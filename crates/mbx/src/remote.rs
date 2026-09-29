@@ -34,6 +34,8 @@ pub struct AwsEnvironment {
     pub instance_role: Option<(InstanceRoleCredentials, SystemTime)>,
     /// Why no instance role credentials were found, for the refusal message.
     pub instance_role_failure: Option<String>,
+    /// Why the instance's region could not be read, for the refusal message.
+    pub region_failure: Option<String>,
 }
 
 /// Where a remote's credentials came from, for `mbx doctor`.
@@ -78,6 +80,7 @@ impl AwsEnvironment {
                 .is_ok_and(|value| !value.trim().is_empty()),
             instance_role: None,
             instance_role_failure: None,
+            region_failure: None,
             region: ["AWS_REGION", "AWS_DEFAULT_REGION"]
                 .into_iter()
                 .find_map(|name| {
@@ -172,7 +175,10 @@ impl AwsEnvironment {
         match provider.fetch().await {
             Ok(fetched) => {
                 if needs_region && self.region.is_none() {
-                    self.region = provider.region().await.ok();
+                    match provider.region().await {
+                        Ok(region) => self.region = Some(region),
+                        Err(error) => self.region_failure = Some(format!("{error:#}")),
+                    }
                 }
                 self.credentials = Some(fetched.credentials);
                 self.instance_role = Some((provider, fetched.expires_at));
@@ -292,7 +298,12 @@ fn s3_client(
         bucket,
         prefix: url.path().to_string(),
         namespace,
-        region: region(config, &aws.region, endpoint.is_some())?,
+        region: region(
+            config,
+            &aws.region,
+            aws.region_failure.as_deref(),
+            endpoint.is_some(),
+        )?,
         endpoint,
         force_path_style: config.remote.s3_force_path_style,
         conditional_writes: config.remote.s3_conditional_writes,
@@ -315,7 +326,12 @@ fn s3_client(
 /// A signature is scoped to a region whether or not the store has one, so it is
 /// always needed. The AWS variables are consulted before giving up, since a
 /// machine set up for the AWS tools has already answered this.
-fn region(config: &Config, environment: &Option<String>, has_endpoint: bool) -> Result<String> {
+fn region(
+    config: &Config,
+    environment: &Option<String>,
+    lookup_failure: Option<&str>,
+    has_endpoint: bool,
+) -> Result<String> {
     let configured = config
         .remote
         .s3_region
@@ -330,8 +346,11 @@ fn region(config: &Config, environment: &Option<String>, has_endpoint: bool) -> 
         // and signs against whatever it is given.
         None if has_endpoint => Ok("us-east-1".to_string()),
         None => {
+            let lookup = lookup_failure
+                .map(|reason| format!(" The instance's region could not be read: {reason}."))
+                .unwrap_or_default();
             bail!(
-                "an s3:// remote cache needs a region; set MBX_REMOTE_S3_REGION or AWS_REGION, or run `mbx settings set remote.s3_region <region>`"
+                "an s3:// remote cache needs a region; set MBX_REMOTE_S3_REGION or AWS_REGION, or run `mbx settings set remote.s3_region <region>`.{lookup}"
             )
         }
     }
@@ -498,6 +517,21 @@ mod tests {
         // The instance names its own region, so no AWS_REGION is needed.
         assert_eq!(environment.region.as_deref(), Some("eu-west-1"));
         assert!(client(s3_remote(), environment).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_failed_region_lookup_is_named_in_the_refusal() {
+        let refusal = refusal(
+            s3_remote(),
+            AwsEnvironment {
+                region: None,
+                region_failure: Some("the metadata service answered 404".into()),
+                ..aws()
+            },
+        );
+
+        assert!(refusal.contains("needs a region"));
+        assert!(refusal.contains("the metadata service answered 404"));
     }
 
     #[test]
