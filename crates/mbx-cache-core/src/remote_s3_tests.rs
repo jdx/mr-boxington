@@ -1178,3 +1178,84 @@ async fn rejected_credentials_name_where_they_came_from() {
     assert!(from_role.contains("instance role"), "{from_role}");
     assert!(!from_role.contains("AWS_ACCESS_KEY_ID"), "{from_role}");
 }
+
+#[tokio::test]
+async fn expired_role_credentials_point_at_renewal_not_permissions() {
+    let mut server = mockito::Server::new_async().await;
+    server
+        .mock("GET", "/cache-bucket/acme/v1/connectivity-probe")
+        .with_status(403)
+        .with_body(s3_error_body("ExpiredToken"))
+        .create_async()
+        .await;
+    let (metadata, _) = metadata_service().await;
+
+    let error = test_store(&server)
+        .with_instance_role(
+            InstanceRoleCredentials::new(metadata.url().parse().unwrap()).unwrap(),
+            SystemTime::now() + Duration::from_secs(3_600),
+        )
+        .check_connection()
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("could not be renewed"), "{error}");
+    assert!(!error.contains("permissions"), "{error}");
+}
+
+#[tokio::test]
+async fn renewal_resumes_once_the_backoff_ends() {
+    let mut metadata = mockito::Server::new_async().await;
+    let failing = metadata
+        .mock("PUT", "/latest/api/token")
+        .with_status(500)
+        .expect(3)
+        .create_async()
+        .await;
+    metadata
+        .mock("PUT", "/latest/api/token")
+        .with_body("session-token")
+        .create_async()
+        .await;
+    metadata
+        .mock("GET", "/latest/meta-data/iam/security-credentials/")
+        .with_body("build-runner")
+        .create_async()
+        .await;
+    metadata
+        .mock(
+            "GET",
+            "/latest/meta-data/iam/security-credentials/build-runner",
+        )
+        .with_body(
+            r#"{"Code":"Success","AccessKeyId":"ASIARENEWED","SecretAccessKey":"renewed-secret","Token":"renewed-token","Expiration":"2999-01-01T00:00:00Z"}"#,
+        )
+        .create_async()
+        .await;
+    let server = mockito::Server::new_async().await;
+    let store = test_store(&server).with_instance_role(
+        InstanceRoleCredentials::new(metadata.url().parse().unwrap()).unwrap(),
+        SystemTime::now() + Duration::from_secs(60),
+    );
+    let CredentialSource::InstanceRole(role) = &store.credentials else {
+        unreachable!()
+    };
+
+    // The first renewal fails and starts the backoff.
+    assert_eq!(signing_key(&store).await, "AKIDEXAMPLE");
+    eventually(async || failing.matched_async().await).await;
+    eventually(async || {
+        !role.renewing.load(Ordering::Acquire) && role.state.lock().unwrap().retry_at.is_some()
+    })
+    .await;
+    // During the backoff nothing is asked, so the failed set is still held.
+    assert_eq!(signing_key(&store).await, "AKIDEXAMPLE");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(signing_key(&store).await, "AKIDEXAMPLE");
+
+    // Once the backoff has passed, the next request renews again.
+    role.state.lock().unwrap().retry_at = Some(Instant::now());
+    signing_key(&store).await;
+    eventually(async || signing_key(&store).await == "ASIARENEWED").await;
+}

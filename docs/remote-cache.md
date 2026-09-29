@@ -70,7 +70,8 @@ mbx looks for credentials in two places, in order:
    read, mbx refuses the remote rather than sign as the instance's identity,
    which can be broader than a profile, pod, or task role. A `[default]`
    profile in `~/.aws/credentials` or `~/.aws/config` that sets access keys, a
-   `credential_process`, SSO, or a role blocks the lookup the same way. Point
+   `credential_process`, SSO, or a role blocks the lookup the same way, as does one
+of those files existing but being unreadable. Point
    `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` at empty files to use the
    instance role anyway.
 

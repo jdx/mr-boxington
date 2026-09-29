@@ -233,10 +233,19 @@ impl CredentialSource {
         role.state.lock().unwrap().credentials.clone()
     }
 
-    /// What to check when the store rejects these credentials.
-    fn rejection_hint(&self) -> &'static str {
+    /// What to check when the store rejects these credentials with `code`.
+    fn rejection_hint(&self, code: Option<&str>) -> &'static str {
         match self {
             Self::Fixed(_) => "Check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY",
+            // The role's credentials lapsed because renewal kept failing, and
+            // the warning logged for that failure says why.
+            Self::InstanceRole(_)
+                if matches!(code, Some("ExpiredToken" | "TokenRefreshRequired")) =>
+            {
+                "The EC2 instance role's credentials have expired and could not be renewed, so \
+                 check the renewal warning above and that the instance metadata service is \
+                 reachable"
+            }
             Self::InstanceRole(_) => {
                 "These are the EC2 instance role's credentials, so check the role's \
                  permissions on the bucket"
@@ -416,7 +425,7 @@ impl S3RemoteCache {
                             "the remote object store rejected these credentials for {url}: {}. \
                              {}, and that this machine's clock is correct",
                             failure.code.as_deref().unwrap_or("forbidden"),
-                            self.credentials.rejection_hint()
+                            self.credentials.rejection_hint(failure.code.as_deref())
                         );
                     }
                     // The signature was accepted; something declined this one

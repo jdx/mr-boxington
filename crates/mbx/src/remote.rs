@@ -101,10 +101,11 @@ impl AwsEnvironment {
 /// asks for, so it stops and says what to export instead.
 ///
 /// `shared_file` returns the text of the shared `credentials` or `config`
-/// file, and is only asked when nothing in the environment already decides.
+/// file, `None` when there is no such file, or the reason it could not be read.
+/// It is only asked when nothing in the environment already decides.
 fn instance_role_blocker(
     var: impl Fn(&str) -> Option<String>,
-    shared_file: impl Fn(SharedFile) -> Option<String>,
+    shared_file: impl Fn(SharedFile) -> Option<Result<String, String>>,
 ) -> Option<String> {
     let set = |name: &str| var(name).is_some_and(|value| !value.trim().is_empty());
     if set("AWS_ACCESS_KEY_ID") {
@@ -129,16 +130,30 @@ fn instance_role_blocker(
              or unset {name} to use the instance role"
         ));
     }
-    [SharedFile::Credentials, SharedFile::Config]
-        .into_iter()
-        .any(|file| shared_file(file).is_some_and(|text| default_profile_names_credentials(&text)))
-        .then(|| {
-            "the default AWS profile names credentials, and mbx does not read profiles. \
-             Export them as AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN, \
-             or point AWS_SHARED_CREDENTIALS_FILE and AWS_CONFIG_FILE at empty files to use \
-             the instance role"
-                .to_string()
-        })
+    for file in [SharedFile::Credentials, SharedFile::Config] {
+        match shared_file(file) {
+            // A file that cannot be inspected might name credentials, so it
+            // blocks the instance role like one that does.
+            Some(Err(reason)) => {
+                return Some(format!(
+                    "{reason}, so mbx cannot tell whether the default AWS profile names \
+                     credentials. Fix the file, or point AWS_SHARED_CREDENTIALS_FILE and \
+                     AWS_CONFIG_FILE at readable files, to use the instance role"
+                ));
+            }
+            Some(Ok(text)) if default_profile_names_credentials(&text) => {
+                return Some(
+                    "the default AWS profile names credentials, and mbx does not read \
+                     profiles. Export them as AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and \
+                     AWS_SESSION_TOKEN, or point AWS_SHARED_CREDENTIALS_FILE and \
+                     AWS_CONFIG_FILE at empty files to use the instance role"
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The files the AWS tools read profiles from.
@@ -149,7 +164,13 @@ enum SharedFile {
 }
 
 /// The text of a shared AWS file, from the location the AWS tools would use.
-fn read_shared_file(file: SharedFile, var: impl Fn(&str) -> Option<String>) -> Option<String> {
+///
+/// A file that does not exist is `None`. One that exists but cannot be read,
+/// or is not UTF-8, is an error naming the file.
+fn read_shared_file(
+    file: SharedFile,
+    var: impl Fn(&str) -> Option<String>,
+) -> Option<Result<String, String>> {
     let (variable, name) = match file {
         SharedFile::Credentials => ("AWS_SHARED_CREDENTIALS_FILE", "credentials"),
         SharedFile::Config => ("AWS_CONFIG_FILE", "config"),
@@ -158,7 +179,14 @@ fn read_shared_file(file: SharedFile, var: impl Fn(&str) -> Option<String>) -> O
         .filter(|path| !path.trim().is_empty())
         .map(std::path::PathBuf::from)
         .or_else(|| Some(dirs::home_dir()?.join(".aws").join(name)))?;
-    std::fs::read_to_string(path).ok()
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Some(Ok(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => Some(Err(format!(
+            "{} could not be read: {error}",
+            path.display()
+        ))),
+    }
 }
 
 /// Whether a shared file's `default` profile sets a credential source: static
@@ -691,7 +719,7 @@ mod tests {
         let credentials = "[default]\naws_access_key_id = AKIDEXAMPLE\naws_secret_access_key = x\n";
         let blocker = instance_role_blocker(
             |_| None,
-            |file| matches!(file, SharedFile::Credentials).then(|| credentials.to_string()),
+            |file| matches!(file, SharedFile::Credentials).then(|| Ok(credentials.to_string())),
         );
         assert!(blocker.unwrap().contains("default AWS profile"));
 
@@ -699,7 +727,7 @@ mod tests {
         assert!(
             instance_role_blocker(
                 |_| None,
-                |file| matches!(file, SharedFile::Config).then(|| config.to_string()),
+                |file| matches!(file, SharedFile::Config).then(|| Ok(config.to_string())),
             )
             .is_some()
         );
@@ -735,7 +763,7 @@ mod tests {
         let text = read_shared_file(SharedFile::Credentials, |name| {
             (name == "AWS_SHARED_CREDENTIALS_FILE").then(|| path.clone())
         });
-        assert!(text.unwrap().contains("AKIDEXAMPLE"));
+        assert!(text.unwrap().unwrap().contains("AKIDEXAMPLE"));
         // A path that does not exist is no file, not an error.
         assert!(
             read_shared_file(SharedFile::Config, |name| {
@@ -743,6 +771,28 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    #[test]
+    fn a_shared_file_that_cannot_be_read_blocks_the_lookup() {
+        let directory = tempfile::tempdir().unwrap();
+        // Not UTF-8, and a directory where a file should be.
+        let binary = directory.path().join("binary");
+        std::fs::write(&binary, [0xff, 0xfe, 0x00]).unwrap();
+        for path in [binary.as_path(), directory.path()] {
+            let path = path.to_string_lossy().to_string();
+            let blocker = instance_role_blocker(
+                |_| None,
+                |file| {
+                    read_shared_file(file, |name| {
+                        (name == "AWS_SHARED_CREDENTIALS_FILE").then(|| path.clone())
+                    })
+                },
+            );
+            let blocker = blocker.unwrap();
+            assert!(blocker.contains("could not be read"), "{blocker}");
+            assert!(blocker.contains(&path), "{blocker}");
+        }
     }
 
     #[test]
