@@ -567,3 +567,56 @@ fn mascot_lid_descends_a_pixel_per_frame_through_jumps_in_progress() {
         assert_eq!(lids.last(), Some(&0), "{lids:?}");
     }
 }
+
+const ERASE: &str = "\r\x1b[2A\x1b[J";
+
+fn drawn_frame() -> Frame {
+    let mut frame = Frame::default();
+    frame.draw(b"", "block\r\nrows\r\n".into(), 2);
+    frame
+}
+
+#[test]
+fn finished_lines_wait_and_reach_the_terminal_with_the_block_repainted() {
+    let mut frame = drawn_frame();
+    // Nothing is erased until the replacement is ready to go out with it.
+    assert!(frame.write(b"warning: one\r\n").is_empty());
+    assert!(frame.write(b"warning: two\r\n").is_empty());
+    assert_eq!(
+        String::from_utf8(frame.present(true)).unwrap(),
+        format!("{ERASE}warning: one\r\nwarning: two\r\nblock\r\nrows\r\n")
+    );
+    assert_eq!(frame.drawn, 2);
+    assert!(frame.present(true).is_empty(), "nothing left to repaint");
+}
+
+#[test]
+fn partial_lines_are_shown_at_once_and_keep_the_block_away() {
+    let mut frame = drawn_frame();
+    assert!(frame.write(b"held\r\n").is_empty());
+    assert_eq!(
+        String::from_utf8(frame.write(b"Password: ")).unwrap(),
+        format!("{ERASE}held\r\nPassword: ")
+    );
+    assert_eq!(frame.drawn, 0);
+    assert!(frame.present(true).is_empty(), "no block to repaint");
+}
+
+#[test]
+fn a_new_frame_carries_held_output_and_diagnostics_above_the_block() {
+    let mut frame = drawn_frame();
+    assert!(frame.write(b"line\r\n").is_empty());
+    assert_eq!(
+        String::from_utf8(frame.draw(b"note\n", "next\r\n".into(), 1)).unwrap(),
+        format!("{ERASE}line\r\nnote\r\nnext\r\n")
+    );
+    assert_eq!(frame.drawn, 1);
+}
+
+#[test]
+fn output_after_the_block_is_committed_passes_through_untouched() {
+    let mut frame = drawn_frame();
+    frame.commit();
+    assert_eq!(frame.write(b"output\r\n"), b"output\r\n");
+    assert!(frame.present(true).is_empty());
+}
