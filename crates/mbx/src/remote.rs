@@ -25,14 +25,12 @@ pub struct AwsEnvironment {
     /// Region named by `AWS_REGION` or `AWS_DEFAULT_REGION`, or failing both,
     /// the one the instance reports.
     pub region: Option<String>,
-    /// Whether `AWS_ACCESS_KEY_ID` is set. When it is, the environment is the
-    /// credential source even if `AWS_SECRET_ACCESS_KEY` is missing, and the
-    /// instance role must not quietly take its place.
-    pub access_key_id_set: bool,
     /// The instance role `credentials` came from, and when they expire.
     /// Absent when the environment supplied them.
     pub instance_role: Option<(InstanceRoleCredentials, SystemTime)>,
-    /// Why no instance role credentials were found, for the refusal message.
+    /// Why no instance role credentials were used, for the refusal message.
+    /// Set before any lookup when the environment names a source that comes
+    /// ahead of the instance role, and then no lookup is made.
     pub instance_role_failure: Option<String>,
     /// Why the instance's region could not be read, for the refusal message.
     pub region_failure: Option<String>,
@@ -76,10 +74,8 @@ impl AwsEnvironment {
     fn from_env() -> Self {
         Self {
             credentials: S3Credentials::from_env(),
-            access_key_id_set: std::env::var("AWS_ACCESS_KEY_ID")
-                .is_ok_and(|value| !value.trim().is_empty()),
             instance_role: None,
-            instance_role_failure: None,
+            instance_role_failure: instance_role_blocker(|name| std::env::var(name).ok()),
             region_failure: None,
             region: ["AWS_REGION", "AWS_DEFAULT_REGION"]
                 .into_iter()
@@ -91,6 +87,38 @@ impl AwsEnvironment {
                 }),
         }
     }
+}
+
+/// Why the instance role must not supply credentials, when the environment
+/// names a source that the AWS credential chain consults first.
+///
+/// mbx cannot read web identity or container credentials itself. Falling
+/// through to the instance role would sign as the host's identity, which can
+/// be broader than the pod or task role the environment asks for, so it stops
+/// and says what to export instead.
+fn instance_role_blocker(var: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let set = |name: &str| var(name).is_some_and(|value| !value.trim().is_empty());
+    if set("AWS_ACCESS_KEY_ID") {
+        return Some(
+            "AWS_ACCESS_KEY_ID is set without AWS_SECRET_ACCESS_KEY, so the instance role \
+             is not used in its place"
+                .to_string(),
+        );
+    }
+    [
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    ]
+    .into_iter()
+    .find(|name| set(name))
+    .map(|name| {
+        format!(
+            "{name} is set, and mbx does not read that credential source. Export its \
+             credentials as AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN, \
+             or unset {name} to use the instance role"
+        )
+    })
 }
 
 /// A remote cache client and where its credentials came from.
@@ -145,11 +173,11 @@ fn is_s3_remote(config: &Config) -> bool {
 }
 
 impl AwsEnvironment {
-    /// The instance role is the fallback for an environment with no access key
-    /// at all. A half-set pair is a mistake to report, not a reason to sign as
-    /// a different identity.
+    /// The instance role is the last resort, for an environment that names no
+    /// credential source at all. Anything else that is set is a mistake to
+    /// report, not a reason to sign as a different identity.
     fn wants_instance_role(&self) -> bool {
-        self.credentials.is_none() && !self.access_key_id_set
+        self.credentials.is_none() && self.instance_role_failure.is_none()
     }
 
     /// Try the EC2 instance role, filling in credentials when it has some.
@@ -535,18 +563,47 @@ mod tests {
     }
 
     #[test]
-    fn a_half_set_access_key_pair_does_not_fall_back_to_the_instance_role() {
-        let unset = AwsEnvironment::default();
-        assert!(unset.wants_instance_role());
+    fn a_credential_source_the_instance_role_would_outrank_blocks_the_lookup() {
+        let vars = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_string())
+            }
+        };
 
+        assert!(instance_role_blocker(vars(&[])).is_none());
+        assert!(instance_role_blocker(vars(&[("AWS_ACCESS_KEY_ID", " ")])).is_none());
         // AWS_ACCESS_KEY_ID without its secret yields no credentials, but the
         // environment is still the source and the refusal should say so.
-        let half_set = AwsEnvironment {
-            access_key_id_set: true,
+        assert!(
+            instance_role_blocker(vars(&[("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")]))
+                .unwrap()
+                .contains("without AWS_SECRET_ACCESS_KEY")
+        );
+        // EKS IRSA, ECS, and Pod Identity name a narrower identity than the node's.
+        for (name, value) in [
+            ("AWS_WEB_IDENTITY_TOKEN_FILE", "/token"),
+            (
+                "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+                "/v2/credentials/x",
+            ),
+            (
+                "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+                "http://169.254.170.23/v1/credentials",
+            ),
+        ] {
+            let blocker = instance_role_blocker(|asked| (asked == name).then(|| value.to_string()));
+            assert!(blocker.unwrap().contains(name));
+        }
+
+        let blocked = AwsEnvironment {
+            instance_role_failure: Some("blocked".into()),
             ..AwsEnvironment::default()
         };
-        assert!(!half_set.wants_instance_role());
-
+        assert!(AwsEnvironment::default().wants_instance_role());
+        assert!(!blocked.wants_instance_role());
         assert!(!aws().wants_instance_role());
     }
 

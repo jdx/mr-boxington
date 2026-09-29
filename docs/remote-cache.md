@@ -65,8 +65,10 @@ mbx looks for credentials in two places, in order:
    `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` for temporary credentials.
 2. The EC2 instance role, through IMDSv2. This is tried only when
    `AWS_ACCESS_KEY_ID` is not set. If it is set without
-   `AWS_SECRET_ACCESS_KEY`, mbx reports the missing secret instead of signing
-   as a different identity.
+   `AWS_SECRET_ACCESS_KEY`, or if `AWS_WEB_IDENTITY_TOKEN_FILE` or an
+   `AWS_CONTAINER_CREDENTIALS_*` variable names a source mbx does not read, mbx
+   refuses the remote rather than sign as the instance's identity, which can be
+   broader than a pod or task role.
 
 `MBX_REMOTE_S3_REGION` names the signing region, falling back to `AWS_REGION` or
 `AWS_DEFAULT_REGION`. When credentials come from an instance role and none of
