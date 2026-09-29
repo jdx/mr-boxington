@@ -797,10 +797,11 @@ impl MinFree {
 
 /// Settings only the command line consumes.
 ///
-/// The library target is semver-checked, and `Config` is a public struct
-/// callers can construct, so a knob the binary alone reads does not belong on
-/// it: adding a field there is a breaking change to an API this crate does not
-/// mean to offer.
+/// `Config` is a public struct callers can construct, so a knob the binary
+/// alone reads does not belong on it: adding a field there changes an API this
+/// crate does not mean to offer. release-plz no longer runs cargo-semver-checks
+/// over `mbx` (see `release-plz.toml`), so nothing enforces this; keep the
+/// knob off `Config` anyway.
 /// The declared default of `learned_incremental_max_size`.
 ///
 /// A crate's incremental state is roughly proportional to the crate, not to
