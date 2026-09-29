@@ -537,7 +537,7 @@ impl Frame {
     /// Show held output, and put the last block back below it if `repaint`.
     /// Output that ends in a CR keeps waiting for a repaint: its LF may be in
     /// the next read, and a bare CR would have the block overwrite the line it
-    /// returned to. The next [`Frame::draw`] shows it.
+    /// returned to. The next [`Frame::draw`] shows it, on a line of its own.
     fn present(&mut self, repaint: bool) -> Vec<u8> {
         let repaint = repaint && self.drawn > 0;
         if repaint && (self.held.is_empty() || self.held.ends_with(b"\r")) {
@@ -558,7 +558,12 @@ impl Frame {
     fn draw(&mut self, diagnostics: &[u8], block: String, rows: u16) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.held.len() + block.len());
         self.erase(&mut out);
+        // A held line that ends in a bare CR would have the block print over it.
+        let unterminated = self.held.ends_with(b"\r");
         out.append(&mut self.held);
+        if unterminated {
+            out.push(b'\n');
+        }
         out.extend_from_slice(
             String::from_utf8_lossy(diagnostics)
                 .replace("\r\n", "\n")

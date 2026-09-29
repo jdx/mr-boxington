@@ -648,12 +648,12 @@ fn a_crlf_split_across_reads_keeps_the_block_until_the_lf_arrives() {
 }
 
 #[test]
-fn a_bare_carriage_return_is_shown_by_the_next_frame() {
+fn a_bare_carriage_return_is_shown_above_the_next_frame_not_overwritten_by_it() {
     let mut frame = drawn_frame();
     assert!(frame.write(b"progress\r").is_empty());
     assert!(frame.present(true).is_empty());
     assert_eq!(
         String::from_utf8(frame.draw(b"", "next\r\n".into(), 1)).unwrap(),
-        format!("{ERASE}progress\rnext\r\n")
+        format!("{ERASE}progress\r\nnext\r\n")
     );
 }
