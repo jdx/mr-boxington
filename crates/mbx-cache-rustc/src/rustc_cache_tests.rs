@@ -1918,6 +1918,82 @@ fn a_predicted_discovery_keeps_named_sources_beneath_a_native_directory() {
     assert_ne!(predicted(), before);
 }
 
+/// The crate root is a required input whether or not dep-info lists it. Having a
+/// native search directory must not turn it, or anything else outside that
+/// directory, into something an edit can go unnoticed in.
+#[test]
+fn a_required_source_outside_a_native_directory_still_moves_the_source_fingerprint() {
+    let directory = tempfile::tempdir().unwrap();
+    let working_dir = directory.path().join("work");
+    let native = directory.path().join("target/native");
+    std::fs::create_dir_all(&working_dir).unwrap();
+    std::fs::create_dir_all(&native).unwrap();
+    std::fs::write(working_dir.join("src.rs"), "pub fn value() {}\n").unwrap();
+    std::fs::write(native.join("libfixture.a"), "archive").unwrap();
+    let argument = format!("-Lnative={}", native.display());
+    let invocation = RustcInvocation::parse(&args(&[
+        "--crate-name=widget",
+        "--crate-type=lib",
+        "--emit=dep-info,metadata,link",
+        "--out-dir=target/debug/deps",
+        &argument,
+        "src.rs",
+    ]))
+    .unwrap();
+    // dep-info that leaves the root out: it still counts.
+    std::fs::write(working_dir.join("other.rs"), "// listed\n").unwrap();
+    let dep_info = RustcDepInfo::parse("target/debug/deps/widget.d: other.rs\n").unwrap();
+    let mappings = vec![
+        PathMapping::new(&working_dir, "workspace"),
+        PathMapping::new(directory.path().join("target"), "target"),
+    ];
+    let discover = || {
+        invocation
+            .discover_inputs_with_mappings(
+                &dep_info,
+                &working_dir,
+                &mappings,
+                &mbx_cache_core::NoFileDigestCache,
+            )
+            .unwrap()
+    };
+    let scanned = || invocation.source_fingerprint(&discover());
+    let sources_only = || {
+        invocation.source_fingerprint(
+            &invocation
+                .discover_source_inputs(&dep_info, &working_dir, &mbx_cache_core::NoFileDigestCache)
+                .unwrap(),
+        )
+    };
+    let discovered = discover();
+    let action_context = ActionContext {
+        working_dir: working_dir.clone(),
+        path_mappings: mappings.clone(),
+        inputs: discovered.inputs.clone(),
+        ..context(&[])
+    };
+    let prediction = invocation.prediction(&action_context, &discovered).unwrap();
+    let predicted = || {
+        invocation.source_fingerprint(
+            &prediction
+                .discover(&working_dir, &mappings, &mbx_cache_core::NoFileDigestCache)
+                .unwrap(),
+        )
+    };
+    let before = scanned();
+    assert_eq!(sources_only(), before);
+    assert_eq!(predicted(), before);
+
+    std::fs::write(native.join("libfixture.a"), "rebuilt").unwrap();
+    assert_eq!(scanned(), before);
+    assert_eq!(predicted(), before);
+
+    std::fs::write(working_dir.join("src.rs"), "pub fn value() -> u32 { 1 }\n").unwrap();
+    assert_ne!(scanned(), before);
+    assert_ne!(sources_only(), before);
+    assert_ne!(predicted(), before);
+}
+
 fn native_links() -> ParseOptions {
     ParseOptions::caching_native_links(true)
 }

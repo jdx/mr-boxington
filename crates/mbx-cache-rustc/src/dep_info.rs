@@ -518,9 +518,11 @@ impl RustcInvocation {
             };
             normalize_components(&absolute)
         };
-        // What dep-info names is the crate's own. A required input is a native
-        // library resolved from a search directory, which belongs in a shared
-        // key but is no more a source than the directory around it.
+        // What dep-info names is the crate's own. A required input also covers
+        // the crate root, `--extern` artifacts and target specifications, so it
+        // is a source unless a native search directory holds it: there it is a
+        // library resolved from that directory, which belongs in a shared key
+        // but is no more a source than the directory around it.
         let sources = dep_info.files.iter().map(absolute).collect::<BTreeSet<_>>();
         let mut paths = sources.clone();
         paths.extend(self.required_inputs.iter().map(absolute));
@@ -544,7 +546,19 @@ impl RustcInvocation {
                 )?;
             }
         }
-        let native_only = paths.difference(&sources).cloned().collect();
+        let native_directories = self
+            .arguments
+            .iter()
+            .filter_map(|argument| match argument {
+                Argument::SearchPath { kind, path } if kind == "native" => Some(absolute(path)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let native_only = paths
+            .difference(&sources)
+            .filter(|path| native_directories.iter().any(|root| path.starts_with(root)))
+            .cloned()
+            .collect();
         Ok(DiscoveredInputs::from_paths(
             &working_dir,
             paths,
