@@ -2693,7 +2693,9 @@ fn link_arguments_bypass_whatever_actually_links() {
         );
     }
 
-    let flag = "-Clink-arg=/STACK:8000000";
+    // A native link refuses what it cannot tell from a file name. A stack
+    // size is the exception on MSVC; see the test for it below.
+    let flag = "-Clink-arg=/DEF:exports.def";
     let native = args(&["--test", "--emit=dep-info,link", flag, "src/lib.rs"]);
     assert_eq!(
         RustcInvocation::parse_with(&native, native_links()),
@@ -2702,6 +2704,103 @@ fn link_arguments_bypass_whatever_actually_links() {
         )),
         "{flag} should not be cacheable on a native link"
     );
+}
+
+/// A `rustflags` entry of `-C link-arg=/STACK:8000000` reaches every proc
+/// macro, build script, and binary a Windows workspace builds. Treated as
+/// unmodeled it bypassed all of them, and since a MSVC link stamps the PE
+/// header and PDB with a time and a GUID, every rebuilt proc-macro DLL hashed
+/// differently from the last one and every crate compiled against it missed
+/// as well: about 175 of mise's 1100 compilations never became hits.
+#[test]
+fn msvc_stack_and_reproducibility_options_are_keyed_on_a_native_link() {
+    let link = |crate_type: &str, flag: &str| {
+        args(&[
+            "--crate-name=widget",
+            crate_type,
+            "--emit=dep-info,link",
+            "--out-dir=target/debug/deps",
+            flag,
+            "src/lib.rs",
+        ])
+    };
+    for flag in [
+        "-Clink-arg=/STACK:8000000",
+        "-Clink-arg=/Brepro",
+        "-Clink-args=/STACK:8000000 /Brepro",
+    ] {
+        let parsed =
+            RustcInvocation::parse_with(&link("--crate-type=proc-macro", flag), native_links());
+        if !cfg!(target_env = "msvc") {
+            // Another host hands this to a linker that reads it as a file.
+            assert_eq!(
+                parsed,
+                Err(BypassReason::UnmodeledLinkArgument(
+                    flag.strip_prefix("-C").unwrap().into()
+                )),
+                "{flag} must still bypass off MSVC"
+            );
+            continue;
+        }
+        assert!(
+            parsed.unwrap().links_natively(),
+            "{flag} should be cacheable"
+        );
+    }
+
+    // Nothing else an MSVC linker accepts is modeled, whatever the output
+    // linked.
+    let msvc = cfg!(target_env = "msvc");
+    for flag in [
+        "-Clink-arg=/DEF:exports.def",
+        "-Clink-arg=/STACK:8000000,x",
+        "-Clink-arg=/LIBPATH:C:\\libs",
+        "-Clink-arg=/Brepro:yes",
+        "-Clink-args=/STACK:8000000 /DEF:exports.def",
+        "-Clink-args=",
+        "-Clink-arg=exports.def",
+    ] {
+        let parsed = RustcInvocation::parse_with(&link("--crate-type=bin", flag), native_links());
+        assert!(
+            matches!(parsed, Err(BypassReason::UnmodeledLinkArgument(_))),
+            "{flag} should bypass (msvc: {msvc})"
+        );
+    }
+}
+
+/// The grammar behind that: a number after `/STACK:` and `/Brepro`, with the
+/// case and the `-` spelling the linker itself accepts.
+#[test]
+fn msvc_link_option_grammar_is_closed() {
+    for modeled in [
+        "/STACK:8000000",
+        "/stack:8000000,4096",
+        "-STACK:0x800000",
+        "/Brepro",
+        "/BREPRO",
+        "-brepro",
+    ] {
+        assert!(msvc_option_reads_no_file(modeled), "{modeled}");
+    }
+    for refused in [
+        "",
+        "/",
+        "STACK:8000000",
+        "/STACK",
+        "/STACK:",
+        "/STACK:,",
+        "/STACK:1,2,3",
+        "/STACK:0x",
+        "/STACK:12ab",
+        "/STACK:8000000 /Brepro",
+        "/STACK:C:\\file",
+        "/Brepro:NO",
+        "/DEBUG",
+        "/OUT:foo.exe",
+        "@response.rsp",
+    ] {
+        assert!(!msvc_option_reads_no_file(refused), "{refused}");
+    }
 }
 
 /// `-z` keywords that only set a flag in the ELF output read no file, so a

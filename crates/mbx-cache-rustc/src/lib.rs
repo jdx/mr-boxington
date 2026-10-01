@@ -2041,7 +2041,8 @@ impl Parser<'_> {
             let option = value.strip_prefix("--codegen=")?;
             let (name, value) = option.split_once('=').unwrap_or((option, ""));
             (matches!(name, "link-arg" | "link-args")
-                && !(name == "link-arg" && elf_keyword_is_modeled(link_output, value)))
+                && !(name == "link-arg" && elf_keyword_is_modeled(link_output, value))
+                && !msvc_options_are_modeled(link_output, name, value))
             .then_some(option)
         })
     }
@@ -2220,6 +2221,65 @@ fn elf_keyword_is_modeled(link_output: LinkOutput, value: &str) -> bool {
                     | "relro"
             )
         })
+}
+
+/// `-C link-arg` / `-C link-args` values that `link.exe` and `lld-link` read
+/// as a plain switch or number and never as a file name.
+///
+/// `-C link-arg=/STACK:8000000` is how projects raise the main thread's stack
+/// for Windows, usually through a `rustflags` entry in `.cargo/config.toml`
+/// that reaches every proc macro, build script, and binary the workspace
+/// builds. Refusing it leaves each of those linking on every build, and a MSVC
+/// link is not reproducible (the PE header and PDB carry a timestamp and a
+/// GUID), so each fresh proc-macro DLL hashes differently and every crate
+/// compiled against it misses too.
+///
+/// Only spellings whose grammar is closed are listed: a number after
+/// `/STACK:`, and `/Brepro`, which makes the link reproducible. Anything else
+/// (`/DEF:`, `/MANIFESTINPUT:`, `/LIBPATH:`, a bare file name) can name a file
+/// the key never hashes, so it still bypasses.
+fn msvc_options_are_modeled(link_output: LinkOutput, name: &str, value: &str) -> bool {
+    cfg!(target_env = "msvc")
+        && matches!(
+            link_output,
+            LinkOutput::NativeExecutable
+                | LinkOutput::NativeProcMacro
+                | LinkOutput::NativeSharedLibrary
+        )
+        && match name {
+            "link-arg" => msvc_option_reads_no_file(value),
+            // The plural spelling is a whitespace-separated list, each entry
+            // of which has to qualify.
+            "link-args" => {
+                let mut options = value.split_ascii_whitespace().peekable();
+                options.peek().is_some() && options.all(msvc_option_reads_no_file)
+            }
+            _ => false,
+        }
+}
+
+/// One MSVC linker option from the closed list in [`msvc_options_are_modeled`].
+/// The linker takes `-` for `/` and ignores the case of option names, and so
+/// does this.
+fn msvc_option_reads_no_file(option: &str) -> bool {
+    let Some(option) = option.strip_prefix(['/', '-']) else {
+        return false;
+    };
+    if option.eq_ignore_ascii_case("brepro") {
+        return true;
+    }
+    let Some((name, sizes)) = option.split_once(':') else {
+        return false;
+    };
+    // `/STACK:reserve[,commit]`. Sizes are decimal or `0x` hexadecimal, and
+    // nothing else, so a value cannot smuggle in a path.
+    let is_size = |size: &str| match size.strip_prefix("0x").or_else(|| size.strip_prefix("0X")) {
+        Some(hex) => !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        None => !size.is_empty() && size.bytes().all(|byte| byte.is_ascii_digit()),
+    };
+    name.eq_ignore_ascii_case("stack")
+        && sizes.split(',').count() <= 2
+        && sizes.split(',').all(is_size)
 }
 
 fn compiler_bundled_wasm_target(target: &str) -> bool {
