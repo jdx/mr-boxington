@@ -272,9 +272,35 @@ pub(super) fn failed_probe(
         return FailedProbe::Roots(Box::new(roots));
     }
     if metadata_failure_passthrough(invocation.as_ref()) {
+        note_uncached_passthrough(invocation.as_ref());
         return FailedProbe::Passthrough;
     }
     FailedProbe::Reject
+}
+
+/// Say that a command is running without a cache session. An external
+/// subcommand may create the workspace itself, as `cargo chef cook` does in an
+/// empty directory, and the builds it starts through `$CARGO` then never reach
+/// mbx; without a message that looks like a slow build. Other commands outside
+/// a project are routine, so they only log at debug level.
+fn note_uncached_passthrough(invocation: Option<&super::cargo_invocation::Invocation>) {
+    let Some(invocation) = invocation else {
+        return;
+    };
+    let command = invocation
+        .arguments
+        .iter()
+        .find(|argument| !argument.to_string_lossy().starts_with(['-', '+']))
+        .map_or_else(String::new, |argument| {
+            argument.to_string_lossy().into_owned()
+        });
+    if matches!(invocation.kind, super::cargo_invocation::Kind::External) {
+        log::info!(
+            "no Cargo manifest in scope; running `cargo {command}` without the cache. If it builds a workspace it creates, write the manifest first so the build runs inside an mbx session"
+        );
+    } else {
+        log::debug!("no Cargo manifest in scope; running `cargo {command}` without the cache");
+    }
 }
 
 /// Preserve invocations outside a project, non-build aliases, and

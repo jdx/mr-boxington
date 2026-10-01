@@ -151,6 +151,24 @@ mbx maps the registry separately from the rest of `CARGO_HOME`, so cached
 compiler inputs remain portable when that child symlink resolves outside the
 Cargo home directory.
 
+### cargo-chef
+
+`cargo chef cook` creates its skeleton workspace itself, so in a fresh build
+stage it starts in a directory with no `Cargo.toml`. The Cargo shim finds no
+manifest, hands the command to real Cargo without a cache session, and the build
+cargo-chef starts through `$CARGO` never reaches mbx. The cook then compiles every
+unit on every run, and mbx prints `no Cargo manifest in scope` to say so.
+
+Write the skeleton first, so the cook starts with a manifest in scope:
+
+```sh
+cargo chef cook --no-build --recipe-path recipe.json
+cargo chef cook --recipe-path recipe.json
+```
+
+The second command runs inside an mbx session and caches the dependency
+compilations like any other build.
+
 ## Closure bundles for action transports
 
 An action can transport only the cache entries produced or used by its builds,

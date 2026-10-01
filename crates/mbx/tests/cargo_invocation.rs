@@ -223,6 +223,24 @@ fn outside_commands_and_external_aliases_reach_real_cargo() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("could not find `Cargo.toml`"), "{stderr}");
         assert!(!stderr.contains("could not verify"), "{stderr}");
+        assert!(!stderr.contains("without the cache"), "{stderr}");
+    }
+}
+
+#[test]
+fn external_command_without_a_manifest_says_it_runs_uncached() {
+    let f = Fixture::new();
+    for shim in [false, true] {
+        let output = f.command(shim).arg("probe").output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert!(
+            stderr.contains("no Cargo manifest in scope; running `cargo probe` without the cache"),
+            "{stderr}"
+        );
+        let output = f.command(shim).args(["--version"]).output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("without the cache"), "{stderr}");
     }
 }
 
