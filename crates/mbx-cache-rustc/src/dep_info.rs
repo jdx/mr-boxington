@@ -460,6 +460,34 @@ impl RustcInvocation {
         path_mappings: &[PathMapping],
         digests: &dyn FileDigestCache,
     ) -> Result<DiscoveredInputs, BypassReason> {
+        self.discover(dep_info, working_dir, Some(path_mappings), digests)
+    }
+
+    /// Hash dep-info sources and modeled compiler inputs, leaving native search
+    /// directories out.
+    ///
+    /// The result cannot key a shared action: the linker may read libraries it
+    /// does not list. It is enough to tell whether a crate's own sources changed,
+    /// which is all that private incremental state needs, so it works for a
+    /// compilation whose search paths [`Self::discover_inputs_with_mappings`]
+    /// refuses.
+    pub fn discover_source_inputs(
+        &self,
+        dep_info: &RustcDepInfo,
+        working_dir: &Path,
+        digests: &dyn FileDigestCache,
+    ) -> Result<DiscoveredInputs, BypassReason> {
+        self.discover(dep_info, working_dir, None, digests)
+    }
+
+    /// Native search directories are collected only when `path_mappings` is given.
+    fn discover(
+        &self,
+        dep_info: &RustcDepInfo,
+        working_dir: &Path,
+        path_mappings: Option<&[PathMapping]>,
+        digests: &dyn FileDigestCache,
+    ) -> Result<DiscoveredInputs, BypassReason> {
         if !working_dir.is_absolute() {
             return Err(BypassReason::RelativeWorkingDirectory(
                 working_dir.to_path_buf(),
@@ -479,10 +507,11 @@ impl RustcInvocation {
                 normalize_components(&absolute)
             })
             .collect::<BTreeSet<_>>();
-        let admitted_roots = native_input_roots(&working_dir, path_mappings);
+        let admitted_roots = native_input_roots(&working_dir, path_mappings.unwrap_or_default());
         let mut native_bytes = 0_u64;
         for argument in &self.arguments {
-            if let Argument::SearchPath { kind, path } = argument
+            if path_mappings.is_some()
+                && let Argument::SearchPath { kind, path } = argument
                 && kind == "native"
             {
                 let directory = if path.is_absolute() {

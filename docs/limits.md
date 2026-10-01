@@ -150,6 +150,11 @@ Existing directory size and input-count limits still apply. Installation paths
 remain part of the key, so different installations do not share artifacts just
 because their files match.
 
+A workspace crate that bypasses for one of these reasons, such as a dependent of
+a `-sys` crate that found a system library through pkg-config, still switches to
+[private incremental state](/incremental#learned-incremental-reuse) on its first
+source edit. Only its result stays out of the shared cache.
+
 A custom target specification names its archives its own way, so a `-l static`
 compile for one bypasses as `custom-target-native-library` unless the flag is
 `+verbatim`.

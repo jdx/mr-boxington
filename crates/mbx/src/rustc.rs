@@ -256,11 +256,13 @@ pub(crate) fn compile(
     } else {
         reuse_hot_workspace_plan(&compilation, &outputs, learned_enabled)
     };
+    let mut unshareable = false;
     if !private_inputs
         && !learned.engaged()
         && outputs.dep_info.is_file()
         && let Ok((candidates, discovered)) =
             action_from_current_dep_info(&compilation, &outputs.dep_info)
+                .inspect_err(|error| unshareable = is_unshareable_search_path(error))
     {
         current_diagnostic = candidates
             .ordered()
@@ -315,6 +317,11 @@ pub(crate) fn compile(
                 session::report_shim_warning(&format!("result was not restored: {error:#}"));
             }
         }
+    }
+    // A compilation that cannot be keyed for the cache still has sources worth
+    // watching: private incremental state needs no shareable key.
+    if unshareable && learned_enabled && !learned.engaged() && learned.record.is_none() {
+        learned = plan_learned_without_action_key(&compilation, &outputs);
     }
     let mut prediction_missing = private_inputs;
     if !private_inputs && !learned.engaged() && !action_lookup_attempted {
@@ -642,7 +649,29 @@ pub(crate) fn compile(
                         .as_ref()
                         .map_err(|error| eyre::eyre!(error.to_string()))?;
                     let (candidates, discovered) =
-                        action_from_dep_info(&compilation, &outputs.dep_info)?;
+                        match action_from_dep_info(&compilation, &outputs.dep_info) {
+                            Ok(keyed) => keyed,
+                            Err(error) if is_unshareable_search_path(&error) => {
+                                if learned_enabled {
+                                    record_compiled_without_action_key(
+                                        &compilation,
+                                        &outputs,
+                                        &learned,
+                                        compilation_started,
+                                        input_snapshots,
+                                    )?;
+                                }
+                                // Private state is withheld from the store on
+                                // purpose, so only a compilation that could
+                                // have been stored reports that it was not.
+                                return if learned.engaged() {
+                                    Ok(None)
+                                } else {
+                                    Err(error)
+                                };
+                            }
+                            Err(error) => return Err(error),
+                        };
                     discovered.verify_not_modified_since_with_snapshots(
                         compilation_started,
                         input_snapshots,
@@ -1309,6 +1338,101 @@ fn plan_learned_reuse(
     }
 }
 
+/// Whether the compilation was refused only because a native search path cannot
+/// be described to the shared cache.
+fn is_unshareable_search_path(error: &eyre::Report) -> bool {
+    matches!(
+        error.downcast_ref::<BypassReason>(),
+        Some(BypassReason::UnsupportedSearchPath(_))
+    )
+}
+
+/// The inputs a churn decision compares, which are the crate's own sources.
+///
+/// Native search directories are part of a shared key but not of that
+/// question, and some can never be part of one: a system directory holding
+/// symlinks into other trees, for instance, which a build script reaches through
+/// pkg-config. Falling back to the sources alone keeps those crates' edits
+/// recognizable, so they can still switch to private incremental state.
+fn discover_for_churn(
+    compilation: &Compilation<'_>,
+    dep_info: &RustcDepInfo,
+) -> Result<DiscoveredInputs> {
+    match compilation.invocation.discover_inputs_with_mappings(
+        dep_info,
+        compilation.working_dir,
+        &compilation.portable.mappings,
+        session::file_digest_cache(),
+    ) {
+        Err(BypassReason::UnsupportedSearchPath(_)) => {
+            Ok(compilation.invocation.discover_source_inputs(
+                dep_info,
+                compilation.working_dir,
+                session::file_digest_cache(),
+            )?)
+        }
+        discovered => Ok(discovered?),
+    }
+}
+
+/// [`plan_learned_reuse`] for a workspace unit whose action key could not be
+/// built, so there is no lookup to take its inputs from.
+fn plan_learned_without_action_key(
+    compilation: &Compilation<'_>,
+    outputs: &RustcOutputs,
+) -> LearnedPlan {
+    if !source_is_in_workspace(compilation) {
+        return LearnedPlan::default();
+    }
+    let discovered = RustcDepInfo::read(&outputs.dep_info)
+        .map_err(eyre::Report::from)
+        .and_then(|dep_info| {
+            verify_environment(&dep_info.environment)?;
+            Ok(compilation.invocation.discover_source_inputs(
+                &dep_info,
+                compilation.working_dir,
+                session::file_digest_cache(),
+            )?)
+        });
+    match discovered {
+        Ok(discovered) => plan_learned_reuse(compilation, &discovered, true),
+        Err(error) => {
+            session::report_shim_warning(&format!(
+                "churn was not tracked for this crate: {error:#}"
+            ));
+            LearnedPlan::default()
+        }
+    }
+}
+
+/// Record what a workspace unit compiled when the compilation could not be
+/// keyed for the cache, as [`LearnedPlan::record_compiled`] does for one that
+/// could.
+fn record_compiled_without_action_key(
+    compilation: &Compilation<'_>,
+    outputs: &RustcOutputs,
+    learned: &LearnedPlan,
+    started: SystemTime,
+    snapshots: &BTreeMap<PathBuf, FileSnapshot>,
+) -> Result<()> {
+    if !source_is_in_workspace(compilation) {
+        return Ok(());
+    }
+    let dep_info = RustcDepInfo::read(&outputs.dep_info)?;
+    let discovered = compilation.invocation.discover_source_inputs(
+        &dep_info,
+        compilation.working_dir,
+        session::file_digest_cache(),
+    )?;
+    discovered.verify_not_modified_since_with_snapshots(started, snapshots)?;
+    discovered.verify()?;
+    learned.record_compiled();
+    if learned.record.is_none() {
+        record_learned_baseline(compilation, &discovered);
+    }
+    Ok(())
+}
+
 /// Eager builds and consumers of private artifacts can prepare state before any source
 /// edits, including when Cargo's target directory has been discarded. Units
 /// linking private artifacts must stay private too, even outside the workspace.
@@ -1370,12 +1494,7 @@ fn reuse_hot_workspace_plan(
         };
         let dep_info = RustcDepInfo::read(&outputs.dep_info)?;
         verify_environment(&dep_info.environment)?;
-        let discovered = compilation.invocation.discover_inputs_with_mappings(
-            &dep_info,
-            compilation.working_dir,
-            &compilation.portable.mappings,
-            session::file_digest_cache(),
-        )?;
+        let discovered = discover_for_churn(compilation, &dep_info)?;
         let sources = compilation.invocation.source_fingerprint(&discovered);
         let changed = recorded.sources != sources.key();
         let edited = changed && recorded.streak >= WORKSPACE_HOT_STREAK_THRESHOLD;
