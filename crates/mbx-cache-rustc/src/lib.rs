@@ -800,10 +800,17 @@ impl RustcInvocation {
         // leaves thousands of files there, which was enough to push the
         // serialized prediction past the protocol's payload limit and lose the
         // prediction entirely for the crate that most needed one.
+        //
+        // A file dep-info itself names stays, even beneath a recorded
+        // directory. It is a source of the crate, and rediscovery can only tell
+        // it from the objects around it if the prediction says which it is.
+        // There are few of those; the thousands of objects are not named.
         let mut inputs = BTreeSet::new();
         for input in &discovered.inputs {
             let normalized = builder.normalize_path(&input.path)?;
-            if !under_any_directory(&normalized, &native_directories) {
+            if !under_any_directory(&normalized, &native_directories)
+                || !discovered.is_native_only(&input.path)
+            {
                 inputs.insert(normalized);
             }
         }

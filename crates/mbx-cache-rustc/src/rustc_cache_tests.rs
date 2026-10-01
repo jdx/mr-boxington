@@ -1855,6 +1855,69 @@ fn native_search_directories_do_not_move_the_source_fingerprint() {
     assert_eq!(scanned().unwrap(), sources_only());
 }
 
+/// A prediction omits what a native directory scan will find again, but not a
+/// file dep-info names there. Rediscovery from it has to agree with discovery
+/// from dep-info about which files are the crate's own sources.
+#[test]
+fn a_predicted_discovery_keeps_named_sources_beneath_a_native_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let working_dir = directory.path().join("work");
+    let native = directory.path().join("target/native");
+    std::fs::create_dir_all(&working_dir).unwrap();
+    std::fs::create_dir_all(&native).unwrap();
+    std::fs::write(working_dir.join("src.rs"), "pub fn value() {}\n").unwrap();
+    std::fs::write(native.join("generated.rs"), "// named by dep-info\n").unwrap();
+    std::fs::write(native.join("libfixture.a"), "first").unwrap();
+    let argument = format!("-Lnative={}", native.display());
+    let invocation = RustcInvocation::parse(&args(&[
+        "--crate-name=widget",
+        "--crate-type=lib",
+        "--emit=dep-info,metadata,link",
+        "--out-dir=target/debug/deps",
+        &argument,
+        "src.rs",
+    ]))
+    .unwrap();
+    let dep_info = RustcDepInfo::parse(&format!(
+        "target/debug/deps/widget.d: src.rs {}\n",
+        native.join("generated.rs").display()
+    ))
+    .unwrap();
+    let mappings = vec![
+        PathMapping::new(&working_dir, "workspace"),
+        PathMapping::new(directory.path().join("target"), "target"),
+    ];
+    let discovered = invocation
+        .discover_inputs_with_mappings(
+            &dep_info,
+            &working_dir,
+            &mappings,
+            &mbx_cache_core::NoFileDigestCache,
+        )
+        .unwrap();
+    let action_context = ActionContext {
+        working_dir: working_dir.clone(),
+        path_mappings: mappings.clone(),
+        inputs: discovered.inputs.clone(),
+        ..context(&[])
+    };
+    let prediction = invocation.prediction(&action_context, &discovered).unwrap();
+    let predicted = || {
+        let predicted = prediction
+            .discover(&working_dir, &mappings, &mbx_cache_core::NoFileDigestCache)
+            .unwrap();
+        invocation.source_fingerprint(&predicted)
+    };
+    let before = invocation.source_fingerprint(&discovered);
+    assert_eq!(predicted(), before);
+
+    // A library appearing in the directory is not an edit; the named file is.
+    std::fs::write(native.join("libextra.a"), "new").unwrap();
+    assert_eq!(predicted(), before);
+    std::fs::write(native.join("generated.rs"), "// changed\n").unwrap();
+    assert_ne!(predicted(), before);
+}
+
 fn native_links() -> ParseOptions {
     ParseOptions::caching_native_links(true)
 }

@@ -510,20 +510,20 @@ impl RustcInvocation {
             ));
         }
         let working_dir = normalize_components(working_dir);
-        let mut paths = dep_info
-            .files
-            .iter()
-            .chain(&self.required_inputs)
-            .map(|path| {
-                let absolute = if path.is_absolute() {
-                    path.to_path_buf()
-                } else {
-                    working_dir.join(path)
-                };
-                normalize_components(&absolute)
-            })
-            .collect::<BTreeSet<_>>();
-        let named = paths.clone();
+        let absolute = |path: &PathBuf| {
+            let absolute = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                working_dir.join(path)
+            };
+            normalize_components(&absolute)
+        };
+        // What dep-info names is the crate's own. A required input is a native
+        // library resolved from a search directory, which belongs in a shared
+        // key but is no more a source than the directory around it.
+        let sources = dep_info.files.iter().map(absolute).collect::<BTreeSet<_>>();
+        let mut paths = sources.clone();
+        paths.extend(self.required_inputs.iter().map(absolute));
         let admitted_roots = native_input_roots(&working_dir, path_mappings.unwrap_or_default());
         let mut native_bytes = 0_u64;
         for argument in &self.arguments {
@@ -544,7 +544,7 @@ impl RustcInvocation {
                 )?;
             }
         }
-        let native_only = paths.difference(&named).cloned().collect();
+        let native_only = paths.difference(&sources).cloned().collect();
         Ok(DiscoveredInputs::from_paths(
             &working_dir,
             paths,
