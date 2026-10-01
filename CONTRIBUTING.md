@@ -5,7 +5,8 @@
 > created it, opened a PR that fixes it, or have already had a contribution merged into mr-boxington.
 > Everyone else is not allowed to, including with lightly edited, reviewed, or disclosed model
 > output. Doing this is an instant ban across all of jdx's projects.
-> Using AI to help write and file your own Discussion or Issue is fine.
+> Using AI to help write and file your own Discussion or Issue is fine. Review it before posting, and
+> disclose that AI contributed.
 
 Start with [Discussions](https://github.com/jdx/mr-boxington/discussions) for
 questions and proposed changes. For a suspected vulnerability, use the private
