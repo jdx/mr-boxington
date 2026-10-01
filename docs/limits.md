@@ -336,6 +336,30 @@ place. A build Cargo considers fresh does not refresh the use timestamp. mbx
 recreates an evicted copy when a later compilation needs it, so an embedded
 `OUT_DIR` path should not be treated as permanent runtime storage.
 
+### A target directory depends on the cache {#target-needs-cache}
+
+Cargo's dep-info for a crate that reads `OUT_DIR` lists the files it read under
+`out-dirs/v1/<digest>` in the mbx cache. A target directory built with sharing
+is therefore only fresh while those files exist. Copy `target/` to a machine or
+container without the cache, or restore it from a CI cache that does not include
+the mbx store, and Cargo marks every crate that read `OUT_DIR` stale, then
+rebuilds everything that depends on them. The rebuild is silent: the stale files
+show up only in `CARGO_LOG=cargo::core::compiler::fingerprint=info` as
+`MissingFile` paths under the cache directory.
+
+This affects a Docker multi-stage build that compiles with the cache on a
+BuildKit cache mount and then runs `COPY --from=builder /app/target`, and a CI
+job that caches `target/` without the mbx store. Keep the cache and the target
+directory together, or build with sharing off:
+
+```sh
+MBX_SHARE_OUT_DIR=0 mbx build
+```
+
+Set it in every stage that builds or reuses that target directory, so the cache
+keys match. Sharing only helps when several checkouts build at different paths;
+builds that always run at the same path, as in an image, gain nothing from it.
+
 To preserve Cargo's original `OUT_DIR` and literal generated source paths:
 
 ```sh

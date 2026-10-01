@@ -151,6 +151,11 @@ mbx maps the registry separately from the rest of `CARGO_HOME`, so cached
 compiler inputs remain portable when that child symlink resolves outside the
 Cargo home directory.
 
+A `target/` directory built with the default `share_out_dir` depends on the mbx
+store. When a later stage copies `target/` without the store, set
+`MBX_SHARE_OUT_DIR=0` in every stage; see
+[A target directory depends on the cache](/limits#target-needs-cache).
+
 ## Closure bundles for action transports
 
 An action can transport only the cache entries produced or used by its builds,
