@@ -1771,6 +1771,90 @@ fn a_rebuilt_dependency_does_not_move_the_source_fingerprint() {
     assert_ne!(fingerprint(), before);
 }
 
+/// A native search directory is part of a shared key, and a directory the cache
+/// cannot describe never gets one. Neither says anything about whether the
+/// crate was edited, so the churn fingerprint must come out the same whether
+/// discovery scanned the directory, refused it, or never looked.
+#[cfg(unix)]
+#[test]
+fn native_search_directories_do_not_move_the_source_fingerprint() {
+    let directory = tempfile::tempdir().unwrap();
+    let working_dir = directory.path().join("work");
+    let native = directory.path().join("native");
+    let elsewhere = directory.path().join("elsewhere");
+    for path in [&working_dir, &native, &elsewhere] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::write(working_dir.join("src.rs"), "pub fn value() {}\n").unwrap();
+    std::fs::write(native.join("generated.rs"), "// listed by dep-info\n").unwrap();
+    std::fs::write(native.join("libfixture.a"), "first").unwrap();
+    let argument = format!("-Lnative={}", native.display());
+    let invocation = RustcInvocation::parse(&args(&[
+        "--crate-name=widget",
+        "--crate-type=lib",
+        "--emit=dep-info,metadata,link",
+        "--out-dir=target/debug/deps",
+        &argument,
+        "src.rs",
+    ]))
+    .unwrap();
+    let dep_info = RustcDepInfo::parse(&format!(
+        "target/debug/deps/widget.d: src.rs {}\n",
+        native.join("generated.rs").display()
+    ))
+    .unwrap();
+    let mappings = [PathMapping::new(&native, "native")];
+    let scanned = || {
+        invocation
+            .discover_inputs_with_mappings(
+                &dep_info,
+                &working_dir,
+                &mappings,
+                &mbx_cache_core::NoFileDigestCache,
+            )
+            .map(|discovered| invocation.source_fingerprint(&discovered))
+    };
+    let refused = || {
+        invocation
+            .discover_inputs_with_mappings(
+                &dep_info,
+                &working_dir,
+                &[],
+                &mbx_cache_core::NoFileDigestCache,
+            )
+            .map(|discovered| invocation.source_fingerprint(&discovered))
+    };
+    let sources_only = || {
+        invocation
+            .discover_source_inputs(&dep_info, &working_dir, &mbx_cache_core::NoFileDigestCache)
+            .map(|discovered| invocation.source_fingerprint(&discovered))
+            .unwrap()
+    };
+    let before = sources_only();
+    assert_eq!(scanned().unwrap(), before);
+
+    // The directory outside every admitted root is refused, and a dangling
+    // link in an admitted one cannot be read; the fingerprint is still defined.
+    assert!(matches!(
+        refused(),
+        Err(BypassReason::UnsupportedSearchPath(_))
+    ));
+    std::os::unix::fs::symlink(elsewhere.join("missing"), native.join("libdangling.so")).unwrap();
+    assert!(matches!(scanned(), Err(BypassReason::InputRead { .. })));
+    assert_eq!(sources_only(), before);
+
+    // A library appearing or changing in the directory is not an edit.
+    std::fs::write(native.join("libfixture.a"), "rebuilt").unwrap();
+    std::fs::write(native.join("libextra.a"), "new").unwrap();
+    assert_eq!(sources_only(), before);
+
+    // A file dep-info names is a source, wherever it lives.
+    std::fs::write(native.join("generated.rs"), "// changed\n").unwrap();
+    assert_ne!(sources_only(), before);
+    std::fs::remove_file(native.join("libdangling.so")).unwrap();
+    assert_eq!(scanned().unwrap(), sources_only());
+}
+
 fn native_links() -> ParseOptions {
     ParseOptions::caching_native_links(true)
 }

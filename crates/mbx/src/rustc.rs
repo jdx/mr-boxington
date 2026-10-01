@@ -1338,12 +1338,15 @@ fn plan_learned_reuse(
     }
 }
 
-/// Whether the compilation was refused only because a native search path cannot
-/// be described to the shared cache.
+/// Whether a native search directory kept the compilation from being described
+/// to the shared cache: one the cache cannot model, or one holding an entry
+/// that cannot be read, such as a dangling symlink rustc never touched. Source
+/// discovery then runs without the directory, so a real read failure of a
+/// source file still surfaces from it.
 fn is_unshareable_search_path(error: &eyre::Report) -> bool {
     matches!(
         error.downcast_ref::<BypassReason>(),
-        Some(BypassReason::UnsupportedSearchPath(_))
+        Some(BypassReason::UnsupportedSearchPath(_) | BypassReason::InputRead { .. })
     )
 }
 
@@ -1364,7 +1367,7 @@ fn discover_for_churn(
         &compilation.portable.mappings,
         session::file_digest_cache(),
     ) {
-        Err(BypassReason::UnsupportedSearchPath(_)) => {
+        Err(BypassReason::UnsupportedSearchPath(_) | BypassReason::InputRead { .. }) => {
             Ok(compilation.invocation.discover_source_inputs(
                 dep_info,
                 compilation.working_dir,

@@ -1701,20 +1701,14 @@ fn a_workspace_crate_is_incremental_on_its_first_edit_and_mbx_clean_resets_it() 
 /// uncacheable. It says nothing about whether the crate's sources are being
 /// edited, so the edit still has to switch the crate to private incremental state.
 #[cfg(unix)]
-#[test]
-fn a_crate_with_an_unshareable_native_search_path_is_incremental_on_its_first_edit() {
+fn assert_incremental_on_first_edit_despite_native_dir(prepare: impl FnOnce(&Path, &Path)) {
     let store = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();
     let native = tempfile::tempdir().unwrap();
     let elsewhere = tempfile::tempdir().unwrap();
     write_project(project.path());
-    std::fs::write(elsewhere.path().join("libextra.so.1"), b"not a library").unwrap();
-    std::os::unix::fs::symlink(
-        elsewhere.path().join("libextra.so.1"),
-        native.path().join("libextra.so"),
-    )
-    .unwrap();
+    prepare(native.path(), elsewhere.path());
     std::fs::write(
         project.path().join("build.rs"),
         format!(
@@ -1755,6 +1749,27 @@ fn a_crate_with_an_unshareable_native_search_path_is_incremental_on_its_first_ed
         Some(0),
         "an incremental artifact must never be published: {stats}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_crate_with_an_unshareable_native_search_path_is_incremental_on_its_first_edit() {
+    assert_incremental_on_first_edit_despite_native_dir(|native, elsewhere| {
+        std::fs::write(elsewhere.join("libextra.so.1"), b"not a library").unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("libextra.so.1"), native.join("libextra.so"))
+            .unwrap();
+    });
+}
+
+/// rustc never reads a link it is not asked to resolve, so a dangling one in the
+/// search directory does not fail the build. It only keeps the directory from
+/// being scanned.
+#[cfg(unix)]
+#[test]
+fn a_dangling_link_in_a_native_search_path_does_not_stop_the_first_edit_going_incremental() {
+    assert_incremental_on_first_edit_despite_native_dir(|native, elsewhere| {
+        std::os::unix::fs::symlink(elsewhere.join("missing"), native.join("libgone.so")).unwrap();
+    });
 }
 
 /// The same evidence that turns it on turns it off: once the content stops

@@ -607,7 +607,9 @@ impl RustcInvocation {
         let owned = discovered
             .inputs
             .iter()
-            .filter(|input| !linked.contains(input.path.as_path()))
+            .filter(|input| {
+                !linked.contains(input.path.as_path()) && !discovered.is_native_only(&input.path)
+            })
             .map(|input| (input.path.as_path(), &input.digest))
             .collect::<BTreeMap<_, _>>();
         let mut bytes = Vec::new();
@@ -1135,6 +1137,7 @@ impl RustcInputPrediction {
             return Err(BypassReason::UnsupportedPrediction);
         }
         let mut paths = BTreeSet::new();
+        let mut named = BTreeSet::new();
         let admitted_roots = dep_info::native_input_roots(working_dir, path_mappings);
         let mut native_bytes = 0_u64;
         for path in &self.inputs {
@@ -1149,9 +1152,12 @@ impl RustcInputPrediction {
                     &mut native_bytes,
                 )?;
             } else {
-                paths.insert(denormalize_path(path, path_mappings)?);
+                let path = denormalize_path(path, path_mappings)?;
+                named.insert(path.clone());
+                paths.insert(path);
             }
         }
+        let native_only = paths.difference(&named).cloned().collect();
         let environment = self
             .environment
             .iter()
@@ -1169,7 +1175,10 @@ impl RustcInputPrediction {
                 Ok((name.clone(), value))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
-        DiscoveredInputs::from_paths(working_dir, paths, environment, digests)
+        Ok(
+            DiscoveredInputs::from_paths(working_dir, paths, environment, digests)?
+                .with_native_only(native_only),
+        )
     }
 }
 

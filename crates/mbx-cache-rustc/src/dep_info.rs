@@ -144,6 +144,10 @@ pub struct DiscoveredInputs {
     /// compare against later. Lets `verify` confirm an input by stat instead of
     /// by reading it again.
     identities: Vec<Option<FileIdentity>>,
+    /// Inputs that entered only because they sit in a native search directory,
+    /// not because dep-info or the invocation named them. They belong in a
+    /// shared action key, but they are not the crate's own sources.
+    native_only: BTreeSet<PathBuf>,
 }
 
 impl DiscoveredInputs {
@@ -266,7 +270,19 @@ impl DiscoveredInputs {
             inputs,
             environment,
             identities,
+            native_only: BTreeSet::new(),
         })
+    }
+
+    /// Mark inputs that were found only by scanning native search directories.
+    pub(crate) fn with_native_only(mut self, native_only: BTreeSet<PathBuf>) -> Self {
+        self.native_only = native_only;
+        self
+    }
+
+    /// Whether `path` is an input only because a native search directory holds it.
+    pub fn is_native_only(&self, path: &Path) -> bool {
+        self.native_only.contains(path)
     }
 
     /// Reject inputs whose modification time overlaps the compiler invocation.
@@ -507,6 +523,7 @@ impl RustcInvocation {
                 normalize_components(&absolute)
             })
             .collect::<BTreeSet<_>>();
+        let named = paths.clone();
         let admitted_roots = native_input_roots(&working_dir, path_mappings.unwrap_or_default());
         let mut native_bytes = 0_u64;
         for argument in &self.arguments {
@@ -527,7 +544,14 @@ impl RustcInvocation {
                 )?;
             }
         }
-        DiscoveredInputs::from_paths(&working_dir, paths, dep_info.environment.clone(), digests)
+        let native_only = paths.difference(&named).cloned().collect();
+        Ok(DiscoveredInputs::from_paths(
+            &working_dir,
+            paths,
+            dep_info.environment.clone(),
+            digests,
+        )?
+        .with_native_only(native_only))
     }
 }
 
