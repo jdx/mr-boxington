@@ -133,6 +133,11 @@ for tuning and [Benchmarks](/benchmarks#six-parallel-jobs) for a measured batch.
 
 ## Docker builds
 
+A `target/` directory built with the default `share_out_dir` depends on the mbx
+store. When a later stage copies `target/` without the store, set
+`MBX_SHARE_OUT_DIR=0` in every stage; see
+[A target directory depends on the cache](/limits#target-needs-cache).
+
 Mount the mbx store and Cargo registry into the container at stable locations.
 The registry may either be mounted directly at `$CARGO_HOME/registry` or
 mounted elsewhere and symlinked from there:
@@ -150,11 +155,6 @@ docker run --rm \
 mbx maps the registry separately from the rest of `CARGO_HOME`, so cached
 compiler inputs remain portable when that child symlink resolves outside the
 Cargo home directory.
-
-A `target/` directory built with the default `share_out_dir` depends on the mbx
-store. When a later stage copies `target/` without the store, set
-`MBX_SHARE_OUT_DIR=0` in every stage; see
-[A target directory depends on the cache](/limits#target-needs-cache).
 
 ## Closure bundles for action transports
 
