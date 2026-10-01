@@ -419,7 +419,7 @@ impl S3RemoteCache {
                 // The bucket answered and authorized the request. Whether this
                 // one key exists is beside the point.
                 StatusCode::OK | StatusCode::NOT_FOUND => Ok(()),
-                StatusCode::FORBIDDEN => {
+                StatusCode::BAD_REQUEST | StatusCode::FORBIDDEN => {
                     let failure = FailedRequest::read(response).await;
                     if failure.is_credentials_rejected() {
                         bail!(
@@ -428,6 +428,9 @@ impl S3RemoteCache {
                             failure.code.as_deref().unwrap_or("forbidden"),
                             self.credentials.rejection_hint(failure.code.as_deref())
                         );
+                    }
+                    if failure.status != StatusCode::FORBIDDEN {
+                        return Err(failure.report("connect to", &url));
                     }
                     // The signature was accepted; something declined this one
                     // object. The probe key is never written, so without
@@ -930,9 +933,13 @@ impl FailedRequest {
     /// can explain away. `AccessDenied` deliberately is not among them: it is
     /// what an absent object looks like without `s3:ListBucket`.
     fn is_credentials_rejected(&self) -> bool {
-        self.status == StatusCode::FORBIDDEN
-            && matches!(
-                self.code.as_deref(),
+        matches!(
+            (self.status, self.code.as_deref()),
+            (
+                StatusCode::BAD_REQUEST,
+                Some("ExpiredToken" | "TokenRefreshRequired" | "InvalidToken")
+            ) | (
+                StatusCode::FORBIDDEN,
                 Some(
                     "SignatureDoesNotMatch"
                         | "InvalidAccessKeyId"
@@ -942,6 +949,7 @@ impl FailedRequest {
                         | "RequestTimeTooSkewed"
                 )
             )
+        )
     }
 
     /// Whether the store is asking to be tried again.
