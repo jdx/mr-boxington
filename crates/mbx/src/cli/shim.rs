@@ -287,14 +287,16 @@ fn note_uncached_passthrough(invocation: Option<&super::cargo_invocation::Invoca
     let Some(invocation) = invocation else {
         return;
     };
-    let command = invocation
-        .arguments
+    let Some((position, command)) = super::launch::cargo_subcommand_at(&invocation.arguments)
+    else {
+        return;
+    };
+    // Cargo's own quiet flag precedes the subcommand; anything after it belongs
+    // to the subcommand.
+    let quiet = invocation.arguments[..position]
         .iter()
-        .find(|argument| !argument.to_string_lossy().starts_with(['-', '+']))
-        .map_or_else(String::new, |argument| {
-            argument.to_string_lossy().into_owned()
-        });
-    if matches!(invocation.kind, super::cargo_invocation::Kind::External) {
+        .any(|argument| argument == "-q" || argument == "--quiet");
+    if matches!(invocation.kind, super::cargo_invocation::Kind::External) && !quiet {
         log::info!(
             "no Cargo manifest in scope; running `cargo {command}` without the cache. If it builds a workspace it creates, write the manifest first so the build runs inside an mbx session"
         );
