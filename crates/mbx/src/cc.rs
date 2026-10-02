@@ -901,6 +901,17 @@ fn path_mappings(working_dir: &Path) -> Vec<PathMapping> {
         std::env::var_os("UniversalCRTSdkDir").map(PathBuf::from),
         "ucrt_sdk",
     );
+    // A build script of a path dependency outside the workspace compiles
+    // sources from its own package, which none of the roots above but home
+    // can name -- and home only when the checkout happens to be below it.
+    if let Some(root) = session_path("CARGO_MANIFEST_DIR").filter(|root| {
+        root.is_absolute()
+            && !mappings
+                .iter()
+                .any(|existing| existing.placeholder != "home" && root.starts_with(&existing.root))
+    }) {
+        mappings.push(PathMapping::new(root, "package"));
+    }
     let _ = working_dir;
     mappings
 }

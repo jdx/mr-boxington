@@ -609,6 +609,87 @@ fn standalone_registry_mapping_uses_the_default_cargo_home() {
     );
 }
 
+/// Session mappings for a compilation of `manifest_dir`, with `home` as home.
+fn session_mappings(
+    workspace: &Path,
+    home: &Path,
+    manifest_dir: &Path,
+    working_dir: &Path,
+) -> Vec<PathMapping> {
+    PathMapping::ordered(&path_mappings_with_env(
+        working_dir,
+        None,
+        None,
+        |name| match name {
+            "HOME" => Some(home.as_os_str().to_owned()),
+            "CARGO_MANIFEST_DIR" => Some(manifest_dir.as_os_str().to_owned()),
+            session::WORKSPACE_ROOT_ENV => Some(workspace.as_os_str().to_owned()),
+            _ => None,
+        },
+    ))
+}
+
+#[test]
+fn path_dependency_outside_the_workspace_and_home_maps_to_its_package() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    let workspace = directory.path().join("checkout/app");
+    let dependency = directory.path().join("checkout/dep");
+    std::fs::create_dir_all(dependency.join("src")).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(dependency.join("src/lib.rs"), "").unwrap();
+
+    let mappings = session_mappings(&workspace, &home, &dependency, &dependency);
+
+    assert_eq!(
+        normalize_mapped_path(&dependency.join("src/lib.rs"), &dependency, &mappings).unwrap(),
+        "${package}/src/lib.rs"
+    );
+}
+
+#[test]
+fn path_dependency_below_home_maps_to_its_package() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    let workspace = home.join("src/app");
+    let dependency = home.join("src/dep");
+    std::fs::create_dir_all(dependency.join("src")).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(dependency.join("src/lib.rs"), "").unwrap();
+
+    let mappings = session_mappings(&workspace, &home, &dependency, &dependency);
+
+    assert_eq!(
+        normalize_mapped_path(&dependency.join("src/lib.rs"), &dependency, &mappings).unwrap(),
+        "${package}/src/lib.rs"
+    );
+    assert_eq!(
+        normalize_mapped_path(&home.join("notes.txt"), &dependency, &mappings).unwrap(),
+        "${home}/notes.txt"
+    );
+}
+
+#[test]
+fn workspace_members_and_registry_crates_keep_their_roots() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    let workspace = directory.path().join("app");
+    let member = workspace.join("crates/widget");
+    let registry = home.join(".cargo/registry/src/index/widget-1.0.0");
+
+    for manifest_dir in [&member, &registry] {
+        let mappings = session_mappings(&workspace, &home, manifest_dir, manifest_dir);
+        assert!(
+            !mappings
+                .iter()
+                .any(|mapping| mapping.placeholder == "package"),
+            "{}",
+            manifest_dir.display()
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn cargo_registry_mapping_follows_a_child_symlink() {

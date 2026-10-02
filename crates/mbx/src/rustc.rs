@@ -3397,6 +3397,19 @@ fn path_mappings_with_env(
             "workspace",
         );
     }
+    // A path dependency outside the workspace is under none of the roots
+    // above, so its own package directory is its root. Without one its sources
+    // could be named only through home, and not at all when the checkout is
+    // elsewhere -- `/tmp`, or a CI runner's work directory -- leaving it
+    // uncached. Home is not consulted here: the package keeps the same name
+    // whether or not it happens to live below home.
+    if let Some(root) = environment("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .filter(|root| root.is_absolute())
+        .filter(|root| !roots.iter().any(|existing| root.starts_with(existing)))
+    {
+        add_mapping(&mut mappings, &mut roots, root, "package");
+    }
     // Home is deliberately last. Most real checkouts live under it, but a
     // checkout-specific prefix must be `${workspace}` so equivalent worktrees
     // agree on their source paths. Cargo and rustup roots come first because a
