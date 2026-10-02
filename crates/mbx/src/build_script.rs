@@ -338,6 +338,16 @@ pub(crate) fn run() -> Result<ExitCode> {
             Ok(Some(restored)) => {
                 record_action_hit(&action, restored.stats, &stats_label());
                 replay_bytes(&restored.stdout, &restored.stderr)?;
+                // A grouped export follows this run's receipt rather than the
+                // cumulative manifest. Keep a restored script in that receipt
+                // so the next CI job can look it up too. Recording is only
+                // bookkeeping after its output reached Cargo: a failure must
+                // not run an already-restored script a second time.
+                if let Err(error) = record_prediction(invocation, action, &prediction) {
+                    session::report_shim_warning(&format!(
+                        "restored build-script prediction was not recorded: {error:#}"
+                    ));
+                }
                 return Ok(ExitCode::SUCCESS);
             }
             Ok(None) => {}

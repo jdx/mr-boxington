@@ -2323,6 +2323,36 @@ fn write_execution_cached_project(directory: &Path, declares_inputs: bool) {
     generate_lockfile(directory);
 }
 
+/// Write a portable binary with a build script whose execution is observable.
+/// Unlike `write_execution_cached_project`, this fixture does not report an
+/// absolute checkout path, so all three actions can restore in a fresh CI job.
+fn write_exported_build_script_project(directory: &Path) {
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[package]\nname = \"exported-build-script-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(directory.join("input.txt"), "first\n").unwrap();
+    std::fs::write(
+        directory.join("build.rs"),
+        "use std::fs;\n\
+         fn main() {\n\
+             let runs = fs::read_to_string(\"runs\").ok().and_then(|runs| runs.parse::<u32>().ok()).unwrap_or(0) + 1;\n\
+             fs::write(\"runs\", runs.to_string()).unwrap();\n\
+             println!(\"cargo:rerun-if-changed=input.txt\");\n\
+             println!(\"cargo:rustc-cfg=from_build_script\");\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/main.rs"),
+        "fn main() { println!(\"{}\", cfg!(from_build_script)); }\n",
+    )
+    .unwrap();
+    generate_lockfile(directory);
+}
+
 /// Write a build script with a Rust build-dependency. Cargo compares the
 /// build-script executable's mtime with that dependency when checking whether
 /// the compilation is fresh.
@@ -2558,6 +2588,91 @@ fn build_script_execution_and_out_dir_restore_across_checkouts() {
         "replayed directives retained the publishing checkout: {replayed}"
     );
     assert!(count(&warm, "hits") >= 1, "build script should hit: {warm}");
+}
+
+/// A CI cache export must include a build script that this run restored. The
+/// next job starts with an empty store and target directory, so it can only
+/// restore the script when the previous job re-recorded its prediction.
+#[test]
+fn a_restored_build_script_stays_in_every_ci_cache_export() {
+    let reports = tempfile::tempdir().unwrap();
+    let mut previous_archive = None;
+
+    for round in 1..=4 {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_exported_build_script_project(project.path());
+
+        if let Some(archive) = previous_archive.as_ref() {
+            let import = mbx_command()
+                // Import outside the checkout, as a CI cache restore does:
+                // the following build must have an empty target directory.
+                .current_dir(reports.path())
+                .args(["cache", "import"])
+                .arg(archive)
+                .env("MBX_CACHE_DIR", store.path())
+                .output()
+                .unwrap();
+            assert!(
+                import.status.success(),
+                "round {round} import failed: {}",
+                String::from_utf8_lossy(&import.stderr)
+            );
+        }
+
+        let group = format!("github-run-{round}/build");
+        let settings = [
+            (mbx::session::CACHE_EXPORT_GROUP_ENV, group.as_str()),
+            ("MBX_LEARNED_INCREMENTAL", "0"),
+        ];
+        let (stats, stderr) = build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("round-{round}.json")),
+            &settings,
+        );
+        if round == 1 {
+            assert_eq!(
+                std::fs::read_to_string(project.path().join("runs")).unwrap(),
+                "1"
+            );
+        } else {
+            assert!(
+                !project.path().join("runs").exists(),
+                "round {round} ran the build script instead of restoring it: {stats}\n{stderr}"
+            );
+            assert_eq!(
+                count(&stats, "misses"),
+                0,
+                "round {round} should restore every cached action: {stats}"
+            );
+            assert_eq!(
+                count(&stats, "hits"),
+                3,
+                "round {round} should restore the build script and both Rust actions: {stats}"
+            );
+        }
+
+        let archive = reports.path().join(format!("round-{round}.tar"));
+        let export = mbx_command()
+            .current_dir(project.path())
+            .args(["cache", "export", "--group", &group])
+            .arg(&archive)
+            .env("MBX_CACHE_DIR", store.path())
+            .output()
+            .unwrap();
+        assert!(
+            export.status.success(),
+            "round {round} export failed: {}",
+            String::from_utf8_lossy(&export.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&export.stdout).contains("exported 3 actions"),
+            "round {round} export omitted a restored action: {}",
+            String::from_utf8_lossy(&export.stdout)
+        );
+        previous_archive = Some(archive);
+    }
 }
 
 /// Move the fixture's build script to `builder/main.rs`, as aws-lc-sys does.
