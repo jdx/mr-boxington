@@ -1357,7 +1357,7 @@ struct Reachability {
     action_cache: mbx_cache_core::LocalActionCache,
     /// Every indexed path and its size, zero if it no longer exists.
     paths: Mutex<PathIndex>,
-    identities: Mutex<HashMap<String, Arc<[Arc<[usize]>]>>>,
+    identities: Mutex<HashMap<String, ActionPaths>>,
     actions: Mutex<HashMap<CacheDigest, Arc<[usize]>>>,
     /// Each tree blob's child directories and the paths it names directly.
     directories: Mutex<HashMap<CacheDigest, Option<DirectoryPaths>>>,
@@ -1371,6 +1371,9 @@ struct PathIndex {
     indices: HashMap<PathBuf, usize>,
     sizes: Vec<u64>,
 }
+
+/// The paths each of an identity's actions reaches.
+type ActionPaths = Arc<[Arc<[usize]>]>;
 
 type DirectoryPaths = (Arc<[CacheDigest]>, Arc<[usize]>);
 
