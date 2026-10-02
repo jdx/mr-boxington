@@ -19,9 +19,8 @@ use mbx_cache_core::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::rc::Rc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CAS_DIR: &str = "cas/v1";
@@ -1283,9 +1282,7 @@ fn project_usage(store: &Path, size_targets: bool) -> Result<Vec<ProjectUsage>> 
         .flat_map(|(identities, _, _)| identities.iter().cloned())
         .collect::<BTreeSet<_>>();
     let mut reachability = Reachability::new(store);
-    for_each_manifest(store, &live, |identity, actions| {
-        reachability.record(identity, &actions);
-    });
+    resolve_identities(&reachability, &live);
     let mut usages = Vec::new();
     for (workspace_root, (identities, live, target_bytes)) in projects {
         let action_bytes = reachability.bytes(&identities);
@@ -1307,19 +1304,14 @@ fn project_usage(store: &Path, size_targets: bool) -> Result<Vec<ProjectUsage>> 
     Ok(usages)
 }
 
-/// Hand each identity's recorded actions to `consume` as its manifest is
-/// parsed.
+/// Resolve every identity's recorded actions into `reachability`.
 ///
 /// Manifests are the one large input: a busy checkout's runs to tens of
 /// megabytes of JSON, and parsing hundreds of them one after another is most
-/// of what sizing every workspace costs. They are parsed in parallel but
-/// consumed one at a time through a short queue, so only a few parsed
-/// manifests are ever held at once rather than all of them.
-fn for_each_manifest(
-    store: &Path,
-    identities: &BTreeSet<String>,
-    mut consume: impl FnMut(&str, Vec<CacheDigest>),
-) {
+/// of what sizing every workspace costs. Resolving what they reach is mostly
+/// cold file reads. Both are spread over a few threads, each taking whole
+/// identities from a shared counter.
+fn resolve_identities(reachability: &Reachability, identities: &BTreeSet<String>) {
     const MAX_WORKERS: usize = 8;
     let identities = identities.iter().collect::<Vec<_>>();
     let workers = std::thread::available_parallelism()
@@ -1328,36 +1320,21 @@ fn for_each_manifest(
         .min(MAX_WORKERS)
         .min(identities.len());
     let next = AtomicUsize::new(0);
-    let (sender, receiver) = std::sync::mpsc::sync_channel(workers);
     std::thread::scope(|scope| {
         for _ in 0..workers {
-            let sender = sender.clone();
-            let (identities, next) = (&identities, &next);
-            scope.spawn(move || {
-                // Resolving an identity reads its action results and output
-                // trees and stats every object, all cold on first touch. The
-                // consumer does that one identity at a time, so each worker
-                // does it first against a private index; the consumer's pass
-                // then finds everything in the page cache.
-                let mut warm = Reachability::new(store);
+            scope.spawn(|| {
                 while let Some(identity) = identities.get(next.fetch_add(1, Ordering::Relaxed)) {
                     // One manifest this build cannot read is not worth
                     // abandoning the report over. It reaches nothing, which
                     // can only understate sharing.
-                    let actions = task_manifest_actions(store, identity).unwrap_or_else(|error| {
-                        log::debug!("could not read the manifest for {identity}: {error}");
-                        Vec::new()
-                    });
-                    warm.record(identity, &actions);
-                    if sender.send((*identity, actions)).is_err() {
-                        break;
-                    }
+                    let actions = task_manifest_actions(&reachability.store, identity)
+                        .unwrap_or_else(|error| {
+                            log::debug!("could not read the manifest for {identity}: {error}");
+                            Vec::new()
+                        });
+                    reachability.record(identity, &actions);
                 }
             });
-        }
-        drop(sender);
-        for (identity, actions) in receiver {
-            consume(identity, actions);
         }
     });
 }
@@ -1378,17 +1355,29 @@ struct Reachability {
     store: PathBuf,
     cas: LocalCas,
     action_cache: mbx_cache_core::LocalActionCache,
-    indices: HashMap<PathBuf, usize>,
-    /// The size of each indexed path, or zero if it no longer exists.
-    sizes: Vec<u64>,
-    identities: HashMap<String, Rc<[Rc<[usize]>]>>,
-    actions: HashMap<CacheDigest, Rc<[usize]>>,
-    directories: HashMap<CacheDigest, Option<Rc<[CacheDigest]>>>,
-    /// Paths each directory names directly, filled alongside `directories`.
-    directory_paths: HashMap<CacheDigest, Rc<[usize]>>,
+    /// Every indexed path and its size, zero if it no longer exists.
+    paths: Mutex<PathIndex>,
+    identities: Mutex<HashMap<String, Arc<[Arc<[usize]>]>>>,
+    actions: Mutex<HashMap<CacheDigest, Arc<[usize]>>>,
+    /// Each tree blob's child directories and the paths it names directly.
+    directories: Mutex<HashMap<CacheDigest, Option<DirectoryPaths>>>,
     /// The workspace number that last counted each path.
     counted: Vec<usize>,
     workspaces: usize,
+}
+
+#[derive(Default)]
+struct PathIndex {
+    indices: HashMap<PathBuf, usize>,
+    sizes: Vec<u64>,
+}
+
+type DirectoryPaths = (Arc<[CacheDigest]>, Arc<[usize]>);
+
+/// The caches are only guards around maps; a panicked holder leaves them
+/// consistent, so poisoning is not worth failing a report over.
+fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|error| error.into_inner())
 }
 
 impl Reachability {
@@ -1397,12 +1386,10 @@ impl Reachability {
             store: store.to_path_buf(),
             cas: LocalCas::new(store),
             action_cache: mbx_cache_core::LocalActionCache::new(store),
-            indices: HashMap::new(),
-            sizes: Vec::new(),
-            identities: HashMap::new(),
-            actions: HashMap::new(),
-            directories: HashMap::new(),
-            directory_paths: HashMap::new(),
+            paths: Mutex::default(),
+            identities: Mutex::default(),
+            actions: Mutex::default(),
+            directories: Mutex::default(),
             counted: Vec::new(),
             workspaces: 0,
         }
@@ -1412,12 +1399,16 @@ impl Reachability {
     ///
     /// An identity that was never recorded reaches nothing.
     fn bytes(&mut self, identities: &BTreeSet<String>) -> u64 {
-        let reachable = identities
-            .iter()
-            .filter_map(|identity| self.identities.get(identity).cloned())
-            .collect::<Vec<_>>();
+        let reachable = {
+            let recorded = locked(&self.identities);
+            identities
+                .iter()
+                .filter_map(|identity| recorded.get(identity).cloned())
+                .collect::<Vec<_>>()
+        };
+        let sizes = std::mem::take(&mut locked(&self.paths).sizes);
         self.workspaces += 1;
-        self.counted.resize(self.sizes.len(), 0);
+        self.counted.resize(sizes.len(), 0);
         let mut bytes = 0_u64;
         for index in reachable
             .iter()
@@ -1426,23 +1417,27 @@ impl Reachability {
         {
             if self.counted[*index] != self.workspaces {
                 self.counted[*index] = self.workspaces;
-                bytes = bytes.saturating_add(self.sizes[*index]);
+                bytes = bytes.saturating_add(sizes[*index]);
             }
         }
+        locked(&self.paths).sizes = sizes;
         bytes
     }
 
     /// Resolve what one identity's recorded actions reach.
-    fn record(&mut self, identity: &str, actions: &[CacheDigest]) {
+    ///
+    /// Safe to call from several threads. Two threads may resolve the same
+    /// action at once; they read the same files and reach the same answer.
+    fn record(&self, identity: &str, actions: &[CacheDigest]) {
         let actions = actions
             .iter()
             .map(|action| self.action(action))
-            .collect::<Rc<[_]>>();
-        self.identities.insert(identity.to_string(), actions);
+            .collect::<Arc<[_]>>();
+        locked(&self.identities).insert(identity.to_string(), actions);
     }
 
-    fn action(&mut self, action: &CacheDigest) -> Rc<[usize]> {
-        if let Some(paths) = self.actions.get(action) {
+    fn action(&self, action: &CacheDigest) -> Arc<[usize]> {
+        if let Some(paths) = locked(&self.actions).get(action) {
             return paths.clone();
         }
         let mut paths = Vec::new();
@@ -1466,27 +1461,27 @@ impl Reachability {
                     if !visited.insert(digest.clone()) {
                         continue;
                     }
-                    let Some(children) = self.directory(&digest) else {
+                    let Some((children, named)) = self.directory(&digest) else {
                         continue;
                     };
-                    paths.extend(self.directory_paths[&digest].iter().copied());
+                    paths.extend(named.iter().copied());
                     pending.extend(children.iter().cloned());
                 }
             }
         }
         paths.sort_unstable();
         paths.dedup();
-        let paths = Rc::<[usize]>::from(paths);
-        self.actions.insert(action.clone(), paths.clone());
+        let paths = Arc::<[usize]>::from(paths);
+        locked(&self.actions).insert(action.clone(), paths.clone());
         paths
     }
 
-    /// The child directories of a tree blob, recording the paths it names.
-    fn directory(&mut self, digest: &CacheDigest) -> Option<Rc<[CacheDigest]>> {
-        if let Some(children) = self.directories.get(digest) {
-            return children.clone();
+    /// The child directories of a tree blob and the paths it names directly.
+    fn directory(&self, digest: &CacheDigest) -> Option<DirectoryPaths> {
+        if let Some(entry) = locked(&self.directories).get(digest) {
+            return entry.clone();
         }
-        let children = read_directory(&self.cas, digest).map(|directory| {
+        let entry = read_directory(&self.cas, digest).map(|directory| {
             let mut paths = Vec::new();
             for file in &directory.files {
                 self.push_digest(&mut paths, &file.digest);
@@ -1494,31 +1489,37 @@ impl Reachability {
             for child in &directory.directories {
                 self.push_digest(&mut paths, &child.digest);
             }
-            self.directory_paths.insert(digest.clone(), Rc::from(paths));
-            directory
+            let children = directory
                 .directories
                 .into_iter()
                 .map(|child| child.digest)
-                .collect::<Rc<[_]>>()
+                .collect::<Arc<[_]>>();
+            (children, Arc::<[usize]>::from(paths))
         });
-        self.directories.insert(digest.clone(), children.clone());
-        children
+        locked(&self.directories).insert(digest.clone(), entry.clone());
+        entry
     }
 
-    fn push_digest(&mut self, paths: &mut Vec<usize>, digest: &CacheDigest) {
+    fn push_digest(&self, paths: &mut Vec<usize>, digest: &CacheDigest) {
         if let Ok(path) = self.cas.path_for(digest) {
             paths.push(self.index(path));
         }
     }
 
-    fn index(&mut self, path: PathBuf) -> usize {
-        if let Some(index) = self.indices.get(&path) {
+    fn index(&self, path: PathBuf) -> usize {
+        if let Some(index) = locked(&self.paths).indices.get(&path) {
             return *index;
         }
+        // The stat runs outside the lock. A second thread may stat the same
+        // path; whichever registers first wins and both get one index.
         let size = std::fs::metadata(&path).map_or(0, |metadata| metadata.len());
-        let index = self.sizes.len();
-        self.sizes.push(size);
-        self.indices.insert(path, index);
+        let mut paths = locked(&self.paths);
+        if let Some(index) = paths.indices.get(&path) {
+            return *index;
+        }
+        let index = paths.sizes.len();
+        paths.sizes.push(size);
+        paths.indices.insert(path, index);
         index
     }
 }
