@@ -1200,27 +1200,52 @@ async fn bad_request_token_errors_are_rejected_with_environment_hint() {
 }
 
 #[tokio::test]
-async fn expired_role_credentials_name_renewal_and_clocks_not_permissions() {
+async fn unrelated_bad_request_fails_the_connection_probe_without_a_credential_hint() {
     let mut server = mockito::Server::new_async().await;
     server
         .mock("GET", "/cache-bucket/acme/v1/connectivity-probe")
         .with_status(400)
-        .with_body(s3_error_body("ExpiredToken"))
+        .with_body(s3_error_body("InvalidRequest"))
         .create_async()
         .await;
-    let (metadata, _) = metadata_service().await;
-    let store = test_store(&server).with_instance_role(
-        InstanceRoleCredentials::new(metadata.url().parse().unwrap()).unwrap(),
-        SystemTime::now() + Duration::from_secs(3_600),
-    );
 
-    let error = store.check_connection().await.unwrap_err().to_string();
+    let error = test_store(&server)
+        .check_connection()
+        .await
+        .unwrap_err()
+        .to_string();
 
-    // The message must not depend on the credentials held now, which a
-    // renewal may have replaced since the rejected request was signed.
-    assert!(error.contains("renewal warning"), "{error}");
-    assert!(error.contains("clocks"), "{error}");
-    assert!(!error.contains("permissions"), "{error}");
+    assert!(error.contains("failed to connect to"), "{error}");
+    assert!(error.contains("400"), "{error}");
+    assert!(error.contains("InvalidRequest"), "{error}");
+    assert!(!error.contains("rejected these credentials"), "{error}");
+    assert!(!error.contains("AWS_ACCESS_KEY_ID"), "{error}");
+}
+
+#[tokio::test]
+async fn expired_role_credentials_name_renewal_and_clocks_not_permissions() {
+    for status in [400, 403] {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/cache-bucket/acme/v1/connectivity-probe")
+            .with_status(status)
+            .with_body(s3_error_body("ExpiredToken"))
+            .create_async()
+            .await;
+        let (metadata, _) = metadata_service().await;
+        let store = test_store(&server).with_instance_role(
+            InstanceRoleCredentials::new(metadata.url().parse().unwrap()).unwrap(),
+            SystemTime::now() + Duration::from_secs(3_600),
+        );
+
+        let error = store.check_connection().await.unwrap_err().to_string();
+
+        // The message must not depend on the credentials held now, which a
+        // renewal may have replaced since the rejected request was signed.
+        assert!(error.contains("renewal warning"), "{status}: {error}");
+        assert!(error.contains("clocks"), "{status}: {error}");
+        assert!(!error.contains("permissions"), "{status}: {error}");
+    }
 }
 
 #[tokio::test]
