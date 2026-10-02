@@ -1248,12 +1248,14 @@ pub fn touch_managed(config: &Config, workspace_root: &Path, target_dir: &Path) 
 
 /// Summarize the managed target directories under `root`.
 pub fn stats(root: &Path) -> Result<ViewStats> {
-    let mut stats = ViewStats::default();
-    for (_, directory) in views(root)? {
-        stats.views += 1;
-        stats.bytes += tree_bytes(&directory);
-    }
-    Ok(stats)
+    let directories = views(root)?
+        .into_iter()
+        .map(|(_, directory)| directory)
+        .collect::<Vec<_>>();
+    Ok(ViewStats {
+        views: directories.len() as u64,
+        bytes: trees_bytes(directories),
+    })
 }
 
 /// Remove the target directories of checkouts that no longer exist.
@@ -1808,6 +1810,77 @@ pub(crate) fn tree_bytes(directory: &Path) -> u64 {
         }
     }
     total
+}
+
+/// [`tree_bytes`] summed over `roots`, walked by several threads.
+///
+/// Sizing is a stat per file, and a machine with many checkouts has millions of
+/// them, so one thread spends nearly all its time waiting on the filesystem.
+/// Directories go onto a shared queue that every worker pulls from, so one
+/// enormous target tree is split up rather than left to a single thread.
+pub(crate) fn trees_bytes(roots: Vec<PathBuf>) -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Condvar, Mutex};
+
+    const MAX_WORKERS: usize = 8;
+    struct Queue {
+        pending: Vec<PathBuf>,
+        /// Directories handed to a worker that has not finished listing them.
+        busy: usize,
+    }
+    let queue = Mutex::new(Queue {
+        pending: roots,
+        busy: 0,
+    });
+    let ready = Condvar::new();
+    let total = AtomicU64::new(0);
+    let workers = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .clamp(1, MAX_WORKERS);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                let mut bytes = 0;
+                loop {
+                    let next = {
+                        let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
+                        loop {
+                            if let Some(next) = queue.pending.pop() {
+                                queue.busy += 1;
+                                break Some(next);
+                            }
+                            if queue.busy == 0 {
+                                break None;
+                            }
+                            queue = ready.wait(queue).unwrap_or_else(|e| e.into_inner());
+                        }
+                    };
+                    let Some(next) = next else { break };
+                    let mut found = Vec::new();
+                    if let Ok(listing) = std::fs::read_dir(&next) {
+                        for entry in listing.flatten() {
+                            let Ok(file_type) = entry.file_type() else {
+                                continue;
+                            };
+                            if file_type.is_dir() {
+                                found.push(entry.path());
+                            } else if file_type.is_file()
+                                && let Ok(metadata) = entry.metadata()
+                            {
+                                bytes += metadata.len();
+                            }
+                        }
+                    }
+                    let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
+                    queue.pending.extend(found);
+                    queue.busy -= 1;
+                    ready.notify_all();
+                }
+                total.fetch_add(bytes, Ordering::Relaxed);
+            });
+        }
+    });
+    total.into_inner()
 }
 
 #[cfg(test)]

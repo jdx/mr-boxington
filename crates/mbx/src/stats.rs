@@ -74,8 +74,18 @@ pub(crate) struct Cache {
 
 pub(crate) fn collect(store: &Path, target_root: &Path) -> Result<Report> {
     let tally = savings::read_tally(store);
-    let stats = store::stats(store)?;
-    let targets = target::stats(target_root)?;
+    // Sizing the target directories and reading the store are independent and
+    // both bound by the filesystem, so they overlap.
+    let (stats, targets, sharing) = std::thread::scope(|scope| {
+        let targets = scope.spawn(|| target::stats(target_root));
+        let sharing = scope.spawn(|| store::live_project_cache_bytes(store));
+        let stats = store::stats(store);
+        (stats, targets.join(), sharing.join())
+    });
+    let stats = stats?;
+    let targets = targets.map_err(|_| eyre::eyre!("sizing target directories panicked"))??;
+    let live_cache_bytes =
+        sharing.map_err(|_| eyre::eyre!("sizing the cache store panicked"))??;
     Ok(Report {
         version: 1,
         store: store.display().to_string(),
@@ -86,7 +96,7 @@ pub(crate) fn collect(store: &Path, target_root: &Path) -> Result<Report> {
             managed_targets: targets.views,
             managed_target_bytes: targets.bytes,
         },
-        sharing: SharingEstimate::read(store, stats.total_bytes())?,
+        sharing: SharingEstimate::from_live_projects(&live_cache_bytes, stats.total_bytes()),
     })
 }
 

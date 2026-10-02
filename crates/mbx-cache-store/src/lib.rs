@@ -1320,7 +1320,7 @@ fn for_each_manifest(
     identities: &BTreeSet<String>,
     mut consume: impl FnMut(&str, Vec<CacheDigest>),
 ) {
-    const MAX_WORKERS: usize = 4;
+    const MAX_WORKERS: usize = 8;
     let identities = identities.iter().collect::<Vec<_>>();
     let workers = std::thread::available_parallelism()
         .map(usize::from)
@@ -1334,6 +1334,12 @@ fn for_each_manifest(
             let sender = sender.clone();
             let (identities, next) = (&identities, &next);
             scope.spawn(move || {
+                // Resolving an identity reads its action results and output
+                // trees and stats every object, all cold on first touch. The
+                // consumer does that one identity at a time, so each worker
+                // does it first against a private index; the consumer's pass
+                // then finds everything in the page cache.
+                let mut warm = Reachability::new(store);
                 while let Some(identity) = identities.get(next.fetch_add(1, Ordering::Relaxed)) {
                     // One manifest this build cannot read is not worth
                     // abandoning the report over. It reaches nothing, which
@@ -1342,6 +1348,7 @@ fn for_each_manifest(
                         log::debug!("could not read the manifest for {identity}: {error}");
                         Vec::new()
                     });
+                    warm.record(identity, &actions);
                     if sender.send((*identity, actions)).is_err() {
                         break;
                     }
