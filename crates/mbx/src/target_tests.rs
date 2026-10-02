@@ -1340,3 +1340,33 @@ fn a_kept_target_outlives_its_age_but_not_its_checkout() {
     assert_eq!(outcome.removed_stale_views, 1);
     assert!(!kept.1.exists(), "a checkout that is gone takes its target");
 }
+
+#[test]
+fn parallel_tree_sizing_matches_the_serial_walk() {
+    let directory = tempfile::tempdir().unwrap();
+    let empty = directory.path().join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    let mut roots = vec![empty, directory.path().join("missing")];
+    for root in 0..3 {
+        let base = directory.path().join(format!("root{root}"));
+        for branch in 0..4 {
+            let nested = base.join(format!("a{branch}")).join("b").join("c");
+            std::fs::create_dir_all(&nested).unwrap();
+            for file in 0..5 {
+                std::fs::write(nested.join(format!("f{file}")), vec![0; 10 * (file + 1)]).unwrap();
+            }
+            std::fs::write(base.join(format!("top{branch}")), vec![0; 7]).unwrap();
+        }
+        roots.push(base);
+    }
+    #[cfg(unix)]
+    {
+        // A link is neither followed nor counted, as in the serial walk.
+        let linked = directory.path().join("root0").join("link");
+        std::os::unix::fs::symlink(directory.path().join("root1"), linked).unwrap();
+    }
+    let serial = roots.iter().map(|root| tree_bytes(root)).sum::<u64>();
+    assert!(serial > 0);
+    assert_eq!(trees_bytes(roots), serial);
+    assert_eq!(trees_bytes(Vec::new()), 0);
+}
