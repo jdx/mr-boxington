@@ -1180,11 +1180,31 @@ async fn rejected_credentials_name_where_they_came_from() {
 }
 
 #[tokio::test]
+async fn bad_request_token_errors_are_rejected_with_environment_hint() {
+    for code in ["ExpiredToken", "TokenRefreshRequired", "InvalidToken"] {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/cache-bucket/acme/v1/connectivity-probe")
+            .with_status(400)
+            .with_body(s3_error_body(code))
+            .create_async()
+            .await;
+        let error = test_store(&server)
+            .check_connection()
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(code), "{code}: {error}");
+        assert!(error.contains("AWS_ACCESS_KEY_ID"), "{code}: {error}");
+    }
+}
+
+#[tokio::test]
 async fn expired_role_credentials_name_renewal_and_clocks_not_permissions() {
     let mut server = mockito::Server::new_async().await;
     server
         .mock("GET", "/cache-bucket/acme/v1/connectivity-probe")
-        .with_status(403)
+        .with_status(400)
         .with_body(s3_error_body("ExpiredToken"))
         .create_async()
         .await;
