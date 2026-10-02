@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.21.1](https://github.com/jdx/mr-boxington/compare/v1.21.0...v1.21.1) - 2026-10-02
+
+### Fixed
+
+- *(gc)* keep the cache disk above gc.min_free_size during concurrent builds ([#618](https://github.com/jdx/mr-boxington/pull/618))
+- *(cache)* cache path dependencies outside the workspace and home directory ([#625](https://github.com/jdx/mr-boxington/pull/625))
+- *(gc)* keep a running command's test binaries when pruning unused build units ([#623](https://github.com/jdx/mr-boxington/pull/623))
+- *(cli)* say when an external cargo command runs without the cache ([#615](https://github.com/jdx/mr-boxington/pull/615))
+- *(cache)* keep private incremental state for crates with uncacheable native search paths ([#617](https://github.com/jdx/mr-boxington/pull/617))
+- *(cache)* prevent build hangs across PID namespaces ([#611](https://github.com/jdx/mr-boxington/pull/611))
+- *(remote)* block the instance role behind AWS profiles and renew credentials in the background ([#609](https://github.com/jdx/mr-boxington/pull/609))
+
+### Other
+
+- handle setup exit codes flagged by Rust 1.100 ([#626](https://github.com/jdx/mr-boxington/pull/626))
+
 ## [1.21.0](https://github.com/jdx/mr-boxington/compare/v1.20.0...v1.21.0) - 2026-09-29
 
 ### Added

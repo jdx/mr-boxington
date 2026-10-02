@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.19.2...mbx-cache-core-v0.19.3) - 2026-10-02
+
+### Fixed
+
+- *(remote)* show credential hints for HTTP 400 token errors ([#621](https://github.com/jdx/mr-boxington/pull/621))
+- *(remote)* block the instance role behind AWS profiles and renew credentials in the background ([#609](https://github.com/jdx/mr-boxington/pull/609))
+
 ## [0.19.2](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.19.1...mbx-cache-core-v0.19.2) - 2026-09-29
 
 ### Added

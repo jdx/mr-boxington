@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.19.2...mbx-cache-rustc-v0.19.3) - 2026-10-02
+
+### Fixed
+
+- *(cache)* cache Windows proc macros and build scripts linked with /STACK or /Brepro ([#619](https://github.com/jdx/mr-boxington/pull/619))
+- *(cache)* keep private incremental state for crates with uncacheable native search paths ([#617](https://github.com/jdx/mr-boxington/pull/617))
+
 ## [0.19.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.19.0...mbx-cache-rustc-v0.19.1) - 2026-09-28
 
 ### Fixed
