@@ -58,15 +58,18 @@ fn setup_puts_rust_analyzer_checks_through_the_stable_cargo_shim() {
         .path()
         .join("config/rust-analyzer/rust-analyzer.toml");
 
-    setup_with_rust_analyzer(
-        &executable,
-        &install,
-        &MiseScope::None,
-        &config,
-        None,
-        SetupAction::Install,
-    )
-    .unwrap();
+    assert_eq!(
+        setup_with_rust_analyzer(
+            &executable,
+            &install,
+            &MiseScope::None,
+            &config,
+            None,
+            SetupAction::Install,
+        )
+        .unwrap(),
+        ExitCode::SUCCESS
+    );
 
     let document = std::fs::read_to_string(&config)
         .unwrap()
@@ -110,7 +113,10 @@ fn setup_upgrades_its_existing_rust_analyzer_command() {
         configure_rust_analyzer(&config, &shim, SetupAction::Status).unwrap(),
         ExitCode::FAILURE
     );
-    configure_rust_analyzer(&config, &shim, SetupAction::Install).unwrap();
+    assert_eq!(
+        configure_rust_analyzer(&config, &shim, SetupAction::Install).unwrap(),
+        ExitCode::SUCCESS
+    );
 
     let written = std::fs::read_to_string(config).unwrap();
     assert!(written.contains("target/rust-analyzer"));
@@ -123,18 +129,24 @@ fn setup_preserves_an_existing_rust_analyzer_command() {
     let original = "# keep me\n[check]\noverrideCommand = [\"cargo\", \"clippy\"]\n";
     std::fs::write(&config, original).unwrap();
 
-    configure_rust_analyzer(
-        &config,
-        &directory.path().join("bin/cargo"),
-        SetupAction::Install,
-    )
-    .unwrap();
-    configure_rust_analyzer(
-        &config,
-        &directory.path().join("bin/cargo"),
-        SetupAction::Uninstall,
-    )
-    .unwrap();
+    assert_eq!(
+        configure_rust_analyzer(
+            &config,
+            &directory.path().join("bin/cargo"),
+            SetupAction::Install,
+        )
+        .unwrap(),
+        ExitCode::SUCCESS
+    );
+    assert_eq!(
+        configure_rust_analyzer(
+            &config,
+            &directory.path().join("bin/cargo"),
+            SetupAction::Uninstall,
+        )
+        .unwrap(),
+        ExitCode::SUCCESS
+    );
 
     assert_eq!(std::fs::read_to_string(config).unwrap(), original);
 }
@@ -146,12 +158,15 @@ fn setup_preserves_existing_rust_analyzer_check_settings() {
     let original = "# keep me\n[check]\ncommand = \"clippy\"\nfeatures = [\"editor\"]\n";
     std::fs::write(&config, original).unwrap();
 
-    configure_rust_analyzer(
-        &config,
-        &directory.path().join("bin/cargo"),
-        SetupAction::Install,
-    )
-    .unwrap();
+    assert_eq!(
+        configure_rust_analyzer(
+            &config,
+            &directory.path().join("bin/cargo"),
+            SetupAction::Install,
+        )
+        .unwrap(),
+        ExitCode::SUCCESS
+    );
 
     assert_eq!(std::fs::read_to_string(config).unwrap(), original);
 }
@@ -207,15 +222,18 @@ fn setup_removes_a_project_override_rust_analyzer_never_ran() {
     document["check"]["overrideCommand"] = toml_edit::value(command);
     std::fs::write(&project_config, document.to_string()).unwrap();
 
-    setup_with_rust_analyzer(
-        &executable,
-        &install,
-        &MiseScope::None,
-        &config,
-        Some(project_config.as_path()),
-        SetupAction::Install,
-    )
-    .unwrap();
+    assert_eq!(
+        setup_with_rust_analyzer(
+            &executable,
+            &install,
+            &MiseScope::None,
+            &config,
+            Some(project_config.as_path()),
+            SetupAction::Install,
+        )
+        .unwrap(),
+        ExitCode::SUCCESS
+    );
 
     assert!(!project_config.exists());
     assert!(
@@ -267,7 +285,10 @@ fn setup_uninstall_removes_only_its_rust_analyzer_command() {
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join("rust-analyzer.toml");
     let shim = directory.path().join("bin/cargo");
-    configure_rust_analyzer(&config, &shim, SetupAction::Install).unwrap();
+    assert_eq!(
+        configure_rust_analyzer(&config, &shim, SetupAction::Install).unwrap(),
+        ExitCode::SUCCESS
+    );
     let mut document = std::fs::read_to_string(&config)
         .unwrap()
         .parse::<toml_edit::DocumentMut>()
@@ -275,7 +296,10 @@ fn setup_uninstall_removes_only_its_rust_analyzer_command() {
     document["check"]["ignore"] = toml_edit::value(toml_edit::Array::from_iter(["dead_code"]));
     std::fs::write(&config, document.to_string()).unwrap();
 
-    configure_rust_analyzer(&config, &shim, SetupAction::Uninstall).unwrap();
+    assert_eq!(
+        configure_rust_analyzer(&config, &shim, SetupAction::Uninstall).unwrap(),
+        ExitCode::SUCCESS
+    );
 
     let written = std::fs::read_to_string(config).unwrap();
     assert!(written.contains("ignore"));
@@ -288,7 +312,10 @@ fn uninstall_keeps_the_shared_override_until_the_machine_wide_scope_goes() {
     let config = directory.path().join("rust-analyzer.toml");
     let shim = directory.path().join("bin/cargo");
     assert!(!rust_analyzer_override_is_installed(&config, &shim).unwrap());
-    configure_rust_analyzer(&config, &shim, SetupAction::Install).unwrap();
+    assert_eq!(
+        configure_rust_analyzer(&config, &shim, SetupAction::Install).unwrap(),
+        ExitCode::SUCCESS
+    );
     assert!(rust_analyzer_override_is_installed(&config, &shim).unwrap());
 
     assert!(override_is_shared_with_other_scopes(&MiseScope::Local));
@@ -298,7 +325,10 @@ fn uninstall_keeps_the_shared_override_until_the_machine_wide_scope_goes() {
     assert!(!override_is_shared_with_other_scopes(&MiseScope::Global));
     assert!(!override_is_shared_with_other_scopes(&MiseScope::None));
 
-    configure_rust_analyzer(&config, &shim, SetupAction::Uninstall).unwrap();
+    assert_eq!(
+        configure_rust_analyzer(&config, &shim, SetupAction::Uninstall).unwrap(),
+        ExitCode::SUCCESS
+    );
     assert!(!rust_analyzer_override_is_installed(&config, &shim).unwrap());
 }
 
@@ -396,13 +426,16 @@ fn setup_status_detects_and_setup_refreshes_a_replaced_wrapper() {
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     let install = directory.path().join("data/bin");
-    setup_at_action(
-        &executable,
-        &install,
-        &MiseScope::None,
-        SetupAction::Install,
-    )
-    .unwrap();
+    assert_eq!(
+        setup_at_action(
+            &executable,
+            &install,
+            &MiseScope::None,
+            SetupAction::Install,
+        )
+        .unwrap(),
+        ExitCode::SUCCESS
+    );
     assert_eq!(
         setup_at_action(&executable, &install, &MiseScope::None, SetupAction::Status,).unwrap(),
         ExitCode::SUCCESS
@@ -417,13 +450,16 @@ fn setup_status_detects_and_setup_refreshes_a_replaced_wrapper() {
         setup_at_action(&executable, &install, &MiseScope::None, SetupAction::Status,).unwrap(),
         ExitCode::FAILURE
     );
-    setup_at_action(
-        &executable,
-        &install,
-        &MiseScope::None,
-        SetupAction::Install,
-    )
-    .unwrap();
+    assert_eq!(
+        setup_at_action(
+            &executable,
+            &install,
+            &MiseScope::None,
+            SetupAction::Install,
+        )
+        .unwrap(),
+        ExitCode::SUCCESS
+    );
     assert!(cargo_shim_is_current(&executable, &shim).unwrap());
 }
 
@@ -438,7 +474,10 @@ fn setup_status_reports_a_shim_whose_target_was_removed_as_outdated() {
     std::fs::write(&removed, b"old mbx binary").unwrap();
     std::fs::set_permissions(&removed, std::fs::Permissions::from_mode(0o755)).unwrap();
     let install = directory.path().join("data/bin");
-    setup_at_action(&removed, &install, &MiseScope::None, SetupAction::Install).unwrap();
+    assert_eq!(
+        setup_at_action(&removed, &install, &MiseScope::None, SetupAction::Install).unwrap(),
+        ExitCode::SUCCESS
+    );
     std::fs::remove_dir_all(removed.parent().unwrap()).unwrap();
 
     let executable = directory.path().join("mbx");
@@ -451,13 +490,16 @@ fn setup_status_reports_a_shim_whose_target_was_removed_as_outdated() {
         ExitCode::FAILURE
     );
 
-    setup_at_action(
-        &executable,
-        &install,
-        &MiseScope::None,
-        SetupAction::Install,
-    )
-    .unwrap();
+    assert_eq!(
+        setup_at_action(
+            &executable,
+            &install,
+            &MiseScope::None,
+            SetupAction::Install,
+        )
+        .unwrap(),
+        ExitCode::SUCCESS
+    );
     assert!(cargo_shim_is_current(&executable, &shim).unwrap());
 }
 
@@ -467,31 +509,40 @@ fn setup_uninstall_keeps_the_shared_shim() {
     let executable = directory.path().join("mbx");
     std::fs::write(&executable, b"mbx binary").unwrap();
     let install = directory.path().join("data/bin");
-    setup_at_action(
-        &executable,
-        &install,
-        &MiseScope::None,
-        SetupAction::Install,
-    )
-    .unwrap();
+    assert_eq!(
+        setup_at_action(
+            &executable,
+            &install,
+            &MiseScope::None,
+            SetupAction::Install,
+        )
+        .unwrap(),
+        ExitCode::SUCCESS
+    );
     let shim = install.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
     assert!(shim.is_file());
-    setup_at_action(
-        &executable,
-        &install,
-        &MiseScope::None,
-        SetupAction::Uninstall,
-    )
-    .unwrap();
+    assert_eq!(
+        setup_at_action(
+            &executable,
+            &install,
+            &MiseScope::None,
+            SetupAction::Uninstall,
+        )
+        .unwrap(),
+        ExitCode::SUCCESS
+    );
 
     assert!(shim.exists());
-    setup_at_action(
-        &executable,
-        &install,
-        &MiseScope::None,
-        SetupAction::Uninstall,
-    )
-    .unwrap();
+    assert_eq!(
+        setup_at_action(
+            &executable,
+            &install,
+            &MiseScope::None,
+            SetupAction::Uninstall,
+        )
+        .unwrap(),
+        ExitCode::SUCCESS
+    );
 }
 
 #[test]

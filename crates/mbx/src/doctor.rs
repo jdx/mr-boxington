@@ -789,13 +789,16 @@ mod tests {
             "Cargo shim is outdated; run `mbx setup`"
         );
 
-        crate::cli::doctor_setup_at_action(
-            &executable,
-            &shim_dir,
-            &crate::cli::DoctorMiseScope::None,
-            crate::cli::DoctorSetupAction::Install,
-        )
-        .unwrap();
+        assert_eq!(
+            crate::cli::doctor_setup_at_action(
+                &executable,
+                &shim_dir,
+                &crate::cli::DoctorMiseScope::None,
+                crate::cli::DoctorSetupAction::Install,
+            )
+            .unwrap(),
+            ExitCode::SUCCESS
+        );
         let inactive = setup_check_at(&executable, &shim, Some(&real_first), false);
         assert_eq!(inactive.severity, Severity::Warn);
         assert!(inactive.detail.contains("current but not active"));
@@ -830,13 +833,16 @@ mod tests {
         make_executable(&removed);
         std::fs::write(&executable, b"current mbx").unwrap();
         make_executable(&executable);
-        crate::cli::doctor_setup_at_action(
-            &removed,
-            &shim_dir,
-            &crate::cli::DoctorMiseScope::None,
-            crate::cli::DoctorSetupAction::Install,
-        )
-        .unwrap();
+        assert_eq!(
+            crate::cli::doctor_setup_at_action(
+                &removed,
+                &shim_dir,
+                &crate::cli::DoctorMiseScope::None,
+                crate::cli::DoctorSetupAction::Install,
+            )
+            .unwrap(),
+            ExitCode::SUCCESS
+        );
         std::fs::remove_dir_all(removed.parent().unwrap()).unwrap();
 
         let check = setup_check_at(&executable, &shim, Some(shim_dir.as_os_str()), false);

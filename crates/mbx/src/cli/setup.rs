@@ -141,12 +141,13 @@ pub(crate) fn setup_install_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 pub(super) fn setup_at(executable: &Path, install_dir: &Path) -> Result<()> {
-    setup_at_action(
+    let status = setup_at_action(
         executable,
         install_dir,
         &MiseScope::None,
         SetupAction::Install,
     )?;
+    eyre::ensure!(status == ExitCode::SUCCESS, "mbx setup failed: {status:?}");
     Ok(())
 }
 
