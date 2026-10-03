@@ -3,11 +3,15 @@
 
 - **Usage:** `mbx exec [--project-root <DIR>] <COMMAND>…`
 
-Run a build command outside cargo with its C and C++ compiles cached.
+Run a build command outside Cargo with its C and C++ compilations cached.
+
+Options for exec, such as `--project-root`, go before the command. Everything after the command name belongs to the command, including a later `--`, as in `mbx exec cmake --build build -- -j8`.
 
 ## Arguments
 - **`<COMMAND>…`** — Build command and its arguments.
 
 ## Flags
-- **`--project-root <DIR>`** — Directory that identifies the project across worktrees.
+- **`--project-root <DIR>`** — Directory that identifies the project across checkouts.
+
+  Defaults to the enclosing Git, Jujutsu, Mercurial, or Sapling checkout, or to the working directory outside one.
 - **`-h --help`** — Print help

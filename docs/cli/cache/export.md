@@ -3,14 +3,20 @@
 
 - **Usage:** `mbx cache export [--group <GROUP>] [--format <FORMAT>] <ARCHIVE>`
 
-Export the cache closure of this checkout's last build. The export includes Cargo scheduler state for recorded workspaces, with compiler outputs referenced from the content-addressed closure instead of duplicated.
+Export the cache entries this checkout's last build produced or used.
+
+The bundle also carries Cargo's scheduler state for each recorded workspace. Compiler outputs in that state point at cache objects in the bundle instead of being stored twice.
 
 ## Arguments
 - **`<ARCHIVE>`** — Tar archive or directory to write.
 
 ## Flags
-- **`--group <GROUP>`** — Export every build that set MBX_CACHE_EXPORT_GROUP to this CI group.
-- **`--format <FORMAT>`** — Bundle layout: tar for a portable archive, or directory for a transport that archives a directory itself, such as the GitHub Actions cache.
+- **`--group <GROUP>`** — CI group to export instead of this checkout's last build.
+
+  The bundle covers every finished build that ran with `MBX_CACHE_EXPORT_GROUP` set to this value and has not been exported yet. A successful export marks those builds as exported, so exporting the same group again includes only builds that finished since, and fails when there are none. A failed export leaves them pending for a retry.
+- **`--format <FORMAT>`** — Bundle layout: `tar` for a portable archive, or `directory` for a CI cache.
+
+  Use `directory` with a backend that archives a directory itself, such as the GitHub Actions cache; a tar there would write every byte twice.
 
   **Default:** `tar`
 - **`-h --help`** — Print help

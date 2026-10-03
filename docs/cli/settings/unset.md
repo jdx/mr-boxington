@@ -3,9 +3,9 @@
 
 - **Usage:** `mbx settings unset <KEY>`
 
-Remove a setting from the global configuration file, so it falls back to its default.
+Remove a setting from the global configuration file.
 
-A key mbx does not recognize, such as a misspelled one that stops mbx from loading, is removed too when it holds a value.
+The setting then falls back to its default. An environment variable for the same setting still takes precedence. You can also unset a key mbx does not recognize, such as a misspelled one that stops mbx from loading, as long as the key holds a value rather than a table.
 
 ## Arguments
 - **`<KEY>`** — Setting name, such as `gc.max_size`.

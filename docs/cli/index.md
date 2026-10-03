@@ -8,6 +8,8 @@
 ## Arguments
 - **`[+TOOLCHAIN]`** — Toolchain to run under, named the way rustup names it: `mbx +1.91 check`.
 
+  Cargo commands, `mbx doctor`, `mbx explain`, and `mbx prefetch` take a toolchain. Other mbx commands reject one, and so does `mbx explain --last`.
+
 ## Flags
 - **`-h --help`** — Print help
 - **`-V --version`** — Print version

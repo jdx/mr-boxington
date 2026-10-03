@@ -3,12 +3,18 @@
 
 - **Usage:** `mbx gc [FLAGS]`
 
-Collect learned incremental state and managed targets, then evict cached objects to fit budgets. When `gc.min_free_size` is short, private state and targets are collected first and shared cache objects may go below `gc.max_size`.
+Collect build state and evict store objects to fit the size budgets.
 
-A missing cached object is rebuilt when it is needed again.
+mbx collects learned incremental state and managed targets first, then evicts store objects until the action store fits its budget (`--max-size`, or `gc.max_size` by default, lowered when `gc.max_total_size` leaves less room). When a disk has less free space than `gc.min_free_size`, mbx also collects past those budgets to free the shortfall: private state and managed targets go first, then shared store objects, even below `gc.max_size`. Active and most recently used state stays, so a disk filled by something else can remain short.
+
+An evicted object is rebuilt when a build needs it again.
 
 ## Flags
-- **`--max-size <SIZE>`** — Size the store may occupy afterwards, for example 20GiB. Defaults to the configured budget.
+- **`--max-size <SIZE>`** — Size the action store may occupy afterwards, such as `20GiB`.
+
+  Defaults to `gc.max_size`. Managed targets, learned incremental state, and generated source trees are still collected to their own budgets. With `gc.max_total_size` set, they share what is left of that total after the action store, whose share this flag caps.
 - **`--json`** — Print a stable machine-readable report.
 - **`--dry-run`** — Show what collection would remove without changing any files.
+
+  While a disk has less free space than `gc.min_free_size`, a real run can remove a different amount than the preview, because it measures the disk again after each step. To free the cache disk, a real run can also evict more store objects than the action-store budget requires, and the preview never lists them.
 - **`-h --help`** — Print help

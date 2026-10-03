@@ -5,10 +5,22 @@
 
 Make plain Cargo commands run through mbx.
 
+mbx installs a stable Cargo shim and prints its path. When you pick a mise scope, with a flag or at the prompt, mbx also adds a `[wrappers.cargo]` entry to that scope's mise configuration, if it has none, and runs `mise reshim`; this needs mise 2026.8.16 or newer. Without a mise scope, put the shim's directory first on `PATH` yourself; mbx never edits shell startup files.
+
+mbx also writes `check.overrideCommand` to rust-analyzer's user `rust-analyzer.toml` so editor checks run through the shim, unless that file already has check settings of its own.
+
 ## Flags
 - **`--yes`** — Accept the recommended activation scope without prompting.
-- **`--global`** — Activate the Cargo wrapper in mise's global configuration.
-- **`--local`** — Activate the Cargo wrapper in the current project's mise configuration.
-- **`--status`** — Report whether plain Cargo integration is installed and current.
-- **`--uninstall`** — Remove mbx activation from the selected scope.
+
+  `MISE_CONFIG_FILE` names the scope when it is set. Otherwise, in an activated mise shell, mbx picks the mise config whose tools include `mr-boxington`, then the nearest project mise config, then the global config; outside one, mbx installs the Cargo shim and edits no mise config. Cannot be combined with `--global` or `--local`.
+- **`--global`** — Add mise's Cargo wrapper to the global mise configuration.
+- **`--local`** — Add mise's Cargo wrapper to the current project's mise configuration.
+- **`--status`** — Check that the Cargo shim and rust-analyzer check command are current.
+
+  mbx checks what `mbx setup` writes and exits non-zero when any of it is missing or out of date. When a mise scope applies (`--global`, `--local`, `MISE_CONFIG_FILE`, or an activated mise shell), mbx also checks that the scope's config has the `[wrappers.cargo]` entry that `mbx setup` adds. Existing rust-analyzer check settings that `mbx setup` did not write count as a pass.
+
+  The status does not show which `cargo` your shell runs, and it does not detect mise's native `mr_boxington` option. `mbx doctor` checks whether `cargo` on `PATH` resolves to the shim or mise's Cargo wrapper.
+- **`--uninstall`** — Undo `mbx setup` for the selected scope, keeping the Cargo shim.
+
+  The scope comes from `--global`, `--local`, `MISE_CONFIG_FILE`, or an activated mise shell, as for `--status`. mbx removes the `[wrappers.cargo]` entry that `mbx setup` added to that scope's mise config. For the global scope, or when no mise scope applies, mbx also removes the rust-analyzer check command that `mbx setup` wrote. For a project scope, mbx leaves that command for other scopes; remove it with `mbx setup --global --uninstall`.
 - **`-h --help`** — Print help

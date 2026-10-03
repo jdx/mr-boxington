@@ -10,7 +10,10 @@ use std::process::ExitCode;
 
 #[derive(usage::Args)]
 pub(super) struct ExecArgs {
-    /// Directory that identifies the project across worktrees.
+    /// Directory that identifies the project across checkouts.
+    ///
+    /// Defaults to the enclosing Git, Jujutsu, Mercurial, or Sapling checkout,
+    /// or to the working directory outside one.
     #[usage(long, value_name = "DIR")]
     project_root: Option<String>,
     /// Build command and its arguments.

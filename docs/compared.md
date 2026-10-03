@@ -1,5 +1,5 @@
 ---
-description: Choose a Rust build cache based on how you work, and see how mbx compares with kache, sccache, and CI caching.
+description: Choose a Rust build cache based on how you work, and compare mbx with kache, sccache, and CI caching.
 ---
 # How mbx compares
 
@@ -25,18 +25,18 @@ the machine's resources.
 ## What mbx adds
 
 Suppose you keep several copies of a project to work on different branches.
-A compiler cache helps them reuse work, but each copy can still leave a large
-`target/` directory behind. That's the directory where Cargo puts build files.
+A compiler cache helps them reuse work, but each copy can still leave behind a
+large `target/` directory, where Cargo puts its build files.
 
 mbx brings these pieces together:
 
 - **Reuse completed work.** A second copy of a project can restore matching
   compilations instead of running them again.
 - **Clean up old build files.** mbx manages each checkout's `target/` by
-  default, including one that already exists, and reclaims the space when a
-  copy of the project is deleted or storage limits are reached. A target
-  directory you set yourself, such as with `CARGO_TARGET_DIR`, is left alone.
-  See [Managed targets](/managed-targets).
+  default, including one that already exists outside CI, and reclaims the
+  space when a copy of the project is deleted or storage limits are reached. A
+  target directory you set yourself, such as with `CARGO_TARGET_DIR`, is left
+  alone. See [Managed target directories](/managed-targets).
 - **Keep concurrent builds under control.** mbx shares CPU and memory across
   builds and holds back new compilations when memory is running low. This is
   enabled by default.
@@ -47,10 +47,10 @@ You can start with `mbx build` in place of `cargo build`. After
 [setup](/setup), you can keep typing `cargo build` and have it run through mbx.
 No cache server is needed to get started.
 
-mbx caches supported C and C++ compilations from Cargo build scripts by
-default too. For C/C++ projects outside Cargo, run the build through
-`mbx exec`, such as `mbx exec make -j8`. See
-[C and C++ builds](/standalone-builds) for make and CMake examples.
+By default, mbx also caches supported C and C++ compilations from Cargo build
+scripts. For C and C++ projects outside Cargo, run the build through
+`mbx exec`, for example `mbx exec make -j8`. For make and CMake examples, see
+[Cache C and C++ builds outside Cargo](/standalone-builds).
 
 ### Several agents, one machine
 
@@ -71,9 +71,9 @@ MBX_SCHEDULER_TESTS=1 mbx test --workspace
 ```
 
 Test binaries then wait for room alongside compilations. mbx accounts for
-their parallelism and, on Unix, their measured memory use; it does not simply
-force every suite to run its tests one at a time. For all your agents, enable
-`scheduler.tests = true` in your [configuration](/configuration).
+their parallelism and, on Unix, their measured memory use; it does not force
+every suite to run its tests one at a time. To schedule tests for all your
+agents, set `scheduler.tests = true` in your [configuration](/configuration).
 
 Scheduling reduces the risk of overload; it is not a hard memory limit.
 See [Parallel builds](/scheduling) for setup and test-runner limitations.
@@ -87,20 +87,28 @@ provide tools to explain cache hits and misses.
 
 **For Rust builds, mbx wraps Cargo as well as the compiler; kache wraps
 the compiler.** Cargo organizes a Rust build and calls the compiler to do the
-work. kache steps in when Cargo calls the compiler. mbx starts Cargo too, so it
-can show build progress with cache hits and misses in place of Cargo's output
-in a terminal, start a new checkout with the registry and Git dependency builds
-another checkout already has (Cargo 1.100 or later), and optionally run test
-binaries within the same CPU and memory budget as compilations.
+work. kache steps in when Cargo calls the compiler. Because mbx also starts
+Cargo, it can:
+
+- show build progress with cache hits and misses in place of Cargo's output in
+  a terminal
+- [start a new checkout](/managed-targets#start-new-checkouts-from-existing-units)
+  with the registry and Git dependency builds another checkout already has
+  (Cargo 1.100 or later)
+- optionally [run test binaries](/scheduling#schedule-test-binaries) within the
+  same CPU and memory budget as compilations
 
 With kache, you run `kache init` once and continue using `cargo build`. With
-mbx, you use `mbx build` or enable the Cargo setup described above. Choose
-kache if you want a cache in your existing build setup; choose mbx if you also
-want it to run your Cargo commands, place `target/` directories and remove them
-automatically, and coordinate builds and test runs across agents.
-kache removes target directories only when you run `kache clean`. mbx removes
-the target directories it manages after builds once their checkout is deleted,
-they go unused for 30 days, or together they exceed a disk budget.
+mbx, you use `mbx build`, or [set up Cargo](/setup) so that `cargo build` runs
+through mbx. Choose kache if you want a cache in your existing build setup;
+choose mbx if you also want it to run your Cargo commands, place `target/`
+directories and remove them automatically, and coordinate builds and test runs
+across agents.
+
+kache removes target directories only when you run `kache clean`. After
+builds, mbx removes the target directories it manages when their checkout is
+deleted, when they go unused for 30 days, or when together they exceed a
+disk budget.
 
 Both tools support C and C++; kache also supports CUDA. See its
 [current feature list](https://github.com/kunobi-ninja/kache) for supported
@@ -114,10 +122,9 @@ This comparison was checked against kache 0.26.3 on September 26, 2026.
 for Rust, C, C++, and other languages and compilers. Like kache, it works when
 the build calls the compiler.
 
-It is also worth considering if you want **other machines to do the
-compiling**. This is called distributed compilation. Sharing a remote cache
-helps when work has already been built; distributed compilation helps run new
-work elsewhere.
+Choose sccache if you want **other machines to do the compiling**. This is
+called distributed compilation. Sharing a remote cache helps when work has
+already been built; distributed compilation runs new work elsewhere.
 
 If you already use sccache, follow the
 [migration guide](/cookbook/migrate#from-sccache) when switching to mbx.
@@ -130,36 +137,40 @@ them itself.
 [`actions/cache`](https://github.com/actions/cache) saves directories at the
 end of a CI job and restores them in a later job.
 [`Swatinem/rust-cache`](https://github.com/Swatinem/rust-cache) does this with
-Rust-specific defaults. This is useful when the next job can reuse much of
-the previous job's build directory.
+Rust-specific defaults. Both help when the next job can reuse much of the
+previous job's build directory.
 
 A compiler cache such as mbx saves individual compilation results. That lets
 a build reuse matching pieces even when it needs a different set of outputs.
 
-The [mbx GitHub Action](/github-action) supports both approaches. By default,
-it saves and restores an archive of Cargo files, then runs builds through mbx.
-It also offers an `objects` mode for sharing individual cached results.
-The action guide explains when to choose each; avoid configuring two actions
-to save the same data.
+The [mbx GitHub Action](/github-action) supports both approaches. It installs
+or reuses mbx and, by default, saves and restores a `target` payload: the
+workspace's `target/` directory plus Cargo's registry and Git downloads. Its
+`objects` payload shares individual cached results instead. The action runs no
+build itself; your workflow's own steps build through mbx with commands such
+as `mbx test`. The [GitHub Actions cache](/github-action#github-actions-cache)
+section of the action guide explains when to choose each payload. Avoid
+configuring two actions to save the same data.
 
 <span id="cargo-s-incremental-compilation"></span>
 
 ## Cargo's incremental compilation {#cargos-incremental-compilation}
 
 Incremental compilation helps with a different situation: you edit a little
-code and rebuild in the same project directory. Rust can reuse parts of the
-previous compilation instead of starting that crate over.
+code and rebuild in the same project directory. The compiler can reuse parts
+of the previous compilation instead of starting that crate over.
 
-mbx combines shared caching with incremental work kept privately for the
-crates you edit. You can leave the defaults in place for everyday development;
+mbx combines the shared cache with private incremental state for the crates
+you edit. You can leave the defaults in place for everyday development;
 [Incremental builds](/incremental) explains the available controls.
 
 ## Which is fastest?
 
 It depends on your project and how you build it. A second build of unchanged
 code, a small source edit, and a fresh CI job benefit from different kinds of
-reuse. Our [benchmarks](/benchmarks) show the tested workloads and tool versions.
-Use them as a starting point, then compare the tools on your own builds.
+reuse. The [Benchmarks](/benchmarks) page shows the tested workloads and tool
+versions. Use its results as a starting point, then compare the tools on your
+own builds.
 
 ### Ask your AI agent to try it
 

@@ -3,7 +3,9 @@
 
 - **Usage:** `mbx clean [WORKSPACE]`
 
-Remove this workspace's managed target, link, and learned incremental state.
+Remove a workspace's managed target and learned incremental state.
+
+mbx also removes the checkout's `target` link when it points at that managed target. Shared store objects and the workspace's cache claims stay, so a later build can restore matching outputs; `mbx cache remove` also forgets the claims. A managed target or learned incremental state that a running command is using is kept, with a warning.
 
 ## Arguments
 - **`[WORKSPACE]`** — Workspace root whose managed target and learned incremental state are removed. Defaults to the current workspace.

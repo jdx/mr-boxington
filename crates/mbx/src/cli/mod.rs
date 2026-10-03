@@ -68,11 +68,14 @@ use {cache::*, cargo::*, exec::*, gc::*, settings::*, setup::*};
     version,
     config = crate::config::RawConfig,
     about = "A build cache for Rust projects",
-    long_about = "Run `mbx setup` once, then keep using Cargo normally. Compiled work is shared across every checkout and build storage prunes itself. Use mbx directly for its own commands, such as `tui`, `stats`, `cache`, `gc`, and `doctor`, or prefix Cargo commands with `mbx` for zero-config use.\n\nExamples:\n  mbx setup\n  cargo build --release\n  cargo test --workspace\n  cargo clippy --all-targets -- -D warnings\n  mbx gc --dry-run",
+    long_about = "Enable mise's `mr_boxington` Rust option, or run `mbx setup` once, then keep using Cargo normally. Compiled work is shared across every checkout, and build storage prunes itself. Use mbx directly for its own commands, such as `tui`, `stats`, `cache`, `gc`, and `doctor`, or prefix Cargo commands with `mbx` for zero-config use.\n\nExamples:\n  mbx setup\n  cargo build --release\n  cargo test --workspace\n  cargo clippy --all-targets -- -D warnings\n  mbx gc --dry-run",
     unknown_flags = "error"
 )]
 struct Cli {
     /// Toolchain to run under, named the way rustup names it: `mbx +1.91 check`.
+    ///
+    /// Cargo commands, `mbx doctor`, `mbx explain`, and `mbx prefetch` take a
+    /// toolchain. Other mbx commands reject one, and so does `mbx explain --last`.
     //
     // Classified by its `+` rather than left to the external subcommand, which
     // is what makes the word mean the same thing in front of an mbx command as
@@ -91,43 +94,98 @@ struct Cli {
 enum Commands {
     /// Generate a self-contained shell completion script.
     Completion {
-        /// Shell: bash, zsh, fish, or powershell.
+        /// Shell: bash, zsh, fish, powershell (or pwsh), nu (or nushell), or elvish.
         #[usage(arg)]
         shell: String,
     },
-    /// Check the local installation, cache, toolchain, and remote connection.
+    /// Check the installation, cache, toolchain, and remote cache connection.
     Doctor(doctor::DoctorArgs),
     /// Explain cache bypasses, or replay the last build and diagnose its misses.
-    Explain(explain::ExplainArgs),
-    /// Rank the last build's uncached compiler time by cause, with what would remove each one.
     ///
-    /// Reads the build's recorded history, so it runs nothing. A crate that rebuilt only because a dependency changed is counted under the change that started it. The report ends with the chain of units the build waited on and the time only one unit was running.
+    /// With a Cargo command, mbx runs it and explains every compilation that
+    /// bypassed the cache, grouped by cause, as in `mbx explain build --workspace`.
+    /// With `--last`, mbx runs nothing: it reads this workspace's most recent
+    /// recorded build and explains each miss against an earlier recording of
+    /// that compilation unit, preferring this workspace's own.
+    Explain(explain::ExplainArgs),
+    /// Rank the uncached compiler time of this workspace's last build by cause.
+    ///
+    /// Each cause comes with what would remove it. mbx reads the newest recorded
+    /// build of the Cargo workspace that contains the current directory, so it
+    /// runs nothing. A crate that rebuilt only because a dependency changed is
+    /// counted under the change that started it. The report ends with the
+    /// critical path (the chain of units the build waited on) and the time only
+    /// one unit was running.
     Analyze(analyze::AnalyzeArgs),
     /// Make plain Cargo commands run through mbx.
+    ///
+    /// mbx installs a stable Cargo shim and prints its path. When you pick a
+    /// mise scope, with a flag or at the prompt, mbx also adds a
+    /// `[wrappers.cargo]` entry to that scope's mise configuration, if it has
+    /// none, and runs `mise reshim`; this needs mise 2026.8.16 or newer. Without
+    /// a mise scope, put the shim's directory first on `PATH` yourself; mbx
+    /// never edits shell startup files.
+    ///
+    /// mbx also writes `check.overrideCommand` to rust-analyzer's user
+    /// `rust-analyzer.toml` so editor checks run through the shim, unless that
+    /// file already has check settings of its own.
     Setup(setup::SetupArgs),
     /// Read and change settings in the global configuration file.
     Settings(settings::SettingsArgs),
-    /// Collect learned incremental state and managed targets, then evict cached objects to fit budgets.
-    /// When `gc.min_free_size` is short, private state and targets are collected
-    /// first and shared cache objects may go below `gc.max_size`.
+    /// Collect build state and evict store objects to fit the size budgets.
     ///
-    /// A missing cached object is rebuilt when it is needed again.
+    /// mbx collects learned incremental state and managed targets first, then
+    /// evicts store objects until the action store fits its budget
+    /// (`--max-size`, or `gc.max_size` by default, lowered when
+    /// `gc.max_total_size` leaves less room). When a disk has less free space
+    /// than `gc.min_free_size`, mbx also collects past those budgets to free
+    /// the shortfall: private state and managed targets go first, then shared
+    /// store objects, even below `gc.max_size`. Active and most recently used
+    /// state stays, so a disk filled by something else can remain short.
+    ///
+    /// An evicted object is rebuilt when a build needs it again.
     Gc(gc::GcArgs),
-    /// Inspect the local store.
-    Cache(cache::CacheArgs),
-    /// Remove this workspace's managed target, link, and learned incremental state.
-    Clean(clean::CleanArgs),
-    /// Bring existing Cargo target directories under mbx management without deleting their contents.
+    /// Inspect and manage the local cache.
     ///
-    /// mbx moves each directory under the managed root and leaves a `target` link in its place. The adopted directory then follows the usual managed-target collection policy.
+    /// Three subcommands change files. `export` writes a cache export. `import`
+    /// adds one to the store, consumes a directory export, and can restore
+    /// Cargo workspace state into an absent or empty target directory. `remove`
+    /// deletes a workspace's managed target, learned incremental state, and
+    /// cache claims. The rest only read.
+    Cache(cache::CacheArgs),
+    /// Remove a workspace's managed target and learned incremental state.
+    ///
+    /// mbx also removes the checkout's `target` link when it points at that
+    /// managed target. Shared store objects and the workspace's cache claims
+    /// stay, so a later build can restore matching outputs; `mbx cache remove`
+    /// also forgets the claims. A managed target or learned incremental state
+    /// that a running command is using is kept, with a warning.
+    Clean(clean::CleanArgs),
+    /// Move existing target directories under mbx management, contents intact.
+    ///
+    /// mbx moves each directory under the managed target root and leaves a
+    /// `target` link in its place. The adopted directory then follows the same
+    /// collection policy as any other managed target.
     Adopt(adopt::AdoptArgs),
-    /// Watch cache activity across every build on this machine.
+    /// Watch cache activity across every build that uses this cache directory.
+    ///
+    /// Builds that use a different cache directory, or that run with the
+    /// `events` setting off, do not appear.
     Tui(tui::TuiArgs),
-    /// Show lifetime savings, pruning totals, and estimated storage shared across workspaces.
+    /// Show lifetime savings, pruning totals, and estimated workspace sharing.
     Stats(stats::StatsArgs),
-    /// Download predicted remote artifacts without running Cargo.
+    /// Download predicted actions from the remote cache without running Cargo.
+    ///
+    /// The predictions are the actions that earlier builds on this platform
+    /// recorded for the same `Cargo.lock`; when that lockfile has none, mbx
+    /// borrows an earlier lockfile's. `mbx prefetch` needs `remote.url` and a
+    /// `remote.mode` that reads (`read-only` or `read-write`).
     Prefetch(prefetch::PrefetchArgs),
-    /// Run a build command outside cargo with its C and C++ compiles cached.
+    /// Run a build command outside Cargo with its C and C++ compilations cached.
+    ///
+    /// Options for exec, such as `--project-root`, go before the command.
+    /// Everything after the command name belongs to the command, including a
+    /// later `--`, as in `mbx exec cmake --build build -- -j8`.
     Exec(exec::ExecArgs),
     #[usage(external_subcommand)]
     Cargo(Vec<String>),

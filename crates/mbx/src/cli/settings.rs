@@ -16,34 +16,43 @@ pub(super) enum SettingsCommands {
     /// List settings and their current values.
     ///
     /// Values come from the environment, the global configuration file, and
-    /// defaults. Workspace `.mbx.toml` settings are not included. The value of
+    /// defaults. Workspace `.mbx.toml` settings are not included. If a setting
+    /// whose default mbx computes when it runs has no value, `ls` shows it as
+    /// unset, followed by a description of that default. The value of
     /// `remote.token` is not printed; `mbx settings get remote.token` prints it.
     Ls(LsArgs),
     /// Print the current value of one setting.
     ///
     /// The value comes from the environment, the global configuration file, or
-    /// the default. Workspace `.mbx.toml` settings are not included. A setting
-    /// with no value prints nothing.
+    /// the setting's fixed default. Workspace `.mbx.toml` settings are not
+    /// included. A setting with neither a value nor a fixed default prints
+    /// nothing. That includes a setting whose default mbx computes when it
+    /// runs, such as `gc.max_size`; `mbx settings ls` describes those defaults.
     Get(KeyArgs),
     /// Write a setting to the global configuration file.
     ///
-    /// The value must match the setting's type and allowed values and load as
-    /// that setting, or nothing is written. List settings take
+    /// mbx writes nothing unless the value has the setting's type, is one of
+    /// its allowed values, and loads as that setting. List settings take
     /// comma-separated items, such as `mbx settings set target.keep ~/src,/work`.
-    /// Comments and formatting elsewhere in the file are kept. An environment
-    /// variable for the same setting still takes precedence.
+    /// Edit table settings, such as `linker.profiles`, in the file directly.
+    /// Settings read only from the environment, such as `verify`, cannot be
+    /// set this way. Comments and formatting elsewhere in the file are kept.
+    /// An environment variable for the same setting still takes precedence.
     Set(SetArgs),
-    /// Remove a setting from the global configuration file, so it falls back to
-    /// its default.
+    /// Remove a setting from the global configuration file.
     ///
-    /// A key mbx does not recognize, such as a misspelled one that stops mbx
-    /// from loading, is removed too when it holds a value.
+    /// The setting then falls back to its default. An environment variable for
+    /// the same setting still takes precedence. You can also unset a key mbx
+    /// does not recognize, such as a misspelled one that stops mbx from
+    /// loading, as long as the key holds a value rather than a table.
     Unset(KeyArgs),
 }
 
 #[derive(usage::Args)]
 pub(super) struct LsArgs {
-    /// Only list this setting, or the settings under this group, such as `gc`.
+    /// Setting or group to list, such as `gc` or `gc.max_size`.
+    ///
+    /// Lists every setting when omitted.
     key: Option<String>,
 }
 
@@ -467,9 +476,9 @@ pub(super) fn link_target(path: &Path) -> Result<PathBuf> {
 /// Hold the edit lock for `path`, so two edits cannot both read the same
 /// contents and each write away the other's change.
 ///
-/// A sibling of the file the links lead to, so two links to one file share a
-/// lock, and not the file itself, because fslock empties the file it locks
-/// when it lets go.
+/// The lock is a sibling of the file the links lead to, so two links to one
+/// file share a lock. It is not the file itself, because fslock empties the
+/// file it locks when it lets go.
 fn lock(path: &Path) -> Result<fslock::LockFile> {
     let target = link_target(path)?;
     let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
