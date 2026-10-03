@@ -87,6 +87,19 @@ jobs:
           mise run check:docs
           mise run build:docs
           touch docs/.vitepress/dist/.nojekyll
+      # The song page plays its music video from mise's R2 bucket, where the
+      # MP4s are uploaded by hand because they are too large for Pages. Refuse
+      # to publish the site before both exist, so the page never ships with a
+      # broken player.
+      - name: Check the song videos are uploaded
+        if: github.ref == 'refs/heads/main'
+        run: |
+          for f in mr-boxington-song.mp4 mr-boxington-song-4k.mp4; do
+            if ! curl -fsSI --retry 3 "https://mise.jdx.dev/$f" > /dev/null; then
+              echo "::error::https://mise.jdx.dev/$f is missing; upload it to the mise R2 bucket first"
+              exit 1
+            fi
+          done
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         if: github.ref == 'refs/heads/main'
         with:
