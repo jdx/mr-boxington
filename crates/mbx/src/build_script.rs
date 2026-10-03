@@ -526,12 +526,28 @@ fn links_outside_out_dir(directive: &str, mappings: &[PathMapping]) -> bool {
     }
     let value = normalize_environment_value(value, mappings);
     // Normalization is textual, so `${build_script_out_dir}/../native` still
-    // reads as inside `OUT_DIR` while naming a sibling. A parent component can
-    // leave the restored tree, so it counts as outside.
+    // reads as inside `OUT_DIR` while naming a sibling. Resolve parent
+    // components lexically: a path rooted in `OUT_DIR` that stays below it is
+    // restored, and any other `..` may leave the restored tree.
     value.contains("${target")
         || value
-            .split(|c: char| matches!(c, '/' | '\\' | ' ' | '=' | ':' | ','))
-            .any(|part| part == "..")
+            .split(|c: char| matches!(c, ' ' | '=' | ','))
+            .any(|token| {
+                let rooted = token
+                    .strip_prefix("${build_script_out_dir")
+                    .and_then(|rest| rest.split_once('}'))
+                    .map(|(_, rest)| rest);
+                let mut depth = 0_usize;
+                for part in rooted.unwrap_or(token).split(['/', '\\']) {
+                    match part {
+                        ".." if rooted.is_some() && depth > 0 => depth -= 1,
+                        ".." => return true,
+                        "" | "." => {}
+                        _ => depth += 1,
+                    }
+                }
+                false
+            })
 }
 
 /// Whether recorded output carries such a directive. Predictions stored before
@@ -1390,6 +1406,12 @@ mod tests {
                 .is_none()
         );
         assert!(output_links_outside_out_dir_with(&escaping, &mappings));
+        let nested = format!("cargo:rustc-link-search={}/sub/../lib\n", out_dir.display());
+        assert!(
+            parse_prediction_with_mappings(&nested, &mappings)
+                .unwrap()
+                .is_some()
+        );
         let inside = format!("cargo:rustc-link-search={}/lib\n", out_dir.display());
         assert!(
             parse_prediction_with_mappings(&inside, &mappings)
