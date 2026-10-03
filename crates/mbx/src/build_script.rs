@@ -547,6 +547,18 @@ fn parse_prediction_with_mappings(
             && !name.is_empty()
         {
             environment.insert(name.to_string());
+        } else if let Some(value) = directive
+            .strip_prefix("rustc-link-search=")
+            .or_else(|| directive.strip_prefix("rustc-link-arg="))
+        {
+            // Only `OUT_DIR` is restored on a hit. A link path elsewhere in
+            // the target directory (rusty_v8 downloads its archive to
+            // `gn_out/obj`) would be replayed pointing at nothing, so the
+            // script has to run again in every checkout.
+            let value = normalize_environment_value(value, mappings);
+            if value.contains("${target}") && !value.contains("${build_script_out_dir") {
+                return Ok(None);
+            }
         }
     }
     let default_package = inputs.is_empty() && environment.is_empty();
@@ -1280,6 +1292,42 @@ mod tests {
             parse_prediction_with_mappings(&directive, &mappings)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn a_link_search_path_outside_out_dir_bypasses_execution_caching() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target");
+        let out_dir = target.join("debug/build/v8-abc/out");
+        let mappings = [
+            PathMapping::new(&out_dir, "build_script_out_dir"),
+            PathMapping::new(&target, "target"),
+        ];
+
+        let outside = format!(
+            "cargo:rustc-link-search={}/debug/gn_out/obj\n",
+            target.display()
+        );
+        assert!(
+            parse_prediction_with_mappings(&outside, &mappings)
+                .unwrap()
+                .is_none()
+        );
+        let outside_kind = format!(
+            "cargo:rustc-link-search=native={}/debug/gn_out/obj\n",
+            target.display()
+        );
+        assert!(
+            parse_prediction_with_mappings(&outside_kind, &mappings)
+                .unwrap()
+                .is_none()
+        );
+        let inside = format!("cargo:rustc-link-search={}/lib\n", out_dir.display());
+        assert!(
+            parse_prediction_with_mappings(&inside, &mappings)
+                .unwrap()
+                .is_some()
         );
     }
 
