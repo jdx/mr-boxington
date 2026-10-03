@@ -512,7 +512,7 @@ fn prediction_payload(prediction: &Prediction) -> Result<String> {
 /// elsewhere (rusty_v8 downloads its archive to `gn_out/obj`) would be replayed
 /// pointing at nothing, and the script has to run again in every checkout.
 /// `OUT_DIR` normalizes to its own placeholder, so any `${target` left in the
-/// value is a path outside it.
+/// value is a path outside it, as is any path with a `..` component.
 fn links_outside_out_dir(directive: &str, mappings: &[PathMapping]) -> bool {
     let Some((name, value)) = directive.split_once('=') else {
         return false;
@@ -521,7 +521,17 @@ fn links_outside_out_dir(directive: &str, mappings: &[PathMapping]) -> bool {
         || name.starts_with("rustc-link-arg")
         || name.starts_with("rustc-cdylib-link-arg")
         || name == "rustc-flags";
-    links && normalize_environment_value(value, mappings).contains("${target")
+    if !links {
+        return false;
+    }
+    let value = normalize_environment_value(value, mappings);
+    // Normalization is textual, so `${build_script_out_dir}/../native` still
+    // reads as inside `OUT_DIR` while naming a sibling. A parent component can
+    // leave the restored tree, so it counts as outside.
+    value.contains("${target")
+        || value
+            .split(|c: char| matches!(c, '/' | '\\' | ' ' | '=' | ':' | ','))
+            .any(|part| part == "..")
 }
 
 /// Whether recorded output carries such a directive. Predictions stored before
@@ -530,11 +540,14 @@ fn output_links_outside_out_dir(stdout: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(stdout) else {
         return false;
     };
-    let mappings = build_script_mappings();
+    output_links_outside_out_dir_with(text, &build_script_mappings())
+}
+
+fn output_links_outside_out_dir_with(text: &str, mappings: &[PathMapping]) -> bool {
     text.lines().any(|line| {
         line.strip_prefix("cargo::")
             .or_else(|| line.strip_prefix("cargo:"))
-            .is_some_and(|directive| links_outside_out_dir(directive, &mappings))
+            .is_some_and(|directive| links_outside_out_dir(directive, mappings))
     })
 }
 
@@ -1367,6 +1380,16 @@ mod tests {
                 "{directive} must bypass caching"
             );
         }
+        let escaping = format!(
+            "cargo:rustc-link-search=native={}/../native\n",
+            out_dir.display()
+        );
+        assert!(
+            parse_prediction_with_mappings(&escaping, &mappings)
+                .unwrap()
+                .is_none()
+        );
+        assert!(output_links_outside_out_dir_with(&escaping, &mappings));
         let inside = format!("cargo:rustc-link-search={}/lib\n", out_dir.display());
         assert!(
             parse_prediction_with_mappings(&inside, &mappings)
