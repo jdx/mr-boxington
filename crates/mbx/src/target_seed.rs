@@ -426,10 +426,10 @@ fn scan_directory(directory: &Path, needles: &[String], budget: &mut u64) -> Opt
             if let Some(found) = scan_directory(&entry.path(), needles, budget) {
                 return Some(found);
             }
-        } else if kind.is_file() {
-            if let Some(found) = scan_file(&entry.path(), needles, budget) {
-                return Some(found);
-            }
+        } else if kind.is_file()
+            && let Some(found) = scan_file(&entry.path(), needles, budget)
+        {
+            return Some(found);
         }
     }
     None
