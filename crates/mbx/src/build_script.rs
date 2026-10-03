@@ -22,12 +22,13 @@ use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant, SystemTime};
 
 /// How far before a run's start a modification still counts as made during it.
-/// File timestamps come from a clock that lags by up to a tick, so a write in
-/// the first moments of a run can carry a time just before its start. Keep this
-/// small: an input edited right before a build, with a warm cache getting the
-/// script running within milliseconds, must not look like the script wrote it.
+/// File timestamps come from a clock that lags by up to a tick (10 ms at the
+/// coarsest common setting), so a write in the first moments of a run can carry
+/// a time just before its start. Keep this no larger than that: an input
+/// edited right before a build, with a warm cache getting the script running
+/// within milliseconds, must not look like the script wrote it.
 /// Best effort on file systems with coarser timestamps.
-const TIMESTAMP_SLACK: Duration = Duration::from_millis(5);
+const TIMESTAMP_SLACK: Duration = Duration::from_millis(10);
 
 const ADAPTER: &str = "build-script";
 
@@ -873,9 +874,13 @@ fn modified_since(
             // Removing it changed its parent directory.
             // Look at the nearest directory that still exists, following a
             // link: unlinking through one changes the directory it points to.
+            // A link that was replaced during the run shows in its own time.
             for ancestor in path.ancestors().skip(1) {
-                match std::fs::metadata(ancestor) {
-                    Ok(directory) => return Ok(directory.modified()? >= since),
+                match std::fs::symlink_metadata(ancestor) {
+                    Ok(own) => {
+                        let target = std::fs::metadata(ancestor)?;
+                        return Ok(own.modified()? >= since || target.modified()? >= since);
+                    }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(error.into()),
                 }
