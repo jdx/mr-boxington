@@ -440,7 +440,7 @@ struct RawScheduler {
         choices("normal", "low")
     )]
     priority: String,
-    /// Delay additional compilations while the machine is under memory pressure.
+    /// Delay additional compilations while memory is under pressure.
     ///
     /// Works on Linux and macOS. Has no effect when `scheduler.memory` is
     /// `"none"`. This may also be set in workspace `.mbx.toml`; the environment

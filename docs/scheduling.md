@@ -80,6 +80,12 @@ then lifts that limit. Pressure control does not suspend running processes. To
 freeze them, see
 [Experimental Linux compiler supervision](#experimental-linux-compiler-supervision).
 
+Containers that share a cache directory share permits, but mbx measures each
+container's pressure from its own memory readings and pauses only that
+container's admissions. Suspended work is the exception: while compiler
+supervision in any container has frozen a compilation, every container sharing
+the cache waits for it to resume.
+
 Set `scheduler.pressure = false` (`MBX_SCHEDULER_PRESSURE=0`) to admit
 compilations on permits and memory estimates alone. Disabling the scheduler or
 setting `scheduler.memory = "none"` also disables pressure control. If the

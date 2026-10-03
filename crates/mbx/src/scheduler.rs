@@ -497,6 +497,9 @@ pub(crate) struct Pool {
     available_memory: fn() -> Option<u64>,
     pressure: bool,
     pressure_probe: fn() -> crate::pressure::Reading,
+    /// The memory domain `pressure_probe` reads, injectable for tests. Pools
+    /// in different containers share leases but not pressure state.
+    pressure_domain: &'static str,
     clock: fn() -> u64,
 }
 
@@ -664,6 +667,7 @@ impl Pool {
             available_memory: crate::util::memory_available_bytes,
             pressure: true,
             pressure_probe: crate::pressure::probe,
+            pressure_domain: crate::pressure::domain(),
             clock: crate::pressure::now_ms,
         }
     }
@@ -817,9 +821,11 @@ impl Pool {
         let live = scan_leases(&leases)?;
         let now = (self.clock)();
         // Broken sensing disables only this advisory gate, never CPU scheduling.
-        let mut pressure = (self.pressure && self.bytes_per_permit > 0)
-            .then(|| crate::pressure::sample(&self.dir, now, self.pressure_probe).ok())
-            .flatten();
+        let pressure_state = (self.pressure && self.bytes_per_permit > 0)
+            .then(|| crate::pressure::domain_state(&self.dir, self.pressure_domain));
+        let mut pressure = pressure_state
+            .as_ref()
+            .and_then(|path| crate::pressure::sample(path, now, self.pressure_probe).ok());
         if self.pressure
             && self.bytes_per_permit > 0
             && !live.is_empty()
@@ -875,9 +881,9 @@ impl Pool {
             return Ok(None);
         }
         let permit = self.grant(&leases, weight)?;
-        if let Some(state) = &mut pressure {
+        if let Some((path, state)) = pressure_state.as_ref().zip(pressure.as_mut()) {
             state.last_admission_ms = Some(now);
-            let _ = crate::pressure::save(&self.dir, state);
+            let _ = crate::pressure::save(path, state);
         }
         Ok(Some(permit))
     }

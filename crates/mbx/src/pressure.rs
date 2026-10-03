@@ -1,5 +1,9 @@
 //! Advisory, pool-wide pressure sampling. Call `sample` under the registrar lock.
 //! Missing probes and stale state fail open; no sample is an OS memory limit.
+//!
+//! A pool is shared by every process using one cache directory, which can span
+//! several containers. Each container is its own memory domain, so the pool
+//! keeps one state file per domain rather than one for the whole pool.
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -8,6 +12,11 @@ use std::sync::Mutex;
 pub(crate) const INTERVAL_MS: u64 = 500;
 const STALE_MS: u64 = 3_000;
 const VERSION: u8 = 1;
+/// Pool subdirectory holding one state file per memory domain.
+const DOMAINS_DIR: &str = "pressure";
+/// A domain file this old belongs to a container or cgroup that is gone. Its
+/// state expired long before this, so removing it loses nothing.
+const DOMAIN_FILE_RETENTION: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// The newest state this process sampled but could not save. Without it, a
 /// failing write would re-probe on every admission poll and reset hysteresis.
@@ -38,6 +47,80 @@ pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |time| time.as_millis().min(u128::from(u64::MAX)) as u64)
+}
+
+/// Names the memory domain this process's probes describe.
+///
+/// A pathname cannot do this. Every container sees its own cgroup at
+/// `/sys/fs/cgroup`, so two containers sharing a pool read different stall
+/// counters and memory limits from identical paths. Subtracting one
+/// container's counter from another's produces stalls that never happened,
+/// and mixing their samples breaks hysteresis in both. The device and inode of
+/// each memory cgroup directory do tell domains apart: a cgroup's inode is its
+/// kernel-wide id, whichever namespace or mount shows it.
+///
+/// `/proc/pressure/memory` is left out. It reports the whole machine in every
+/// container, and its identity changes with each proc mount, so including it
+/// would split one cgroup's state between processes with different proc
+/// mounts and let both skip the recovery spacing meant for that cgroup.
+///
+/// Computed once: a process does not change domain while it compiles.
+pub(crate) fn domain() -> &'static str {
+    static DOMAIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DOMAIN.get_or_init(|| {
+        #[cfg(target_os = "linux")]
+        {
+            use sha2::Digest;
+            use std::os::unix::fs::MetadataExt;
+            let mut hasher = sha2::Sha256::new();
+            let mut identified = false;
+            for path in crate::cgroup::memory_directories() {
+                if let Ok(metadata) = std::fs::metadata(&path) {
+                    hasher.update(format!("{}:{}\n", metadata.dev(), metadata.ino()));
+                    identified = true;
+                }
+            }
+            if identified {
+                return hex::encode(&hasher.finalize()[..8]);
+            }
+        }
+        // Without a visible cgroup the probes read only machine-wide figures,
+        // which every process on the machine shares.
+        "host".into()
+    })
+}
+
+/// The pool's state file for one memory domain.
+///
+/// The first time a domain appears, files left by domains that have not
+/// sampled for a day are removed, so a host that starts many containers does
+/// not collect one file per container forever.
+pub(crate) fn domain_state(pool: &Path, domain: &str) -> PathBuf {
+    let directory = pool.join(DOMAINS_DIR);
+    let path = directory.join(format!("{domain}.json"));
+    if !path.exists() {
+        prune(&directory, std::time::SystemTime::now());
+    }
+    path
+}
+
+fn prune(directory: &Path, now: std::time::SystemTime) {
+    for entry in std::fs::read_dir(directory).into_iter().flatten().flatten() {
+        let path = entry.path();
+        let old = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= DOMAIN_FILE_RETENTION);
+        if old
+            && path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 pub(crate) fn probe() -> Reading {
@@ -150,14 +233,17 @@ impl State {
 }
 
 /// The caller holds the pool registrar lock across sampling and any state write.
-pub(crate) fn sample(dir: &Path, now: u64, probe: fn() -> Reading) -> eyre::Result<State> {
-    let mut state: State = std::fs::read(dir.join("pressure.json"))
+///
+/// Every process sampling into `path` must read the same memory domain; see
+/// `domain`.
+pub(crate) fn sample(path: &Path, now: u64, probe: fn() -> Reading) -> eyre::Result<State> {
+    let mut state: State = std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
     let mut unsaved = UNSAVED.lock().unwrap_or_else(|error| error.into_inner());
-    if let Some((path, kept)) = unsaved.as_ref()
-        && path == dir
+    if let Some((kept_path, kept)) = unsaved.as_ref()
+        && kept_path == path
         && (state.version != VERSION || kept.sampled_ms > state.sampled_ms)
     {
         state = kept.clone();
@@ -170,17 +256,20 @@ pub(crate) fn sample(dir: &Path, now: u64, probe: fn() -> Reading) -> eyre::Resu
         return Ok(state);
     }
     state.update(now, probe());
-    let saved = save(dir, &state);
+    let saved = save(path, &state);
     if saved.is_err() {
-        *unsaved = Some((dir.to_path_buf(), state.clone()));
-    } else if unsaved.as_ref().is_some_and(|(path, _)| path == dir) {
+        *unsaved = Some((path.to_path_buf(), state.clone()));
+    } else if unsaved
+        .as_ref()
+        .is_some_and(|(kept_path, _)| kept_path == path)
+    {
         *unsaved = None;
     }
     saved.map(|()| state)
 }
 
-pub(crate) fn save(dir: &Path, state: &State) -> eyre::Result<()> {
-    crate::util::write_advisory(&dir.join("pressure.json"), &serde_json::to_vec(state)?)
+pub(crate) fn save(path: &Path, state: &State) -> eyre::Result<()> {
+    crate::util::write_advisory(path, &serde_json::to_vec(state)?)
 }
 
 #[cfg(test)]
@@ -254,23 +343,89 @@ mod tests {
     #[test]
     fn sampling_is_shared_and_rate_limited() {
         let dir = tempfile::tempdir().unwrap();
-        sample(dir.path(), 1_000, || memory(0)).unwrap();
-        sample(dir.path(), 1_100, || panic!("too soon")).unwrap();
-        let state = sample(dir.path(), 1_500, || memory(0)).unwrap();
+        let path = domain_state(dir.path(), "a");
+        sample(&path, 1_000, || memory(0)).unwrap();
+        sample(&path, 1_100, || panic!("too soon")).unwrap();
+        let state = sample(&path, 1_500, || memory(0)).unwrap();
         assert!(state.pressured);
-        let state = sample(dir.path(), 1_600, || panic!("shared state")).unwrap();
+        let state = sample(&path, 1_600, || panic!("shared state")).unwrap();
         assert!(state.pressured);
     }
     #[test]
     fn failed_saves_keep_rate_limit_and_hysteresis() {
         let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pressure.json");
         // A directory in place of the file makes every atomic write fail.
-        std::fs::create_dir(dir.path().join("pressure.json")).unwrap();
-        assert!(sample(dir.path(), 1_000, || memory(0)).is_err());
-        let state = sample(dir.path(), 1_100, || panic!("too soon")).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(sample(&path, 1_000, || memory(0)).is_err());
+        let state = sample(&path, 1_100, || panic!("too soon")).unwrap();
         assert_eq!(state.sampled_ms, 1_000);
-        assert!(sample(dir.path(), 1_500, || memory(0)).is_err());
-        let state = sample(dir.path(), 1_600, || panic!("too soon")).unwrap();
+        assert!(sample(&path, 1_500, || memory(0)).is_err());
+        let state = sample(&path, 1_600, || panic!("too soon")).unwrap();
         assert!(state.pressured);
+    }
+    /// Containers expose different cgroups at the same pathname. Each counter
+    /// below is stationary, so no container is stalling at all.
+    const COUNTERS: [u64; 3] = [21_764_622, 200_000_000, 393_795_795];
+    fn container(counter: u64) -> Reading {
+        Reading {
+            total: Some(100),
+            available: Some(50),
+            stalls: BTreeMap::from([("/sys/fs/cgroup/memory.pressure".into(), counter)]),
+        }
+    }
+    #[test]
+    fn one_state_for_several_containers_invents_lasting_stalls() {
+        // The hazard the per-domain files exist for. Rotating samples subtract
+        // one container's counter from another's: each rise reads as a full
+        // stall, so pressure begins and every rise restarts the healthy time
+        // that recovery needs.
+        let mut state = State::default();
+        for (step, now) in (1_000..60_000).step_by(500).enumerate() {
+            state.update(now, container(COUNTERS[step % 3]));
+            if now >= 2_000 {
+                assert!(state.pressured, "pressured from the third sample on");
+            }
+        }
+    }
+    #[test]
+    fn containers_sharing_a_pool_keep_separate_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let probes: [fn() -> Reading; 3] = [
+            || container(COUNTERS[0]),
+            || container(COUNTERS[1]),
+            || container(COUNTERS[2]),
+        ];
+        let paths = ["one", "two", "three"].map(|name| domain_state(dir.path(), name));
+        assert_ne!(paths[0], paths[1]);
+        // Each domain samples at the pressure interval, interleaved with the others.
+        for (step, now) in (1_000..60_000).step_by(100).enumerate() {
+            let index = step % 3;
+            let state = sample(&paths[index], now, probes[index]).unwrap();
+            assert!(state.valid);
+            assert!(!state.pressured, "no container stalled");
+        }
+    }
+    #[test]
+    fn a_new_domain_prunes_files_left_by_gone_domains() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = domain_state(dir.path(), "live");
+        sample(&path, 1_000, || memory(50)).unwrap();
+        let gone = dir.path().join(DOMAINS_DIR).join("gone.json");
+        std::fs::write(&gone, b"{}").unwrap();
+        let later = std::time::SystemTime::now() + DOMAIN_FILE_RETENTION;
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        // An existing domain never scans the directory.
+        domain_state(dir.path(), "live");
+        assert!(gone.exists());
+        prune(&dir.path().join(DOMAINS_DIR), later);
+        assert!(!gone.exists(), "a day without samples");
+        assert!(path.exists(), "a domain that sampled recently stays");
+        assert!(!domain().is_empty());
     }
 }

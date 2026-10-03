@@ -36,6 +36,22 @@ pub(crate) fn pressure_files() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Every visible memory cgroup directory, v1 or v2, from this process's group
+/// up to its mount: the directories whose files the memory probes read.
+pub(crate) fn memory_directories() -> Vec<PathBuf> {
+    visible_domains()
+        .into_iter()
+        .flat_map(|domain| {
+            domain
+                .current
+                .ancestors()
+                .take_while(|path| path.starts_with(&domain.mount))
+                .map(Path::to_path_buf)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 pub(crate) fn memory() -> Memory {
     snapshot(&visible_domains())
 }

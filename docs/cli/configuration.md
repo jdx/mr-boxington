@@ -508,7 +508,7 @@ Each permit stands for an equal share of it. `"none"` leaves plain CPU permits a
 - **Default:** `true`
 - **Set with:** `MBX_SCHEDULER_PRESSURE`
 
-Delay additional compilations while the machine is under memory pressure.
+Delay additional compilations while memory is under pressure.
 
 Works on Linux and macOS. Has no effect when `scheduler.memory` is `"none"`. This may also be set in workspace `.mbx.toml`; the environment variable wins.
 

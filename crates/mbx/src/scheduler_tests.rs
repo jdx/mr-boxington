@@ -869,6 +869,57 @@ fn recovery_spaces_admissions_and_probe_failure_fails_open() {
 }
 
 #[test]
+fn containers_sharing_a_pool_are_gated_by_their_own_pressure() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CLOCK: AtomicU64 = AtomicU64::new(1_000);
+    fn container(counter: u64) -> crate::pressure::Reading {
+        crate::pressure::Reading {
+            total: Some(100),
+            available: Some(50),
+            // The same pathname names a different cgroup in each container.
+            stalls: [("/sys/fs/cgroup/memory.pressure".into(), counter)].into(),
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let container_pool = |domain, probe| {
+        let mut pool = pool_at(directory.path(), 64, 100);
+        pool.pressure = true;
+        pool.pressure_domain = domain;
+        pool.pressure_probe = probe;
+        pool.clock = || CLOCK.load(Ordering::SeqCst);
+        pool
+    };
+    // Three idle containers whose stall counters never move, as in the
+    // reported build, plus one that is genuinely short of memory.
+    let idle = [
+        container_pool("one", || container(21_764_622)),
+        container_pool("two", || container(200_000_000)),
+        container_pool("three", || container(393_795_795)),
+    ];
+    let short = container_pool("short", || crate::pressure::Reading {
+        total: Some(100),
+        available: Some(0),
+        ..Default::default()
+    });
+    let held = short
+        .try_admit(1, None)
+        .unwrap()
+        .expect("an idle pool admits");
+    CLOCK.store(1_500, Ordering::SeqCst);
+    assert!(short.try_admit(1, None).unwrap().is_none());
+    for (step, now) in (2_000..60_000).step_by(500).enumerate() {
+        CLOCK.store(now, Ordering::SeqCst);
+        let permit = idle[step % 3].try_admit(1, None).unwrap();
+        assert!(
+            permit.is_some(),
+            "another container's pressure gated this one"
+        );
+        assert!(short.try_admit(1, None).unwrap().is_none());
+    }
+    drop(held);
+}
+
+#[test]
 fn an_oversized_idle_grant_spaces_the_next_pools_admission() {
     let directory = tempfile::tempdir().unwrap();
     let mut low = pool_at(directory.path(), 4, 100);
@@ -877,20 +928,21 @@ fn an_oversized_idle_grant_spaces_the_next_pools_admission() {
     low.clock = || 7_000;
     std::fs::write(directory.path().join(PRIORITY_WAIT_STAMP), b"").unwrap();
     // Establish a recovered state without granting a compilation in the ramp.
-    crate::pressure::sample(directory.path(), 1_000, || crate::pressure::Reading {
+    let state = crate::pressure::domain_state(directory.path(), low.pressure_domain);
+    crate::pressure::sample(&state, 1_000, || crate::pressure::Reading {
         total: Some(100),
         available: Some(0),
         ..Default::default()
     })
     .unwrap();
-    crate::pressure::sample(directory.path(), 1_500, || crate::pressure::Reading {
+    crate::pressure::sample(&state, 1_500, || crate::pressure::Reading {
         total: Some(100),
         available: Some(0),
         ..Default::default()
     })
     .unwrap();
     for now in (2_000..=7_000).step_by(500) {
-        crate::pressure::sample(directory.path(), now, || crate::pressure::Reading {
+        crate::pressure::sample(&state, now, || crate::pressure::Reading {
             total: Some(100),
             available: Some(50),
             ..Default::default()

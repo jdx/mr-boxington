@@ -54,6 +54,9 @@ mise run format
 mise run ci
 ```
 
+[hk](https://hk.jdx.dev) runs the same rustfmt and Clippy checks from `hk.pkl`:
+`hk check` to verify, `hk fix` to fix, or `hk install --mise` to run them on commit.
+
 `ci` runs formatting and Clippy checks, builds the workspace, verifies generated
 docs and site links, and runs Rust and platform behavioral tests. For a focused
 iteration, use `mise run test:cargo` or `mise run test:e2e`. See
