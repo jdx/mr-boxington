@@ -51,7 +51,7 @@ same numbers `MBX_STATS_REPORT` would have written.
 
 **Store** shows what the store holds and what mbx has saved on this machine
 since it started counting, with a date and human-readable compiler time.
-It also shows pruning totals, reflinked bytes, and estimated workspace sharing;
+It also shows pruning totals, copying avoided, and estimated workspace sharing;
 [`mbx stats`](/stats) explains the figures and prints them without opening the TUI.
 Use `↑`/`↓` or `Page Up`/`Page Down` to scroll the Store screen.
 On larger terminals, inventory, lifetime savings, and workspace sharing each

@@ -429,7 +429,7 @@ pub(super) fn store(frame: &mut Frame, area: Rect, app: &App) -> bool {
             Style::new().fg(theme::MUTED),
         ),
         Line::styled(
-            "Compiler time and reflinks are cumulative, not wall time or current disk savings.",
+            "Compiler time and copying avoided are cumulative, not wall time or current disk savings.",
             Style::new().fg(theme::MUTED),
         ),
     ]);

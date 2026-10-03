@@ -175,7 +175,7 @@ impl Lifetime {
             ),
             (
                 "copying avoided",
-                format!("{} reflinked (cumulative)", size(self.reflinked_bytes)),
+                format!("{} (cumulative)", size(self.reflinked_bytes)),
             ),
         ]
     }
@@ -236,7 +236,7 @@ impl Report {
             "Pruned totals are logical file sizes, not physical space reclaimed; requested removals are separate."
                 .into(),
         );
-        lines.push("Compiler time and reflinked bytes are cumulative, not wall time or current disk savings.".into());
+        lines.push("Compiler time and copying avoided are cumulative, not wall time or current disk savings.".into());
         if cheeky && let Some(quip) = self.savings.quip() {
             lines.extend([String::new(), quip]);
         }
