@@ -1,16 +1,17 @@
 ---
-description: "Watch the music video for Pray Silence for Mister Boxington, the mr boxington theme song, and read the lyrics. Download the video in 1080p or 4K, or the MP3."
+description: Watch the music video for the mbx theme song, read the lyrics, or download the video or MP3.
 ---
 
 # Pray Silence for Mister Boxington
 
-**Pray Silence for Mister Boxington** is the mr boxington theme song, and this
-is its music video. Captions are available from the player. You can also
-download the video in [1080p](https://mise.jdx.dev/mr-boxington-song.mp4) or
+**Pray Silence for Mister Boxington** is the mbx theme song, and this is its
+music video. Captions are available from the player. You can also download the
+video in [1080p](https://mise.jdx.dev/mr-boxington-song.mp4) or
 [4K (HEVC)](https://mise.jdx.dev/mr-boxington-song-4k.mp4), both at 120 fps,
 or [download the MP3](/mr-boxington-song.mp3). The [lyrics](#lyrics) are also
-available as text. To set up mbx, start with
-[Get started](/getting-started).
+available as text.
+
+To set up mbx, start with [Get started](/getting-started).
 
 <video controls preload="metadata" playsinline poster="/mr-boxington-song.jpg" width="1920" height="1080" style="width: 100%; height: auto; border-radius: 8px;">
   <source src="https://mise.jdx.dev/mr-boxington-song.mp4" type="video/mp4">

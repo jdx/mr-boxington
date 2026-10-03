@@ -5,7 +5,7 @@
 
 Write a setting to the global configuration file.
 
-The value must match the setting's type and allowed values and load as that setting, or nothing is written. List settings take comma-separated items, such as `mbx settings set target.keep ~/src,/work`. Comments and formatting elsewhere in the file are kept. An environment variable for the same setting still takes precedence.
+mbx writes nothing unless the value has the setting's type, is one of its allowed values, and loads as that setting. List settings take comma-separated items, such as `mbx settings set target.keep ~/src,/work`. Edit table settings, such as `linker.profiles`, in the file directly. Settings read only from the environment, such as `verify`, cannot be set this way. Comments and formatting elsewhere in the file are kept. An environment variable for the same setting still takes precedence.
 
 ## Arguments
 - **`<KEY>`** — Setting name, such as `gc.max_size`.

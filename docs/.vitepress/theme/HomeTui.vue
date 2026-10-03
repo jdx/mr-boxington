@@ -7,19 +7,19 @@ const screens = [
     name: "Live",
     image: "/screenshots/tui-live.png",
     alt: "mbx Live dashboard with build activity, hit and miss graphs, store capacity, and compilation savings",
-    description: "View active builds, cache transfers, and storage usage in the dashboard.",
+    description: "Watch each compilation's cache outcome as builds run, with hit and miss graphs, store capacity, and compiler time saved.",
+  },
+  {
+    name: "Store",
+    image: "/screenshots/tui-store.png",
+    alt: "mbx Store dashboard with lifetime savings, automatic pruning totals, and estimated workspace sharing",
+    description: "See what the store holds, the compiler time saved and bytes pruned since mbx started counting, and the estimated duplication that sharing one store avoids.",
   },
   {
     name: "Insights",
     image: "/screenshots/tui-insights.png",
     alt: "mbx Insights dashboard with cache outcome bars, action durations, bypass reasons, and savings rankings",
     description: "See what missed, what was bypassed, and which crates cost the most.",
-  },
-  {
-    name: "Store",
-    image: "/screenshots/tui-store.png",
-    alt: "mbx Store dashboard with lifetime savings, automatic pruning totals, and estimated workspace sharing",
-    description: "See how much work and cleanup mbx has done since it started counting.",
   },
 ];
 const selected = ref(screens[0]);
@@ -48,7 +48,7 @@ const selected = ref(screens[0]);
         :href="withBase(selected.image)"
         target="_blank"
         rel="noopener"
-        :aria-label="`Open the ${selected.name} screenshot at full size`"
+        :aria-label="`${selected.alt} (opens full size in a new tab)`"
       >
         <img
           :src="withBase(selected.image)"
@@ -61,13 +61,18 @@ const selected = ref(screens[0]);
       </a>
       <figcaption>
         <span aria-live="polite">{{ selected.description }}</span>
-        <a :href="withBase(selected.image)" target="_blank" rel="noopener">
+        <a
+          :href="withBase(selected.image)"
+          target="_blank"
+          rel="noopener"
+          aria-label="View full size (opens in a new tab)"
+        >
           View full size <span aria-hidden="true">↗</span>
         </a>
       </figcaption>
     </figure>
     <div class="links">
-      <a :href="withBase('/tui')">Explore the dashboard <span aria-hidden="true">→</span></a>
+      <a :href="withBase('/tui')">Watch builds with <code>mbx tui</code> <span aria-hidden="true">→</span></a>
     </div>
   </section>
 </template>

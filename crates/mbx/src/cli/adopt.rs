@@ -9,13 +9,15 @@ use std::process::ExitCode;
 #[derive(usage::Args)]
 pub(super) struct AdoptArgs {
     /// Search below each path for Cargo checkouts with a target directory.
-    /// Hidden directories, target directories, and symbolic links are skipped.
+    ///
+    /// The search skips symbolic links and hidden or `target` directories.
     #[usage(short = 'r', long)]
     pub(super) recursive: bool,
-    /// Report what would be adopted without moving anything.
+    /// Show what would be adopted without moving anything.
     #[usage(long)]
     pub(super) dry_run: bool,
-    /// Cargo checkouts to adopt, or directories to search with --recursive.
+    /// Cargo checkouts to adopt, or directories to search with `--recursive`.
+    ///
     /// Defaults to the current directory.
     #[usage(value_name = "PATH")]
     pub(super) paths: Vec<PathBuf>,
@@ -24,7 +26,8 @@ pub(super) struct AdoptArgs {
 /// What happened to one checkout's target directory.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Adoption {
-    /// The outputs now sit under the managed root, or would after a dry run.
+    /// The outputs now sit under the managed target root, or would after a
+    /// dry run.
     Adopted { target: PathBuf, bytes: u64 },
     /// Nothing was changed, for the stated reason.
     Skipped { target: PathBuf, reason: String },
@@ -106,12 +109,12 @@ pub(super) fn run(config: &Config, args: &AdoptArgs) -> Result<ExitCode> {
 
 /// Bring one checkout's default target directory under management.
 ///
-/// The checkout is resolved the way a build run inside it would resolve it,
-/// so the view this records is the one that build will look for. Anything
-/// placement would leave alone is left alone here too, with the reason
-/// reported instead of logged: a configured target directory, a workspace
-/// member whose outputs belong to its root, or a directory the managed root
-/// cannot hold without copying.
+/// This resolves the checkout as a build run inside it would, so the view
+/// recorded here is the one that build will look for. It skips whatever
+/// placement would skip and reports the reason instead of logging it: a
+/// configured target directory, a workspace member whose outputs belong to its
+/// root, a checkout with managed targets turned off, or a directory the managed
+/// target root cannot hold without copying.
 pub(super) fn adopt_checkout(
     config: &Config,
     cargo: &OsStr,
@@ -196,12 +199,13 @@ pub(super) fn adopt_checkout(
 
 /// Whether two paths name one directory.
 ///
-/// Compared in resolved form: Cargo reports the workspace root as a physical
-/// path while the checkout may have been named through a link, and on Windows
-/// a resolved path carries a verbatim prefix that Cargo's answer omits, so
-/// neither side can be compared to the other as spelled. Each side resolves
-/// on its own, so a path that cannot be resolved is still compared to the
-/// other's resolved form rather than dragging both back to their spelling.
+/// Both sides are compared in resolved form, because neither can be compared
+/// to the other as spelled. Cargo reports the workspace root as a physical
+/// path, while the checkout may have been named through a link. On Windows, a
+/// resolved path also carries a verbatim prefix that Cargo's answer omits.
+/// Each side resolves on its own, so a path that cannot be resolved is still
+/// compared to the other's resolved form rather than dragging both back to
+/// their spelling.
 fn same_directory(a: &Path, b: &Path) -> bool {
     let resolve = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     resolve(a) == resolve(b)
@@ -210,11 +214,12 @@ fn same_directory(a: &Path, b: &Path) -> bool {
 /// Every directory under `root` holding a `Cargo.toml` and a real `target`
 /// directory, `root` itself included, in path order.
 ///
-/// Hidden directories are skipped along with target directories and anything
-/// reached through a link: a search of a home directory should not wander
-/// into editor caches, package registries, or a link back up the tree.
-/// A directory that cannot be read is reported and skipped rather than ending
-/// the search.
+/// The search skips hidden directories, `target` directories, and anything
+/// reached through a link. That keeps a search of a home directory out of
+/// hidden editor caches and package registries, and stops it from following a
+/// link back up the tree. A directory below `root` that cannot be read is
+/// logged as a warning and skipped rather than ending the search, but an
+/// unreadable `root` is an error.
 pub(super) fn find_checkouts(root: &Path) -> Result<Vec<PathBuf>> {
     let mut found = Vec::new();
     let mut pending = vec![root.to_path_buf()];

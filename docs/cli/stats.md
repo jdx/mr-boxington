@@ -3,7 +3,7 @@
 
 - **Usage:** `mbx stats [--json]`
 
-Show lifetime savings, pruning totals, and estimated storage shared across workspaces.
+Show lifetime savings, pruning totals, and estimated workspace sharing.
 
 ## Flags
 - **`--json`** — Print a stable machine-readable report, with byte counts and nanoseconds.

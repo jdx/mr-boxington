@@ -44,18 +44,43 @@ const LEGACY_RUST_ANALYZER_CHECK_ARGUMENTS: [&str; 4] = [
 #[derive(usage::Args)]
 pub(super) struct SetupArgs {
     /// Accept the recommended activation scope without prompting.
+    ///
+    /// `MISE_CONFIG_FILE` names the scope when it is set. Otherwise, in an
+    /// activated mise shell, mbx picks the mise config whose tools include
+    /// `mr-boxington`, then the nearest project mise config, then the global
+    /// config; outside one, mbx installs the Cargo shim and edits no mise
+    /// config. Cannot be combined with `--global` or `--local`.
     #[usage(long)]
     pub(super) yes: bool,
-    /// Activate the Cargo wrapper in mise's global configuration.
+    /// Add mise's Cargo wrapper to the global mise configuration.
     #[usage(long)]
     pub(super) global: bool,
-    /// Activate the Cargo wrapper in the current project's mise configuration.
+    /// Add mise's Cargo wrapper to the current project's mise configuration.
     #[usage(long)]
     pub(super) local: bool,
-    /// Report whether plain Cargo integration is installed and current.
+    /// Check that the Cargo shim and rust-analyzer check command are current.
+    ///
+    /// mbx checks what `mbx setup` writes and exits non-zero when any of it is
+    /// missing or out of date. When a mise scope applies (`--global`,
+    /// `--local`, `MISE_CONFIG_FILE`, or an activated mise shell), mbx also
+    /// checks that the scope's config has the `[wrappers.cargo]` entry that
+    /// `mbx setup` adds. Existing rust-analyzer check settings that `mbx setup`
+    /// did not write count as a pass.
+    ///
+    /// The status does not show which `cargo` your shell runs, and it does not
+    /// detect mise's native `mr_boxington` option. `mbx doctor` checks whether
+    /// `cargo` on `PATH` resolves to the shim or mise's Cargo wrapper.
     #[usage(long)]
     pub(super) status: bool,
-    /// Remove mbx activation from the selected scope.
+    /// Undo `mbx setup` for the selected scope, keeping the Cargo shim.
+    ///
+    /// The scope comes from `--global`, `--local`, `MISE_CONFIG_FILE`, or an
+    /// activated mise shell, as for `--status`. mbx removes the
+    /// `[wrappers.cargo]` entry that `mbx setup` added to that scope's mise
+    /// config. For the global scope, or when no mise scope applies, mbx also
+    /// removes the rust-analyzer check command that `mbx setup` wrote. For a
+    /// project scope, mbx leaves that command for other scopes; remove it
+    /// with `mbx setup --global --uninstall`.
     #[usage(long)]
     pub(super) uninstall: bool,
 }
@@ -417,7 +442,7 @@ pub(super) fn project_rust_analyzer_config_path_from(
 
 /// Take back a project override that rust-analyzer silently ignored.
 ///
-/// Releases up to 1.11.0 wrote the check command beside `Cargo.toml` when mbx
+/// Releases up to 1.12.0 wrote the check command beside `Cargo.toml` when mbx
 /// was activated in a project mise scope. The editor kept calling plain Cargo,
 /// so those checks missed the cache and the compiler pool. Remove the dead
 /// setting, and remove the file with it when setup wrote the whole thing.

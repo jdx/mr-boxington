@@ -5,5 +5,7 @@
 
 Verify local objects and action results.
 
+mbx prints each invalid entry and exits with a failure status if it finds any.
+
 ## Flags
 - **`-h --help`** — Print help

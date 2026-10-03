@@ -3,10 +3,14 @@
 
 - **Usage:** `mbx prefetch <CARGO_ARGS>…`
 
-Download predicted remote artifacts without running Cargo.
+Download predicted actions from the remote cache without running Cargo.
+
+The predictions are the actions that earlier builds on this platform recorded for the same `Cargo.lock`; when that lockfile has none, mbx borrows an earlier lockfile's. `mbx prefetch` needs `remote.url` and a `remote.mode` that reads (`read-only` or `read-write`).
 
 ## Arguments
-- **`<CARGO_ARGS>…`** — Cargo subcommand and arguments whose previous manifest should be warmed.
+- **`<CARGO_ARGS>…`** — Cargo command and arguments, such as `build --workspace --release`.
+
+  mbx uses them only to find the workspace. It selects the predictions by the workspace's `Cargo.lock`, not by the command, so `build`, `test`, and `clippy` share them whatever their profile or features.
 
 ## Flags
 - **`-h --help`** — Print help

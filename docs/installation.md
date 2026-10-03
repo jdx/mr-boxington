@@ -3,8 +3,9 @@ description: Install mbx with mise, Cargo, or verified release archives on Linux
 ---
 # Installation
 
-mbx uses your existing Rust toolchain. Install Cargo and rustc before running a
-build; `mbx doctor` checks which tools are active.
+mbx wraps the Cargo and rustc that are active. The [mise](#mise) command
+installs Rust along with mbx; otherwise, install Cargo and rustc before running
+a build. `mbx doctor` checks which tools are active.
 
 ## mise
 
@@ -12,16 +13,18 @@ build; `mbx doctor` checks which tools are active.
 mise use --global --tool-option mr_boxington=true rust mr-boxington
 ```
 
-Requires mise 2026.9.2 or newer. This installs Rust and mbx and enables Cargo
-wrapping through mise; no `mbx setup` postinstall hook is needed.
-`--tool-option` applies to the following tool, so keep it before `rust`.
-Drop `--global` to enable it only in the current project. Keep an existing
-Rust version pin by [editing its tool entry](/setup#share-setup-with-a-project).
+With mise 2026.9.2 or newer, this installs Rust and mbx and has mise run Cargo
+commands through mbx, so no `mbx setup` postinstall hook is needed.
+`--tool-option` applies to the tool that follows it, so keep it before `rust`.
+Drop `--global` to set this up only for the current project. To keep an
+existing Rust version pin, add `mr_boxington = true` to that `rust` entry
+instead. See [Share setup with a project](/setup#share-setup-with-a-project).
 
 Use `mise exec -- cargo build`, or open a shell with mise activation or shims
 on `PATH` and follow [Verify plain Cargo](/setup#verify-plain-cargo).
-The Rust option does not install a standalone mbx shim or configure
-rust-analyzer; see [editor setup](/setup#rust-analyzer) if you need that too.
+
+The `mr_boxington` option does not install the Cargo shim or configure
+rust-analyzer. To add both, see [rust-analyzer](/setup#rust-analyzer).
 
 ### Older mise versions
 
@@ -31,9 +34,10 @@ With mise 2026.8.16 through 2026.9.1:
 mise use --global --postinstall "mbx setup --yes" mr-boxington
 ```
 
-This runs standalone setup and writes an explicit `[wrappers.cargo]` entry.
-Versions older than 2026.8.16 install the standalone shim and print an upgrade
-warning instead of editing mise configuration.
+After installing mbx, mise runs [standalone setup](/setup#standalone-setup),
+which writes an explicit `[wrappers.cargo]` entry. With mise older than
+2026.8.16, `mbx setup` installs the Cargo shim and prints an upgrade warning
+instead of editing the mise configuration.
 
 ## Cargo
 
@@ -42,10 +46,19 @@ cargo install mbx --locked
 mbx --version
 ```
 
+Building mbx from crates.io needs Rust 1.91 or newer as the active toolchain.
+In a project that pins an older toolchain, run the install from another
+directory, or select a newer toolchain with rustup:
+`cargo +stable install mbx --locked`. mise and the release archives install a
+prebuilt binary instead.
+
 You can now run `mbx build` in a Rust workspace. To make plain `cargo` commands
-use mbx too, run [`mbx setup`](/setup).
+use mbx too, run [`mbx setup`](/setup#standalone-setup).
 
 ## Release archives
+
+Each snippet downloads the latest archive for one platform, checks it against
+the release's `SHA256SUMS`, and extracts it into a per-user directory.
 
 :::tabs
 == Linux x86-64
@@ -96,7 +109,7 @@ $expected = (Select-String -Path SHA256SUMS -Pattern $archive).Line.Split(" ")[0
 if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $expected.ToUpper()) {
   throw "checksum mismatch"
 }
-Expand-Archive $archive -DestinationPath "$env:LOCALAPPDATA\Programs\mbx"
+Expand-Archive $archive -DestinationPath "$env:LOCALAPPDATA\Programs\mbx" -Force
 ```
 
 Add `%LOCALAPPDATA%\Programs\mbx` to `PATH`.
@@ -113,7 +126,7 @@ $expected = (Select-String -Path SHA256SUMS -Pattern $archive).Line.Split(" ")[0
 if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $expected.ToUpper()) {
   throw "checksum mismatch"
 }
-Expand-Archive $archive -DestinationPath "$env:LOCALAPPDATA\Programs\mbx"
+Expand-Archive $archive -DestinationPath "$env:LOCALAPPDATA\Programs\mbx" -Force
 ```
 
 Add `%LOCALAPPDATA%\Programs\mbx` to `PATH`.
@@ -125,9 +138,9 @@ Every release publishes its archives and `SHA256SUMS` on
 Linux also has `-musl` archives for a static binary that does not depend on a
 host glibc.
 
-After extracting an archive, put its directory on `PATH`, then run
-`mbx --version` and `mbx doctor`. Run `mbx setup` to enable
-[automatic Cargo wrapping](/setup).
+After extracting an archive, make sure the destination directory is on `PATH`,
+then run `mbx --version` and `mbx doctor`. To make plain `cargo` commands use
+mbx, run [`mbx setup`](/setup#standalone-setup).
 
 ## Supported platforms
 
@@ -137,44 +150,76 @@ Release binaries cover:
 - macOS on Apple Silicon
 - Windows x86-64 and ARM64
 
-Other platforms with a Rust toolchain can build from source with
+Other platforms with Rust 1.91 or newer can build from source with
 `cargo install mbx --locked`. mbx wraps whichever Cargo and rustc are active,
 including rustup-managed toolchains. `mbx doctor` reports the pair it found.
 
-Reflinked output restoration needs a filesystem with copy-on-write file cloning:
-APFS on macOS, btrfs or XFS on Linux, ReFS (Dev Drive) on Windows. mbx probes
-the cache and target locations and copies bytes where cloning is unavailable.
-Caching still works on ext4 or NTFS, but the store and restored outputs occupy
-separate disk space.
+mbx restores a cached output into the target directory with the first of these
+methods that works, and the method decides how much disk space the output
+takes:
+
+1. **Reflink.** The output is a copy-on-write clone of the store object. This
+   needs the store and the target directory on the same filesystem, and that
+   filesystem must support file cloning: APFS on macOS; Btrfs, XFS with
+   reflink, or ZFS on Linux; or ReFS (Dev Drive) on Windows.
+2. **Hard link.** Where cloning is unavailable, as on ext4, mbx on Linux,
+   macOS, and other Unix systems hard links the store object into place. This
+   needs the store and the target directory on the same filesystem, and the
+   [`restore_hardlink`](/configuration#restore-hardlink) setting enabled (the
+   default). The output shares the store object's disk space but is read-only,
+   so running Cargo without mbx in that target directory can fail with
+   `output file ... is not writeable`.
+3. **Copy.** mbx copies the bytes when it can do neither. On Windows it never
+   hard links, so it copies wherever it cannot clone. The store and the copied
+   output take separate disk space.
+
+Caching still works on ext4 and NTFS. `mbx doctor` reports which method applies
+to the managed target root and to the current workspace's target directory. See
+[Output restoration](/how-it-works#output-restoration).
 
 ### Windows
 
-Windows is a supported release platform. The differences from Linux and macOS:
+On Windows, mbx differs from Linux and macOS in these ways:
 
-- Reflinks need ReFS, which usually means a Dev Drive; on NTFS mbx copies
-  bytes instead.
-- The managed `target` link needs Developer Mode or a privileged process;
-  where Windows refuses to create it, Cargo keeps its ordinary target
-  directory. See [managed target directories](/managed-targets).
-- rustc compilations and native host links are cached; native-link keys bind
-  the selected MSVC/LLVM linker, Windows SDK, and CRT. See
-  [limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
-- MSVC C and C++ compiles from build scripts and `mbx exec` are cached through
-  a conservative `cl.exe` adapter. See
-  [limits](/limits#c-and-c-caching-covers-the-host-compiles-mbx-drives).
+- Reflinks need the cache directory and the target directory on the same ReFS
+  volume, which usually means a Dev Drive. Moving only the checkout is not
+  enough: set [`cache_dir`](/configuration#cache-dir) to a path on the Dev
+  Drive. On NTFS, mbx copies restored outputs, even where `mbx doctor` reports
+  a hard link.
+- A managed target directory needs a `target` symlink, which Windows creates
+  only in Developer Mode or for a privileged process. If Windows refuses, mbx
+  lets Cargo use its ordinary target directory. See
+  [Managed target directories](/managed-targets).
+- mbx caches rustc compilations and native host links. A native link's cache
+  key binds the selected MSVC or LLVM linker, Windows SDK, and CRT. See
+  [native link caching](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
+- mbx caches MSVC C and C++ compilations from build scripts and `mbx exec`
+  through a conservative `cl.exe` adapter. See
+  [C and C++ caching](/limits#c-and-c-caching-covers-the-host-compiles-mbx-drives).
 
 ## Upgrade or uninstall
 
-Upgrade using the same installation method: update the mise version, rerun
-`cargo install mbx --locked`, or replace the binary with a verified release
-archive. The stable Cargo shim follows upgrades; setup does not need to run
-again.
+Upgrade the same way you installed:
 
-Before removing the executable, disable `mr_boxington` in each Rust tool entry
-where you enabled it. If you also ran standalone setup, run
-`mbx setup --uninstall` in each scope you enabled. See
-[Remove automatic wrapping](/setup#remove-automatic-wrapping).
-Cached work is disposable; use [cache management](/managed-targets) to inspect
-and reclaim it.
+- With mise, update the `mr-boxington` version.
+- With Cargo, rerun `cargo install mbx --locked`.
+- With a release archive, rerun your platform's snippet from
+  [Release archives](#release-archives). It verifies the new archive and
+  extracts it over the old binary.
 
-Continue with [your first build](/getting-started#run-a-build).
+The Cargo shim that `mbx setup` installs follows Cargo and release-archive
+upgrades, which replace mbx at the same path. mise installs each version in its
+own directory instead. On Unix, the shim runs the mbx that `mbx setup`
+recorded, so run `mbx setup` again once mise removes that version. Until you
+do, `mbx doctor` reports the shim as outdated, and the shim fails wherever mbx
+is not on `PATH`.
+
+To uninstall, turn off automatic wrapping before removing the executable.
+Disable `mr_boxington` in each Rust tool entry where you enabled it. If you
+also ran standalone setup, run `mbx setup --uninstall` in each scope you
+enabled. See [Remove automatic wrapping](/setup#remove-automatic-wrapping).
+
+Cached work is disposable. To inspect and reclaim it, see
+[Inspect and clean up](/managed-targets#inspect-and-clean-up).
+
+Next, [run a build](/getting-started#run-a-build).

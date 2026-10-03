@@ -11,9 +11,10 @@ const crates = ["libc", "serde", "your-app"];
     <div class="demo-copy">
       <h2 id="demo-title">Reuse builds across worktrees</h2>
       <p>
-        When you build in a new worktree, Mr Boxington checks the shared cache
-        for matching compiler outputs before compiling. Configure a remote store
-        to share cached work with CI.
+        When you build in a new worktree, mbx checks the shared store for
+        matching compiler outputs before compiling. The GitHub Action carries
+        cached work between CI runs. Connect a remote cache to reuse CI's
+        compiler outputs on your machines too.
       </p>
       <a class="home-text-link" href="/how-it-works#portable-keys"
         >How cache matching works <span aria-hidden="true">→</span></a
@@ -54,7 +55,7 @@ const crates = ["libc", "serde", "your-app"];
         <p class="result">
           {{
             warm
-              ? "Matching compiler outputs restored from the cache."
+              ? "Matching compiler outputs restored from the store."
               : "Compiler outputs stored for reuse."
           }}
         </p>

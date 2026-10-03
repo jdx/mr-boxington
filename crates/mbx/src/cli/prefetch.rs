@@ -8,7 +8,11 @@ use std::process::ExitCode;
 #[derive(usage::Args)]
 #[usage(unknown_flags = "value", dont_delimit_trailing_values = true)]
 pub(super) struct PrefetchArgs {
-    /// Cargo subcommand and arguments whose previous manifest should be warmed.
+    /// Cargo command and arguments, such as `build --workspace --release`.
+    ///
+    /// mbx uses them only to find the workspace. It selects the predictions by
+    /// the workspace's `Cargo.lock`, not by the command, so `build`, `test`,
+    /// and `clippy` share them whatever their profile or features.
     #[usage(value_name = "CARGO_ARGS", required = true)]
     pub(super) cargo_args: Vec<String>,
 }

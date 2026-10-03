@@ -41,14 +41,24 @@ const LOW_DISK_ROUNDS_PER_TIER: usize = 4;
 
 #[derive(usage::Args)]
 pub(super) struct GcArgs {
-    /// Size the store may occupy afterwards, for example 20GiB. Defaults to the
-    /// configured budget.
+    /// Size the action store may occupy afterwards, such as `20GiB`.
+    ///
+    /// Defaults to `gc.max_size`. Managed targets, learned incremental state,
+    /// and generated source trees are still collected to their own budgets.
+    /// With `gc.max_total_size` set, they share what is left of that total
+    /// after the action store, whose share this flag caps.
     #[usage(long, value_name = "SIZE")]
     pub(super) max_size: Option<ByteSize>,
     /// Print a stable machine-readable report.
     #[usage(long)]
     pub(super) json: bool,
     /// Show what collection would remove without changing any files.
+    ///
+    /// While a disk has less free space than `gc.min_free_size`, a real run
+    /// can remove a different amount than the preview, because it measures the
+    /// disk again after each step. To free the cache disk, a real run can also
+    /// evict more store objects than the action-store budget requires, and the
+    /// preview never lists them.
     #[usage(long)]
     pub(super) dry_run: bool,
     /// Run the throttled sweep a build schedules, if one is due. Builds start
@@ -553,7 +563,7 @@ pub(super) struct Sweep {
 
 /// Keep the store inside its budget, at most once per configured interval.
 ///
-/// A sweep that fails is logged and forgotten -- the build that scheduled it
+/// A sweep that fails is logged and forgotten: the build that scheduled it
 /// is already over, and its exit status is the build's answer, not the
 /// collector's. What it freed is returned so the lifetime totals can count it.
 pub(super) fn sweep_store(config: &Config, retention: &RetentionSettings) -> Sweep {
@@ -901,7 +911,7 @@ pub(super) struct PruneReport {
     pub(super) removals: Vec<String>,
 }
 
-/// Collect target views as the other half of a due automatic sweep.
+/// Collect managed targets as the other half of a due automatic sweep.
 pub(super) fn prune_targets(
     config: &Config,
     retention: &RetentionSettings,

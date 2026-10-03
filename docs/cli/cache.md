@@ -3,7 +3,9 @@
 
 - **Usage:** `mbx cache <SUBCOMMAND>`
 
-Inspect the local store.
+Inspect and manage the local cache.
+
+Three subcommands change files. `export` writes a cache export. `import` adds one to the store, consumes a directory export, and can restore Cargo workspace state into an absent or empty target directory. `remove` deletes a workspace's managed target, learned incremental state, and cache claims. The rest only read.
 
 ## Flags
 - **`-h --help`** — Print help

@@ -507,6 +507,116 @@ fn prediction_payload(prediction: &Prediction) -> Result<String> {
     Ok(String::from_utf8(canonical_json(&payload)?)?)
 }
 
+/// Whether a directive hands the linker a path in the target directory that
+/// is not inside `OUT_DIR`. Only `OUT_DIR` is restored on a hit, so a link path
+/// elsewhere (rusty_v8 downloads its archive to `gn_out/obj`) would be replayed
+/// pointing at nothing, and the script has to run again in every checkout.
+/// `OUT_DIR` normalizes to its own placeholder, so any `${target` left in the
+/// value is a path outside it, as is a `..` that climbs out of `OUT_DIR`.
+fn links_outside_out_dir(directive: &str, mappings: &[PathMapping]) -> bool {
+    let Some((name, value)) = directive.split_once('=') else {
+        return false;
+    };
+    let links = name.starts_with("rustc-link-search")
+        || name.starts_with("rustc-link-arg")
+        || name.starts_with("rustc-cdylib-link-arg")
+        || name == "rustc-flags";
+    if !links {
+        return false;
+    }
+    let value = normalize_environment_value(value, mappings);
+    // Normalization is textual, so `${build_script_out_dir}/../native` still
+    // reads as inside `OUT_DIR` while naming a sibling. Resolve parent
+    // components lexically: a path rooted in `OUT_DIR` that stays below it is
+    // restored, and any other `..` may leave the restored tree.
+    //
+    // A relative path is resolved by the linker from the build script's working
+    // directory, which can place it in the target directory too.
+    let bases = relative_bases();
+    // The word after `-l` or `-framework` names a library, not a path.
+    let mut names_library = false;
+    let relative_in_target = {
+        value.split(' ').any(|word| {
+            let skip = std::mem::replace(
+                &mut names_library,
+                matches!(word, "-l" | "-framework" | "-weak_framework"),
+            );
+            !skip
+                && word
+                    .split(['=', ','])
+                    .any(|token| relative_token_is_in_target(token, &bases, mappings))
+        })
+    };
+    relative_in_target
+        || value.contains("${target")
+        || value.split([' ', '=', ',']).any(|token| {
+            let rooted = token
+                .strip_prefix("${build_script_out_dir")
+                .and_then(|rest| rest.split_once('}'))
+                .map(|(_, rest)| rest);
+            let mut depth = 0_usize;
+            for part in rooted.unwrap_or(token).split(['/', '\\']) {
+                match part {
+                    ".." if rooted.is_some() && depth > 0 => depth -= 1,
+                    ".." => return true,
+                    "" | "." => {}
+                    _ => depth += 1,
+                }
+            }
+            false
+        })
+}
+
+/// The directories a relative link path may be resolved from: the build
+/// script's working directory, and the workspace root that rustc runs in.
+fn relative_bases() -> Vec<PathBuf> {
+    let mut bases = Vec::new();
+    bases.extend(std::env::current_dir().ok());
+    bases.extend(std::env::var_os(session::WORKSPACE_ROOT_ENV).map(PathBuf::from));
+    bases
+}
+
+/// Whether a relative path argument lands in the target directory from any of
+/// `bases` once its `.` and `..` components are resolved.
+fn relative_token_is_in_target(token: &str, bases: &[PathBuf], mappings: &[PathMapping]) -> bool {
+    // An attached `-L<path>` carries its path after the flag.
+    let token = token.strip_prefix("-L").unwrap_or(token);
+    let path = Path::new(token);
+    if token.is_empty() || token.starts_with(['-', '$']) || !path.is_relative() {
+        return false;
+    }
+    bases.iter().any(|base| {
+        let mut resolved = PathBuf::new();
+        for component in base.join(path).components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    resolved.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => resolved.push(other),
+            }
+        }
+        normalize_environment_value(&resolved.to_string_lossy(), mappings).contains("${target")
+    })
+}
+
+/// Whether recorded output carries such a directive. Predictions stored before
+/// this check existed can still resolve to one.
+fn output_links_outside_out_dir(stdout: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(stdout) else {
+        return false;
+    };
+    output_links_outside_out_dir_with(text, &build_script_mappings())
+}
+
+fn output_links_outside_out_dir_with(text: &str, mappings: &[PathMapping]) -> bool {
+    text.lines().any(|line| {
+        line.strip_prefix("cargo::")
+            .or_else(|| line.strip_prefix("cargo:"))
+            .is_some_and(|directive| links_outside_out_dir(directive, mappings))
+    })
+}
+
 fn parse_prediction(stdout: &[u8]) -> Result<Option<Prediction>> {
     let text = std::str::from_utf8(stdout).wrap_err("build-script stdout is not UTF-8")?;
     let mappings = build_script_mappings();
@@ -547,6 +657,8 @@ fn parse_prediction_with_mappings(
             && !name.is_empty()
         {
             environment.insert(name.to_string());
+        } else if links_outside_out_dir(directive, mappings) {
+            return Ok(None);
         }
     }
     let default_package = inputs.is_empty() && environment.is_empty();
@@ -936,6 +1048,12 @@ fn restore(action: &CacheDigest, action_bytes: &[u8]) -> Result<Option<Restored>
     );
     let mappings = build_script_mappings();
     let stdout = denormalize_output_text(&stdout, &mappings);
+    // A result stored before such scripts were excluded names a link target
+    // that is gone. Decline before installing its tree, so the rerun starts
+    // from the OUT_DIR Cargo left rather than from stale cached files.
+    if output_links_outside_out_dir(&stdout) {
+        return Ok(None);
+    }
     let stderr = denormalize_output_text(&stderr, &mappings);
     let parent = out_dir
         .parent()
@@ -1280,6 +1398,105 @@ mod tests {
             parse_prediction_with_mappings(&directive, &mappings)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn a_link_search_path_outside_out_dir_bypasses_execution_caching() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target");
+        let out_dir = target.join("debug/build/v8-abc/out");
+        let mappings = [
+            PathMapping::new(&out_dir, "build_script_out_dir"),
+            PathMapping::new(&target, "target"),
+        ];
+
+        let outside = format!(
+            "cargo:rustc-link-search={}/debug/gn_out/obj\n",
+            target.display()
+        );
+        assert!(
+            parse_prediction_with_mappings(&outside, &mappings)
+                .unwrap()
+                .is_none()
+        );
+        let outside_kind = format!(
+            "cargo:rustc-link-search=native={}/debug/gn_out/obj\n",
+            target.display()
+        );
+        assert!(
+            parse_prediction_with_mappings(&outside_kind, &mappings)
+                .unwrap()
+                .is_none()
+        );
+        let lib = format!("{}/debug/gn_out/obj/lib.a", target.display());
+        for directive in [
+            format!("rustc-link-arg={lib}"),
+            format!("rustc-link-arg-bins={lib}"),
+            format!("rustc-link-arg-bin=tool={lib}"),
+            format!("rustc-cdylib-link-arg={lib}"),
+            format!("rustc-flags=-L {}/debug/gn_out/obj", target.display()),
+            format!("rustc-link-arg={}/a.o {lib}", out_dir.display()),
+        ] {
+            let line = format!("cargo:{directive}\n");
+            assert!(
+                parse_prediction_with_mappings(&line, &mappings)
+                    .unwrap()
+                    .is_none(),
+                "{directive} must bypass caching"
+            );
+        }
+        let escaping = format!(
+            "cargo:rustc-link-search=native={}/../native\n",
+            out_dir.display()
+        );
+        assert!(
+            parse_prediction_with_mappings(&escaping, &mappings)
+                .unwrap()
+                .is_none()
+        );
+        assert!(output_links_outside_out_dir_with(&escaping, &mappings));
+        let working_dir = std::env::current_dir().unwrap();
+        let relative_mappings = [
+            PathMapping::new(working_dir.join("target"), "target"),
+            PathMapping::new(
+                working_dir.join("target/debug/build/v8-abc/out"),
+                "build_script_out_dir",
+            ),
+        ];
+        let relative = "cargo:rustc-link-search=native=target/debug/gn_out/obj\n";
+        assert!(
+            parse_prediction_with_mappings(relative, &relative_mappings)
+                .unwrap()
+                .is_none()
+        );
+        assert!(output_links_outside_out_dir_with(
+            relative,
+            &relative_mappings
+        ));
+        let attached = "cargo:rustc-flags=-Ltarget/debug/gn_out/obj\n";
+        assert!(
+            parse_prediction_with_mappings(attached, &relative_mappings)
+                .unwrap()
+                .is_none()
+        );
+        let library = "cargo:rustc-flags=-l target\n";
+        assert!(
+            parse_prediction_with_mappings(library, &relative_mappings)
+                .unwrap()
+                .is_some()
+        );
+        let nested = format!("cargo:rustc-link-search={}/sub/../lib\n", out_dir.display());
+        assert!(
+            parse_prediction_with_mappings(&nested, &mappings)
+                .unwrap()
+                .is_some()
+        );
+        let inside = format!("cargo:rustc-link-search={}/lib\n", out_dir.display());
+        assert!(
+            parse_prediction_with_mappings(&inside, &mappings)
+                .unwrap()
+                .is_some()
         );
     }
 
