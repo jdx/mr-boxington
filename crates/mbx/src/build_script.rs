@@ -878,8 +878,11 @@ fn modified_since(
             for ancestor in path.ancestors().skip(1) {
                 match std::fs::symlink_metadata(ancestor) {
                     Ok(own) => {
-                        let target = std::fs::metadata(ancestor)?;
-                        return Ok(own.modified()? >= since || target.modified()? >= since);
+                        // A link whose target is gone has no target time to add.
+                        let target = std::fs::metadata(ancestor)
+                            .and_then(|target| target.modified())
+                            .is_ok_and(|modified| modified >= since);
+                        return Ok(own.modified()? >= since || target);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(error.into()),
@@ -1633,5 +1636,20 @@ mod tests {
         std::fs::write(referent, "second").unwrap();
         let second = input_state(&link, &[]).unwrap();
         assert_ne!(first, second);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_input_under_a_dangling_link_is_not_an_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(directory.path().join("gone"), &link).unwrap();
+        let missing = link.join("flag");
+
+        // Long ago, so only the link's own time could count as a change.
+        let since = SystemTime::now() + Duration::from_secs(3600);
+        assert!(!modified_since(&missing, &[], since, 0).unwrap());
+        let since = SystemTime::UNIX_EPOCH;
+        assert!(modified_since(&missing, &[], since, 0).unwrap());
     }
 }
