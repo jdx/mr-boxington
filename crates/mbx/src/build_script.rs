@@ -512,7 +512,7 @@ fn prediction_payload(prediction: &Prediction) -> Result<String> {
 /// elsewhere (rusty_v8 downloads its archive to `gn_out/obj`) would be replayed
 /// pointing at nothing, and the script has to run again in every checkout.
 /// `OUT_DIR` normalizes to its own placeholder, so any `${target` left in the
-/// value is a path outside it, as is any path with a `..` component.
+/// value is a path outside it, as is a `..` that climbs out of `OUT_DIR`.
 fn links_outside_out_dir(directive: &str, mappings: &[PathMapping]) -> bool {
     let Some((name, value)) = directive.split_once('=') else {
         return false;
@@ -530,24 +530,22 @@ fn links_outside_out_dir(directive: &str, mappings: &[PathMapping]) -> bool {
     // components lexically: a path rooted in `OUT_DIR` that stays below it is
     // restored, and any other `..` may leave the restored tree.
     value.contains("${target")
-        || value
-            .split(|c: char| matches!(c, ' ' | '=' | ','))
-            .any(|token| {
-                let rooted = token
-                    .strip_prefix("${build_script_out_dir")
-                    .and_then(|rest| rest.split_once('}'))
-                    .map(|(_, rest)| rest);
-                let mut depth = 0_usize;
-                for part in rooted.unwrap_or(token).split(['/', '\\']) {
-                    match part {
-                        ".." if rooted.is_some() && depth > 0 => depth -= 1,
-                        ".." => return true,
-                        "" | "." => {}
-                        _ => depth += 1,
-                    }
+        || value.split([' ', '=', ',']).any(|token| {
+            let rooted = token
+                .strip_prefix("${build_script_out_dir")
+                .and_then(|rest| rest.split_once('}'))
+                .map(|(_, rest)| rest);
+            let mut depth = 0_usize;
+            for part in rooted.unwrap_or(token).split(['/', '\\']) {
+                match part {
+                    ".." if rooted.is_some() && depth > 0 => depth -= 1,
+                    ".." => return true,
+                    "" | "." => {}
+                    _ => depth += 1,
                 }
-                false
-            })
+            }
+            false
+        })
 }
 
 /// Whether recorded output carries such a directive. Predictions stored before
