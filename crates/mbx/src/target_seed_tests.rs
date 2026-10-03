@@ -489,6 +489,49 @@ fn build_script_output_may_name_only_its_own_out_dir() {
     );
 }
 
+#[test]
+fn a_build_script_file_naming_the_donor_keeps_the_unit_out() {
+    // Cargo rewrites the recorded OUT_DIR only in the stdout it replays. A
+    // file the script left, such as CMake's cache, keeps naming the donor.
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let profile = from.path().join("debug");
+    let clean = unit(&profile, "serde", "0123456789abcdef");
+    run_output(&clean, &clean.join("out"), "cargo:rerun-if-changed=x\n");
+    std::fs::write(clean.join("out/note.txt"), "names no checkout").unwrap();
+    let naming = unit(&profile, "serde", "fedcba9876543210");
+    run_output(&naming, &naming.join("out"), "cargo:rerun-if-changed=x\n");
+    std::fs::create_dir(naming.join("out/build")).unwrap();
+    std::fs::write(
+        naming.join("out/build/CMakeCache.txt"),
+        format!("BUILD_DIR:PATH={}/out/build\n", naming.display()),
+    )
+    .unwrap();
+    // A compiler unit has no recorded run, and its outputs are not scanned.
+    let compiled = unit(&profile, "serde", "aaaaaaaaaaaaaaaa");
+    std::fs::write(
+        compiled.join("out/x.d"),
+        format!("{}: src/lib.rs\n", compiled.display()),
+    )
+    .unwrap();
+
+    let outcome = seed(
+        to.path(),
+        &[PathBuf::from("debug")],
+        &registry(),
+        &[donor(from.path())],
+    );
+
+    assert_eq!(outcome.units, 2);
+    let copied = to.path().join("debug/build/serde");
+    assert!(copied.join("0123456789abcdef").is_dir());
+    assert!(copied.join("aaaaaaaaaaaaaaaa").is_dir());
+    assert!(
+        !copied.join("fedcba9876543210").exists(),
+        "a copied CMakeCache.txt would make the script fail in this checkout"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_link_elsewhere_into_the_donor_keeps_the_unit_out() {

@@ -366,11 +366,67 @@ fn foreign_path_in_output(unit: &Path, donor: &Donor) -> Option<String> {
     } else {
         stdout.replace(out_dir.trim(), "")
     };
-    donor
+    let spellings = donor
         .spellings()
         .into_iter()
         .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    spellings
+        .iter()
         .find(|path| remaining.contains(path.as_str()))
+        .cloned()
+        .or_else(|| donor_path_in_files(&unit.join("out"), &spellings))
+}
+
+/// The largest file read for a donor path. A script's output files can be
+/// large artifacts, which do not name the checkout in text.
+const MAX_SCANNED_FILE: u64 = 1024 * 1024;
+
+/// A donor path named by a file a build script left in its `OUT_DIR`.
+///
+/// Cargo rewrites `OUT_DIR` only in the stdout it replays, so a file such as
+/// CMake's cache that records `OUT_DIR/build` keeps naming the donor, and the
+/// script fails in the checkout that received the copy. Links are not
+/// followed. A file or directory that cannot be read keeps the unit out, since
+/// nothing can say it is clean.
+fn donor_path_in_files(directory: &Path, spellings: &[String]) -> Option<String> {
+    let unreadable = || Some(format!("{} (unreadable)", directory.display()));
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return unreadable(),
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return unreadable();
+        };
+        let Ok(kind) = entry.file_type() else {
+            return unreadable();
+        };
+        if kind.is_dir() {
+            if let Some(found) = donor_path_in_files(&entry.path(), spellings) {
+                return Some(found);
+            }
+        } else if kind.is_file() {
+            let Ok(metadata) = entry.metadata() else {
+                return unreadable();
+            };
+            if metadata.len() > MAX_SCANNED_FILE {
+                continue;
+            }
+            let Ok(contents) = std::fs::read(entry.path()) else {
+                return Some(format!("{} (unreadable)", entry.path().display()));
+            };
+            let contents = String::from_utf8_lossy(&contents);
+            if let Some(found) = spellings
+                .iter()
+                .find(|path| contents.contains(path.as_str()))
+            {
+                return Some(found.clone());
+            }
+        }
+    }
+    None
 }
 
 /// Finish removing staging directories an interrupted seeding left.
