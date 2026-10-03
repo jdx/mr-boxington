@@ -743,9 +743,11 @@ fn build_action(
         inputs: &inputs,
         kind: ADAPTER,
         out_dir: out_dir.as_deref(),
-        // Bumped with `archive_timestamps`: an entry stored before it cannot
-        // say which archive policy produced it, so it is not reused.
-        version: 3,
+        // Bumped with `archive_timestamps`, then again when a script that
+        // wrote into its declared inputs stopped being recorded: an entry
+        // stored before either cannot say which policy produced it, so it is
+        // not reused.
+        version: 4,
     })?;
     let digest = CacheDigest::blake3(&bytes);
     Ok((bytes, digest))
@@ -864,7 +866,14 @@ fn modified_since(
 ) -> Result<bool> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A missing input may have been there when the script started.
+            // Removing it changed its parent directory.
+            return match path.parent().map(std::fs::symlink_metadata) {
+                Some(Ok(parent)) => Ok(parent.modified()? >= since),
+                _ => Ok(false),
+            };
+        }
         Err(error) => return Err(error.into()),
     };
     if metadata.modified()? >= since {
