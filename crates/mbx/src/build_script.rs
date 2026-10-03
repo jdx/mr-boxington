@@ -19,16 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::time::{Duration, Instant, SystemTime};
-
-/// How far before a run's start a modification still counts as made during it.
-/// File timestamps come from a clock that lags by up to a tick (10 ms at the
-/// coarsest common setting), so a write in the first moments of a run can carry
-/// a time just before its start. Keep this no larger than that: an input
-/// edited right before a build, with a warm cache getting the script running
-/// within milliseconds, must not look like the script wrote it.
-/// Best effort on file systems with coarser timestamps.
-const TIMESTAMP_SLACK: Duration = Duration::from_millis(10);
+use std::time::{Instant, SystemTime};
 
 const ADAPTER: &str = "build-script";
 
@@ -374,7 +365,7 @@ pub(crate) fn run() -> Result<ExitCode> {
     command.env_remove(session::BUILD_SCRIPT_SHIM_PATH_ENV);
     apply_ar_determinism(&mut command);
     let started = Instant::now();
-    let started_at = SystemTime::now();
+    let started_at = run_start_stamp();
     let output = command
         .output()
         .wrap_err("failed to execute the build script")?;
@@ -838,10 +829,28 @@ fn input_state_at(
     )
 }
 
+/// The moment a run starts, as the file system's own clock reports it.
+///
+/// File times come from a clock that can lag the one `SystemTime` reads by a
+/// tick or more, so comparing the two misjudges a write made in the first
+/// moments of a run or an input edited just before it. A file created now
+/// carries the time any write from here on will carry or exceed. Falls back to
+/// the process clock when no file can be made.
+fn run_start_stamp() -> SystemTime {
+    let stamp = std::env::var_os("OUT_DIR").and_then(|out_dir| {
+        let path = Path::new(&out_dir).join(format!(".mbx-run-start-{}", std::process::id()));
+        std::fs::write(&path, b"").ok()?;
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let _ = std::fs::remove_file(&path);
+        modified
+    });
+    stamp.unwrap_or_else(SystemTime::now)
+}
+
 /// Whether anything a prediction declares as an input was modified at or after
-/// `started`, less [`TIMESTAMP_SLACK`].
+/// `started`.
 fn declared_inputs_changed_since(prediction: &Prediction, started: SystemTime) -> Result<bool> {
-    let since = started.checked_sub(TIMESTAMP_SLACK).unwrap_or(started);
+    let since = started;
     let mappings = build_script_mappings();
     let working_dir = std::env::current_dir()?;
     for declared in &prediction.inputs {
@@ -878,11 +887,12 @@ fn modified_since(
             for ancestor in path.ancestors().skip(1) {
                 match std::fs::symlink_metadata(ancestor) {
                     Ok(own) => {
-                        // A link whose target is gone has no target time to add.
-                        let target = std::fs::metadata(ancestor)
-                            .and_then(|target| target.modified())
-                            .is_ok_and(|modified| modified >= since);
-                        return Ok(own.modified()? >= since || target);
+                        // A link whose target is gone cannot say what happened
+                        // to it, so count it as a change.
+                        let Ok(target) = std::fs::metadata(ancestor) else {
+                            return Ok(true);
+                        };
+                        return Ok(own.modified()? >= since || target.modified()? >= since);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(error.into()),
@@ -1640,16 +1650,14 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_missing_input_under_a_dangling_link_is_not_an_error() {
+    fn a_missing_input_under_a_dangling_link_counts_as_changed() {
         let directory = tempfile::tempdir().unwrap();
         let link = directory.path().join("link");
         std::os::unix::fs::symlink(directory.path().join("gone"), &link).unwrap();
         let missing = link.join("flag");
 
-        // Long ago, so only the link's own time could count as a change.
+        // Nothing says what became of the link's target, and that is no error.
         let since = SystemTime::now() + Duration::from_secs(3600);
-        assert!(!modified_since(&missing, &[], since, 0).unwrap());
-        let since = SystemTime::UNIX_EPOCH;
         assert!(modified_since(&missing, &[], since, 0).unwrap());
     }
 }
