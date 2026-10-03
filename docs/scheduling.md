@@ -96,6 +96,26 @@ Use `scheduler.priority = "low"` (`MBX_SCHEDULER_PRIORITY=low`) for an editor's
 background check or CI on a shared machine. While normal-priority work is
 waiting, low-priority builds leave a quarter of the pool available for it.
 
+## Reserve capacity for external work
+
+Use `mbx reserve` for a command whose work consumes the same host CPU or
+memory but does not run through mbx, such as a build in a VM or container:
+
+```sh
+mbx reserve --memory 6GiB --cpus 4 -- ./run-windows-build-in-vm.sh
+```
+
+The command waits until the requested capacity is free, then a dedicated worker
+holds it until the external command exits. Killing the invoking `mbx reserve`
+process alone does not release capacity while that worker still waits for the
+command; a crashed worker does release its lease through the operating system.
+The command must wait for work it launches: detached background processes can
+outlive the reservation and are not covered after the command exits.
+`--memory` is measured against `scheduler.memory`; omit it when memory
+scheduling is disabled. Use `--priority low` for background work that
+should yield at admission time to waiting normal-priority builds; an admitted
+reservation, like an admitted compiler, is never preempted.
+
 ## Schedule test binaries
 
 By default, permits cover compilers only. When several `cargo test` commands
