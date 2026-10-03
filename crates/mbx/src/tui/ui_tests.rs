@@ -180,8 +180,10 @@ fn store_scroll_reaches_the_report_notes_and_plain_mode_omits_quips() {
         scroll_page(&mut app, area, true);
     }
     let narrow = render(&app, 48, 22);
-    assert!(narrow.contains("current disk"), "{narrow}");
-    assert!(narrow.contains("savings."), "{narrow}");
+    // The last note wraps after "current" at this width; its tail shows the
+    // scroll reached the bottom of the report.
+    assert!(narrow.contains("Copying avoided is cumulative"), "{narrow}");
+    assert!(narrow.contains("disk savings."), "{narrow}");
     app.store_scroll = 0;
     // macOS and Windows temporary roots can exceed one dashboard column.
     // Give this fixture enough room to exercise the panel layout, rather than

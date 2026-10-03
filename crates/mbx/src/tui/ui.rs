@@ -814,7 +814,7 @@ fn store_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         "Pruned totals are logical file sizes, not physical space reclaimed.",
     ));
     lines.push(Line::from(
-        "Reflinks are cumulative, not current disk savings.",
+        "Copying avoided is cumulative, not current disk savings.",
     ));
     wrap_lines(lines, width)
 }
