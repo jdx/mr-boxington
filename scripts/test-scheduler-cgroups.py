@@ -233,9 +233,7 @@ def suspension(mbx, root):
             while not stop.is_set():
                 with (pool / "pool.lock").open("w") as lock:
                     fcntl.flock(lock, fcntl.LOCK_EX)
-                    # Shims sample the pool from outside the delegated tree;
-                    # the controller must judge only its own readings.
-                    publish(pool, False)
+                    # The controller judges only its own generation's file.
                     publish(registry, unhealthy.is_set())
                 stop.wait(0.05)
         sampler = None
