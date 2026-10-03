@@ -10,6 +10,7 @@ import EndevSponsors from "./EndevSponsors.vue";
 import HomeBuild from "./HomeBuild.vue";
 import HomeQuickStart from "./HomeQuickStart.vue";
 import HomeShowreel from "./HomeShowreel.vue";
+import HomeSongChip from "./HomeSongChip.vue";
 import HomeTerminal from "./HomeTerminal.vue";
 import HomeTui from "./HomeTui.vue";
 import { initBanner } from "./banner";
@@ -19,6 +20,7 @@ export default {
   extends: DefaultTheme,
   Layout() {
     return h(DefaultTheme.Layout, null, {
+      "home-hero-info-before": () => h(HomeSongChip),
       "home-hero-actions-after": () => h(HomeQuickStart),
       "home-hero-after": () => [h(HomeShowreel), h(HomeTerminal)],
       "home-features-after": () => [h(HomeBuild), h(HomeTui)],
