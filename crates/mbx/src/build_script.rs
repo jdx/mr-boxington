@@ -335,7 +335,7 @@ pub(crate) fn run() -> Result<ExitCode> {
         // A result that fails to restore is a miss like any other: running the
         // script republishes it, where bypassing would leave it broken.
         match restore(&action, &action_bytes) {
-            Ok(Some(restored)) => {
+            Ok(Some(restored)) if !output_links_outside_out_dir(&restored.stdout) => {
                 record_action_hit(&action, restored.stats, &stats_label());
                 replay_bytes(&restored.stdout, &restored.stderr)?;
                 // A grouped export follows this run's receipt rather than the
@@ -350,7 +350,9 @@ pub(crate) fn run() -> Result<ExitCode> {
                 }
                 return Ok(ExitCode::SUCCESS);
             }
-            Ok(None) => {}
+            // A restored result that links outside `OUT_DIR` was stored before
+            // such scripts were excluded; its link target is gone, so rerun.
+            Ok(Some(_) | None) => {}
             Err(error) => session::report_shim_warning(&format!(
                 "build-script result was not restored: {error:#}"
             )),
@@ -507,6 +509,37 @@ fn prediction_payload(prediction: &Prediction) -> Result<String> {
     Ok(String::from_utf8(canonical_json(&payload)?)?)
 }
 
+/// Whether a directive hands the linker a path in the target directory that
+/// is not inside `OUT_DIR`. Only `OUT_DIR` is restored on a hit, so a link path
+/// elsewhere (rusty_v8 downloads its archive to `gn_out/obj`) would be replayed
+/// pointing at nothing, and the script has to run again in every checkout.
+/// `OUT_DIR` normalizes to its own placeholder, so any `${target` left in the
+/// value is a path outside it.
+fn links_outside_out_dir(directive: &str, mappings: &[PathMapping]) -> bool {
+    let Some((name, value)) = directive.split_once('=') else {
+        return false;
+    };
+    let links = name.starts_with("rustc-link-search")
+        || name.starts_with("rustc-link-arg")
+        || name.starts_with("rustc-cdylib-link-arg")
+        || name == "rustc-flags";
+    links && normalize_environment_value(value, mappings).contains("${target")
+}
+
+/// Whether recorded output carries such a directive. Predictions stored before
+/// this check existed can still resolve to one.
+fn output_links_outside_out_dir(stdout: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(stdout) else {
+        return false;
+    };
+    let mappings = build_script_mappings();
+    text.lines().any(|line| {
+        line.strip_prefix("cargo::")
+            .or_else(|| line.strip_prefix("cargo:"))
+            .is_some_and(|directive| links_outside_out_dir(directive, &mappings))
+    })
+}
+
 fn parse_prediction(stdout: &[u8]) -> Result<Option<Prediction>> {
     let text = std::str::from_utf8(stdout).wrap_err("build-script stdout is not UTF-8")?;
     let mappings = build_script_mappings();
@@ -547,18 +580,8 @@ fn parse_prediction_with_mappings(
             && !name.is_empty()
         {
             environment.insert(name.to_string());
-        } else if let Some(value) = directive
-            .strip_prefix("rustc-link-search=")
-            .or_else(|| directive.strip_prefix("rustc-link-arg="))
-        {
-            // Only `OUT_DIR` is restored on a hit. A link path elsewhere in
-            // the target directory (rusty_v8 downloads its archive to
-            // `gn_out/obj`) would be replayed pointing at nothing, so the
-            // script has to run again in every checkout.
-            let value = normalize_environment_value(value, mappings);
-            if value.contains("${target}") && !value.contains("${build_script_out_dir") {
-                return Ok(None);
-            }
+        } else if links_outside_out_dir(directive, mappings) {
+            return Ok(None);
         }
     }
     let default_package = inputs.is_empty() && environment.is_empty();
@@ -1323,6 +1346,23 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        let lib = format!("{}/debug/gn_out/obj/lib.a", target.display());
+        for directive in [
+            format!("rustc-link-arg={lib}"),
+            format!("rustc-link-arg-bins={lib}"),
+            format!("rustc-link-arg-bin=tool={lib}"),
+            format!("rustc-cdylib-link-arg={lib}"),
+            format!("rustc-flags=-L {}/debug/gn_out/obj", target.display()),
+            format!("rustc-link-arg={}/a.o {lib}", out_dir.display()),
+        ] {
+            let line = format!("cargo:{directive}\n");
+            assert!(
+                parse_prediction_with_mappings(&line, &mappings)
+                    .unwrap()
+                    .is_none(),
+                "{directive} must bypass caching"
+            );
+        }
         let inside = format!("cargo:rustc-link-search={}/lib\n", out_dir.display());
         assert!(
             parse_prediction_with_mappings(&inside, &mappings)
