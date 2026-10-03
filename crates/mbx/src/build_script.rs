@@ -335,7 +335,7 @@ pub(crate) fn run() -> Result<ExitCode> {
         // A result that fails to restore is a miss like any other: running the
         // script republishes it, where bypassing would leave it broken.
         match restore(&action, &action_bytes) {
-            Ok(Some(restored)) if !output_links_outside_out_dir(&restored.stdout) => {
+            Ok(Some(restored)) => {
                 record_action_hit(&action, restored.stats, &stats_label());
                 replay_bytes(&restored.stdout, &restored.stderr)?;
                 // A grouped export follows this run's receipt rather than the
@@ -350,9 +350,7 @@ pub(crate) fn run() -> Result<ExitCode> {
                 }
                 return Ok(ExitCode::SUCCESS);
             }
-            // A restored result that links outside `OUT_DIR` was stored before
-            // such scripts were excluded; its link target is gone, so rerun.
-            Ok(Some(_) | None) => {}
+            Ok(None) => {}
             Err(error) => session::report_shim_warning(&format!(
                 "build-script result was not restored: {error:#}"
             )),
@@ -971,6 +969,12 @@ fn restore(action: &CacheDigest, action_bytes: &[u8]) -> Result<Option<Restored>
     );
     let mappings = build_script_mappings();
     let stdout = denormalize_output_text(&stdout, &mappings);
+    // A result stored before such scripts were excluded names a link target
+    // that is gone. Decline before installing its tree, so the rerun starts
+    // from the OUT_DIR Cargo left rather than from stale cached files.
+    if output_links_outside_out_dir(&stdout) {
+        return Ok(None);
+    }
     let stderr = denormalize_output_text(&stderr, &mappings);
     let parent = out_dir
         .parent()
