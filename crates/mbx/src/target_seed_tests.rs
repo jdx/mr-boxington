@@ -789,3 +789,43 @@ fn a_relative_link_that_climbs_out_and_back_keeps_the_unit_out() {
 
     assert_eq!(outcome, SeedOutcome::default());
 }
+
+#[test]
+fn a_donor_path_deep_in_a_large_output_file_is_found() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut contents = vec![b'x'; 3 * 1024 * 1024];
+    // Straddle a read boundary so a path split across two chunks is caught.
+    let at = 64 * 1024 - 5;
+    contents.splice(at..at, b"/donor/checkout/target".iter().copied());
+    std::fs::write(directory.path().join("big.bin"), contents).unwrap();
+
+    let found = donor_path_in_files(directory.path(), &["/donor/checkout/target".to_string()]);
+
+    assert_eq!(found.as_deref(), Some("/donor/checkout/target"));
+}
+
+#[test]
+fn a_donor_path_spelled_with_forward_slashes_is_found() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("cache.txt"),
+        "DIR=C:/work/donor/target/debug\n",
+    )
+    .unwrap();
+
+    let found = donor_path_in_files(directory.path(), &[r"C:\work\donor\target".to_string()]);
+
+    assert!(found.is_some());
+}
+
+#[test]
+fn output_past_the_scan_budget_keeps_the_unit_out() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("huge.bin");
+    let handle = std::fs::File::create(&file).unwrap();
+    handle.set_len(SCAN_BUDGET + 1).unwrap();
+
+    let found = donor_path_in_files(directory.path(), &["/donor".to_string()]);
+
+    assert!(found.is_some_and(|reason| reason.contains("scan budget")));
+}
