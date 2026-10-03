@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 const ADAPTER: &str = "build-script";
 
@@ -365,6 +365,7 @@ pub(crate) fn run() -> Result<ExitCode> {
     command.env_remove(session::BUILD_SCRIPT_SHIM_PATH_ENV);
     apply_ar_determinism(&mut command);
     let started = Instant::now();
+    let started_at = run_start_stamp();
     let output = command
         .output()
         .wrap_err("failed to execute the build script")?;
@@ -383,6 +384,13 @@ pub(crate) fn run() -> Result<ExitCode> {
             record_bypass("build-script-always-rerun");
             return Ok(());
         };
+        if declared_inputs_changed_since(&prediction, started_at)? {
+            // The result is keyed to the inputs as the run left them, but the
+            // script read them as they were before. Cargo runs it again, and
+            // that run starts from the tree this one left.
+            record_bypass("build-script-wrote-its-inputs");
+            return Ok(());
+        }
         let (action_bytes, action) = build_action(&binary_action, &prediction)?;
         publish(&action, &action_bytes, &output.stdout, &output.stderr)?;
         record_prediction(invocation, action, &prediction)
@@ -729,9 +737,11 @@ fn build_action(
         inputs: &inputs,
         kind: ADAPTER,
         out_dir: out_dir.as_deref(),
-        // Bumped with `archive_timestamps`: an entry stored before it cannot
-        // say which archive policy produced it, so it is not reused.
-        version: 3,
+        // Bumped with `archive_timestamps`, then again when a script that
+        // wrote into its declared inputs stopped being recorded: an entry
+        // stored before either cannot say which policy produced it, so it is
+        // not reused.
+        version: 4,
     })?;
     let digest = CacheDigest::blake3(&bytes);
     Ok((bytes, digest))
@@ -742,14 +752,20 @@ fn input_state(path: &Path, mappings: &[PathMapping]) -> Result<InputState> {
 }
 
 fn package_input_state(path: &Path, mappings: &[PathMapping]) -> Result<InputState> {
-    let mut excluded = vec![path.join(".git"), path.join("target")];
+    let excluded = default_package_exclusions(path)?;
+    input_state_at(path, mappings, &excluded, 0)
+}
+
+/// What Cargo's package-wide default input leaves out of `package`.
+fn default_package_exclusions(package: &Path) -> Result<Vec<PathBuf>> {
+    let mut excluded = vec![package.join(".git"), package.join("target")];
     if let Some(target) = std::env::var_os(session::TARGET_DIR_ENV) {
         let target = std::path::absolute(target)?;
-        if target.starts_with(path) {
+        if target.starts_with(package) {
             excluded.push(target);
         }
     }
-    input_state_at(path, mappings, &excluded, 0)
+    Ok(excluded)
 }
 
 fn input_state_at(
@@ -811,6 +827,106 @@ fn input_state_at(
         "declared build-script input is not a file or directory: {}",
         path.display()
     )
+}
+
+/// The moment a run starts, as the file system's own clock reports it.
+///
+/// File times come from a clock that can lag the one `SystemTime` reads by a
+/// tick or more, so comparing the two misjudges a write made in the first
+/// moments of a run or an input edited just before it. A file created now
+/// carries the time any write from here on will carry or exceed. The earlier of
+/// that and the process clock is used, so a file system whose clock runs ahead
+/// of this machine's (a network mount, say) cannot push the start past a write.
+/// Falls back to the process clock when no file can be made.
+fn run_start_stamp() -> SystemTime {
+    let now = SystemTime::now();
+    let stamp = std::env::var_os("OUT_DIR").and_then(|out_dir| {
+        let path = Path::new(&out_dir).join(format!(".mbx-run-start-{}", std::process::id()));
+        std::fs::write(&path, b"").ok()?;
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let _ = std::fs::remove_file(&path);
+        modified
+    });
+    stamp.map_or(now, |stamp| stamp.min(now))
+}
+
+/// Whether anything a prediction declares as an input was modified at or after
+/// `started`.
+fn declared_inputs_changed_since(prediction: &Prediction, started: SystemTime) -> Result<bool> {
+    let since = started;
+    let mappings = build_script_mappings();
+    let working_dir = std::env::current_dir()?;
+    for declared in &prediction.inputs {
+        let resolved_name =
+            String::from_utf8(denormalize_output_text(declared.as_bytes(), &mappings))
+                .expect("denormalizing UTF-8 paths preserves UTF-8");
+        let path = working_dir.join(resolved_name);
+        let excluded = if prediction.default_package {
+            default_package_exclusions(&path)?
+        } else {
+            Vec::new()
+        };
+        if modified_since(&path, &excluded, since, 0)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn modified_since(
+    path: &Path,
+    excluded: &[PathBuf],
+    since: SystemTime,
+    symlink_depth: usize,
+) -> Result<bool> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A missing input may have been there when the script started.
+            // Removing it changed its parent directory.
+            // Look at the nearest directory that still exists, following a
+            // link: unlinking through one changes the directory it points to.
+            // A link that was replaced during the run shows in its own time.
+            for ancestor in path.ancestors().skip(1) {
+                match std::fs::symlink_metadata(ancestor) {
+                    Ok(own) => {
+                        // A link whose target is gone cannot say what happened
+                        // to it, so count it as a change.
+                        let Ok(target) = std::fs::metadata(ancestor) else {
+                            return Ok(true);
+                        };
+                        return Ok(own.modified()? >= since || target.modified()? >= since);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            return Ok(false);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.modified()? >= since {
+        return Ok(true);
+    }
+    if metadata.file_type().is_symlink() {
+        if symlink_depth >= 64 {
+            return Ok(false);
+        }
+        let target = std::fs::read_link(path)?;
+        let resolved = path.parent().unwrap_or_else(|| Path::new("")).join(target);
+        return modified_since(&resolved, excluded, since, symlink_depth + 1);
+    }
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            if !excluded.iter().any(|excluded| entry.path() == *excluded)
+                && modified_since(&entry.path(), excluded, since, symlink_depth)?
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn out_dir_is_portable() -> Result<bool> {
@@ -1500,6 +1616,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_input_modified_after_the_run_started_is_noticed_in_a_tree() {
+        let directory = tempfile::tempdir().unwrap();
+        let old = SystemTime::now() - Duration::from_secs(60);
+        std::fs::create_dir(directory.path().join("sub")).unwrap();
+        let file = directory.path().join("sub/input");
+        std::fs::write(&file, "x").unwrap();
+        for path in [&file, &directory.path().join("sub"), directory.path()] {
+            filetime::set_file_mtime(path, filetime::FileTime::from_system_time(old)).unwrap();
+        }
+        let since = SystemTime::now() - Duration::from_secs(30);
+        assert!(!modified_since(directory.path(), &[], since, 0).unwrap());
+        filetime::set_file_mtime(&file, filetime::FileTime::now()).unwrap();
+        assert!(modified_since(directory.path(), &[], since, 0).unwrap());
+        assert!(
+            !modified_since(directory.path(), &[directory.path().join("sub")], since, 0).unwrap()
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_symlink_input_includes_its_referent_contents() {
@@ -1514,5 +1649,18 @@ mod tests {
         std::fs::write(referent, "second").unwrap();
         let second = input_state(&link, &[]).unwrap();
         assert_ne!(first, second);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_input_under_a_dangling_link_counts_as_changed() {
+        let directory = tempfile::tempdir().unwrap();
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(directory.path().join("gone"), &link).unwrap();
+        let missing = link.join("flag");
+
+        // Nothing says what became of the link's target, and that is no error.
+        let since = SystemTime::now() + Duration::from_secs(3600);
+        assert!(modified_since(&missing, &[], since, 0).unwrap());
     }
 }

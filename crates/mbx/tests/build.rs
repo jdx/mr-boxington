@@ -2590,6 +2590,126 @@ fn build_script_execution_and_out_dir_restore_across_checkouts() {
     assert!(count(&warm, "hits") >= 1, "build script should hit: {warm}");
 }
 
+/// A script that writes into an input it declared saw a different tree than the
+/// one its result is keyed to: the key is taken from the tree the run left. A
+/// restore of that result would hand back output the script no longer produces
+/// from that tree, so the run is not recorded and the next build runs again.
+#[test]
+fn a_build_script_that_writes_into_its_declared_inputs_is_not_recorded() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join("src")).unwrap();
+    std::fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname = \"input-writer-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(project.path().join("src/lib.rs"), "").unwrap();
+    std::fs::write(
+        project.path().join("build.rs"),
+        "use std::{env, fs, path::{Path, PathBuf}};\n\
+         fn main() {\n\
+             let seen = if Path::new(\"data\").exists() { \"present\" } else { \"absent\" };\n\
+             fs::create_dir_all(\"data\").unwrap();\n\
+             let out = PathBuf::from(env::var_os(\"OUT_DIR\").unwrap());\n\
+             fs::write(out.join(\"seen\"), seen).unwrap();\n\
+             println!(\"cargo:rerun-if-changed=data\");\n\
+         }\n",
+    )
+    .unwrap();
+    generate_lockfile(project.path());
+
+    let seen = |project: &Path| {
+        let found = find_files(&project.join("target/debug/build"), |path| {
+            path.ends_with("out/seen")
+        });
+        std::fs::read_to_string(found.into_iter().next().expect("the script's output")).unwrap()
+    };
+    let no_link_cache = [("MBX_CACHE_LINKS", "0")];
+    build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+        &no_link_cache,
+    );
+    assert_eq!(seen(project.path()), "absent");
+
+    // The same tree, now holding what the first run created, built from an
+    // empty target directory. Only a run can say what the script does here.
+    std::fs::remove_dir_all(project.path().join("target")).unwrap();
+    let (stats, stderr) = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+        &no_link_cache,
+    );
+    assert_eq!(
+        seen(project.path()),
+        "present",
+        "a result recorded from the run that created `data` was restored: {stats}\n{stderr}"
+    );
+}
+
+/// Deleting a declared input is writing into it: the script ran while the file
+/// existed, but the result would be keyed to the tree where it is gone.
+#[test]
+fn a_build_script_that_deletes_a_declared_input_is_not_recorded() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join("src")).unwrap();
+    std::fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname = \"input-deleter-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(project.path().join("src/lib.rs"), "").unwrap();
+    std::fs::write(project.path().join("flag"), "").unwrap();
+    std::fs::write(
+        project.path().join("build.rs"),
+        "use std::{env, fs, path::{Path, PathBuf}};\n\
+         fn main() {\n\
+             let seen = if Path::new(\"flag\").exists() { \"present\" } else { \"absent\" };\n\
+             let _ = fs::remove_file(\"flag\");\n\
+             let out = PathBuf::from(env::var_os(\"OUT_DIR\").unwrap());\n\
+             fs::write(out.join(\"seen\"), seen).unwrap();\n\
+             println!(\"cargo:rerun-if-changed=flag\");\n\
+         }\n",
+    )
+    .unwrap();
+    generate_lockfile(project.path());
+
+    let seen = |project: &Path| {
+        let found = find_files(&project.join("target/debug/build"), |path| {
+            path.ends_with("out/seen")
+        });
+        std::fs::read_to_string(found.into_iter().next().expect("the script's output")).unwrap()
+    };
+    let no_link_cache = [("MBX_CACHE_LINKS", "0")];
+    build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+        &no_link_cache,
+    );
+    assert_eq!(seen(project.path()), "present");
+
+    // `flag` is gone now. Only a run can say what the script does without it.
+    std::fs::remove_dir_all(project.path().join("target")).unwrap();
+    let (stats, stderr) = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+        &no_link_cache,
+    );
+    assert_eq!(
+        seen(project.path()),
+        "absent",
+        "a result recorded from the run that deleted `flag` was restored: {stats}\n{stderr}"
+    );
+}
+
 /// A CI cache export must include a build script that this run restored. The
 /// next job starts with an empty store and target directory, so it can only
 /// restore the script when the previous job re-recorded its prediction.
