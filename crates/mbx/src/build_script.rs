@@ -22,10 +22,12 @@ use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant, SystemTime};
 
 /// How far before a run's start a modification still counts as made during it.
-/// File timestamps move in ticks, and a script that finishes within one would
-/// otherwise look as though it left its inputs alone. Best effort on file
-/// systems with coarser timestamps.
-const TIMESTAMP_SLACK: Duration = Duration::from_millis(50);
+/// File timestamps come from a clock that lags by up to a tick, so a write in
+/// the first moments of a run can carry a time just before its start. Keep this
+/// small: an input edited right before a build, with a warm cache getting the
+/// script running within milliseconds, must not look like the script wrote it.
+/// Best effort on file systems with coarser timestamps.
+const TIMESTAMP_SLACK: Duration = Duration::from_millis(5);
 
 const ADAPTER: &str = "build-script";
 
