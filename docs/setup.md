@@ -248,8 +248,10 @@ new shell and check Cargo's path again.
 
 One user-level rust-analyzer override serves every scope. Uninstalling a
 project scope leaves the override in place for the others. Uninstalling the
-global scope, or running `mbx setup --uninstall` without an active mise shell,
-removes it.
+global scope removes it, and so does `mbx setup --uninstall` with no mise scope
+selected: no `--global` or `--local`, no `MISE_CONFIG_FILE`, and no active mise
+shell. A `MISE_CONFIG_FILE` that names a project config selects that project's
+scope even without an active mise shell, so the override stays.
 
 `mbx setup --uninstall` never removes the Cargo shim or the mbx executable, and
 it does not clear the cache. The rust-analyzer override calls the shim by its
