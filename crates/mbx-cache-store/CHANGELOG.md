@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.37](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.36...mbx-cache-store-v0.1.37) - 2026-10-03
+
+### Other
+
+- correct outdated guides and CLI help, and reorganize the docs site ([#637](https://github.com/jdx/mr-boxington/pull/637))
+- *(stats)* parallelize target and cache scans in mbx stats ([#631](https://github.com/jdx/mr-boxington/pull/631))
+
 ## [0.1.36](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.35...mbx-cache-store-v0.1.36) - 2026-10-02
 
 ### Fixed
