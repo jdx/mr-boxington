@@ -46,6 +46,11 @@ global file, and defaults; they do not read `.mbx.toml`. Table settings such as
 from the environment, such as `MBX_VERIFY`, cannot be written with
 `settings set`.
 
+## Sizes and durations
+
+Sizes accept SI and IEC units. `20GB` and `20GiB` are different values. Durations
+accept values such as `30s`, `15m`, and `1h`.
+
 ## Common adjustments
 
 | Change | Command or guide |
@@ -58,6 +63,17 @@ from the environment, such as `MBX_VERIFY`, cannot be written with
 | Use factual savings messages | `mbx settings set savings plain` |
 | Print more cache detail | `mbx settings set summary full`; [cache results](/cache-results) |
 | Share results with CI | [Remote cache](/remote-cache) |
+| Pin a linker per profile or target | [Managed linkers](/linkers) |
+| Tune the shared compiler pool | [Parallel builds](/scheduling) |
+| Keep private incremental state from the first compile | `mbx settings set eager_incremental true`; [incremental builds](/incremental#eager-incremental-reuse) |
+| Bound learned incremental state per crate | `mbx settings set learned_incremental_max_size 12GiB`; [incremental builds](/incremental#bound-the-storage) |
+| Compare restored outputs with fresh compiles | `MBX_VERIFY=1`; [troubleshooting](/troubleshooting#verify-mode) |
+
+<span id="managed-linkers"></span>
+<span id="machine-wide-compile-scheduling"></span>
+<span id="incremental-builds"></span>
+<span id="learned-incremental-reuse"></span>
+<span id="verify-mode"></span>
 
 In the file, use TOML section headers for dotted settings, as shown in the
 example below.
@@ -160,29 +176,11 @@ to inspect collection, or `mbx gc --json` for each component's logical sizes.
 
 The budget spans the cache and managed targets even when they live on separate
 disks; free-space safeguards still operate per disk. Setting
-`gc.max_total_size = "none"` restores the disk-scaled defaults below for any
+`gc.max_total_size = "none"` restores the
+[disk-scaled defaults](/managed-targets#budgets-scale-with-the-disk) for any
 component without an explicit limit.
 
-## Disk-scaled defaults
-
-Without a combined budget, three size budgets default to a share of the disk holding their data: 5% for
-the action store (`gc.max_size`), 10% for managed target directories
-(`target.max_size`), and 5% for learned incremental state
-(`gc.incremental_max_size`), each bounded at both ends. Managed targets and
-learned incremental state are also collected after 30 days unused. The table in
-[managed target directories](/managed-targets#budgets-scale-with-the-disk)
-lists the bounds and what collection removes.
-
-`gc.min_free_size` also scales: when less than 10% of a disk is free (bounded
-from 5 GiB to 50 GiB), collection runs sooner and removes learned incremental
-state, generated sources, and managed targets past their budgets. If the cache
-disk is still short after those private tiers, it also evicts shared action-store
-objects below `gc.max_size`. See
-[when the disk runs low](/managed-targets#when-the-disk-runs-low).
-
-Setting an explicit budget overrides the scaling; `"none"` disables
-`target.max_size`, `target.max_age`, `gc.incremental_max_size`,
-`gc.incremental_max_age`, `gc.max_total_size`, and `gc.min_free_size`.
+<span id="disk-scaled-defaults"></span>
 
 ## Example
 
@@ -255,12 +253,6 @@ priority = "normal"      # or "low"
 
 </details>
 
-## Managed linkers
-
-Select a linker for each Cargo profile and target, or override it for one build
-with `MBX_LINKER`. See [Managed linkers](/linkers) for selectors, prerequisites,
-and complete examples.
-
 ## Workspace policy
 
 A repository may check in a `.mbx.toml` containing the build-policy switches
@@ -288,12 +280,9 @@ credentials, diagnostics, target placement, and garbage collection are not
 accepted from a repository-owned file. mbx reports an error for an unsupported
 or misspelled workspace setting.
 
-`share_out_dir = true` is the global default. It lets Rust compilations reuse
-cached artifacts across checkouts with matching build-script output by giving
-rustc a shared copy of that output as `OUT_DIR`. It also remaps generated source
-paths in Rust and C/C++ debug information. Set it to false when a build needs
-Cargo's original `OUT_DIR` or literal generated source paths; Rust compilations
-that read `OUT_DIR` then remain checkout-specific. See
+The [`share_out_dir`](#share-out-dir) and
+[`build_script_execution`](#build-script-execution) settings are described in
+the reference below; see
 [`OUT_DIR` sharing](/limits#out-dir-sharing) for eligibility and compatibility
 details.
 
@@ -303,11 +292,7 @@ crate rebuilt in a second checkout comes out byte-identical and the crates above
 it still share. It is worth turning on for a machine that builds many checkouts
 of one repository, and costs literal source paths in debug information,
 `file!()` and panic locations. See
-[A rebuilt workspace crate records its checkout](/limits).
-
-`build_script_execution = true` (`MBX_BUILD_SCRIPT_EXECUTION`) caches eligible
-`build.rs` executions. Set it to false to keep compilation caching while every
-build script runs normally.
+[A rebuilt workspace crate records its checkout](/limits#a-rebuilt-workspace-crate-records-its-checkout).
 
 ## Build-script C and C++
 
@@ -316,82 +301,13 @@ build scripts, such as the native code built by `*-sys` crates. No project
 changes are required: for the duration of the mbx command, build scripts use
 mbx's compiler wrappers.
 
-mbx preserves a host compiler selected with `CC`, `CXX`, `HOST_CC`, or
-`HOST_CXX`, and does not cache those compiles. For a cross-compile, mbx does
-not guess the target toolchain. It caches only when the build names a compiler
-with `CC_<target>`, `CXX_<target>`, `TARGET_CC`, or `TARGET_CXX`; mbx wraps
-that compiler without replacing the build's choice.
-
 If mbx cannot safely model a compiler call, it runs the real compiler without
-caching that call. Use `mbx explain` to see why a build bypassed the cache, or
+caching that call; use `mbx explain` to see why a build bypassed the cache, or
 read the
 [full C and C++ limits](/limits#c-and-c-caching-covers-the-host-compiles-mbx-drives).
 
 To cache C and C++ builds that run outside Cargo, put the build command after
 `mbx exec`. See [cache C and C++ builds outside Cargo](/standalone-builds).
-
-## Machine-wide compile scheduling
-
-Simultaneous mbx builds share CPU and memory permits. Set `scheduler.cpus`,
-`scheduler.reserve_cpus`, `scheduler.memory`, and `scheduler.priority` to tune
-that pool. See [Parallel builds](/scheduling) for examples and the difference
-between a shared budget and Cargo's per-build `-j` limit.
-
-## Verify mode
-
-`MBX_VERIFY=1` compiles and consults the cache side by side and compares the
-results. It is expensive; use it to investigate correctness, not for everyday
-builds.
-
-For routine checks, set `MBX_VERIFY_SAMPLE_RATE=5` (or `verify_sample_rate = 5`)
-to verify approximately 5% of compilation identities. The range is 0–100;
-0 disables sampling. Selection is stable across wrapper processes and build
-order, so rerunning the same invocation selects the same sample. This samples
-units, not elapsed compiler time. `MBX_VERIFY=1` takes precedence and verifies
-all eligible units. Selected units rehash inputs and disable learned
-incremental compilation, just like full verification.
-
-The build reports what it found:
-
-```text
-mbx[cache]: qualification: 24 verified, 0 diverged
-```
-
-The verified count includes divergent compilations. Each compilation contributes
-at most one divergence, reporting its first mismatch. Warnings identify the
-adapter, unit and action; stdout/stderr differences include the first differing
-byte offset, line number and bounded, escaped excerpts of both results. Cached
-diagnostics are rewritten into this checkout's paths before comparison.
-
-Cargo must actually invoke the compiler to verify anything. Run in the checkout
-that filled the cache with a fresh target directory; an unchanged build in an
-existing target can be a Cargo no-op. Keep the original target and shared store.
-`MBX_BYPASS_LOG` and `mbx explain` show what was left out.
-
-For audits across worktrees, populate and verify using the same virtual source
-root. For example, run this from each checkout's workspace root, first with
-`MBX_VERIFY=0` to populate, then with `MBX_VERIFY=1` in the other checkout:
-
-```sh
-RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$PWD=/workspace" \
-  CARGO_TARGET_DIR="$PWD/target-audit" MBX_VERIFY=1 mbx build --all-targets --locked
-```
-
-Use a fresh `target-audit` directory each time and the same toolchain, profile,
-and other compiler flags. The source side of `--remap-path-prefix` is keyed
-portably; its virtual destination must agree between checkouts. If using
-`CARGO_ENCODED_RUSTFLAGS`, add the remap there instead: Cargo gives it precedence
-over `RUSTFLAGS`.
-
-Remapping reduces embedded-source-path differences; it does not guarantee
-byte-identical outputs, especially for native links or paths outside the mapped
-root. See [artifact equivalence](/limits#restored-artifacts-are-equivalent-not-always-identical).
-Investigate remaining divergences rather than treating every cross-worktree
-mismatch as harmless. Please report unexplained differences, including the
-identified unit and action.
-
-Use verification to check a caching feature against your own workload, including
-[native link caching](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 
 ## The savings line
 
@@ -417,27 +333,6 @@ Set a fixed style to override automatic selection. `full` prints detailed
 timing, compiler, bypass, transfer, and output-restoration figures. `off` prints
 no cache summary, while still writing `MBX_STATS_REPORT` when configured.
 Cargo's `-q` and `--quiet` also suppress the summary for that invocation.
-
-## Incremental builds
-
-Leave `MBX_INCREMENTAL` unset for mbx's default combination of shared caching
-and private incremental state. `MBX_INCREMENTAL=1` hands control to Cargo and
-reduces reuse across checkouts. Local builds and persistent CI runners can seed
-private workspace state from the first compilation with `eager_incremental = true` (`MBX_EAGER_INCREMENTAL=1`). See
-[Incremental builds](/incremental#eager-incremental-reuse) for the storage and
-first-build tradeoffs.
-
-## Learned incremental reuse
-
-mbx recognizes source edits and retains private state for the affected crates.
-`learned_incremental_max_size` bounds that state per crate; its default is
-`8GiB`. See [Learned incremental reuse](/incremental#learned-incremental-reuse)
-for triggers, cleanup, and overrides.
-
-## Sizes and durations
-
-Sizes accept SI and IEC units. `20GB` and `20GiB` are different values. Durations
-accept values such as `30s`, `15m`, and `1h`.
 
 ## Settings
 

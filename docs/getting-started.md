@@ -72,7 +72,7 @@ mise use --global --tool-option mr_boxington=true rust mr-boxington
 ```
 
 This requires mise 2026.9.2 or newer. Drop `--global` for project-scoped
-wrapping. See [Installation](/installation#mise) for older mise versions.
+wrapping. See [Installation](/installation#older-mise-versions) for older mise versions.
 
 Or install from crates.io:
 

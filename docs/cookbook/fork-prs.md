@@ -6,7 +6,7 @@ description: Route trusted CI builds to a private cache server and fork pull req
 Open-source repositories take pull requests from forks, and forks change what
 a CI run may hold: GitHub withholds secrets and OIDC tokens from
 fork-triggered runs, so a fork's job cannot authenticate to a
-[cache server](/remote-cache). mbx's own [write policy](/remote-cache#read-and-write-policy)
+[cache server](/remote-cache#authenticate). mbx's own [write policy](/remote-cache#read-and-write-policy)
 already keeps every pull request read-only. The remaining question is which
 backend each run should use.
 

@@ -17,8 +17,8 @@ For automatic Cargo wrapping and rust-analyzer, see [Cargo and editor setup](/se
 | Task | Guide |
 | --- | --- |
 | Use editors, watch loops, or a debugger | [Local development](/cookbook/local-development) |
-| Run tests and Clippy at the same time | [Parallel builds](/scheduling) |
 | Understand what is stored or deleted | [Managed target directories](/managed-targets) |
+| Run tests and Clippy at the same time | [Parallel builds](/scheduling) |
 | Tune repeated source edits | [Incremental builds](/incremental) |
 | Select a linker by profile and target | [Managed linkers](/linkers) |
 | Watch compiler and cache activity | [Watching builds](/tui) |
@@ -39,9 +39,14 @@ For automatic Cargo wrapping and rust-analyzer, see [Cargo and editor setup](/se
 Start with [Troubleshooting](/troubleshooting) for an unexpected build. Read
 [Cache results](/cache-results) to interpret the counters, [How it works](/how-it-works)
 for the architecture, and [Caching limits](/limits) for invocations mbx bypasses.
+Use [Analyzing a build](/analyze) to rank where a rebuild's uncached compiler time went.
 
 Use [Savings and statistics](/stats) for lifetime totals and workspace sharing,
 or [Watching builds](/tui) to explore live activity and per-build insights.
+
+- [FAQ](/faq): common questions and the story behind the name.
+
+## About mbx
 
 [Benchmarks](/benchmarks) includes measured results and the method behind them.
 [How mbx compares](/compared) explains the tradeoffs with other caches and
@@ -53,7 +58,6 @@ Cargo's incremental compilation.
 - [CLI reference](/cli/): command syntax, flags, and arguments.
 - [Stability](/stability): upgrade behavior and supported output formats.
 - [Protocol compatibility](/protocol-compatibility): local, remote, and Rust API contracts.
-- [FAQ](/faq): common questions and the story behind the name.
 
 To improve these docs or contribute code, read
 [Contributing](https://github.com/jdx/mr-boxington/blob/main/CONTRIBUTING.md).

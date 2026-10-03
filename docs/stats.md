@@ -39,14 +39,16 @@ Dates use UTC. Missing savings history is shown as unrecorded; reading a report
 does not start a new ledger. The automatic-pruning period begins with the first
 ledger update from a version that tracks it separately.
 
+## JSON report
+
+The [versioned JSON report](/stability#json-output-is-versioned) includes
+`version`, `store`, `savings`, `cache`, and `sharing`. It uses integer bytes,
+nanoseconds, and Unix timestamps; an unknown start time is `null`. Its field
+names identify estimates and cumulative counters. JSON never contains quips.
+
 ## A little personality
 
 With the default `savings = "quips"`, the text report and TUI add a line grounded
 in the recorded figures, such as “321 compilations served reheated. rustc can
 finish its coffee.” Set `savings = "plain"` or `savings = "off"` to omit the
 quip. Explicitly requested statistics are still shown.
-
-The [versioned JSON report](/stability#json-output-is-versioned) includes
-`version`, `store`, `savings`, `cache`, and `sharing`. It uses integer bytes,
-nanoseconds, and Unix timestamps; an unknown start time is `null`. Its field
-names identify estimates and cumulative counters. JSON never contains quips.

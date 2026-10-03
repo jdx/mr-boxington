@@ -35,10 +35,6 @@ The action's default entry carries Cargo's target directory and its download
 caches under `~/.cargo`, so the workflow can retain dependency artifacts and Cargo downloads.
 The `github-cache-mode: objects` payload omits the download caches; use a separate Cargo-download cache if you need those files too.
 
-Production release jobs may use a trusted local cache, but should not restore
-compiler outputs from a remote or an Actions archive. See
-[Production releases](/github-action#production-releases).
-
 ## From sccache
 
 Both tools wrap rustc through `RUSTC_WRAPPER`, so they cannot be combined for

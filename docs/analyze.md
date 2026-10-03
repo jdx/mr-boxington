@@ -104,6 +104,28 @@ The last line reports how long exactly one recorded unit was running, and
 which units ran alone. Recorded units are rustc compilations and build-script
 runs; a C compiler a build script starts runs inside its build script's unit.
 
+## Wrapper phase traces
+
+Rustc and C/C++ cache attempts record startup, key construction, cache
+lookup, blob transfer, restore, store, prediction recording, compiler
+execution, and scheduler waits.
+`MBX_STATS_REPORT` includes these as `wrapper_phases_ns`. The durations are
+cumulative across wrappers and exclusive: nested work is subtracted from its
+parent phase. They do not add up to build wall time because compilers run in
+parallel. Work without a phase is reported as `unattributed`.
+
+To inspect a saved build in Perfetto, export its [session file](/tui#recording):
+
+```sh
+mbx cache trace "$(mbx cache dir)/sessions/v1/<session>.jsonl" > trace.json
+```
+
+Open `trace.json` in [Perfetto](https://ui.perfetto.dev). Each wrapper process
+has its own lane, with nested phases under the invocation. Trace spans are
+bounded to 512 per wrapper; totals continue accumulating after that limit.
+Telemetry delivery itself is excluded. A declined cache attempt ends before
+the transparent compiler fallback, and rustdoc is not instrumented.
+
 ## Limits
 
 - Cause times are compiler wall time. Compilations overlap, so their total is

@@ -49,7 +49,7 @@ not cache. See [migrate from rust-cache or sccache](/cookbook/migrate).
 Equivalent, not always identical: rustc and C compilers record absolute
 source paths in metadata and debug information, so artifacts from two
 checkouts can differ without behaving differently.
-[`MBX_VERIFY=1`](/configuration#verify-mode) compares bytes and names what
+[`MBX_VERIFY=1`](/troubleshooting#verify-mode) compares bytes and names what
 differed. See
 [limits](/limits#restored-artifacts-are-equivalent-not-always-identical).
 

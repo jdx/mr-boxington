@@ -19,15 +19,10 @@ mbx setup
 mbx setup --status
 ```
 
-Setup gives rust-analyzer's background check an absolute path to mbx's stable
-Cargo shim. That matters for editors launched from a desktop icon: they often
-do not inherit the shell activation that puts mise's Cargo wrapper on `PATH`.
-The override lands in rust-analyzer's user configuration file, so one run
-covers every workspace. Project-level `rust-analyzer.toml` files do not apply
-this override to the editor's Cargo process.
 Restart the editor after setup so rust-analyzer reloads its configuration.
-rust-analyzer then reports `check/overrideCommand: unexpected field` for that
-file. The override still applies; see [editor setup](/setup#rust-analyzer).
+rust-analyzer then reports `check/overrideCommand: unexpected field` for its user
+configuration file, where setup writes the override. The override still applies;
+see [editor setup](/setup#rust-analyzer).
 
 Setup leaves an existing rust-analyzer check configuration untouched. If
 `mbx setup --status` says that the editor kept its existing settings, either
@@ -37,14 +32,6 @@ shim while preserving the command's existing arguments. Do not point the
 editor at a versioned mbx executable: the stable shim continues to work across
 upgrades.
 
-To check the path seen by a terminal, run:
-
-```sh
-command -v cargo
-mbx doctor
-```
-
-On Windows, use `(Get-Command cargo).Path` instead of `command -v cargo`.
 See [Cargo and editor setup](/setup#verify-plain-cargo) for the shell and
 non-interactive `PATH` setup.
 
@@ -147,4 +134,4 @@ CARGO_TARGET_DIR=target/debugger-uncached MBX_DISABLE=1 \
 This build is cold and is best reserved for path-sensitive debugger or
 artifact investigations. Remove the extra target directory when finished; the
 shared action cache remains intact. To check whether restored bytes diverge,
-use [`MBX_VERIFY=1`](/configuration#verify-mode).
+use [`MBX_VERIFY=1`](/troubleshooting#verify-mode).

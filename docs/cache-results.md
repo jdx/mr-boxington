@@ -126,13 +126,6 @@ The individual warnings, printed as the build runs, say what failed. The count
 also appears as `remote_failures` in the JSON statistics report, so CI can alert
 on a cache that has quietly stopped serving.
 
-## Watching a build instead
-
-Everything above describes results reported after a build. To see the same
-outcomes as they are decided, one row per compilation with the crate it belongs
-to, run [`mbx tui`](/tui) in another terminal. It reads builds using the same
-local cache, including ones already running.
-
 ## Reading the hit rate
 
 A build can report a high hit rate among attempted lookups while spending most
@@ -140,21 +133,33 @@ of its time on actions that were not looked up or were bypassed. Read all the
 summary counts together, and compare wall-clock time when evaluating the
 cache. Set `MBX_SUMMARY=full` when the one-line counts need a breakdown.
 
-A link mbx cannot describe always runs, so its downstream crates may have work
-to do on an otherwise warm build. Native executables, tests, and proc macros on
-Linux, macOS, and Windows, host `cdylib`s on Linux, and binaries, tests, and
-`cdylib`s for supported self-contained WebAssembly targets may be restored as
-hits; see
-[limits](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
+## Compiler time
+
+The full summary reports real compiler time by outcome and an estimate of
+the compiler time avoided by cache hits:
+
+```text
+mbx[cache]: compiler time: 4m 12s estimated avoided; 38.20s spent (161 miss in 31.00s, 7 unconsulted in 7.20s)
+mbx[cache]: slowest uncached crates: syn 8.90s, regex-syntax 4.90s, serde_derive 3.90s
+```
+
+Times of a minute or more are reported in whole units, as above; shorter ones
+keep their fraction.
+
+The estimate comes from the duration recorded with the successful compilation
+that populated the action prediction; older predictions without a timing hint
+contribute zero. The five crates with the largest cumulative uncached compiler
+time are listed so you can identify expensive uncached work. Parallel
+compilations overlap, so this ranking does not directly identify the
+[critical path](/analyze#critical-path).
+
+The JSON statistics report exposes the same data in
+`estimated_compiler_duration_avoided_ns`, `compiler`, and
+`slow_compilations`.
 
 ## Troubleshooting a low hit rate
 
-Run the build through `mbx explain` first. It collects the per-action
-records, groups identical causes, and prints guidance for each category:
-
-```sh
-mbx explain build --workspace
-```
+Run the build through `mbx explain` first, as shown under [Bypass](#bypass).
 
 The usual causes, roughly in the order they show up:
 
@@ -164,7 +169,7 @@ The usual causes, roughly in the order they show up:
 - Incremental builds are enabled. With `MBX_INCREMENTAL=1`, workspace
   members compile incrementally, those compilations bypass the cache, and the
   changed artifacts make crates above them miss too. See
-  [limits](/limits#incremental-compilations-are-not-cached).
+  [Cargo incremental mode](/incremental#cargo-incremental-mode).
 - A link could not be described. Native executables, tests, and proc macros
   are cached on Linux, macOS, and Windows, and self-contained WebAssembly
   targets everywhere, but native links with custom or unmodeled inputs still
@@ -195,25 +200,9 @@ The usual causes, roughly in the order they show up:
   count too: a remote that is failing every request reports the same zeros as
   one that is empty.
 
-## Compiler time
+## Watching a build instead
 
-The full summary reports real compiler time by outcome and an estimate of
-the compiler time avoided by cache hits:
-
-```text
-mbx[cache]: compiler time: 4m 12s estimated avoided; 38.20s spent (161 miss in 31.00s, 7 unconsulted in 7.20s)
-mbx[cache]: slowest uncached crates: syn 8.90s, regex-syntax 4.90s, serde_derive 3.90s
-```
-
-Times of a minute or more are reported in whole units, as above; shorter ones
-keep their fraction.
-
-The estimate comes from the duration recorded with the successful compilation
-that populated the action prediction; older predictions without a timing hint
-contribute zero. The five crates with the largest cumulative uncached compiler
-time are listed so you can identify expensive uncached work. Parallel
-compilations overlap, so this ranking does not directly identify the critical path.
-
-The JSON statistics report exposes the same data in
-`estimated_compiler_duration_avoided_ns`, `compiler`, and
-`slow_compilations`.
+Everything above describes results reported after a build. To see the same
+outcomes as they are decided, one row per compilation with the crate it belongs
+to, run [`mbx tui`](/tui) in another terminal. It reads builds using the same
+local cache, including ones already running.

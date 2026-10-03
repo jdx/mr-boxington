@@ -83,6 +83,27 @@ Set `target.lanes = false` (`MBX_TARGET_LANES=0`) to keep every command in
 and wait for each other; give them separate targets as described in
 [Parallel builds](/scheduling).
 
+## Inspect and clean up
+
+| Command | Effect |
+| --- | --- |
+| `mbx cache stats` | Inspect the action store, managed targets, and learned incremental state |
+| `mbx gc --dry-run` | Preview collection under the configured budgets |
+| `mbx gc` | Collect eligible targets, cached objects, and learned incremental state |
+| `mbx clean` | Remove this workspace's managed target, link, and learned incremental state |
+| `mbx adopt [--recursive] [PATH]...` | Adopt existing `target/` directories without deleting their contents |
+| `mbx cache remove /path/to/workspace` | Remove the target and incremental state, then forget that workspace's cache claims |
+
+`mbx clean` and `mbx cache remove` keep the target directory, with a warning,
+while a command run through mbx is using it. `mbx clean` also accepts a
+workspace path. It keeps shared cached objects and the workspace's cache
+claims, so a later build can restore matching outputs. `mbx cache remove`
+forgets those claims as well; objects used by other workspaces remain available
+and normal garbage collection reclaims unneeded objects.
+
+Cargo's `cargo clean` follows Cargo's own target-directory behavior and does not
+remove mbx's private incremental state.
+
 ## Change target placement
 
 Set `target.root` to place managed targets on another local disk:
@@ -404,26 +425,18 @@ Invalid sizes and durations are errors, so a typo cannot disable collection.
 stop creating managed targets, see
 [Disable managed targets](#disable-managed-targets).
 
-## Inspect and clean up
+### Collection is approximate
 
-| Command | Effect |
-| --- | --- |
-| `mbx cache stats` | Inspect the action store, managed targets, and learned incremental state |
-| `mbx gc --dry-run` | Preview collection under the configured budgets |
-| `mbx gc` | Collect eligible targets, cached objects, and learned incremental state |
-| `mbx clean` | Remove this workspace's managed target, link, and learned incremental state |
-| `mbx adopt [--recursive] [PATH]...` | Adopt existing `target/` directories without deleting their contents |
-| `mbx cache remove /path/to/workspace` | Remove the target and incremental state, then forget that workspace's cache claims |
+Object eviction prefers abandoned checkout data and then older access times.
+Filesystems using `relatime` coarsen that order; `noatime` removes it. A poor
+choice costs a recompile, not correctness.
 
-`mbx clean` and `mbx cache remove` keep the target directory, with a warning,
-while a command run through mbx is using it. `mbx clean` also accepts a
-workspace path. It keeps shared cached objects and the workspace's cache
-claims, so a later build can restore matching outputs. `mbx cache remove`
-forgets those claims as well; objects used by other workspaces remain available
-and normal garbage collection reclaims unneeded objects.
-
-Cargo's `cargo clean` follows Cargo's own target-directory behavior and does not
-remove mbx's private incremental state.
+The action-store budget covers action objects and results. Prediction data,
+checkout records, and temporary downloads add overhead. Managed targets have
+their own budget and can account for substantial space; use the optional
+combined budget to bound the action store, managed targets, and learned
+incremental state together. See
+[single cache budget](/configuration#single-cache-budget).
 
 ## Disable managed targets
 

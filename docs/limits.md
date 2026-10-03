@@ -50,6 +50,8 @@ the result at the same location. A symlink that may escape `OUT_DIR` makes the
 execution uncacheable. The launcher left in a target directory is transparent
 when the build later runs under plain Cargo, outside an mbx session.
 
+<span id="incremental-output-reduces-sharing"></span>
+
 ## Incremental compilations are not cached
 
 Incremental compilations bypass the action cache. Dependencies, which Cargo
@@ -210,7 +212,7 @@ These path differences can affect debugging and byte-for-byte comparisons.
 `MBX_VERIFY=1` reports them as divergences, but a divergence alone does not
 establish its cause. Inspect the named output and mismatch before attributing it
 to paths, and report unexplained differences. See
-[Verify mode](/configuration#verify-mode) for a controlled comparison and the
+[Verify restored outputs](/troubleshooting#verify-mode) for a controlled comparison and the
 [debugger recipe](/cookbook/local-development#debug-a-binary-restored-from-another-checkout)
 for a build using local source paths.
 
@@ -383,21 +385,5 @@ what changes is that its dependents stop paying for that. The cost is that
 source paths under the workspace are recorded as the placeholder, in debug
 information, `file!()` and panic locations, which is why it is off by default.
 
-## Incremental output reduces sharing
-
-`MBX_INCREMENTAL=1` can improve a local edit/rebuild loop, but an incremental
-artifact changes the content inputs of dependent crates. Those crates then miss
-even if another checkout built the same source. CI disables incremental builds.
-
-## Collection is approximate
-
-Object eviction prefers abandoned checkout data and then older access times.
-Filesystems using `relatime` coarsen that order; `noatime` removes it. A poor
-choice costs a recompile, not correctness.
-
-The action-store budget covers action objects and results. Prediction data,
-checkout records, and temporary downloads add overhead. Managed targets have
-their own budget and can account for substantial space; use the optional
-combined budget to bound the action store, managed targets, and learned
-incremental state together. See
-[Managed target directories](/managed-targets).
+<span id="collection-is-approximate"></span>
+[Collection is approximate](/managed-targets#collection-is-approximate) now lives in Managed target directories.

@@ -16,6 +16,27 @@ Use `mise exec -- cargo build`, `mise run` tasks, or a shell with mise
 activation or shims on `PATH`. Rust and mbx remain independently versioned.
 Drop `--global` for a project-scoped configuration.
 
+## Share setup with a project
+
+With mise 2026.9.2 or newer, commit the tool option in the project's `mise.toml`:
+
+```toml
+[tools]
+rust = { version = "stable", mr_boxington = true }
+mr-boxington = "latest"
+```
+
+Keep the project's existing Rust version and other options when adding
+`mr_boxington = true`. Both tools must be configured. Run `mise install`, then
+use `mise exec -- cargo build`, project tasks with `mise run`, or plain `cargo`
+with mise activation or shims on `PATH`.
+
+Set `mr_boxington = false` on the project's Rust entry to disable native
+wrapping there. An explicit `[wrappers.cargo]` takes precedence over the Rust
+option, including `false`. When migrating from `mbx setup`, remove the old mbx
+`[wrappers.cargo]` entry and its `postinstall` hook from the applicable config
+so the Rust option controls wrapping. Run `mise reshim` after migrating.
+
 ## Standalone setup
 
 After [installing mbx](/installation), run this to install a stable Cargo shim
@@ -49,27 +70,6 @@ change and never edits a shell startup file. Setup runs `mise reshim` after
 adding or removing the wrapper.
 
 The explicit wrapper written by `mbx setup` requires mise 2026.8.16 or newer.
-
-## Share setup with a project
-
-With mise 2026.9.2 or newer, commit the tool option in the project's `mise.toml`:
-
-```toml
-[tools]
-rust = { version = "stable", mr_boxington = true }
-mr-boxington = "latest"
-```
-
-Keep the project's existing Rust version and other options when adding
-`mr_boxington = true`. Both tools must be configured. Run `mise install`, then
-use `mise exec -- cargo build`, project tasks with `mise run`, or plain `cargo`
-with mise activation or shims on `PATH`.
-
-Set `mr_boxington = false` on the project's Rust entry to disable native
-wrapping there. An explicit `[wrappers.cargo]` takes precedence over the Rust
-option, including `false`. When migrating from `mbx setup`, remove the old mbx
-`[wrappers.cargo]` entry and its `postinstall` hook from the applicable config
-so the Rust option controls wrapping. Run `mise reshim` after migrating.
 
 ## Verify plain Cargo
 

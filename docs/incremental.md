@@ -70,20 +70,6 @@ that setting, the default aggregate incremental cap is replaced by the shared
 budget, and the per-crate limit defaults to the combined budget. Explicit
 incremental limits still apply. See [single cache budget](/configuration#single-cache-budget).
 
-## Cargo incremental mode
-
-By default, mbx sets `CARGO_INCREMENTAL=0` and uses learned incremental reuse
-for changing crates. `MBX_INCREMENTAL=1` stops it from forcing Cargo's setting
-off locally:
-
-```sh
-MBX_INCREMENTAL=1 mbx build
-```
-
-This lets Cargo manage incremental workspace compilation. Those artifacts
-remain checkout-specific and bypass the shared cache; their dependents may
-also miss. Use it only when you want that tradeoff.
-
 ## Eager incremental reuse
 
 `eager_incremental` is an opt-in mode for builds where you expect more source
@@ -132,6 +118,20 @@ can fall back to ordinary shared caching;
 unsupported compiler invocations and existing unknown compiler wrappers keep
 their usual bypass behavior. Set `MBX_EAGER_INCREMENTAL=0` to override a
 checked-in setting and return to the default policy.
+
+## Cargo incremental mode
+
+By default, mbx sets `CARGO_INCREMENTAL=0` and uses learned incremental reuse
+for changing crates. `MBX_INCREMENTAL=1` stops it from forcing Cargo's setting
+off locally:
+
+```sh
+MBX_INCREMENTAL=1 mbx build
+```
+
+This lets Cargo manage incremental workspace compilation. Those artifacts
+remain checkout-specific and bypass the shared cache; their dependents may
+also miss. Use it only when you want that tradeoff.
 
 ## Overrides and CI
 

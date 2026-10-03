@@ -17,6 +17,7 @@ cached work.
 | Remote requests fail | `mbx doctor`, then [check authentication](/remote-cache#authenticate) |
 | Build storage is larger than expected | `mbx cache stats` and `mbx gc --dry-run`; review [budgets](/managed-targets#budgets-scale-with-the-disk) |
 | Breakpoints point at an old checkout | Use the [debugger recipe](/cookbook/local-development#debug-a-binary-restored-from-another-checkout) |
+| A restored artifact looks wrong | [verify restored outputs](#verify-mode) |
 
 ## Diagnose the installation
 
@@ -126,6 +127,62 @@ try { cargo build } finally { Remove-Item Env:MBX_DISABLE }
 This keeps Cargo's existing outputs. To investigate an artifact that may have
 been restored earlier, use a separate target directory as shown in the
 [debugger recipe](/cookbook/local-development#debug-a-binary-restored-from-another-checkout).
+
+## Verify restored outputs {#verify-mode}
+
+`MBX_VERIFY=1` compiles and consults the cache side by side and compares the
+results. It is expensive; use it to investigate correctness, not for everyday
+builds.
+
+For routine checks, set `MBX_VERIFY_SAMPLE_RATE=5` (or `verify_sample_rate = 5`)
+to verify approximately 5% of compilation identities. The range is 0–100;
+0 disables sampling. Selection is stable across wrapper processes and build
+order, so rerunning the same invocation selects the same sample. This samples
+units, not elapsed compiler time. `MBX_VERIFY=1` takes precedence and verifies
+all eligible units. Selected units rehash inputs and disable learned
+incremental compilation, just like full verification.
+
+The build reports what it found:
+
+```text
+mbx[cache]: qualification: 24 verified, 0 diverged
+```
+
+The verified count includes divergent compilations. Each compilation contributes
+at most one divergence, reporting its first mismatch. Warnings identify the
+adapter, unit and action; stdout/stderr differences include the first differing
+byte offset, line number and bounded, escaped excerpts of both results. Cached
+diagnostics are rewritten into this checkout's paths before comparison.
+
+Cargo must actually invoke the compiler to verify anything. Run in the checkout
+that filled the cache with a fresh target directory; an unchanged build in an
+existing target can be a Cargo no-op. Keep the original target and shared store.
+`MBX_BYPASS_LOG` and `mbx explain` show what was left out.
+
+For audits across worktrees, populate and verify using the same virtual source
+root. For example, run this from each checkout's workspace root, first with
+`MBX_VERIFY=0` to populate, then with `MBX_VERIFY=1` in the other checkout:
+
+```sh
+RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$PWD=/workspace" \
+  CARGO_TARGET_DIR="$PWD/target-audit" MBX_VERIFY=1 mbx build --all-targets --locked
+```
+
+Use a fresh `target-audit` directory each time and the same toolchain, profile,
+and other compiler flags. The source side of `--remap-path-prefix` is keyed
+portably; its virtual destination must agree between checkouts. If using
+`CARGO_ENCODED_RUSTFLAGS`, add the remap there instead: Cargo gives it precedence
+over `RUSTFLAGS`.
+
+Remapping reduces embedded-source-path differences; it does not guarantee
+byte-identical outputs, especially for native links or paths outside the mapped
+root. See [artifact equivalence](/limits#restored-artifacts-are-equivalent-not-always-identical).
+Investigate remaining divergences rather than treating every cross-worktree
+mismatch as harmless. Please report unexplained differences, including the
+identified unit and action.
+
+Use verification to check a caching feature against your own workload, including
+[native link caching](/limits#native-linking-is-cached-only-where-the-linker-can-be-described).
 
 ## Reporting a problem
 
