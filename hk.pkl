@@ -1,12 +1,16 @@
 amends "package://github.com/jdx/hk/releases/download/v2.0.1/hk@2.0.1#/Config.pkl"
 import "package://github.com/jdx/hk/releases/download/v2.0.1/hk@2.0.1#/Builtins.pkl"
 
-// Mirrors `mise run lint` (and so CI): rustfmt, then Clippy with warnings denied.
+// Mirrors `mise run lint` (and so CI): rustfmt, then Clippy (debug and release) with warnings denied.
 local linters = new Mapping<String, Step> {
     ["cargo-fmt"] = Builtins.cargo_fmt
     ["cargo-clippy"] = (Builtins.cargo_clippy) {
         check = "cargo clippy --workspace --all-features --all-targets -- -D warnings"
         fix = "cargo clippy --workspace --all-features --all-targets --fix --allow-dirty --allow-staged -- -D warnings"
+    }
+    ["cargo-clippy-release"] = (Builtins.cargo_clippy) {
+        check = "cargo clippy --release --workspace --all-features --all-targets -- -D warnings"
+        fix = "cargo clippy --release --workspace --all-features --all-targets --fix --allow-dirty --allow-staged -- -D warnings"
     }
 }
 
