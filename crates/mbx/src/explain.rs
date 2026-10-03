@@ -132,6 +132,12 @@ impl Baselines {
     fn get(&self, key: &(String, String)) -> Option<&ActionDiagnostic> {
         self.here.get(key).or_else(|| self.elsewhere.get(key))
     }
+
+    /// Whether the baseline for this unit comes from another checkout rather
+    /// than from this workspace.
+    fn is_other_checkout(&self, key: &(String, String)) -> bool {
+        !self.here.contains_key(key) && self.elsewhere.contains_key(key)
+    }
 }
 
 fn recorded_sessions(store: &Path) -> Result<Vec<RecordedSession>> {
@@ -238,7 +244,16 @@ fn display_last(session: &RecordedSession, baselines: &Baselines) {
         }
         let previous = previous_recording(baselines, crate_name, diagnostic);
         match (previous, diagnostic) {
-            (Some(previous), Some(current)) => display_diff(previous, current),
+            (Some(previous), Some(current)) => {
+                display_diff(previous, current);
+                if compilation_unit(current).is_some_and(|unit| {
+                    baselines.is_other_checkout(&(crate_name.to_string(), unit))
+                }) {
+                    for line in checkout_hint(previous, current) {
+                        crate::session::note(&line);
+                    }
+                }
+            }
             (None, _) => crate::session::note(if baselines.truncated {
                 "  no earlier build recorded key details for this crate; an earlier build stopped recording at the per-session size limit, so its details may be among the rows that were dropped"
             } else {
@@ -324,6 +339,60 @@ fn diff_lines(previous: &ActionDiagnostic, current: &ActionDiagnostic) -> Vec<St
     if lines.is_empty() {
         lines.push(
             "  the action key changed, but the recorded details do not say which part did".into(),
+        );
+    }
+    lines
+}
+
+/// What to set when a miss is compared with another checkout's build and the
+/// difference is one a setting can remove.
+///
+/// The comparison alone names what changed; this says which setting or
+/// environment variable acts on it. It stays quiet when nothing recorded points
+/// at a checkout path, since a flag or a variable that truly differs needs no
+/// mbx setting.
+fn checkout_hint(previous: &ActionDiagnostic, current: &ActionDiagnostic) -> Vec<String> {
+    let components = changed_keys(&previous.components, &current.components);
+    let inputs = changed_keys(&previous.inputs, &current.inputs);
+    let mut lines = Vec::new();
+    let mut changed_env: Vec<&str> = Vec::new();
+    let mut remap_differs = false;
+    for name in &components {
+        if let Some(variable) = name.strip_prefix("environment ") {
+            changed_env.push(variable);
+        } else if name.starts_with("argument --remap-path-prefix") {
+            remap_differs = true;
+        }
+    }
+    if changed_env.contains(&"OUT_DIR") {
+        lines.push(
+            "  hint: OUT_DIR differs between the checkouts; `MBX_SHARE_OUT_DIR=1` (the default) gives rustc a shared build-script output directory, so check that neither checkout sets it to 0 in `.mbx.toml` or the environment".into(),
+        );
+    }
+    if changed_env.contains(&"CARGO_MANIFEST_DIR") {
+        lines.push(
+            "  hint: this crate reads CARGO_MANIFEST_DIR, so it is keyed to its checkout and recompiles in each one; `MBX_SHARE_WORKSPACE_ROOT=1` (or `share_workspace_root = true`) still lets the crates that depend on it share".into(),
+        );
+    }
+    if remap_differs {
+        lines.push(
+            "  hint: --remap-path-prefix differs; set `MBX_SHARE_WORKSPACE_ROOT` the same way in both checkouts".into(),
+        );
+    }
+    let others: Vec<&str> = changed_env
+        .into_iter()
+        .filter(|name| !["OUT_DIR", "CARGO_MANIFEST_DIR"].contains(name))
+        .collect();
+    if !others.is_empty() {
+        lines.push(format!(
+            "  hint: {} differ{} between the checkouts; if a value holds a checkout path, set it the same in both or unset it",
+            others.join(", "),
+            if others.len() == 1 { "s" } else { "" },
+        ));
+    }
+    if lines.is_empty() && components.is_empty() && !dependencies_behind(&inputs).is_empty() {
+        lines.push(
+            "  hint: if that crate is a workspace member, it records its checkout path and was rebuilt there; `MBX_SHARE_WORKSPACE_ROOT=1` (or `share_workspace_root = true`) makes both checkouts produce the same bytes".into(),
         );
     }
     lines
@@ -844,6 +913,62 @@ mod tests {
                 diagnostic: Some(diagnostic),
             }],
         }
+    }
+
+    #[test]
+    fn checkout_hint_names_the_setting_for_a_path_difference() {
+        let digest = |value: &str| mbx_cache_core::CacheDigest::blake3(value.as_bytes());
+        let diagnostic = |components: &[(&str, &str)], inputs: &[(&str, &str)]| ActionDiagnostic {
+            action: digest("action"),
+            components: components
+                .iter()
+                .map(|(name, value)| (name.to_string(), digest(value)))
+                .collect(),
+            inputs: inputs
+                .iter()
+                .map(|(name, value)| (name.to_string(), digest(value)))
+                .collect(),
+        };
+        let hint = |a: &ActionDiagnostic, b: &ActionDiagnostic| checkout_hint(a, b).join("\n");
+
+        let a = diagnostic(&[("environment CARGO_MANIFEST_DIR", "/a")], &[]);
+        let b = diagnostic(&[("environment CARGO_MANIFEST_DIR", "/b")], &[]);
+        assert!(hint(&a, &b).contains("MBX_SHARE_WORKSPACE_ROOT=1"));
+
+        let a = diagnostic(&[("environment OUT_DIR", "/a")], &[]);
+        let b = diagnostic(&[("environment OUT_DIR", "/b")], &[]);
+        assert!(hint(&a, &b).contains("MBX_SHARE_OUT_DIR"));
+
+        let a = diagnostic(&[("environment FOO", "1")], &[]);
+        let b = diagnostic(&[("environment FOO", "2")], &[]);
+        let text = hint(&a, &b);
+        assert!(text.contains("FOO differs"), "{text}");
+        assert!(!text.contains("MBX_SHARE"), "{text}");
+
+        let a = diagnostic(&[], &[("${target}/debug/deps/libdep-1.rmeta", "1")]);
+        let b = diagnostic(&[], &[("${target}/debug/deps/libdep-1.rmeta", "2")]);
+        assert!(hint(&a, &b).contains("workspace member"));
+
+        let a = diagnostic(&[("argument --opt-level", "1")], &[]);
+        let b = diagnostic(&[("argument --opt-level", "3")], &[]);
+        assert!(hint(&a, &b).is_empty());
+    }
+
+    #[test]
+    fn only_a_baseline_from_another_checkout_is_other_checkout() {
+        let target = recorded("/b", Some("project"), "missed-here");
+        let elsewhere = Baselines::collect(&[recorded("/a", Some("project"), "p")], &target);
+        let here = Baselines::collect(&[recorded("/b", Some("project"), "p")], &target);
+        let key = |b: &Baselines| {
+            b.here
+                .keys()
+                .chain(b.elsewhere.keys())
+                .next()
+                .cloned()
+                .unwrap()
+        };
+        assert!(elsewhere.is_other_checkout(&key(&elsewhere)));
+        assert!(!here.is_other_checkout(&key(&here)));
     }
 
     #[test]
