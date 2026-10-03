@@ -871,10 +871,16 @@ fn modified_since(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             // A missing input may have been there when the script started.
             // Removing it changed its parent directory.
-            return match path.parent().map(std::fs::symlink_metadata) {
-                Some(Ok(parent)) => Ok(parent.modified()? >= since),
-                _ => Ok(false),
-            };
+            // Look at the nearest directory that still exists, following a
+            // link: unlinking through one changes the directory it points to.
+            for ancestor in path.ancestors().skip(1) {
+                match std::fs::metadata(ancestor) {
+                    Ok(directory) => return Ok(directory.modified()? >= since),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            return Ok(false);
         }
         Err(error) => return Err(error.into()),
     };
