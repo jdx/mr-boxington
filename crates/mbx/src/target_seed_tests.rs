@@ -489,6 +489,49 @@ fn build_script_output_may_name_only_its_own_out_dir() {
     );
 }
 
+#[test]
+fn a_build_script_file_naming_the_donor_keeps_the_unit_out() {
+    // Cargo rewrites the recorded OUT_DIR only in the stdout it replays. A
+    // file the script left, such as CMake's cache, keeps naming the donor.
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let profile = from.path().join("debug");
+    let clean = unit(&profile, "serde", "0123456789abcdef");
+    run_output(&clean, &clean.join("out"), "cargo:rerun-if-changed=x\n");
+    std::fs::write(clean.join("out/note.txt"), "names no checkout").unwrap();
+    let naming = unit(&profile, "serde", "fedcba9876543210");
+    run_output(&naming, &naming.join("out"), "cargo:rerun-if-changed=x\n");
+    std::fs::create_dir(naming.join("out/build")).unwrap();
+    std::fs::write(
+        naming.join("out/build/CMakeCache.txt"),
+        format!("BUILD_DIR:PATH={}/out/build\n", naming.display()),
+    )
+    .unwrap();
+    // A compiler unit has no recorded run, and its outputs are not scanned.
+    let compiled = unit(&profile, "serde", "aaaaaaaaaaaaaaaa");
+    std::fs::write(
+        compiled.join("out/x.d"),
+        format!("{}: src/lib.rs\n", compiled.display()),
+    )
+    .unwrap();
+
+    let outcome = seed(
+        to.path(),
+        &[PathBuf::from("debug")],
+        &registry(),
+        &[donor(from.path())],
+    );
+
+    assert_eq!(outcome.units, 2);
+    let copied = to.path().join("debug/build/serde");
+    assert!(copied.join("0123456789abcdef").is_dir());
+    assert!(copied.join("aaaaaaaaaaaaaaaa").is_dir());
+    assert!(
+        !copied.join("fedcba9876543210").exists(),
+        "a copied CMakeCache.txt would make the script fail in this checkout"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_link_elsewhere_into_the_donor_keeps_the_unit_out() {
@@ -745,4 +788,63 @@ fn a_relative_link_that_climbs_out_and_back_keeps_the_unit_out() {
     );
 
     assert_eq!(outcome, SeedOutcome::default());
+}
+
+#[test]
+fn a_donor_path_deep_in_a_large_output_file_is_found() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut contents = vec![b'x'; 3 * 1024 * 1024];
+    // Straddle a read boundary so a path split across two chunks is caught.
+    let at = 64 * 1024 - 5;
+    contents.splice(at..at, b"/donor/checkout/target".iter().copied());
+    std::fs::write(directory.path().join("big.bin"), contents).unwrap();
+
+    let found = donor_path_in_files(directory.path(), &["/donor/checkout/target".to_string()]);
+
+    assert_eq!(found.as_deref(), Some("/donor/checkout/target"));
+}
+
+#[test]
+fn a_donor_path_spelled_with_forward_slashes_is_found() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("cache.txt"),
+        "DIR=C:/work/donor/target/debug\n",
+    )
+    .unwrap();
+
+    let found = donor_path_in_files(directory.path(), &[r"C:\work\donor\target".to_string()]);
+
+    assert!(found.is_some());
+}
+
+#[test]
+fn output_past_the_scan_budget_keeps_the_unit_out() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("huge.bin");
+    let handle = std::fs::File::create(&file).unwrap();
+    handle.set_len(SCAN_BUDGET + 1).unwrap();
+
+    let found = donor_path_in_files(directory.path(), &["/donor".to_string()]);
+
+    assert!(found.is_some_and(|reason| reason.contains("scan budget")));
+}
+
+#[test]
+fn a_donor_path_in_stdout_spelled_with_forward_slashes_is_found() {
+    let from = tempfile::tempdir().unwrap();
+    let unit = from.path().join("unit");
+    std::fs::create_dir_all(unit.join("run")).unwrap();
+    std::fs::write(
+        unit.join("run/stdout"),
+        "cargo:rustc-link-search=C:/work/donor/target/x\n",
+    )
+    .unwrap();
+    let donor = Donor {
+        directory: PathBuf::from(r"C:\work\donor\target"),
+        workspace_root: PathBuf::from(r"C:\work\donor"),
+        ..donor(from.path())
+    };
+
+    assert!(foreign_path_in_output(&unit, &donor).is_some());
 }

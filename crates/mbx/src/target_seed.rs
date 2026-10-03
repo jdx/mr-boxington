@@ -366,11 +366,109 @@ fn foreign_path_in_output(unit: &Path, donor: &Donor) -> Option<String> {
     } else {
         stdout.replace(out_dir.trim(), "")
     };
-    donor
+    let spellings = donor
         .spellings()
         .into_iter()
         .map(|path| path.to_string_lossy().into_owned())
-        .find(|path| remaining.contains(path.as_str()))
+        .collect::<Vec<_>>();
+    // Tools such as CMake write a path with forward slashes on Windows, so the
+    // stdout check looks for that spelling too.
+    let remaining_slashes = remaining.replace('\\', "/");
+    spellings
+        .iter()
+        .find(|path| {
+            remaining.contains(path.as_str())
+                || remaining_slashes.contains(path.replace('\\', "/").as_str())
+        })
+        .cloned()
+        .or_else(|| donor_path_in_files(&unit.join("out"), &spellings))
+}
+
+/// The most bytes read from one unit's output files while looking for a donor
+/// path. A unit that holds more than this is left unseeded, since seeding must
+/// stay quick and nothing can say the rest is clean.
+const SCAN_BUDGET: u64 = 64 * 1024 * 1024;
+
+/// How much of a file is read at a time.
+const SCAN_CHUNK: usize = 64 * 1024;
+
+/// A donor path named by a file a build script left in its `OUT_DIR`.
+///
+/// Cargo rewrites `OUT_DIR` only in the stdout it replays, so a file such as
+/// CMake's cache that records `OUT_DIR/build` keeps naming the donor, and the
+/// script fails in the checkout that received the copy. Files are read in
+/// chunks, so a large one is checked without being held in memory. Links are
+/// not followed. A file or directory that cannot be read, or output past the
+/// scan budget, keeps the unit out, since nothing can say it is clean.
+fn donor_path_in_files(directory: &Path, spellings: &[String]) -> Option<String> {
+    // A path may be written with either separator, so look for both.
+    let mut needles: Vec<String> = Vec::new();
+    for spelling in spellings {
+        for needle in [spelling.clone(), spelling.replace('\\', "/")] {
+            if !needles.contains(&needle) {
+                needles.push(needle);
+            }
+        }
+    }
+    let mut budget = SCAN_BUDGET;
+    scan_directory(directory, &needles, &mut budget)
+}
+
+fn scan_directory(directory: &Path, needles: &[String], budget: &mut u64) -> Option<String> {
+    let unreadable = || Some(format!("{} (unreadable)", directory.display()));
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return unreadable(),
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return unreadable();
+        };
+        let Ok(kind) = entry.file_type() else {
+            return unreadable();
+        };
+        if kind.is_dir() {
+            if let Some(found) = scan_directory(&entry.path(), needles, budget) {
+                return Some(found);
+            }
+        } else if kind.is_file()
+            && let Some(found) = scan_file(&entry.path(), needles, budget)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn scan_file(path: &Path, needles: &[String], budget: &mut u64) -> Option<String> {
+    use std::io::Read;
+    let unreadable = || Some(format!("{} (unreadable)", path.display()));
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return unreadable();
+    };
+    let longest = needles.iter().map(String::len).max().unwrap_or(0);
+    let mut window: Vec<u8> = Vec::new();
+    let mut chunk = vec![0u8; SCAN_CHUNK];
+    loop {
+        let read = match file.read(&mut chunk) {
+            Ok(0) => return None,
+            Ok(read) => read,
+            Err(_) => return unreadable(),
+        };
+        let Some(left) = budget.checked_sub(read as u64) else {
+            return Some(format!("{} (past the scan budget)", path.display()));
+        };
+        *budget = left;
+        window.extend_from_slice(&chunk[..read]);
+        let text = String::from_utf8_lossy(&window);
+        if let Some(found) = needles.iter().find(|needle| text.contains(needle.as_str())) {
+            return Some(found.clone());
+        }
+        // Keep the tail, so a path split across two chunks is still found.
+        let keep = longest.saturating_sub(1).min(window.len());
+        window.drain(..window.len() - keep);
+    }
 }
 
 /// Finish removing staging directories an interrupted seeding left.
