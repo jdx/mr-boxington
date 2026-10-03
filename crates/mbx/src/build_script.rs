@@ -529,8 +529,17 @@ fn links_outside_out_dir(directive: &str, mappings: &[PathMapping]) -> bool {
     // reads as inside `OUT_DIR` while naming a sibling. Resolve parent
     // components lexically: a path rooted in `OUT_DIR` that stays below it is
     // restored, and any other `..` may leave the restored tree.
+    //
+    // A relative path is resolved by the linker from the build script's working
+    // directory, which can place it in the target directory too.
+    let working_dir = std::env::current_dir().ok();
     value.contains("${target")
         || value.split([' ', '=', ',']).any(|token| {
+            if let Some(working_dir) = &working_dir
+                && relative_token_is_in_target(token, working_dir, mappings)
+            {
+                return true;
+            }
             let rooted = token
                 .strip_prefix("${build_script_out_dir")
                 .and_then(|rest| rest.split_once('}'))
@@ -546,6 +555,26 @@ fn links_outside_out_dir(directive: &str, mappings: &[PathMapping]) -> bool {
             }
             false
         })
+}
+
+/// Whether a relative path argument, taken from `working_dir`, lands in the
+/// target directory once its `.` and `..` components are resolved.
+fn relative_token_is_in_target(token: &str, working_dir: &Path, mappings: &[PathMapping]) -> bool {
+    let path = Path::new(token);
+    if token.is_empty() || token.starts_with(['-', '$']) || !path.is_relative() {
+        return false;
+    }
+    let mut resolved = PathBuf::new();
+    for component in working_dir.join(path).components() {
+        match component {
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => resolved.push(other),
+        }
+    }
+    normalize_environment_value(&resolved.to_string_lossy(), mappings).contains("${target")
 }
 
 /// Whether recorded output carries such a directive. Predictions stored before
@@ -1404,6 +1433,24 @@ mod tests {
                 .is_none()
         );
         assert!(output_links_outside_out_dir_with(&escaping, &mappings));
+        let working_dir = std::env::current_dir().unwrap();
+        let relative_mappings = [
+            PathMapping::new(working_dir.join("target"), "target"),
+            PathMapping::new(
+                working_dir.join("target/debug/build/v8-abc/out"),
+                "build_script_out_dir",
+            ),
+        ];
+        let relative = "cargo:rustc-link-search=native=target/debug/gn_out/obj\n";
+        assert!(
+            parse_prediction_with_mappings(relative, &relative_mappings)
+                .unwrap()
+                .is_none()
+        );
+        assert!(output_links_outside_out_dir_with(
+            relative,
+            &relative_mappings
+        ));
         let nested = format!("cargo:rustc-link-search={}/sub/../lib\n", out_dir.display());
         assert!(
             parse_prediction_with_mappings(&nested, &mappings)
