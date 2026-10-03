@@ -829,3 +829,22 @@ fn output_past_the_scan_budget_keeps_the_unit_out() {
 
     assert!(found.is_some_and(|reason| reason.contains("scan budget")));
 }
+
+#[test]
+fn a_donor_path_in_stdout_spelled_with_forward_slashes_is_found() {
+    let from = tempfile::tempdir().unwrap();
+    let unit = from.path().join("unit");
+    std::fs::create_dir_all(unit.join("run")).unwrap();
+    std::fs::write(
+        unit.join("run/stdout"),
+        "cargo:rustc-link-search=C:/work/donor/target/x\n",
+    )
+    .unwrap();
+    let donor = Donor {
+        directory: PathBuf::from(r"C:\work\donor\target"),
+        workspace_root: PathBuf::from(r"C:\work\donor"),
+        ..donor(from.path())
+    };
+
+    assert!(foreign_path_in_output(&unit, &donor).is_some());
+}

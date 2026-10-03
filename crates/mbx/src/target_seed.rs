@@ -371,9 +371,15 @@ fn foreign_path_in_output(unit: &Path, donor: &Donor) -> Option<String> {
         .into_iter()
         .map(|path| path.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
+    // Tools such as CMake write a path with forward slashes on Windows, so the
+    // stdout check looks for that spelling too.
+    let remaining_slashes = remaining.replace('\\', "/");
     spellings
         .iter()
-        .find(|path| remaining.contains(path.as_str()))
+        .find(|path| {
+            remaining.contains(path.as_str())
+                || remaining_slashes.contains(path.replace('\\', "/").as_str())
+        })
         .cloned()
         .or_else(|| donor_path_in_files(&unit.join("out"), &spellings))
 }
