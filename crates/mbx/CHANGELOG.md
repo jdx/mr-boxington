@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.0](https://github.com/jdx/mr-boxington/compare/v1.21.1...v1.22.0) - 2026-10-03
+
+### Added
+
+- *(scheduler)* reserve capacity for external commands ([#643](https://github.com/jdx/mr-boxington/pull/643))
+- *(explain)* name the setting to change when a miss differs from another checkout ([#639](https://github.com/jdx/mr-boxington/pull/639))
+
+### Fixed
+
+- *(cache)* skip caching build scripts that write into their declared inputs ([#640](https://github.com/jdx/mr-boxington/pull/640))
+- *(seed)* leave build-script units unseeded when their output files name the donor checkout ([#641](https://github.com/jdx/mr-boxington/pull/641))
+- *(stats)* label copying avoided without calling hard links reflinks ([#638](https://github.com/jdx/mr-boxington/pull/638))
+- *(cache)* rerun build scripts that link from outside OUT_DIR ([#635](https://github.com/jdx/mr-boxington/pull/635))
+- *(scheduler)* keep memory pressure state separate for each container ([#634](https://github.com/jdx/mr-boxington/pull/634))
+- *(cache)* retain restored build scripts in CI exports ([#629](https://github.com/jdx/mr-boxington/pull/629))
+
+### Other
+
+- correct outdated guides and CLI help, and reorganize the docs site ([#637](https://github.com/jdx/mr-boxington/pull/637))
+- *(stats)* parallelize target and cache scans in mbx stats ([#631](https://github.com/jdx/mr-boxington/pull/631))
+
 ## [1.21.1](https://github.com/jdx/mr-boxington/compare/v1.21.0...v1.21.1) - 2026-10-02
 
 ### Fixed

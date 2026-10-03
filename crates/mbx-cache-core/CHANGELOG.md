@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.4](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.19.3...mbx-cache-core-v0.19.4) - 2026-10-03
+
+### Other
+
+- correct outdated guides and CLI help, and reorganize the docs site ([#637](https://github.com/jdx/mr-boxington/pull/637))
+
 ## [0.19.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.19.2...mbx-cache-core-v0.19.3) - 2026-10-02
 
 ### Fixed

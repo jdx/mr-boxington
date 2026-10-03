@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.21](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.20...mbx-cache-protocol-v0.5.21) - 2026-10-03
+
+### Other
+
+- correct outdated guides and CLI help, and reorganize the docs site ([#637](https://github.com/jdx/mr-boxington/pull/637))
+
 ## [0.5.20](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.19...mbx-cache-protocol-v0.5.20) - 2026-09-27
 
 ### Other
