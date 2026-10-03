@@ -8,7 +8,9 @@ List settings and their current values.
 Values come from the environment, the global configuration file, and defaults. Workspace `.mbx.toml` settings are not included. If a setting whose default mbx computes when it runs has no value, `ls` shows it as unset, followed by a description of that default. The value of `remote.token` is not printed; `mbx settings get remote.token` prints it.
 
 ## Arguments
-- **`[KEY]`** — Setting or group to list, such as `gc` or `gc.max_size`. Lists every setting when omitted.
+- **`[KEY]`** — Setting or group to list, such as `gc` or `gc.max_size`.
+
+  Lists every setting when omitted.
 
 ## Flags
 - **`-h --help`** — Print help

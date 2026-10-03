@@ -44,9 +44,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # Optional: a push to main also saves a pruned Cargo target directory and
+      # optional: a push to main also saves a pruned Cargo target directory and
       # registry to GitHub Actions cache, so fork PRs restore warm without ever
-      # reaching the server.
+      # reaching the server
       - name: Mirror the target directory for fork pull requests
         if: github.event_name == 'push'
         uses: jdx/mr-boxington-action@v1

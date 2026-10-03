@@ -65,14 +65,13 @@ mbx has neither dep-info for this compilation nor a matching
 action key. This is common on a cold build. mbx makes no lookup, so counting
 the compilation as a miss would overstate the number of failed lookups. Unless
 the compilation keeps [private incremental state](#incremental), mbx still
-stores its result afterwards.
+stores its result afterwards. The short summary counts this outcome as
+`not looked up`. The full summary prints a `could not look up` line with the
+reason, and its [compiler time](#compiler-time) line labels the outcome
+`unconsulted`, as [`mbx tui`](/tui) does.
 
 A crate that depends on a crate with private incremental state also counts
-here, because mbx skips its lookup; see [Incremental](#incremental). The short
-summary counts these compilations as `not looked up`. The full summary prints a
-`could not look up` line with the reason, and its
-[compiler time](#compiler-time) line labels them `unconsulted`, as
-[`mbx tui`](/tui) does.
+here, because mbx skips its lookup; see [Incremental](#incremental).
 
 ## Bypass
 

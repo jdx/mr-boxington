@@ -43,12 +43,12 @@ invalidates every rustc action at once. The one-line summary that local
 builds print counts those compilations as
 [`not looked up`](/cache-results#could-not-look-up).
 
-When the build loaded
-[recorded predictions](/how-it-works#prediction-and-dep-info), looked nothing
-up, and could not look up at least half as many compilations as those
-predictions named, the `ci` summary (the default in CI) and the `full` summary
+The `ci` summary (the default in CI) and the `full` summary
 (`MBX_SUMMARY=full`) also name the cause:
 `a manifest predicting N compilations was loaded, but none matched this build`.
+They print that line only when the build loaded
+[recorded predictions](/how-it-works#prediction-and-dep-info), looked nothing
+up, and could not look up at least half as many compilations as were predicted.
 
 Actions that do not depend on rustc, such as a build script's C objects,
 survive. If any of them is looked up, whether it hits or misses, the

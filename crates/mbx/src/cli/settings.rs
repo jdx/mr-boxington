@@ -50,8 +50,9 @@ pub(super) enum SettingsCommands {
 
 #[derive(usage::Args)]
 pub(super) struct LsArgs {
-    /// Setting or group to list, such as `gc` or `gc.max_size`. Lists every
-    /// setting when omitted.
+    /// Setting or group to list, such as `gc` or `gc.max_size`.
+    ///
+    /// Lists every setting when omitted.
     key: Option<String>,
 }
 

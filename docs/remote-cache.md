@@ -289,15 +289,16 @@ prefetched 161 actions; 214.8 MiB downloaded and 214.8 MiB stored locally
 ```
 
 - **Nothing recorded.** If no manifest has been published for the workspace's
-  lockfile, mbx prints `no recorded actions for this workspace and Cargo command`
-  and exits successfully. There was nothing to fetch, which is normal for a
-  first build.
+  lockfile or for an earlier lockfile it can borrow (see the next item), mbx
+  prints `no recorded actions for this workspace and Cargo command` and exits
+  successfully. There was nothing to fetch, which is normal for a first build.
 - **New lockfile.** A lockfile that has not been built yet borrows the manifest
   of the most recent earlier lockfile in Git history that has one, looking back
   up to eight lockfile states, so a dependency bump still prefetches the
-  unchanged part of the graph. A shallow checkout needs that history fetched. For GitHub Actions builds of the default pull-request merge
-  commit, `fetch-depth: 2` includes its base parent; builds of a PR head or
-  another ref may need more history.
+  unchanged part of the graph. A shallow checkout needs that history fetched.
+  For GitHub Actions builds of the default pull-request merge commit,
+  `fetch-depth: 2` includes its base parent; builds of a PR head or another ref
+  may need more history.
 - **Failed lookup.** A lookup that fails, such as an unreachable host or
   refused credentials, is an error, so CI can tell an empty cache from a broken
   one.

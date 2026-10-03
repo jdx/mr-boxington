@@ -130,7 +130,8 @@ after changing its inherited environment.
 To use the Cargo shim instead, run `mbx setup` and prepend the shim's directory
 to the `PATH` those processes use. With native mise integration, choose
 **Create the shim without activating it** if `mbx setup` prompts, and do not
-pass `--yes`, `--global`, or `--local`; see [rust-analyzer](#rust-analyzer).
+pass `--yes`, `--global`, or `--local`. Selecting a mise scope adds mise's Cargo
+wrapper, which takes precedence over the `mr_boxington` option.
 When `mbx setup` activates a mise config, it names that directory on every run.
 Without a mise config, only the first run prints a ready-made `PATH` line.
 Other runs print only the shim file, as in

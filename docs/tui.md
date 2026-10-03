@@ -145,9 +145,9 @@ heuristic, not proof that eviction caused specific misses.
 The banner alternates red and yellow once per second while keeping its text
 visible, and shows the evicted bytes and the miss rate. The scrollable Store
 report repeats them and suggests a larger `gc.max_size` budget and
-inspecting misses. The panel layout that larger terminals use shows the
-evicted bytes and counter updates for the last five minutes, but not the
-warning or the suggestion.
+inspecting misses. On larger terminals, the Store screen's panel layout shows
+the evicted bytes and counter updates for the last five minutes, but not the
+report's warning line or suggestion; the banner in the header still appears.
 
 ## Keys
 

@@ -80,9 +80,10 @@ options:
 cargo metadata --no-deps --format-version 1
 ```
 
-Resolve the reported Cargo error, then retry the build. Help, cleanup, and
-plain `cargo` commands run with `MBX_DISABLE` set still pass through without
-this probe; see [Run Cargo without mbx](#bypass-mbx-for-one-command).
+Resolve the reported Cargo error, then retry the build. Help and cleanup
+commands still pass through without this probe, as does any plain `cargo`
+command run with `MBX_DISABLE` set; see
+[Run Cargo without mbx](#bypass-mbx-for-one-command).
 
 Outside a project, commands such as `cargo binstall` pass through to Cargo,
 and `cargo build` in a directory with no manifest reports Cargo's own

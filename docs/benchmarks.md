@@ -127,8 +127,8 @@ oversubscribed it.
   produced the numbers. Every trial in a run uses that one compiler, so the
   tools are compared fairly against each other. A Rust upgrade between runs
   changes every cache key at once, which reads as a cache that stopped
-  working. Check that field before treating a drop across runs as a
-  regression.
+  working. Check that field before treating a drop across runs as
+  a regression.
 - The harness sets `CARGO_INCREMENTAL=0`, as CI does, in every scenario except
   the edit scenario. It clears any inherited `RUSTC_WRAPPER` or
   `RUSTC_WORKSPACE_WRAPPER`, and the run fails if the Cargo baseline turns out
@@ -185,8 +185,8 @@ dependency shape, such as heavy proc macros, a large C component, or many
 small leaf crates, will see different ratios. Three trials expose some
 variation; their ranges are not confidence intervals, and a “fastest” label is
 a display heuristic, not a statistical significance test. The benchmark is
-Linux-only, and [Caching limits](/limits) covers what changes on macOS and
-Windows.
+Linux-only, and [Caching limits](/limits) covers what changes on macOS
+and Windows.
 
 Instruction-counted measurements of mbx's own startup path, and cold and warm
 correctness runs against this workspace, live in

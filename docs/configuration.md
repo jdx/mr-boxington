@@ -172,19 +172,20 @@ Or run `mbx settings set gc.max_total_size 50GiB`. The environment equivalent is
 `MBX_GC_MAX_TOTAL_SIZE`.
 
 The budget covers action-store objects and results, managed targets, learned
-incremental state, and [generated source trees](/limits#out-dir-sharing). These
-components share the budget without the usual disk-scaled size caps. The per-crate learned
-incremental limit defaults to this same budget. Explicit component limits
-still apply; remove those settings if you want mbx to manage the allocation.
-Age limits and the automatic disk-free-space safeguard remain enabled.
+incremental state, and [generated source trees](/limits#out-dir-sharing).
+These components share the budget without the usual disk-scaled size caps.
+The per-crate learned incremental limit defaults to this same budget.
+Explicit component limits still apply; remove those settings if you want mbx
+to manage the allocation. Age limits and the automatic disk-free-space
+safeguard remain enabled.
 
 Collection reserves only the space the action store occupies, up to its limit,
 so an empty store does not force useful targets out. Learned incremental state
 and generated source trees use the remaining allowance; managed targets use what
-remains after them. If protected state leaves less room, mbx collects the action store
-to fit the remaining budget. This order favors shared cached results and
-incremental state over older target directories; allocation is not based on
-measured rebuild cost.
+remains after them. If protected state leaves less room, mbx collects the
+action store to fit the remaining budget. This order favors shared cached
+results and incremental state over older target directories; allocation is not
+based on measured rebuild cost.
 
 The budget is a **logical-byte collection target**, not a physical disk quota.
 Shared blocks can make physical usage smaller, while metadata, session history,
@@ -366,9 +367,9 @@ prints to stderr after a build:
 | `off` | No build summary; `MBX_STATS_REPORT` is still written when configured |
 
 `auto` treats a build as CI when `CI` or `GITHUB_ACTIONS` is `1`, `true`, or
-`yes` (case-insensitive). Set `short`, `ci`, `full`, or `off` to use that style
-everywhere.
-Cargo's `-q` and `--quiet` also suppress the summary for that invocation.
+`yes` (case-insensitive). Set `short`, `ci`, `full`, or `off` to use that
+style everywhere. Cargo's `-q` and `--quiet` also suppress the summary for
+that invocation.
 
 The `ci` style's `object cache:` counts and transfers exclude artifacts Cargo
 reused directly and archives that a CI cache step restored or saved. Compiler

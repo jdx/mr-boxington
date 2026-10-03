@@ -228,8 +228,8 @@ interactive build offers to remove a `target/` on another filesystem; see
 
 To adopt a directory skipped for being on another filesystem, set
 `target.root` to a location on that filesystem. If that filesystem does not
-also hold the cache directory, restores into the managed target copy every
-byte instead of cloning or hard linking.
+also hold the cache directory, mbx copies every restored output into the
+managed target instead of cloning or hard linking it.
 
 Before moving a directory, mbx takes its Cargo build locks. If a build is still
 writing there, `mbx adopt` leaves that directory in place and reports
@@ -332,9 +332,10 @@ A target directory is removed when any of these is true:
 [Keep or evict specific checkouts](#keep-or-evict-specific-checkouts) changes
 the order for checkouts you list.
 
-`mbx gc` prints the over-budget warning. A background sweep does not add it to
-the next build's report. Instead it writes the warning to `gc/v1/sweep.log` in
-the directory `mbx cache dir` prints, and each sweep starts that log afresh.
+`mbx gc` prints the `target.max_size` warning. A background sweep does not add
+that warning to the next build's report. Instead it writes it to
+`gc/v1/sweep.log` in the directory `mbx cache dir` prints, and each sweep starts
+that log afresh.
 
 Removing a target directory never removes cached compilations from the store.
 When the store itself must shrink, compilations no live checkout uses go
@@ -514,10 +515,7 @@ Filesystems using `relatime` coarsen that order; `noatime` removes it. A poor
 choice costs a recompile, not correctness.
 
 The action-store budget covers action objects and results. Prediction data,
-checkout records, and temporary downloads add overhead. Managed targets have
-their own budget and can take substantial space. To bound the action store,
-managed targets, and learned incremental state together, set a
-[single cache budget](/configuration#single-cache-budget).
+checkout records, and temporary downloads add overhead.
 
 ## Disable managed targets
 

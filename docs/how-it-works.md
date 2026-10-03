@@ -32,12 +32,12 @@ Both follow the same build lifecycle.
 6. The cache agent exits with the build, draining any remote uploads it still
    owes. There is no persistent daemon.
 
-Because every compiler call passes through a shim, mbx can also coordinate
-several Cargo builds running at once. Their compiler shims share a permit pool
-and an in-flight-work registry under the cache directory, so those builds do
-not multiply the machine's CPU and memory budgets or repeat an identical cold
-compilation. [Machine-wide scheduling](#machine-wide-scheduling) describes the
-mechanism. For ready-to-use recipes, see the
+Because the compilations mbx manages pass through its shims, mbx can also
+coordinate several Cargo builds running at once. Their compiler shims share a
+permit pool and an in-flight-work registry under the cache directory, so those
+builds do not multiply the machine's CPU and memory budgets or repeat an
+identical cold compilation. [Machine-wide scheduling](#machine-wide-scheduling)
+describes the mechanism. For ready-to-use recipes, see the
 [mise task example](/scheduling#run-independent-tasks) and the
 [parallel GitHub Actions example](/github-action#parallel-cargo-steps).
 
@@ -164,9 +164,10 @@ An output whose destination already holds the same bytes stays where it is;
 mbx refreshes the modification time of a Rust output kept this way. The
 summary counts it as `already in place`, and the report as
 `reused_output_files` and `reused_output_bytes`.
-`mbx doctor` reports which of the three a restore to a given target directory
-will use. On Windows, a hard link in that report means a copy, since restores
-there never hard link.
+
+`mbx doctor` reports which method (reflink, hard link, or copy) restores to a
+given target directory will use. On Windows, a hard link in that report means
+a copy, since restores there never hard link.
 
 ### Hard-linked outputs
 

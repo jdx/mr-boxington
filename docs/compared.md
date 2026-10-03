@@ -36,8 +36,7 @@ mbx brings these pieces together:
   default, including one that already exists outside CI, and reclaims the
   space when a copy of the project is deleted or storage limits are reached. A
   target directory you set yourself, such as with `CARGO_TARGET_DIR`, is left
-  alone.
-  See [Managed target directories](/managed-targets).
+  alone. See [Managed target directories](/managed-targets).
 - **Keep concurrent builds under control.** mbx shares CPU and memory across
   builds and holds back new compilations when memory is running low. This is
   enabled by default.
@@ -108,8 +107,8 @@ across agents.
 
 kache removes target directories only when you run `kache clean`. After
 builds, mbx removes the target directories it manages when their checkout is
-deleted, when they go unused for 30 days, or when together they exceed a disk
-budget.
+deleted, when they go unused for 30 days, or when together they exceed a
+disk budget.
 
 Both tools support C and C++; kache also supports CUDA. See its
 [current feature list](https://github.com/kunobi-ninja/kache) for supported

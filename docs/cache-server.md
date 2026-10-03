@@ -198,10 +198,9 @@ server rejects the token. With the example provider, set
 
 For S3 or Azure Blob storage, expire blobs with an S3 bucket lifecycle rule or
 an Azure Blob lifecycle management rule. Run a separate metadata sweep to
-remove old records. The sweep exits after
-cleanup without starting the server. Run it with the server's
-`MBX_CACHE_DATABASE_URL`; against the default `memory://`, it finds nothing to
-remove.
+remove old records. The sweep exits after cleanup without starting the server.
+Run it with the server's `MBX_CACHE_DATABASE_URL`; against the default
+`memory://`, it finds nothing to remove.
 
 ```sh
 MBX_CACHE_DATABASE_URL=postgres://... mbx-cache --sweep-metadata-older-than-days 35
