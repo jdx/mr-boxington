@@ -199,7 +199,7 @@ run = "tak run --record"
 mr-boxington = { version = "latest", minimum_release_age = "0s" }
 tak = { version = "latest", minimum_release_age = "0s" }
 aube = { version = "latest", lazy = true, lazy_bins = ["aube"], minimum_release_age = "0s" }
-hk = "2.0.1"
+hk = { version = "latest", minimum_release_age = "0s" }
 communique = { version = "latest", minimum_release_age = "0s" }
 lychee = "0.24.2"
 node = "24"
