@@ -532,10 +532,10 @@ fn links_outside_out_dir(directive: &str, mappings: &[PathMapping]) -> bool {
     //
     // A relative path is resolved by the linker from the build script's working
     // directory, which can place it in the target directory too.
-    let working_dir = std::env::current_dir().ok();
+    let bases = relative_bases();
     // The word after `-l` or `-framework` names a library, not a path.
     let mut names_library = false;
-    let relative_in_target = working_dir.is_some_and(|working_dir| {
+    let relative_in_target = {
         value.split(' ').any(|word| {
             let skip = std::mem::replace(
                 &mut names_library,
@@ -544,9 +544,9 @@ fn links_outside_out_dir(directive: &str, mappings: &[PathMapping]) -> bool {
             !skip
                 && word
                     .split(['=', ','])
-                    .any(|token| relative_token_is_in_target(token, &working_dir, mappings))
+                    .any(|token| relative_token_is_in_target(token, &bases, mappings))
         })
-    });
+    };
     relative_in_target
         || value.contains("${target")
         || value.split([' ', '=', ',']).any(|token| {
@@ -567,24 +567,37 @@ fn links_outside_out_dir(directive: &str, mappings: &[PathMapping]) -> bool {
         })
 }
 
-/// Whether a relative path argument, taken from `working_dir`, lands in the
-/// target directory once its `.` and `..` components are resolved.
-fn relative_token_is_in_target(token: &str, working_dir: &Path, mappings: &[PathMapping]) -> bool {
+/// The directories a relative link path may be resolved from: the build
+/// script's working directory, and the workspace root that rustc runs in.
+fn relative_bases() -> Vec<PathBuf> {
+    let mut bases = Vec::new();
+    bases.extend(std::env::current_dir().ok());
+    bases.extend(std::env::var_os(session::WORKSPACE_ROOT_ENV).map(PathBuf::from));
+    bases
+}
+
+/// Whether a relative path argument lands in the target directory from any of
+/// `bases` once its `.` and `..` components are resolved.
+fn relative_token_is_in_target(token: &str, bases: &[PathBuf], mappings: &[PathMapping]) -> bool {
+    // An attached `-L<path>` carries its path after the flag.
+    let token = token.strip_prefix("-L").unwrap_or(token);
     let path = Path::new(token);
     if token.is_empty() || token.starts_with(['-', '$']) || !path.is_relative() {
         return false;
     }
-    let mut resolved = PathBuf::new();
-    for component in working_dir.join(path).components() {
-        match component {
-            std::path::Component::ParentDir => {
-                resolved.pop();
+    bases.iter().any(|base| {
+        let mut resolved = PathBuf::new();
+        for component in base.join(path).components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    resolved.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => resolved.push(other),
             }
-            std::path::Component::CurDir => {}
-            other => resolved.push(other),
         }
-    }
-    normalize_environment_value(&resolved.to_string_lossy(), mappings).contains("${target")
+        normalize_environment_value(&resolved.to_string_lossy(), mappings).contains("${target")
+    })
 }
 
 /// Whether recorded output carries such a directive. Predictions stored before
@@ -1461,6 +1474,12 @@ mod tests {
             relative,
             &relative_mappings
         ));
+        let attached = "cargo:rustc-flags=-Ltarget/debug/gn_out/obj\n";
+        assert!(
+            parse_prediction_with_mappings(attached, &relative_mappings)
+                .unwrap()
+                .is_none()
+        );
         let library = "cargo:rustc-flags=-l target\n";
         assert!(
             parse_prediction_with_mappings(library, &relative_mappings)
