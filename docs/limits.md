@@ -253,8 +253,9 @@ zeros instead. The [`ar_determinism`](/configuration#ar-determinism) setting
 (`MBX_AR_DETERMINISM`) chooses when:
 
 - `auto` (the default) covers every build whose Cargo `PROFILE` is not
-  `release`, so `--release` builds and profiles that inherit from `release`,
-  such as `bench`, stay byte-for-byte as the toolchain made them.
+  `release`. Cargo reports `release` for `--release` builds and for every
+  profile that inherits from `release`, such as `bench`, so their archives stay
+  byte-for-byte as the toolchain made them.
 - `always` covers those builds too.
 - `off` leaves the archive tools alone.
 

@@ -16,7 +16,7 @@ Set `ZERO_AR_DATE` for build scripts so native archives omit a timestamp.
 
 Apple's `ar` and `ranlib` read the variable; other archivers ignore it. Without it, those tools stamp the time into every archive they write, such as the ones CMake-based dependencies build with `/usr/bin/ar` on macOS. An archive rebuilt from unchanged objects then gets a new digest, and every cached action downstream of it misses.
 
-`auto` normalizes every build whose Cargo `PROFILE` is not `release`, leaving `--release` builds and profiles that inherit from `release` (such as `bench`) byte-for-byte as the host toolchain made them. `always` covers those too, and `off` leaves the toolchain alone. A `ZERO_AR_DATE` you set yourself always wins.
+`auto` normalizes every build whose Cargo `PROFILE` is not `release`. Cargo reports `release` for `--release` builds and for every profile that inherits from `release`, such as `bench`, so `auto` leaves their archives byte-for-byte as the host toolchain made them. `always` covers those too, and `off` leaves the toolchain alone. A `ZERO_AR_DATE` you set yourself always wins.
 
 mbx sets the variable through the build-script wrapper that `build_script_execution` installs, so this has no effect on build scripts compiled while that setting is off.
 
