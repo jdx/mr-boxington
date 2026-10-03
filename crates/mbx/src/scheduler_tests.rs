@@ -97,6 +97,61 @@ fn weights_count_against_capacity() {
 }
 
 #[test]
+fn a_reservation_charges_the_larger_of_cpu_and_memory_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 4, 1024);
+
+    let reservation = pool.reserve(Some(1), Some(3 * 1024)).unwrap();
+    assert!(
+        pool.try_admit(2, None).unwrap().is_none(),
+        "three memory permits leave only one"
+    );
+    drop(reservation);
+    assert!(pool.try_admit(4, None).unwrap().is_some());
+}
+
+#[test]
+fn a_reservation_requires_a_requested_resource() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 4, 1024);
+
+    assert!(pool.reserve(None, None).is_err());
+}
+
+#[test]
+fn a_memory_reservation_needs_a_memory_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 4, 0);
+
+    assert!(pool.reserve(None, Some(1024)).is_err());
+}
+
+#[test]
+fn a_waiting_normal_reservation_holds_low_priority_work_back() {
+    let directory = tempfile::tempdir().unwrap();
+    let normal = pool_at(directory.path(), 1, 0);
+    let held = normal.try_admit(1, None).unwrap().expect("first permit");
+    let waiting_dir = directory.path().to_path_buf();
+    let waiter = std::thread::spawn(move || {
+        let pool = pool_at(&waiting_dir, 1, 0);
+        pool.reserve(Some(1), None).unwrap()
+    });
+
+    for _ in 0..20 {
+        if directory.path().join(PRIORITY_WAIT_STAMP).exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        directory.path().join(PRIORITY_WAIT_STAMP).exists(),
+        "a normal reservation waiting for capacity announces itself"
+    );
+    drop(held);
+    drop(waiter.join().unwrap());
+}
+
+#[test]
 fn a_build_limit_counts_only_that_builds_leases() {
     let directory = tempfile::tempdir().unwrap();
     let mut other = pool_at(directory.path(), 6, 0);

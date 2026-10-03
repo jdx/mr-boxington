@@ -75,6 +75,11 @@ const LEDGER_LOCK: &str = "memory.lock";
 
 /// Where the pool lives; empty means the session turned scheduling off.
 pub(crate) const SCHED_DIR_ENV: &str = "MBX_SCHED_DIR";
+/// Keep scheduler shims off for work already covered by an outer reservation.
+///
+/// A nested `mbx` command otherwise constructs a new session and re-resolves
+/// configuration, which would replace an inherited empty `MBX_SCHED_DIR`.
+pub(crate) const SCHED_DISABLE_ENV: &str = "MBX_SCHED_DISABLE";
 /// Machine-wide concurrent compile permits.
 pub(crate) const SCHED_SLOTS_ENV: &str = "MBX_SCHED_SLOTS";
 /// Memory one permit stands for; zero disables memory weighting.
@@ -513,6 +518,27 @@ pub(crate) fn pool() -> Option<&'static Pool> {
     POOL.get_or_init(resolve_pool).as_ref()
 }
 
+/// Construct the pool used by `mbx reserve`.
+///
+/// Reservations are explicit user requests, unlike compiler shims where a
+/// broken scheduler must fail open. Keep their priority separate from the
+/// configured default: an unattended external job may deliberately yield to
+/// normal builds without changing the priority of every later Cargo command.
+pub(crate) fn reservation_pool(config: &Config, priority: SchedulerPriority) -> Option<Pool> {
+    let scheduler = &config.scheduler;
+    scheduler.enabled.then(|| {
+        let permits = scheduler.permits();
+        let mut pool = Pool::new(
+            config.cache_dir.join(SCHEDULER_DIR),
+            permits,
+            bytes_per_permit(scheduler.memory_bytes, permits),
+            priority,
+        );
+        pool.pressure = scheduler.pressure;
+        pool
+    })
+}
+
 fn resolve_pool() -> Option<Pool> {
     match std::env::var_os(SCHED_DIR_ENV) {
         Some(dir) if dir.is_empty() => None,
@@ -568,7 +594,7 @@ pub(crate) fn session_environment_with_jobs(
     cargo_jobs: Option<u64>,
 ) -> Vec<(String, String)> {
     let scheduler = &config.scheduler;
-    if !scheduler.enabled {
+    if !scheduler.enabled || std::env::var_os(SCHED_DISABLE_ENV).is_some() {
         return vec![(SCHED_DIR_ENV.into(), String::new())];
     }
     let permits = scheduler.permits();
@@ -735,6 +761,46 @@ impl Pool {
                     "waiting for {weight} of {} machine-wide compile permits ({})",
                     self.capacity, demand.name
                 );
+            }
+            std::thread::sleep(jittered(delay));
+            delay = (delay * 2).min(POLL_MAX);
+        }
+    }
+
+    /// Wait for and hold capacity for work mbx does not launch itself.
+    ///
+    /// Unlike compiler admission this propagates scheduler errors: silently
+    /// running an explicitly reserved command without its reservation would
+    /// defeat the command's purpose.
+    pub(crate) fn reserve(&self, cpus: Option<u64>, memory_bytes: Option<u64>) -> Result<Permit> {
+        let cpu_weight = cpus.unwrap_or(0);
+        let memory_weight = match memory_bytes {
+            Some(_) if self.bytes_per_permit == 0 => {
+                eyre::bail!("--memory needs scheduler.memory to be configured")
+            }
+            Some(memory) => memory.div_ceil(self.bytes_per_permit),
+            None => 0,
+        };
+        let weight = cpu_weight.max(memory_weight);
+        if weight == 0 {
+            eyre::bail!("reserve needs --cpus, --memory, or both")
+        }
+
+        let started = Instant::now();
+        let mut delay = POLL_INITIAL;
+        let mut stamped: Option<Instant> = None;
+        loop {
+            // Like compiler admission, a persistently low available-memory
+            // reading must not turn an advisory gate into permanent starvation.
+            let gate = memory_bytes.filter(|_| started.elapsed() < GATE_DEADLINE);
+            if let Some(permit) = self.try_admit(weight, gate)? {
+                return Ok(permit);
+            }
+            if self.priority == SchedulerPriority::Normal
+                && stamped.is_none_or(|last| last.elapsed() >= PRIORITY_STAMP_INTERVAL)
+            {
+                let _ = std::fs::write(self.dir.join(PRIORITY_WAIT_STAMP), b"");
+                stamped = Some(Instant::now());
             }
             std::thread::sleep(jittered(delay));
             delay = (delay * 2).min(POLL_MAX);

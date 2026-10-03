@@ -28,6 +28,7 @@ mod mascot;
 mod plain_progress;
 mod prefetch;
 mod pretty;
+mod reserve;
 mod settings;
 mod setup;
 mod shim;
@@ -187,6 +188,17 @@ enum Commands {
     /// Everything after the command name belongs to the command, including a
     /// later `--`, as in `mbx exec cmake --build build -- -j8`.
     Exec(exec::ExecArgs),
+    /// Hold scheduler capacity while an external command runs.
+    ///
+    /// This is for work such as a VM, Docker build, or another compiler that
+    /// consumes the same machine resources but does not run through mbx.
+    /// It waits for the requested capacity, runs the command, and releases
+    /// that capacity whenever the command or its mbx parent exits.
+    ///
+    /// `--memory` is charged against `scheduler.memory`, so it needs that
+    /// setting to be enabled. Specify one or both resource flags, as in
+    /// `mbx reserve --memory 6GiB --cpus 4 -- ./run-windows-build-in-vm.sh`.
+    Reserve(reserve::ReserveArgs),
     #[usage(external_subcommand)]
     Cargo(Vec<String>),
 }
@@ -229,6 +241,7 @@ fn compiles_nothing(command: &Commands) -> Option<&'static str> {
         // Its whole subject is the C and C++ compiles of a build cargo is not
         // running, so a Rust toolchain has nothing to select here.
         Commands::Exec(_) => Some("exec"),
+        Commands::Reserve(_) => Some("reserve"),
         Commands::Doctor(_) | Commands::Explain(_) | Commands::Prefetch(_) | Commands::Cargo(_) => {
             None
         }
@@ -257,6 +270,9 @@ pub fn run() -> Result<ExitCode> {
     }
     if let Commands::Exec(args) = &mut cli.command {
         args.command = original_exec_arguments(&original)?;
+    }
+    if let Commands::Reserve(args) = &mut cli.command {
+        args.command = original_reserve_arguments(&original)?;
     }
     if let Commands::Doctor(args) = &cli.command {
         // Doctor describes the toolchain selected at this invocation site.
@@ -320,6 +336,7 @@ pub fn run() -> Result<ExitCode> {
             prefetch::run(&config, settings.events_max_size, &args.cargo_args)
         }
         Commands::Exec(args) => exec::run(&config, &settings, &args),
+        Commands::Reserve(args) => reserve::run(&config, args),
         Commands::Cargo(arguments) => {
             shim::prepare_explicit_cargo()?;
             cargo::run(&config, &settings, &with_toolchain(toolchain, arguments))
@@ -355,6 +372,37 @@ fn original_exec_arguments(arguments: &[std::ffi::OsString]) -> Result<Vec<Strin
     }
     // A separator before the command belongs to exec, and running it would
     // look for a program named `--`.
+    if rest.first().is_some_and(|argument| argument == "--") {
+        rest = &rest[1..];
+    }
+    strings(rest)
+}
+
+/// Recover `mbx reserve`'s command exactly as it was typed.
+///
+/// Like `exec`, reserve has a command that may itself use `--`. The parser
+/// consumes the first separator, so find the first non-option after reserve's
+/// own options and hand every remaining word to the external command.
+fn original_reserve_arguments(arguments: &[std::ffi::OsString]) -> Result<Vec<String>> {
+    let Some(index) = arguments
+        .iter()
+        .position(|argument| argument == std::ffi::OsStr::new("reserve"))
+    else {
+        eyre::bail!("could not recover reserve arguments");
+    };
+    let mut rest = &arguments[index + 1..];
+    while let Some(first) = rest.first().and_then(|argument| argument.to_str()) {
+        if matches!(first, "--cpus" | "--memory" | "--priority") {
+            rest = rest.get(2..).unwrap_or_default();
+        } else if first.starts_with("--cpus=")
+            || first.starts_with("--memory=")
+            || first.starts_with("--priority=")
+        {
+            rest = &rest[1..];
+        } else {
+            break;
+        }
+    }
     if rest.first().is_some_and(|argument| argument == "--") {
         rest = &rest[1..];
     }
@@ -397,6 +445,8 @@ mod exec_tests;
 mod gc_tests;
 #[cfg(test)]
 mod prefetch_tests;
+#[cfg(test)]
+mod reserve_tests;
 #[cfg(test)]
 mod settings_tests;
 #[cfg(test)]
