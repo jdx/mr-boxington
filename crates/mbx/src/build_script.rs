@@ -834,9 +834,12 @@ fn input_state_at(
 /// File times come from a clock that can lag the one `SystemTime` reads by a
 /// tick or more, so comparing the two misjudges a write made in the first
 /// moments of a run or an input edited just before it. A file created now
-/// carries the time any write from here on will carry or exceed. Falls back to
-/// the process clock when no file can be made.
+/// carries the time any write from here on will carry or exceed. The earlier of
+/// that and the process clock is used, so a file system whose clock runs ahead
+/// of this machine's (a network mount, say) cannot push the start past a write.
+/// Falls back to the process clock when no file can be made.
 fn run_start_stamp() -> SystemTime {
+    let now = SystemTime::now();
     let stamp = std::env::var_os("OUT_DIR").and_then(|out_dir| {
         let path = Path::new(&out_dir).join(format!(".mbx-run-start-{}", std::process::id()));
         std::fs::write(&path, b"").ok()?;
@@ -844,7 +847,7 @@ fn run_start_stamp() -> SystemTime {
         let _ = std::fs::remove_file(&path);
         modified
     });
-    stamp.unwrap_or_else(SystemTime::now)
+    stamp.map_or(now, |stamp| stamp.min(now))
 }
 
 /// Whether anything a prediction declares as an input was modified at or after
