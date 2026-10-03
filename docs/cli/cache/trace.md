@@ -3,10 +3,10 @@
 
 - **Usage:** `mbx cache trace <SESSION>`
 
-Export wrapper timings from a session JSONL file as Perfetto-compatible trace JSON.
+Print a session file's wrapper timings as Perfetto-compatible trace JSON.
 
 ## Arguments
-- **`<SESSION>`** — Session JSONL file under the store's sessions/v1 directory.
+- **`<SESSION>`** — Session history file, such as `$(mbx cache dir)/sessions/v1/<session>.jsonl`.
 
 ## Flags
 - **`-h --help`** — Print help

@@ -6,10 +6,17 @@ use std::process::ExitCode;
 #[derive(usage::Args)]
 #[usage(unknown_flags = "value")]
 pub(super) struct ExplainArgs {
-    /// Explain the most recent recorded build without running Cargo again.
+    /// Explain this workspace's most recent recorded build without running Cargo.
+    ///
+    /// mbx reads the newest build recorded for the Cargo workspace that contains
+    /// the current directory and fails when there is none; it never picks a newer
+    /// build from another checkout. It compares each miss with the most recent
+    /// earlier recording of that compilation unit: from this workspace when it
+    /// has one, otherwise from another checkout of the same project (one whose
+    /// `Cargo.lock` is identical).
     #[usage(long)]
     last: bool,
-    /// Cargo subcommand to run under diagnostics.
+    /// Cargo subcommand, such as `build`, to run and check for cache bypasses.
     #[usage(value_name = "CARGO_COMMAND")]
     cargo_command: Option<String>,
     /// Arguments to pass to the Cargo subcommand.

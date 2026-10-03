@@ -5,7 +5,7 @@
 
 Print the current value of one setting.
 
-The value comes from the environment, the global configuration file, or the default. Workspace `.mbx.toml` settings are not included. A setting with no value prints nothing.
+The value comes from the environment, the global configuration file, or the setting's fixed default. Workspace `.mbx.toml` settings are not included. A setting with neither a value nor a fixed default prints nothing. That includes a setting whose default mbx computes when it runs, such as `gc.max_size`; `mbx settings ls` describes those defaults.
 
 ## Arguments
 - **`<KEY>`** — Setting name, such as `gc.max_size`.

@@ -16,38 +16,49 @@ pub(super) struct CacheArgs {
 
 #[derive(usage::Subcommands)]
 pub(super) enum CacheCommands {
-    /// Export wrapper timings from a session JSONL file as Perfetto-compatible trace JSON.
+    /// Print a session file's wrapper timings as Perfetto-compatible trace JSON.
     Trace(TraceArgs),
     /// Print the store directory.
     Dir(JsonArgs),
-    /// Summarize what the store holds.
+    /// Summarize the action store, managed targets, and learned incremental state.
+    ///
+    /// The report also counts generated source trees and ends with the combined
+    /// logical size of all four.
     Stats(JsonArgs),
     /// Show cache use attributed to recorded workspaces.
     Projects,
-    /// List the largest objects and action-result records.
+    /// List the largest objects and action results.
     Largest(LargestArgs),
     /// Verify local objects and action results.
-    Verify,
-    /// Export the cache closure of this checkout's last build. The export includes
-    /// Cargo scheduler state for recorded workspaces, with compiler outputs referenced
-    /// from the content-addressed closure instead of duplicated.
-    Export(ExportArgs),
-    /// Import a cache export into the local store. A directory export is consumed:
-    /// its objects are moved into the store and the directory is removed. If the
-    /// export contains Cargo workspace state and the command runs from a matching
-    /// checkout with an absent or empty target directory, restore that state as well.
-    /// A non-empty target directory is never replaced.
-    Import(ImportArgs),
-    /// Remove managed targets, learned incremental state, and cache claims for
-    /// one workspace or selected workspaces.
     ///
-    /// Provide exactly one of `<WORKSPACE>` or `--interactive`.
+    /// mbx prints each invalid entry and exits with a failure status if it finds any.
+    Verify,
+    /// Export the cache entries this checkout's last build produced or used.
+    ///
+    /// The bundle also carries Cargo's scheduler state for each recorded
+    /// workspace. Compiler outputs in that state point at cache objects in the
+    /// bundle instead of being stored twice.
+    Export(ExportArgs),
+    /// Import a cache export into the local store.
+    ///
+    /// A directory export is consumed: mbx moves its objects into the store and
+    /// then removes the directory. When the export carries Cargo workspace state
+    /// and you run the command from a matching checkout whose target directory is
+    /// absent or empty, mbx restores that state too. mbx never replaces a
+    /// non-empty target directory.
+    Import(ImportArgs),
+    /// Remove a workspace's managed target, learned incremental state, and cache claims.
+    ///
+    /// Provide exactly one of `<WORKSPACE>` or `--interactive`. mbx keeps a
+    /// managed target or learned incremental state that a running command is
+    /// using. Shared cache objects stay in the store for other workspaces and
+    /// normal collection.
     Remove(RemoveCacheArgs),
 }
 
 #[derive(usage::Args)]
 pub(super) struct TraceArgs {
-    /// Session JSONL file under the store's sessions/v1 directory.
+    /// Session history file, such as `$(mbx cache dir)/sessions/v1/<session>.jsonl`.
     session: PathBuf,
 }
 
@@ -67,11 +78,19 @@ pub(super) struct LargestArgs {
 
 #[derive(usage::Args)]
 pub(super) struct ExportArgs {
-    /// Export every build that set MBX_CACHE_EXPORT_GROUP to this CI group.
+    /// CI group to export instead of this checkout's last build.
+    ///
+    /// The bundle covers every finished build that ran with
+    /// `MBX_CACHE_EXPORT_GROUP` set to this value and has not been exported yet.
+    /// A successful export marks those builds as exported, so exporting the same
+    /// group again includes only builds that finished since, and fails when there
+    /// are none. A failed export leaves them pending for a retry.
     #[usage(long, value_name = "GROUP")]
     group: Option<String>,
-    /// Bundle layout: tar for a portable archive, or directory for a transport
-    /// that archives a directory itself, such as the GitHub Actions cache.
+    /// Bundle layout: `tar` for a portable archive, or `directory` for a CI cache.
+    ///
+    /// Use `directory` with a backend that archives a directory itself, such as
+    /// the GitHub Actions cache; a tar there would write every byte twice.
     #[usage(long, value_name = "FORMAT", default = "tar")]
     format: String,
     /// Tar archive or directory to write.
@@ -90,7 +109,9 @@ pub(super) struct RemoveCacheArgs {
     /// Workspace root to forget.
     #[usage(group = "removal_mode")]
     workspace: Option<PathBuf>,
-    /// Select recorded workspaces to remove.
+    /// Choose from a list of recorded workspaces to remove.
+    ///
+    /// Requires a terminal.
     #[usage(long, group = "removal_mode")]
     interactive: bool,
 }

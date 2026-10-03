@@ -28,9 +28,12 @@ async function copyCommand() {
       </button>
     </div>
     <p class="install-note">
-      <span>Linux · macOS · Windows</span>
+      <span
+        >Requires mise 2026.9.2+ · Also installs Rust · Linux, macOS (Apple
+        Silicon), Windows</span
+      >
       <a href="/installation"
-        >More install options <span aria-hidden="true">↗</span></a
+        >More install options <span aria-hidden="true">→</span></a
       >
     </p>
     <p class="copy-status" role="status">{{ status }}</p>

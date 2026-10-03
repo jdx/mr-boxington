@@ -7,10 +7,11 @@ Give independent Cargo commands their own target directories. mbx coordinates
 their real compiler processes through a shared CPU and memory budget; Cargo
 continues to plan dependencies within each build.
 
-`check` and `clippy` need no setup: in a managed target they already write to
-their own [directory](/managed-targets#check-lanes), so `mbx clippy` runs beside
-`mbx build`. The rest of this page is for commands that would otherwise share
-a target directory, such as two builds or several lint configurations.
+`check` and `clippy` need no setup. In a managed target directory, they
+already write to their own [check lane](/managed-targets#check-lanes), so
+`mbx clippy` runs beside `mbx build`. The rest of this page is for commands
+that would otherwise share a target directory, such as two builds or several
+lint configurations.
 
 ## Run independent tasks
 
@@ -35,8 +36,9 @@ mise run lint:default ::: lint:all
 Separate target directories keep Cargo's directory lock from serializing the
 commands. mbx shares one machine-wide compiler pool and deduplicates identical
 work in flight without further configuration. See
-[how it works](/how-it-works#machine-wide-scheduling) for the mechanism and
-the same shape [inside GitHub Actions](/github-action#parallel-cargo-steps).
+[Machine-wide scheduling](/how-it-works#machine-wide-scheduling) for the
+mechanism and [Parallel Cargo steps](/github-action#parallel-cargo-steps) for
+the same setup in GitHub Actions.
 
 ## Machine-wide compile scheduling
 
@@ -53,25 +55,36 @@ the cgroup's memory limit constrains that budget.
 
 Compiler processes take permits according to their estimated memory use.
 Unmeasured compilations start at one permit; native links start at two and can
-use estimates from earlier links. Measurements refine later admissions.
-Set `scheduler.memory = "none"` to use CPU permits without memory weighting.
+use estimates from earlier links. Measurements refine later admissions. mbx
+measures compiler memory on Unix only, so on Windows, compilations keep these
+starting weights. Set `scheduler.memory = "none"` to use CPU permits without
+memory weighting.
 
-Cache hits do not need compiler permits. If a process dies, the kernel releases
-its permits. For the weighting and recovery details, see
-[how it works](/how-it-works#machine-wide-scheduling).
+Cache hits do not need compiler permits. If a process dies, the kernel
+releases its permits. For the weighting and recovery details, see
+[Machine-wide scheduling](/how-it-works#machine-wide-scheduling).
 
-Live pressure control is enabled by default (`scheduler.pressure = true`). It
-pauses additional admissions, including compilations with no memory history,
-while memory headroom is low or Linux memory-stall measurements show sustained
-pressure. macOS uses available-memory headroom; it has no Linux PSI signal.
+Live pressure control is on by default (`scheduler.pressure = true`). It
+pauses further admissions, including compilations with no memory history, while
+available memory is low or memory stalls show sustained pressure. The signals
+mbx reads depend on the platform:
+
+- Linux: available-memory headroom and pressure stall information (PSI), the
+  kernel's measure of time lost waiting for memory
+- macOS: available-memory headroom only
+- Windows: neither, so pressure control does not pause admissions there
+
 At least one compilation can run when the pool is idle. After five healthy
-seconds, admissions resume gradually for five seconds. Running processes are
-not suspended by this setting.
+seconds, mbx admits at most one compilation every half second for five seconds,
+then lifts that limit. Pressure control does not suspend running processes. To
+freeze them, see
+[Experimental Linux compiler supervision](#experimental-linux-compiler-supervision).
 
-Set `scheduler.pressure = false` (`MBX_SCHEDULER_PRESSURE=0`) to retain the
-existing estimate-based admission policy. Disabling the scheduler or setting
-`scheduler.memory = "none"` also disables pressure control. If pressure probes
-fail, scheduling falls back to the existing permit and estimate checks.
+Set `scheduler.pressure = false` (`MBX_SCHEDULER_PRESSURE=0`) to admit
+compilations on permits and memory estimates alone. Disabling the scheduler or
+setting `scheduler.memory = "none"` also disables pressure control. If the
+pressure probes fail, scheduling falls back to the same permit and estimate
+checks.
 
 Use `scheduler.priority = "low"` (`MBX_SCHEDULER_PRIORITY=low`) for an editor's
 background check or CI on a shared machine. While normal-priority work is
@@ -79,10 +92,10 @@ waiting, low-priority builds leave a quarter of the pool available for it.
 
 ## Schedule test binaries
 
-Compile permits stop at the compiler. When several `cargo test` commands reach
-their test runs together, each libtest harness starts a thread per CPU. Set
-`scheduler.tests = true` (`MBX_SCHEDULER_TESTS=1`) to run test binaries through
-the same pool:
+By default, permits cover compilers only. When several `cargo test` commands
+reach their test runs together, each libtest harness starts a thread per CPU.
+Set `scheduler.tests = true` (`MBX_SCHEDULER_TESTS=1`) to run test binaries
+through the same pool:
 
 ```sh
 MBX_SCHEDULER_TESTS=1 mbx test --workspace   # this run
@@ -101,18 +114,25 @@ have configured. Each test binary waits for permits before it starts:
 Only complete runs of at least a second are measured; a run narrowed by a test
 name, `--skip`, or `--ignored` is not. A recorded core count only goes up,
 because a suite measured on a busy machine gets fewer cores than it would use.
+mbx measures CPU and memory on Unix only. On Windows, a binary always asks for
+its stated thread count or half the pool.
+
 History is kept per Git repository, package, and test binary. Worktrees of one
-repository share it, and separate clones and unrelated projects do not. Outside
-Git, projects that share a package and test name share history. A run with a stated
-thread count keeps separate history from the default width.
-CPU is measured on Unix only; on Windows the other rules apply.
+repository share it; separate clones and unrelated projects do not. Outside
+Git, projects that share a package and test name share history. A run with a
+stated thread count keeps its history apart from runs at the default thread
+count.
 
 Builds a test starts, such as trybuild or compile-fail suites, are charged to
 the test's permits and run without taking permits of their own.
 
-Doctests, `cargo test --no-run`, commands with `--config`, a `+toolchain`
-override, or a directory change (`-C`, `--directory`), and test runners other
-than `cargo test` run unscheduled.
+These run unscheduled:
+
+- doctests
+- `cargo test --no-run`
+- commands with `--config`, a `+toolchain` override, or a directory change
+  (`-C`, `--directory`)
+- test runners other than `cargo test`
 
 ## Choose the scope of a limit
 
@@ -126,17 +146,35 @@ than `cargo test` run unscheduled.
 
 A memory budget schedules work using measurements; it is not an operating-system
 memory limit. A compiler process can still exceed its estimate. For laptop
-settings, see [Keep a laptop responsive](/cookbook/local-development#keep-a-laptop-responsive).
+settings, see
+[Keep a laptop responsive](/cookbook/local-development#keep-a-laptop-responsive).
 
 ## Experimental Linux compiler supervision
 
+Pressure control only holds back new compilations. With supervision, mbx can
+also freeze running compilers while memory is under pressure and resume them
+when pressure recovers.
+
+::: warning Experimental
+Compiler supervision is experimental and off by default. It needs Linux and a
+delegated cgroup v2 directory. If you enable it where delegation is unavailable
+or on another platform, mbx warns once per build and continues with admission
+scheduling.
+:::
+
 `scheduler.suspend = true` (`MBX_SCHEDULER_SUSPEND=1`) opts compiler processes
-into cgroup supervision. Set `scheduler.cgroup_root` (`MBX_SCHEDULER_CGROUP_ROOT`)
-to an absolute path to a writable, delegated cgroup v2 directory. mbx creates
-its own descendants and does not change limits on the supplied directory.
-Pressure control and memory scheduling must also be enabled. These two settings
-are user/environment configuration only; repository `.mbx.toml` policy cannot
-opt a contributor into supervision or choose their delegated directory.
+into cgroup supervision. Supervision also needs:
+
+- `scheduler.cgroup_root` (`MBX_SCHEDULER_CGROUP_ROOT`) set to the absolute
+  path of a writable, delegated cgroup v2 directory
+- pressure control and memory scheduling, which are both on by default
+
+Set `scheduler.suspend` and `scheduler.cgroup_root` in your global
+configuration file or the environment. A repository's `.mbx.toml` cannot opt a
+contributor into supervision or choose their delegated directory. mbx creates
+its own cgroups inside the delegated directory and does not change limits on
+it. Enabling supervision does not provision systemd units, grant permissions,
+or modify host cgroup limits.
 
 ```toml
 [scheduler]
@@ -145,29 +183,35 @@ cgroup_root = "/sys/fs/cgroup/my-delegated-builds"
 ```
 
 After pressure persists for two seconds, mbx can freeze the newest eligible
-compiler tree, at most one per second. The oldest eligible action keeps running;
-when it finishes its successor is resumed to preserve progress. After pressure
-recovers, suspended work resumes oldest first before new admissions. Frozen
-compilers retain their permits. Freezing stops execution but retains allocated
-memory; it cannot rescue a compilation that is too large to run alone.
+compiler tree (the compiler and the processes it starts), at most one per
+second. The oldest eligible compilation keeps running; when it finishes, mbx
+resumes its successor to preserve progress. After pressure recovers, mbx
+resumes suspended work oldest first, before it admits anything new. Frozen
+compilers keep their permits. Freezing stops execution but keeps allocated
+memory, so it cannot rescue a compilation that is too large to run alone.
 
-A supervisor and an independent watchdog stay outside the compiler cgroups.
-Losing the supervisor's heartbeat thaws its compiler groups. Losing the
-watchdog's heartbeat starts a replacement watchdog for the compilers still
-running. The next supervisor removes cgroups and state left by earlier ones
-once their compilers have exited.
-Compiler cancellation thaws the owned group before terminating leftover
-processes. Custom compiler wrappers, build-script binaries, test binaries, and
-compilers nested inside a supervised compiler are not eligible.
+Custom compiler wrappers, build-script binaries, test binaries, and compilers
+nested inside a supervised compiler are not eligible.
 
-If delegation is unavailable or the platform is unsupported, mbx warns once per
-session and continues with admission scheduling. Enabling this option does not
-provision systemd units, grant permissions, or modify host cgroup limits.
+mbx runs a supervisor and an independent watchdog outside the compiler cgroups.
+Each watches the other's heartbeat, and the supervisor also checks its
+pressure probes:
 
-Suspension/resumption events and per-action memory and suspended-time statistics
-are recorded beneath `scheduler/supervision-*/` in the cache directory. Compiler
-completion reports time spent suspended. Probe failures or a lost watchdog
-heartbeat thaw the generation and disable further suspension. Ownership cleanup
-continues until the existing actions finish. Suspension never kills
-and retries a compilation; termination of orphaned descendants is cancellation
-cleanup only.
+- If the supervisor's heartbeat stops, the watchdog thaws the supervisor's
+  compilers and disables further suspension.
+- If the watchdog's heartbeat stops, the supervisor does the same and starts a
+  replacement watchdog for the compilers still running.
+- If a pressure probe fails, the supervisor thaws its compilers and disables
+  further suspension.
+
+After suspension is disabled, mbx keeps cleaning up the cgroups it owns until
+their compilations finish. Once an earlier supervisor's compilers have exited,
+the next supervisor removes the cgroups and state it left behind.
+
+When a compilation is cancelled, mbx thaws its cgroup before terminating any
+leftover processes. Suspension itself never kills and retries a compilation;
+mbx terminates orphaned descendants only to clean up after a cancellation.
+
+mbx records suspend and resume events, plus each compilation's peak memory and
+suspended time, under `scheduler/supervision-*/` in the cache directory. When a
+suspended compilation finishes, mbx reports how long it spent suspended.

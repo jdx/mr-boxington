@@ -7,14 +7,15 @@ mbx reuses compiler work across Rust workspaces, checkouts, and CI runs. Cargo
 still resolves dependencies and decides what needs building. mbx restores
 matching compilations and runs the compiler for everything else.
 
-You need an existing Rust toolchain and a Cargo project. No cache server or
-configuration file is required.
+You need a Cargo project. The mise command in [Install](#install) also installs
+Rust; with the other methods, install a Rust toolchain first. No cache server
+or configuration file is required.
 
 ## Set up with your AI agent
 
 Want your coding agent to handle setup? Open it in your project and paste the
 prompt below. It asks the agent to install mbx, adapt it to your existing
-setup, and verify that a build actually reuses cached work.
+setup, and verify that a build reuses cached work.
 
 <details>
 <summary>Copy a setup prompt</summary>
@@ -32,8 +33,9 @@ Cargo, and compiler-cache configuration. Use my existing tool manager where
 appropriate, and preserve Rust version pins and unrelated settings. Install
 mbx if needed; do not upgrade Rust just to enable it.
 
-Prefer project-scoped setup. With a compatible mise installation, enable its
-native mbx integration while preserving the existing Rust tool options.
+Prefer project-scoped setup. With a compatible mise installation, enable
+native mise integration (the Rust tool's mr_boxington option) while preserving
+the existing Rust tool options.
 Otherwise, get explicit mbx commands working first. Ask before changing my
 global shell/editor configuration or replacing another compiler wrapper.
 Do not delete existing build outputs or caches, or change CI configuration.
@@ -71,8 +73,12 @@ With [mise](https://mise.jdx.dev):
 mise use --global --tool-option mr_boxington=true rust mr-boxington
 ```
 
-This requires mise 2026.9.2 or newer. Drop `--global` for project-scoped
-wrapping. See [Installation](/installation#older-mise-versions) for older mise versions.
+This requires mise 2026.9.2 or newer. With an older mise, see
+[Older mise versions](/installation#older-mise-versions).
+
+Drop `--global` for project-scoped wrapping. To keep an existing Rust version
+pin, add `mr_boxington = true` to that `rust` entry instead; see
+[Share setup with a project](/setup#share-setup-with-a-project).
 
 Or install from crates.io:
 
@@ -100,17 +106,24 @@ mbx clippy --workspace --all-targets -- -D warnings
 mbx +stable check --workspace
 ```
 
-Cargo aliases, installed subcommands, and toolchain selection are preserved.
+mbx preserves Cargo aliases, installed subcommands, and toolchain selection.
 Use the same toolchain, features, and profile across builds to reuse the same
 cached work.
 
 ## Keep using plain Cargo
 
-The mise command above enables wrapping without running `mbx setup`. Use
-`mise exec -- cargo build`, `mise run` tasks, or plain `cargo` with mise
-activation or shims on `PATH`.
+The mise command in [Install](#install) makes mise run Cargo through mbx, so
+you do not need `mbx setup`. Use `mise exec -- cargo build`, `mise run` tasks,
+or plain `cargo` with mise activation or shims on `PATH`.
 
-For standalone installations, run:
+`mbx doctor` does not recognize native mise integration, so its `setup` check
+can warn that the Cargo shim is missing or inactive even when Cargo runs
+through mbx. To confirm wrapping, follow
+[Verify plain Cargo](/setup#verify-plain-cargo).
+
+For a standalone installation, run `mbx setup` to install a Cargo shim and
+configure rust-analyzer, then `mbx setup --status` to check that both are
+current:
 
 ```sh
 mbx setup
@@ -125,47 +138,58 @@ configuration, configure rust-analyzer, and use mbx from desktop applications.
 A new local store has no compilations to restore. The first build fills it;
 later builds and equivalent worktrees can reuse that work. If Cargo already
 has up-to-date outputs in `target/`, it skips those compilations entirely.
-That is normal and will not appear as mbx cache hits.
+That is normal, and those compilations do not appear as mbx hits.
 
-mbx creates a managed target and leaves a `target` symlink in the workspace.
-An existing `target/` is moved into the managed target with its outputs kept,
-except in CI. See
+mbx creates a managed target directory and leaves a `target` symlink in the
+workspace. It moves an existing `target/` into the managed target and keeps
+its outputs; CI builds leave `target/` in place. See
 [Managed target directories](/managed-targets) for placement and cleanup.
 
-The first build also prints the cache location and disk budgets chosen for your
-machine. Automatic collection runs after builds, at most once an hour.
+Outside CI, the first build on a machine also prints the cache location and
+the disk budgets chosen for it. Automatic
+[collection](/managed-targets#collection) runs after builds, at most once an hour.
 
 ## Read the result
 
-An illustrative summary looks like this:
+An illustrative build summary looks like this:
 
 ```text
-mbx[cache]: 139 hits, 8 misses, 4 not looked up, 147 prefetched, 7 bypassed; 312.4 MiB downloaded, 0 B uploaded, 280.1 MiB stored locally
+mbx[cache]: 139 hits, 8 misses, 4 not looked up, 7 bypassed; 0 B downloaded, 0 B uploaded, 41.2 MiB stored locally
 ```
 
-| Result | What happened |
+| Result | What it means |
 | --- | --- |
-| Hit | mbx restored a matching compilation |
-| Miss | No result matched the key; successful compilation can fill the cache |
-| Not looked up | mbx lacked a usable input prediction and had to compile first |
-| Bypassed | The invocation ran without shared caching |
+| [Hit](/cache-results#hit) | mbx restores a matching compilation |
+| [Miss](/cache-results#miss) | No stored result matches the cache key; mbx stores the result if compilation succeeds |
+| [Not looked up](/cache-results#could-not-look-up) | mbx cannot compute the key yet, so it compiles, then stores a successful result and records its inputs |
+| [Bypass](/cache-results#bypass) | mbx runs the invocation without shared caching |
+
+mbx does not store a compilation that keeps private incremental state, such as
+a workspace crate you just edited. The build summary counts those as
+`incremental`; see [Incremental builds](/incremental).
+
+`stored locally` is the size of the new data this build added to the local
+store. With a [remote cache](/remote-cache), `downloaded` and `uploaded` report
+remote traffic, and a `prefetched` count shows results that mbx fetched from
+the remote before the build asked for them.
 
 To check reuse, build into two fresh target directories with the same command
-and options. The [cache reuse walkthrough](/cache-results#measure-cache-reuse)
-shows the commands and explains why simply rerunning an up-to-date Cargo build may
-produce no mbx hits.
-Use `mbx explain --last` to inspect the last recorded build or `mbx tui` to
-[watch builds live](/tui).
+and options. [Measure cache reuse](/cache-results#measure-cache-reuse) shows
+the commands and explains why rerunning an up-to-date build shows no mbx hits.
 
-## Inspect the store
+Use `mbx explain --last` to inspect the last recorded build. To follow builds
+as they run, open `mbx tui`; see [Watching builds](/tui).
+
+## Inspect the cache directory {#inspect-the-store}
 
 ```sh
 mbx cache stats     # size and contents
-mbx gc --dry-run    # preview cleanup
+mbx gc --dry-run    # preview collection
 ```
 
-A cache can always be rebuilt. Use the [management guide](/managed-targets)
-to understand what each cleanup command removes.
+A cache can always be rebuilt. See
+[Inspect and clean up](/managed-targets#inspect-and-clean-up) for what each
+cleanup command removes.
 
 ## Next steps
 

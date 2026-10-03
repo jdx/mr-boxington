@@ -124,20 +124,31 @@ const SCHEDULER_MEMORY_FALLBACK: u64 = 16 * GIB;
     format = "toml"
 ))]
 pub(crate) struct RawConfig {
-    /// Cache root. NFS is unsupported for local build storage.
-    #[usage(env = "MBX_CACHE_DIR", default_note = "platform cache directory")]
+    /// Cache directory, which holds the store and private incremental state.
+    ///
+    /// Managed targets (`target.root`) and compiler shims (`shims_dir`) live
+    /// inside it unless configured elsewhere. NFS is unsupported for local
+    /// build storage.
+    #[usage(
+        env = "MBX_CACHE_DIR",
+        default_note = "an `mbx` directory in the platform cache directory, such as `~/.cache/mbx`"
+    )]
     cache_dir: Option<PathBuf>,
-    /// Persistent compiler shims. Containers sharing a cache should each use a
-    /// private, dedicated local directory that survives builds and contains no real compilers.
-    /// Relative paths use the cache root and cannot traverse above it with `..`
-    /// or normalize to an empty path.
-    #[usage(env = "MBX_SHIMS_DIR", default_note = "<cache_dir>/shims")]
+    /// Directory for the persistent compiler shims.
+    ///
+    /// Containers that share a cache directory should each use a private,
+    /// dedicated local directory that survives builds and contains no real
+    /// compilers. A relative path resolves under `cache_dir` and cannot climb
+    /// above it with `..` or normalize to an empty path.
+    #[usage(env = "MBX_SHIMS_DIR", default_note = "`<cache_dir>/shims`")]
     shims_dir: Option<PathBuf>,
     /// Write a JSON build report to this path.
     #[usage(env = "MBX_STATS_REPORT")]
     stats_report: Option<PathBuf>,
-    /// Detail printed after a build. Auto uses an explanatory CI report in CI
-    /// and one line locally; short, ci, full, and off select a fixed style.
+    /// Detail of the build summary printed after a build.
+    ///
+    /// `auto` prints the explanatory `ci` report in CI and the one-line `short`
+    /// summary locally; `short`, `ci`, `full`, and `off` select a fixed style.
     #[usage(
         env = "MBX_SUMMARY",
         default = "auto",
@@ -145,9 +156,15 @@ pub(crate) struct RawConfig {
     )]
     summary: String,
     /// Open the terminal warning browser after a successful Cargo build.
+    ///
+    /// Has no effect when `display` is `plain`.
     #[usage(env = "MBX_PRETTY_INSPECT", default = false)]
     pretty_inspect: bool,
-    /// Cargo display mode. Plain disables animated output even in a terminal.
+    /// How mbx displays Cargo's output.
+    ///
+    /// `auto` allows animated output in a terminal. `plain` disables it even
+    /// there, including the inline build view and its warning browser, so
+    /// `pretty_inspect` has no effect.
     #[usage(env = "MBX_DISPLAY", default = "auto", choices("auto", "plain"))]
     display: String,
     /// Compile and consult the cache, then compare outputs.
@@ -156,107 +173,170 @@ pub(crate) struct RawConfig {
     /// Percentage of compilation identities to verify (0–100), selected deterministically.
     #[usage(env = "MBX_VERIFY_SAMPLE_RATE", default = 0)]
     verify_sample_rate: i64,
-    /// Let local workspace members compile incrementally.
+    /// Let Cargo compile local workspace members incrementally.
+    ///
+    /// mbx stops forcing `CARGO_INCREMENTAL=0`, so Cargo's profiles decide: by
+    /// default, dev builds compile incrementally and release builds do not.
+    /// Those compilations bypass the shared cache, crates that depend on them
+    /// may miss, and learned incremental reuse turns off. Ignored when `CI` is
+    /// `1`, `true`, or `yes`, and while `eager_incremental` is in effect. When
+    /// it applies, Cargo still honors a `CARGO_INCREMENTAL` already set in the
+    /// environment. This may also be set in workspace `.mbx.toml`; the
+    /// environment variable wins.
     #[usage(env = "MBX_INCREMENTAL", default = false)]
     incremental: bool,
-    /// Keep private workspace incremental state from the first compilation, locally or in CI.
+    /// Keep private workspace incremental state from the first compilation.
+    ///
+    /// It applies in CI too, and it overrides `incremental` and learned
+    /// incremental reuse. Workspace crates then compile with that state
+    /// instead of restoring or publishing shared results, and crates that link
+    /// them stay private as well. The first build can be slower. Ignored for
+    /// compilations selected for verification by `MBX_VERIFY` or
+    /// `verify_sample_rate`. This may also be set in workspace `.mbx.toml`; the
+    /// environment variable wins.
     #[usage(env = "MBX_EAGER_INCREMENTAL", default = false)]
     eager_incremental: bool,
-    /// Compile crates that keep missing the cache with changed content
-    /// incrementally, keeping their outputs out of the shared cache.
+    /// Use private incremental state for crates whose sources keep changing.
+    ///
+    /// A workspace crate qualifies on its first source edit; any other crate
+    /// after three consecutive misses with changed sources. A qualifying
+    /// crate's outputs, and those of crates that link them, stay out of the
+    /// shared cache. Off in CI (`CI` set to `1`, `true`, or `yes`), while
+    /// `incremental` or `eager_incremental` is in effect, and for compilations
+    /// selected for verification by `MBX_VERIFY` or `verify_sample_rate`.
     #[usage(
         key = "learned_incremental",
         env = "MBX_LEARNED_INCREMENTAL",
         default = true
     )]
     _learned_incremental: bool,
-    /// How much learned incremental state one crate may keep, or "none". State
-    /// past this is discarded before the crate compiles again.
+    /// How much learned incremental state one crate may keep, or `"none"`.
+    ///
+    /// State past this is discarded before the crate compiles again.
     #[usage(
         key = "learned_incremental_max_size",
         env = "MBX_LEARNED_INCREMENTAL_MAX_SIZE",
-        default_note = "8GiB, or gc.max_total_size when set"
+        default_note = "8 GiB, or `gc.max_total_size` when set"
     )]
     learned_incremental_max_size: Option<String>,
-    /// How much per-compilation history one build may record, or "none" for no
-    /// limit. Past this the counters carry on but the rows stop, and
-    /// `mbx explain` says so.
+    /// Cap on the per-compilation history one build records, or `"none"`.
+    ///
+    /// Past the cap, the totals the build reports stay complete but its
+    /// per-compilation rows stop, and `mbx explain` says so.
     #[usage(
         key = "events_max_size",
         env = "MBX_EVENTS_MAX_SIZE",
         default = "16MiB"
     )]
     events_max_size: String,
-    /// Reuse Rust compilations across checkouts with matching build-script
-    /// output by giving rustc a shared, content-addressed `OUT_DIR` under the
-    /// cache. Also remap generated source paths in Rust and C/C++ debug
+    /// Reuse Rust compilations across checkouts with matching build-script output.
+    ///
+    /// mbx gives rustc a shared, content-addressed `OUT_DIR` in the cache
+    /// directory and remaps generated source paths in Rust and C/C++ debug
     /// information. Disable to preserve Cargo's original `OUT_DIR` and paths.
+    /// This may also be set in workspace `.mbx.toml`; the environment
+    /// variable wins.
     #[usage(env = "MBX_SHARE_OUT_DIR", default = true)]
     share_out_dir: bool,
-    /// Remap the workspace root so rustc does not record which checkout a
-    /// compilation ran in, which lets a crate rebuilt in a second checkout come
-    /// out byte-identical so its dependents still share. Source paths in debug
-    /// information and panic messages then name a placeholder. This may also be
-    /// set in workspace `.mbx.toml`; the environment variable wins.
+    /// Remap the workspace root so compilations do not record their checkout.
+    ///
+    /// A crate rebuilt in a second checkout then comes out byte-identical, so
+    /// its dependents still share. Source paths in debug information and panic
+    /// messages name a placeholder instead. This may also be set in workspace
+    /// `.mbx.toml`; the environment variable wins.
     #[usage(env = "MBX_SHARE_WORKSPACE_ROOT", default = false)]
     share_workspace_root: bool,
-    /// Restore cached outputs by hard link when the filesystem cannot clone
-    /// them, instead of copying their bytes. Filesystems with clone support
-    /// (APFS, Btrfs, XFS with reflink, ZFS) are unaffected: they clone either
-    /// way. Elsewhere -- ext4 above all -- this is the difference between a
-    /// restore that writes nothing and one that writes every cached byte.
-    /// A hard-linked output is the store's object, so it is read-only; mbx
-    /// unlinks it before a compiler rewrites it, but `cargo` run directly in
-    /// the same target directory reports that the output is not writeable.
-    /// Disable to give every restored output a file of its own.
+    /// Restore cached outputs by hard link when the filesystem cannot clone them.
+    ///
+    /// Filesystems with clone support (APFS, Btrfs, XFS with reflink, ZFS) are
+    /// unaffected: they clone either way. On other Unix filesystems, ext4 above
+    /// all, this is the difference between a restore that writes nothing and
+    /// one that copies every cached byte. On Windows, mbx copies whatever it
+    /// cannot clone. A hard-linked output is the store's object, so it is
+    /// read-only. mbx unlinks it before a compiler rewrites it, but Cargo run
+    /// without mbx in the same target directory can fail with
+    /// `output file ... is not writeable`. Disable to give every restored
+    /// output a file of its own.
     #[usage(env = "MBX_RESTORE_HARDLINK", default = true)]
     restore_hardlink: bool,
-    /// Cache executions of build scripts using Cargo's freshness inputs. This may
-    /// also be set in workspace `.mbx.toml`; the environment variable wins.
+    /// Cache executions of build scripts using Cargo's freshness inputs.
+    ///
+    /// This may also be set in workspace `.mbx.toml`; the environment
+    /// variable wins.
     #[usage(env = "MBX_BUILD_SCRIPT_EXECUTION", default = true)]
     build_script_execution: bool,
     /// Record a per-compilation event stream for `mbx tui` to watch.
+    ///
+    /// `mbx explain --last` and `mbx analyze` also read it back. A build run
+    /// with this off is not recorded, so those commands report the newest build
+    /// that was, or find none. Cache entries and other build state are
+    /// still stored.
     #[usage(env = "MBX_EVENTS", default = true)]
     events: bool,
-    /// Cache C and C++ compilations run by build scripts.
+    /// Cache C and C++ compilations run by build scripts and by `mbx exec`.
+    ///
+    /// With this off, `mbx exec` runs its command uncached. This may also be
+    /// set in workspace `.mbx.toml`; the environment variable wins.
     #[usage(env = "MBX_CC", default = true)]
     cc: bool,
     /// Store C objects that embed absolute paths under checkout-specific keys.
+    ///
     /// Disable for disposable worktrees to avoid storing objects that cannot be
     /// reused at another path. Existing entries may still be restored.
     #[usage(env = "MBX_CC_STORE_PATH_SPECIFIC", default = true)]
     cc_store_path_specific: bool,
-    /// Set `ZERO_AR_DATE` for build scripts so native archives stop embedding a
-    /// timestamp. Without it, tools like CMake's `ar` rewrite an archive's
-    /// header on every build, moving its digest and missing every cached action
-    /// downstream even when no member changed. Auto normalizes every profile
-    /// except `release`, leaving published artifacts byte-for-byte as the host
-    /// toolchain made them; always covers `release` too; off leaves the
-    /// toolchain alone. A `ZERO_AR_DATE` you set yourself always wins.
+    /// Set `ZERO_AR_DATE` for build scripts so native archives omit a timestamp.
+    ///
+    /// Apple's `ar` and `ranlib` read the variable; other archivers ignore it.
+    /// Without it, those tools stamp the time into every archive they write,
+    /// such as the ones CMake-based dependencies build with `/usr/bin/ar` on
+    /// macOS. An archive rebuilt from unchanged objects then gets a new digest,
+    /// and every cached action downstream of it misses.
+    ///
+    /// `auto` normalizes every build whose Cargo `PROFILE` is not `release`,
+    /// leaving `--release` builds and profiles that inherit from `release`
+    /// (such as `bench`) byte-for-byte as the host toolchain made them.
+    /// `always` covers those too, and `off` leaves the toolchain alone. A
+    /// `ZERO_AR_DATE` you set yourself always wins.
+    ///
+    /// mbx sets the variable through the build-script wrapper that
+    /// `build_script_execution` installs, so this has no effect on build
+    /// scripts compiled while that setting is off.
     #[usage(
         env = "MBX_AR_DETERMINISM",
         default = "auto",
         choices("auto", "always", "off")
     )]
     ar_determinism: String,
-    /// Forward rustc's diagnostics and artifact notifications to Cargo as the
-    /// compiler prints them, so Cargo can start a dependent against this
-    /// crate's metadata while its code generation continues. Turn it off to
-    /// hold the compiler's output until mbx has stored the result, which is
-    /// useful when diagnosing the shim itself.
+    /// Forward rustc's diagnostics and artifact notifications to Cargo as they arrive.
+    ///
+    /// Cargo can then start a dependent against a crate's metadata while that
+    /// crate's code generation continues. Disable to hold the compiler's output
+    /// until mbx has stored the result, which is useful when diagnosing the
+    /// compiler shim itself.
     #[usage(env = "MBX_FORWARD_COMPILER_NOTIFICATIONS", default = true)]
     forward_compiler_notifications: bool,
-    /// How the savings line after a build reads.
+    /// Style of the savings line printed after a build.
+    ///
+    /// `quips` draws the line from a pool of dry one-liners, `plain` reports
+    /// the same figures without a quip, and `off` prints nothing but keeps
+    /// the totals.
     #[usage(
         env = "MBX_SAVINGS",
         default = "quips",
         choices("quips", "plain", "off")
     )]
     savings: String,
-    /// Cache natively linked test binaries, executables, and proc macros. On macOS this
-    /// also passes ld64 `-oso_prefix` so a debug-info link's debug map stops
-    /// naming this checkout, which is what lets it cache. Supported on Linux,
-    /// macOS, and Windows; a link mbx cannot describe exactly still links normally.
+    /// Cache natively linked test binaries, executables, and proc macros.
+    ///
+    /// On Linux, `cdylib`s are cached too. Only links for the host qualify: a
+    /// binary, test, or `cdylib` built with an explicit `--target`, including
+    /// one set by `build.target`, still links normally even when it names the
+    /// host triple. The built-in WebAssembly targets are cached regardless of
+    /// this setting. On macOS this also passes ld64 `-oso_prefix` so a
+    /// debug-info link's debug map stops naming this checkout, which is what
+    /// lets the link cache. Supported on Linux, macOS, and Windows; a link mbx
+    /// cannot describe exactly still links normally.
     #[usage(
         key = "cache_links",
         env = "MBX_CACHE_LINKS",
@@ -267,10 +347,12 @@ pub(crate) struct RawConfig {
     /// Append the full reason for every bypassed compilation to this path.
     #[usage(key = "bypass_log", env = "MBX_BYPASS_LOG", scope = "env")]
     _bypass_log: Option<PathBuf>,
-    /// Log filter such as `debug` or `mbx=trace`. It covers every log the mbx
-    /// process emits, its own and those of the libraries it builds on. The
-    /// default keeps the pty library behind the inline build view quiet,
-    /// because mbx falls back to plain Cargo when that view cannot start.
+    /// Log filter, such as `debug` or `mbx=trace`.
+    ///
+    /// It covers every log the mbx process emits: its own and those of the
+    /// libraries it builds on. The default keeps the pty library behind the
+    /// inline build view quiet, because mbx falls back to plain Cargo when that
+    /// view cannot start.
     #[usage(
         key = "log",
         env = "MBX_LOG",
@@ -296,9 +378,16 @@ pub(crate) struct RawConfig {
 #[usage(prefix = "linker")]
 struct RawLinker {
     /// Linker used when the active Cargo profile has no matching selection.
+    ///
+    /// This may also be set in workspace `.mbx.toml`, but not to a `path:`
+    /// selector; `MBX_LINKER` wins.
     #[usage(default = "system")]
     default: String,
     /// Linkers selected by Cargo profile and target triple.
+    ///
+    /// This may also be set in workspace `.mbx.toml`, where no entry may be a
+    /// `path:` selector. Workspace entries replace the global file's entries
+    /// for the same profile and target, and `MBX_LINKER` wins over both.
     profiles: Option<BTreeMap<String, BTreeMap<String, String>>>,
     /// Override the configured linker for this invocation.
     #[usage(key = "selection", env = "MBX_LINKER", scope = "env")]
@@ -309,18 +398,42 @@ struct RawLinker {
 #[usage(prefix = "scheduler")]
 struct RawScheduler {
     /// Coordinate real compilations machine-wide through a permit pool.
+    ///
+    /// Cache hits never take a permit. A compilation that runs the compiler
+    /// takes one first, so concurrent mbx builds on one machine share one pool.
+    /// This may also be set in workspace `.mbx.toml`; the environment
+    /// variable wins.
     #[usage(env = "MBX_SCHEDULER", default = true)]
     enabled: bool,
-    /// Machine-wide concurrent compile permits.
+    /// Number of compile permits in the machine-wide pool.
+    ///
+    /// A typical compilation takes one permit; links and memory-heavy crates
+    /// can take more. This may also be set in workspace `.mbx.toml`; the
+    /// environment variable wins.
     #[usage(env = "MBX_SCHEDULER_CPUS", default_note = "logical CPUs")]
     cpus: Option<i64>,
-    /// Logical CPUs to leave free for the rest of the machine.
+    /// Permits withheld from `scheduler.cpus` to leave CPUs for other work.
+    ///
+    /// At least one permit always remains. This may also be set in workspace
+    /// `.mbx.toml`; the environment variable wins.
     #[usage(env = "MBX_SCHEDULER_RESERVE_CPUS", default = 0)]
     reserve_cpus: i64,
-    /// Memory budget the permits divide, or "none" for plain CPU permits.
-    #[usage(env = "MBX_SCHEDULER_MEMORY", default_note = "85% of physical memory")]
+    /// Memory budget the permits divide, such as `24GiB`, or `"none"`.
+    ///
+    /// Each permit stands for an equal share of it. `"none"` leaves plain CPU
+    /// permits and also turns off `scheduler.pressure` and `scheduler.suspend`.
+    /// This may also be set in workspace `.mbx.toml`; the environment
+    /// variable wins.
+    #[usage(
+        env = "MBX_SCHEDULER_MEMORY",
+        default_note = "85% of physical memory, or of the Linux cgroup memory limit if lower"
+    )]
     memory: Option<String>,
-    /// Permit priority of this build's compilations.
+    /// Priority of this build's compilations in the machine-wide permit pool.
+    ///
+    /// While a normal-priority build is waiting, a `low` build leaves about a
+    /// quarter of the pool free for it. This may also be set in workspace
+    /// `.mbx.toml`; the environment variable wins.
     #[usage(
         env = "MBX_SCHEDULER_PRIORITY",
         default = "normal",
@@ -328,15 +441,29 @@ struct RawScheduler {
     )]
     priority: String,
     /// Delay additional compilations while the machine is under memory pressure.
+    ///
+    /// Works on Linux and macOS. Has no effect when `scheduler.memory` is
+    /// `"none"`. This may also be set in workspace `.mbx.toml`; the environment
+    /// variable wins.
     #[usage(env = "MBX_SCHEDULER_PRESSURE", default = true)]
     pressure: bool,
-    /// Experimentally suspend Linux compiler trees under memory pressure.
+    /// Experimentally suspend Linux compiler process trees under memory pressure.
+    ///
+    /// Takes effect only with `scheduler.cgroup_root` set, `scheduler.pressure`
+    /// on, and `scheduler.memory` not `"none"`. When suspension cannot start,
+    /// mbx warns once per build and only delays new compilations.
     #[usage(env = "MBX_SCHEDULER_SUSPEND", default = false)]
     suspend: bool,
-    /// Writable delegated cgroup v2 directory for compiler supervision.
+    /// Absolute path to a delegated cgroup v2 directory for `scheduler.suspend`.
+    ///
+    /// mbx must be able to write to it. mbx uses it only on Linux, and only
+    /// while `scheduler.suspend` is in effect.
     #[usage(env = "MBX_SCHEDULER_CGROUP_ROOT")]
     cgroup_root: Option<PathBuf>,
     /// Run `cargo test` binaries under the same permit pool.
+    ///
+    /// This may also be set in workspace `.mbx.toml`; the environment
+    /// variable wins.
     #[usage(env = "MBX_SCHEDULER_TESTS", default = false)]
     tests: bool,
 }
@@ -344,38 +471,62 @@ struct RawScheduler {
 #[derive(Debug, usage::Config)]
 #[usage(prefix = "remote")]
 struct RawRemote {
-    /// Remote cache URL.
+    /// Remote cache URL; its scheme selects the backend.
+    ///
+    /// Use `https://` for an mbx cache server or `s3://bucket[/prefix]` for an
+    /// S3-compatible bucket. mbx refuses the `remote.s3_*` settings with any
+    /// other scheme.
     #[usage(env = "MBX_REMOTE_URL", ty = "url")]
     url: Option<String>,
-    /// Remote namespace; required when a URL is configured.
+    /// Namespace that isolates one project's cache, such as `acme/backend`.
+    ///
+    /// Required when `remote.url` is set.
     #[usage(env = "MBX_REMOTE_NAMESPACE")]
     namespace: Option<String>,
-    /// Bearer token for the remote cache.
+    /// Bearer token for a cache server.
+    ///
+    /// An `s3://` remote refuses it. Takes precedence over `remote.token_file`
+    /// and `remote.oidc_audience`.
     #[usage(env = "MBX_REMOTE_TOKEN")]
     token: Option<String>,
-    /// File containing a bearer token.
+    /// File containing a bearer token for a cache server.
+    ///
+    /// An `s3://` remote refuses it. `remote.token` takes precedence over it,
+    /// and it takes precedence over `remote.oidc_audience`.
     #[usage(env = "MBX_REMOTE_TOKEN_FILE")]
     token_file: Option<PathBuf>,
-    /// CI OIDC audience.
+    /// GitHub Actions OIDC token audience for authenticating to a cache server.
+    ///
+    /// GitHub Actions only; the job needs `id-token: write`. An `s3://` remote
+    /// refuses it.
     #[usage(env = "MBX_REMOTE_OIDC_AUDIENCE")]
     oidc_audience: Option<String>,
     /// Remote access mode.
+    ///
+    /// Only trusted CI (a push to a protected branch on GitHub Actions or GitLab
+    /// CI) may write. Everywhere else, including a local shell, `read-write`
+    /// acts as `read-only` and `write-only` disables the remote.
     #[usage(
         env = "MBX_REMOTE_MODE",
         default = "read-write",
         choices("read-write", "read-only", "write-only")
     )]
     mode: String,
-    /// S3 endpoint for a store that is not AWS, such as MinIO or R2.
+    /// S3 endpoint for a service other than AWS, such as MinIO or R2.
     #[usage(env = "MBX_REMOTE_S3_ENDPOINT", ty = "url")]
     s3_endpoint: Option<String>,
-    /// S3 region; Cloudflare R2 uses "auto".
+    /// S3 region; Cloudflare R2 uses `auto`.
     #[usage(env = "MBX_REMOTE_S3_REGION")]
     s3_region: Option<String>,
     /// Address S3 buckets in the path rather than the host.
     #[usage(env = "MBX_REMOTE_S3_FORCE_PATH_STYLE")]
     s3_force_path_style: Option<bool>,
-    /// How to treat an S3 store that does not implement conditional writes.
+    /// How to handle a bucket that does not implement S3 conditional writes.
+    ///
+    /// Conditional writes keep concurrent updates to the action manifest, which
+    /// prefetch reads, from overwriting each other. `auto` uses them until the
+    /// bucket rejects them and then writes without them; `required` fails
+    /// against such a bucket; and `off` never sends conditional headers.
     #[usage(
         env = "MBX_REMOTE_S3_CONDITIONAL_WRITES",
         default = "auto",
@@ -387,38 +538,52 @@ struct RawRemote {
 #[derive(Debug, usage::Config)]
 #[usage(prefix = "target")]
 struct RawTarget {
-    /// Let mbx place eligible target directories under the managed root.
+    /// Let mbx place eligible target directories under the managed target root.
     #[usage(env = "MBX_TARGET_VIEWS", default = true)]
     views: bool,
-    /// Give `cargo check` and `cargo clippy` a directory of their own inside
-    /// the managed target, so they run beside a build instead of waiting for
-    /// Cargo's target lock.
+    /// Give `cargo check` and `cargo clippy` their own directory in the
+    /// managed target.
+    ///
+    /// They then run beside a build instead of waiting for Cargo's target lock.
     #[usage(env = "MBX_TARGET_LANES", default = true)]
     lanes: bool,
     /// Copy registry build units from another checkout's managed target into
     /// a profile this checkout has not built yet (Cargo 1.100 or later).
     #[usage(env = "MBX_TARGET_SEED", default = true)]
     seed: bool,
-    /// Managed target root. NFS is unsupported for build outputs.
-    #[usage(env = "MBX_TARGET_ROOT", default_note = "<cache_dir>/targets")]
+    /// Managed target root: the directory that holds managed targets.
+    ///
+    /// A relative path resolves under `cache_dir`. Changing it moves each
+    /// checkout's managed target on its next build; across filesystems, mbx
+    /// removes the old outputs rather than copying them. NFS is unsupported for
+    /// build outputs.
+    #[usage(env = "MBX_TARGET_ROOT", default_note = "`<cache_dir>/targets`")]
     root: Option<PathBuf>,
-    /// Managed-target budget, or "none". Live views are collected oldest-first.
+    /// Size budget for managed targets, or `"none"`.
+    ///
+    /// Over budget, mbx collects managed targets least recently used first and
+    /// keeps the most recently used one.
     #[usage(
         env = "MBX_TARGET_MAX_SIZE",
-        default_note = "10% of the target disk, from 10GiB to 100GiB; shared budget when gc.max_total_size is set"
+        default_note = "10% of the target disk, from 10 GiB to 100 GiB; shared budget when `gc.max_total_size` is set"
     )]
     max_size: Option<String>,
-    /// Collect live managed targets, and build units inside them, unused this
-    /// long, or "none".
+    /// Collect managed targets, and build units inside them, unused this long,
+    /// or `"none"`.
     #[usage(env = "MBX_TARGET_MAX_AGE", default = "30d", ty = "duration")]
     max_age: String,
     /// Checkouts whose managed targets are never collected for age or size.
+    ///
     /// An absolute path covers the checkouts under it; a relative one matches
-    /// wherever it appears in a checkout's path.
+    /// wherever it appears in a checkout's path. A leading `~` is your home
+    /// directory. When `target.evict_first` also matches a checkout, the entry
+    /// that reaches deeper into its path wins, and a tie keeps it. A kept
+    /// target is still collected once its checkout is deleted.
     #[usage(env = "MBX_TARGET_KEEP", parse = "list_by_comma")]
     keep: Option<Vec<String>>,
-    /// Checkouts whose managed targets are collected first when targets are
-    /// over budget, such as ".claude/worktrees". Matched like `target.keep`.
+    /// Checkouts whose managed targets are collected first when over budget.
+    ///
+    /// Entries, such as `.claude/worktrees`, are matched like `target.keep`.
     #[usage(env = "MBX_TARGET_EVICT_FIRST", parse = "list_by_comma")]
     evict_first: Option<Vec<String>>,
 }
@@ -429,38 +594,55 @@ struct RawGc {
     /// Sweep after a build when collection is due.
     #[usage(env = "MBX_GC_AUTO", default = true)]
     auto: bool,
-    /// Action-store and per-session remote-download budget.
+    /// Size budget for the action store.
+    ///
+    /// It also caps how much one build downloads from the remote cache. Unlike
+    /// the other size budgets, it cannot be `"none"`.
     #[usage(
         env = "MBX_GC_MAX_SIZE",
-        default_note = "5% of the cache disk, from 5GiB to 500GiB; gc.max_total_size when set"
+        default_note = "5% of the cache disk, from 5 GiB to 500 GiB; `gc.max_total_size` when set"
     )]
     max_size: Option<String>,
-    /// Combined logical-byte collection target for the action store, managed
-    /// targets, learned incremental state, and generated sources, or "none".
-    /// When set, replaces disk-scaled component defaults; explicit component
-    /// limits still apply. Active and protected state may exceed this target.
+    /// Combined size target for the action store, managed targets, and
+    /// incremental state, or `"none"`.
+    ///
+    /// A size such as `50GiB` counts logical bytes across the action store,
+    /// managed targets, learned incremental state, and generated source trees.
+    /// When set, it replaces the disk-scaled defaults of the component budgets;
+    /// explicit component limits still apply. Active and protected state may
+    /// exceed this target.
     #[usage(env = "MBX_GC_MAX_TOTAL_SIZE")]
     max_total_size: Option<String>,
-    /// Aggregate learned-incremental budget, or "none". Inactive checkouts are
-    /// collected oldest-first while the most recently used checkout is kept.
+    /// Shared budget for learned incremental state and generated source trees,
+    /// or `"none"`.
+    ///
+    /// Over budget, mbx collects the incremental state of inactive checkouts
+    /// least recently used first and keeps the most recently used checkout's.
+    /// Generated source trees get whatever budget incremental state leaves.
     #[usage(
         env = "MBX_GC_INCREMENTAL_MAX_SIZE",
-        default_note = "5% of the cache disk, from 10GiB to 100GiB; shared budget when gc.max_total_size is set"
+        default_note = "5% of the cache disk, from 10 GiB to 100 GiB; shared budget when `gc.max_total_size` is set"
     )]
     incremental_max_size: Option<String>,
-    /// Collect learned incremental state unused this long, or "none".
+    /// Collect learned incremental state unused this long, or `"none"`.
     #[usage(env = "MBX_GC_INCREMENTAL_MAX_AGE", default = "30d", ty = "duration")]
     incremental_max_age: String,
-    /// Free space to keep on the disks holding the cache and managed targets,
-    /// or "none". Below it, sweeps run more often and collect private state,
-    /// generated sources, managed targets, and shared action-store objects
-    /// past their budgets until the disk is no longer short.
+    /// Free space to keep on the disks that hold the cache directory and
+    /// managed targets, or `"none"`.
+    ///
+    /// Below it, sweeps run more often and collect private state, generated
+    /// source trees, managed targets, and shared store objects past their
+    /// budgets to free the shortfall. Active and most recently used state
+    /// stays, so the disk can remain short.
     #[usage(
         env = "MBX_GC_MIN_FREE_SIZE",
-        default_note = "10% of each disk, from 5GiB to 50GiB"
+        default_note = "10% of each disk, from 5 GiB to 50 GiB"
     )]
     min_free_size: Option<String>,
-    /// Minimum interval between automatic sweeps.
+    /// Minimum interval between automatic sweeps while the disks have room.
+    ///
+    /// While a disk is short of `gc.min_free_size`, the interval is capped at
+    /// five minutes, so sweeps can run that often even when this is longer.
     #[usage(env = "MBX_GC_INTERVAL", default = "1h", ty = "duration")]
     interval: String,
 }
@@ -468,17 +650,29 @@ struct RawGc {
 #[derive(Debug, usage::Config)]
 #[usage(prefix = "http")]
 struct RawHttp {
-    /// Connect and request timeout.
+    /// Connect timeout, and how long a remote cache request may wait for data.
+    ///
+    /// A response must begin within this time of its request starting, so an
+    /// upload's whole body has to be sent within it. After that, the clock
+    /// restarts whenever response bytes arrive: a long download keeps going
+    /// while data flows and fails only after this long with none.
+    /// `http.download_timeout` caps a whole blob download, retries included.
+    /// Managed linker downloads use this setting only as their connect timeout.
     #[usage(env = "MBX_HTTP_TIMEOUT", default = "30s", ty = "duration")]
     timeout: String,
     /// Deadline for one blob download, retries and backoff included.
+    ///
+    /// It also caps each whole request mbx makes to download a managed linker.
     #[usage(env = "MBX_HTTP_DOWNLOAD_TIMEOUT", default = "10m", ty = "duration")]
     download_timeout: String,
-    /// Wall clock a build may lose to failed remote reads before it stops
-    /// reading and just compiles. "0" keeps reading however long it takes.
+    /// Wall-clock time a build may lose to failed reads from a cache server.
+    ///
+    /// Once it is spent, the build stops reading from the remote and compiles
+    /// instead. `0` keeps reading however long it takes. Has no effect on an
+    /// `s3://` remote.
     #[usage(env = "MBX_HTTP_READ_STALL_BUDGET", default = "90s", ty = "duration")]
     read_stall_budget: String,
-    /// Request retries.
+    /// How many times to retry a remote cache request after a transient failure.
     #[usage(env = "MBX_HTTP_RETRIES", default = 3)]
     retries: i64,
 }
@@ -491,7 +685,7 @@ pub struct Config {
     pub stats_report: Option<PathBuf>,
     pub verify: bool,
     pub verify_sample_rate: u8,
-    /// Let cargo compile workspace members incrementally, rather than forcing
+    /// Let Cargo compile workspace members incrementally, rather than forcing
     /// `CARGO_INCREMENTAL=0` for the whole build.
     pub incremental: bool,
     /// Seed private workspace incremental state from the first compilation; disabled by default.
@@ -525,18 +719,19 @@ pub struct Config {
     ///
     /// Off by default. Cargo gives rustc the crate's own directory to work in,
     /// and rustc records it, so a workspace member rebuilt in a second checkout
-    /// produces a different artifact even when everything it read was the same
-    /// -- and every crate above it rebuilds with it. Remapping the root removes
+    /// produces a different artifact even when everything it read was the same,
+    /// and every crate above it rebuilds with it. Remapping the root removes
     /// that difference, at the cost of naming a placeholder wherever a source
     /// path is recorded: debug information, `file!()`, and panic locations.
     pub share_workspace_root: bool,
     /// Cache build-script execution when the script declares rerun inputs.
     pub build_script_execution: bool,
-    /// Append a per-compilation event stream to the store, for `mbx tui`.
+    /// Append a per-compilation event stream to the store, for `mbx tui`,
+    /// `mbx explain --last`, and `mbx analyze`.
     ///
-    /// On by default: one small buffered append per accounted compilation, with
-    /// no flush of its own, against a compile or restore measured in
-    /// milliseconds. Turn it off to keep the store free of build history.
+    /// On by default: one small unbuffered append per accounted compilation,
+    /// against a compilation or restore measured in milliseconds. Turn it off
+    /// to keep the store free of build history.
     pub events: bool,
     /// Point build scripts at a caching `CC` and `CXX`.
     ///
@@ -693,9 +888,9 @@ impl Default for SchedulerSettings {
 
 /// Whose compilations wait when the machine is contended.
 ///
-/// `Low` is for builds nobody is sitting at -- CI on a shared box, an editor's
-/// background check -- which leave a share of the permit pool free whenever a
-/// normal-priority build is waiting for it.
+/// `Low` is for builds nobody is sitting at, such as CI on a shared box or an
+/// editor's background check. They leave a share of the permit pool free
+/// whenever a normal-priority build is waiting for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SchedulerPriority {
     #[default]
@@ -796,13 +991,6 @@ impl MinFree {
     }
 }
 
-/// Settings only the command line consumes.
-///
-/// `Config` is a public struct callers can construct, so a knob the binary
-/// alone reads does not belong on it: adding a field there changes an API this
-/// crate does not mean to offer. release-plz no longer runs cargo-semver-checks
-/// over `mbx` (see `release-plz.toml`), so nothing enforces this; keep the
-/// knob off `Config` anyway.
 /// The declared default of `learned_incremental_max_size`.
 ///
 /// A crate's incremental state is roughly proportional to the crate, not to
@@ -817,10 +1005,17 @@ pub(crate) const DEFAULT_LEARNED_INCREMENTAL_MAX_SIZE: u64 = 8 * 1024 * 1024 * 1
 /// The cap exists so the TUI can read a session's tail without reading a
 /// build-sized file first. A row carrying key details runs to several KiB, so a
 /// large workspace reaches this partway through a build and keeps only the part
-/// that fit -- enough for the TUI, and raisable for anyone diagnosing a miss
+/// that fit: enough for the TUI, and raisable for anyone diagnosing a miss
 /// with `mbx explain`.
 pub(crate) const DEFAULT_EVENTS_MAX_SIZE: u64 = 16 * 1024 * 1024;
 
+/// Settings only the command line consumes.
+///
+/// `Config` is a public struct callers can construct, so a knob the binary
+/// alone reads does not belong on it: adding a field there changes an API this
+/// crate does not mean to offer. release-plz no longer runs cargo-semver-checks
+/// over `mbx` (see `release-plz.toml`), so nothing enforces this; keep the
+/// knob off `Config` anyway.
 #[derive(Debug, Clone)]
 pub(crate) struct CliSettings {
     pub retention: RetentionSettings,
@@ -929,7 +1124,7 @@ impl std::str::FromStr for SavingsStyle {
 ///
 /// These are the unmeasured fallbacks rather than the disk-scaled budgets: a
 /// `Default` cannot probe a disk it has not been told about. Collection still
-/// happens, which is the property that matters -- a default that pruned nothing
+/// happens, which is the property that matters: a default that pruned nothing
 /// would make every unconfigured path a leak.
 impl Default for RetentionSettings {
     fn default() -> Self {
@@ -1503,7 +1698,7 @@ fn workspace_count(
 
 /// Resolve a byte size, written either plainly or with a unit.
 ///
-/// Both IEC and SI spellings parse -- `20GiB` and `20GB` are different numbers,
+/// Both IEC and SI spellings parse. `20GiB` and `20GB` are different numbers,
 /// and sizes are reported back in IEC, so the two are not interchangeable.
 fn parse_byte_size(value: &str) -> Result<u64> {
     // `ByteSize`'s parse error is a bare `String`, so it cannot be a source.
@@ -1528,8 +1723,8 @@ fn is_no_limit(value: &str) -> bool {
 /// Parse the store budget, which alone has no off switch.
 ///
 /// An unbounded action store is the problem collection exists to prevent, so
-/// `"none"` is refused -- but it has to be refused in words, since the sibling
-/// size settings accept it and `bytesize` would otherwise blame a float.
+/// `"none"` is refused. It has to be refused in words, since the sibling size
+/// settings accept it and `bytesize` would otherwise blame a float.
 fn parse_store_budget(value: &str) -> Result<u64> {
     if is_no_limit(value) {
         eyre::bail!("the action store budget cannot be disabled; set a size such as 20GiB");

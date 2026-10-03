@@ -3,7 +3,7 @@
 
 - **Usage:** `mbx cache largest [--limit <LIMIT>]`
 
-List the largest objects and action-result records.
+List the largest objects and action results.
 
 ## Flags
 - **`--limit <LIMIT>`** — Maximum entries to print.

@@ -9,6 +9,15 @@ const paused = ref(false);
   <section class="MbxBuild" aria-labelledby="mbx-build-title">
     <div class="heading">
       <h2 id="mbx-build-title">Follow build progress</h2>
+      <p>
+        In an interactive terminal, <code>build</code>, <code>check</code>,
+        <code>clippy</code>, <code>run</code>, and <code>test</code> show each
+        compiling crate with a timer, label finished crates with their cache
+        outcome, and color the progress bar by outcome. This applies to
+        <code>mbx build</code> and to <code>cargo build</code> set up to use
+        mbx. In CI, or with <code>display = "plain"</code>
+        (<code>MBX_DISPLAY=plain</code>), mbx shows Cargo's own output instead.
+      </p>
     </div>
     <figure>
       <picture>
@@ -18,7 +27,7 @@ const paused = ref(false);
         />
         <img
           :src="withBase(`/screenshots/cargo-pretty.${paused ? 'png' : 'gif'}`)"
-          alt="Animated Boxington mascot beside mbx build output showing live and completed crates"
+          alt="mbx build output with live crates and timers, finished crates marked hit or miss, a progress bar split into cache hits and misses, and estimated compiler time saved, beside the Mr Boxington mascot"
           width="1080"
           height="550"
           loading="lazy"
@@ -26,8 +35,8 @@ const paused = ref(false);
         />
       </picture>
       <figcaption>
-        Build output during a rebuild.
-        <button type="button" :aria-pressed="paused" @click="paused = !paused">
+        <code>mbx build</code> during a partly cached rebuild.
+        <button type="button" @click="paused = !paused">
           {{ paused ? 'Play animation' : 'Pause animation' }}
         </button>
       </figcaption>

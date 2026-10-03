@@ -5,8 +5,9 @@ description: Select system, toolchain LLD, mold, or Wild linkers by Cargo profil
 
 The default `system` selection preserves Cargo's linker. Change it when you
 want to try another linker or share a pinned choice across a workspace.
-Managed selections require `clang` on `PATH`. Keep `system` on Windows;
-managed `rust-lld` selection is not supported there.
+Every selection other than `system` links through `clang`, so it requires
+`clang` on `PATH`. Keep `system` on Windows, where mbx does not support
+`rust-lld` selection.
 
 ## Try a linker
 
@@ -16,37 +17,46 @@ On Linux, try a pinned mold release for one build:
 MBX_LINKER=mold@2.42.0 mbx build
 ```
 
-This is an example version, not an automatically updated recommendation. On
-Linux or macOS, `rust-lld` uses the active Rust toolchain's bundled LLD without
-a download:
+This is an example version, not an automatically updated recommendation.
+
+On Linux or macOS, `rust-lld` uses the active Rust toolchain's bundled LLD
+without a download:
 
 ```sh
 MBX_LINKER=rust-lld mbx build
 ```
 
+mbx includes the selected linker executable in the cache key for native links
+(see [Native linking is cached only where the linker can be described](/limits#native-linking-is-cached-only-where-the-linker-can-be-described)).
+Changing the linker can therefore change cache keys, so compare equivalent
+builds when you measure a linker's effect.
+
 ## Selectors
 
-mbx can select a linker by Cargo profile and target triple, install an exact
-version from its official GitHub releases, and route native Rust links through
-it. The built-in selectors are:
+mbx selects a linker by Cargo profile and target triple and routes native Rust
+links through it. For mold and Wild, it installs the exact version you name,
+downloading it from the linker's official GitHub releases.
 
-- `system`, which leaves Cargo's linker selection alone;
-- `rust-lld` or `lld`, which uses the LLD shipped with the active Rust
-  toolchain;
-- `mold@<version>` or `wild@<version>`, which downloads the
-  matching release asset and verifies GitHub's SHA-256 digest; and
-- `path:<executable>`, which selects a linker mbx does not install.
+| Selector | Linker | Downloads |
+| --- | --- | --- |
+| `system` | Cargo's own linker selection, unchanged | No |
+| `rust-lld` or `lld` | The LLD shipped with the active Rust toolchain | No |
+| `mold@<version>` or `wild@<version>` | The named mold or Wild release, checked against GitHub's SHA-256 digest | Yes |
+| `path:<executable>` | A linker mbx does not install | No |
 
-Managed GitHub linkers require an exact version. Downloads are installed once
-beneath `<cache_dir>/tools`; concurrent builds share the same installation
-lock. `GITHUB_TOKEN` may authenticate GitHub API and download requests.
+The mold and Wild selectors require an exact version, not `latest`. mbx
+installs each download once beneath `<cache_dir>/tools`, and concurrent builds
+wait on the same installation lock. When `GITHUB_TOKEN` is set, mbx sends it
+with its GitHub API and download requests.
 
-Within a profile table, an exact target triple wins over `default`. The
-top-level `linker.default` applies when the active profile has no entry. Cargo's
-ordinary profile is `dev`, `--release` selects `release`, `cargo bench` selects
-`bench`, `cargo install` selects `release`, and `--profile <name>` selects that
-custom profile. The `debug` profile, which `cargo install --debug` uses from
-Cargo 1.99, uses the `dev` table when it has none of its own.
+mbx installs mold and Wild only on Linux. On an unsupported host, the build
+fails before Cargo starts rather than silently changing the linker.
+
+## Choose a linker by profile and target
+
+Store persistent selections in your [global configuration](/configuration) or
+in the [workspace policy](/configuration#workspace-policy). Workspace policy,
+which the repository owns, cannot use the `path:` selector.
 
 ```toml
 [linker]
@@ -60,18 +70,26 @@ aarch64-unknown-linux-gnu = "wild@0.10.0"
 default = "rust-lld"
 ```
 
-`MBX_LINKER` overrides every file for one invocation:
+Within a profile table, an exact target triple wins over `default`. The
+top-level `linker.default` applies when the active profile has no matching
+entry. mbx reads the active profile from the Cargo command:
+
+| Cargo command or flag | Profile |
+| --- | --- |
+| `--profile <name>` | `<name>` |
+| `--release` | `release` |
+| `cargo bench` | `bench` |
+| `cargo install` | `release` |
+| `cargo install --debug` | `debug` |
+| Any other command | `dev` |
+
+From Cargo 1.99, `cargo install --debug` builds with the `debug` profile. When
+`linker.profiles.debug` is absent, mbx uses the `dev` table instead.
+
+`MBX_LINKER` overrides the global configuration and workspace policy for
+one invocation:
 
 ```sh
 MBX_LINKER=mold@2.42.0 cargo build
 MBX_LINKER=system cargo build --release
 ```
-
-mold and Wild currently provide managed releases for Linux. Unsupported host
-platforms fail before Cargo starts rather than silently changing the linker.
-The selected executable remains part of mbx's native-link cache identity.
-
-Store persistent selections in your [global configuration](/configuration) or
-in the [workspace policy](/configuration#workspace-policy). The `path:` selector
-is accepted only outside repository-owned policy. A linker change can
-change cache keys; compare equivalent builds when measuring it.
