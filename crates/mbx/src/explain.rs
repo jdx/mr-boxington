@@ -376,7 +376,7 @@ fn checkout_hint(previous: &ActionDiagnostic, current: &ActionDiagnostic) -> Vec
     }
     if remap_differs {
         lines.push(
-            "  hint: --remap-path-prefix differs; set `MBX_SHARE_WORKSPACE_ROOT` the same way in both checkouts".into(),
+            "  hint: --remap-path-prefix differs; if it comes from workspace-root sharing rather than a flag you pass, set `MBX_SHARE_WORKSPACE_ROOT` the same way in both checkouts".into(),
         );
     }
     let others: Vec<&str> = changed_env
@@ -392,7 +392,7 @@ fn checkout_hint(previous: &ActionDiagnostic, current: &ActionDiagnostic) -> Vec
     }
     if lines.is_empty() && components.is_empty() && !dependencies_behind(&inputs).is_empty() {
         lines.push(
-            "  hint: if that crate is a workspace member, it records its checkout path and was rebuilt there; `MBX_SHARE_WORKSPACE_ROOT=1` (or `share_workspace_root = true`) makes both checkouts produce the same bytes".into(),
+            "  hint: if that crate is a workspace member whose source did not change, it may record its checkout path; `MBX_SHARE_WORKSPACE_ROOT=1` (or `share_workspace_root = true`) can make both checkouts produce the same bytes. If its source did change, inspect that crate's inputs instead".into(),
         );
     }
     lines
