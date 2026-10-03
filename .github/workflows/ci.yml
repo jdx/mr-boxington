@@ -35,6 +35,8 @@ jobs:
         run: |
           rustup component add rustfmt clippy
           rustup target add wasm32-unknown-unknown
+      - name: Run hk checks
+        run: hk check --all
       - name: Test benchmark driver
         run: python3 -m unittest discover -s benchmarks -p 'test_*.py'
       - name: Check dependencies
