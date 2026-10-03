@@ -533,13 +533,23 @@ fn links_outside_out_dir(directive: &str, mappings: &[PathMapping]) -> bool {
     // A relative path is resolved by the linker from the build script's working
     // directory, which can place it in the target directory too.
     let working_dir = std::env::current_dir().ok();
-    value.contains("${target")
+    // The word after `-l` or `-framework` names a library, not a path.
+    let mut names_library = false;
+    let relative_in_target = working_dir.is_some_and(|working_dir| {
+        value.split(' ').any(|word| {
+            let skip = std::mem::replace(
+                &mut names_library,
+                matches!(word, "-l" | "-framework" | "-weak_framework"),
+            );
+            !skip
+                && word
+                    .split(['=', ','])
+                    .any(|token| relative_token_is_in_target(token, &working_dir, mappings))
+        })
+    });
+    relative_in_target
+        || value.contains("${target")
         || value.split([' ', '=', ',']).any(|token| {
-            if let Some(working_dir) = &working_dir
-                && relative_token_is_in_target(token, working_dir, mappings)
-            {
-                return true;
-            }
             let rooted = token
                 .strip_prefix("${build_script_out_dir")
                 .and_then(|rest| rest.split_once('}'))
@@ -1451,6 +1461,12 @@ mod tests {
             relative,
             &relative_mappings
         ));
+        let library = "cargo:rustc-flags=-l target\n";
+        assert!(
+            parse_prediction_with_mappings(library, &relative_mappings)
+                .unwrap()
+                .is_some()
+        );
         let nested = format!("cargo:rustc-link-search={}/sub/../lib\n", out_dir.display());
         assert!(
             parse_prediction_with_mappings(&nested, &mappings)
