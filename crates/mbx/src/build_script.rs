@@ -19,7 +19,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
+
+/// How far before a run's start a modification still counts as made during it.
+/// File timestamps move in ticks, and a script that finishes within one would
+/// otherwise look as though it left its inputs alone. Best effort on file
+/// systems with coarser timestamps.
+const TIMESTAMP_SLACK: Duration = Duration::from_millis(50);
 
 const ADAPTER: &str = "build-script";
 
@@ -365,6 +371,7 @@ pub(crate) fn run() -> Result<ExitCode> {
     command.env_remove(session::BUILD_SCRIPT_SHIM_PATH_ENV);
     apply_ar_determinism(&mut command);
     let started = Instant::now();
+    let started_at = SystemTime::now();
     let output = command
         .output()
         .wrap_err("failed to execute the build script")?;
@@ -383,6 +390,13 @@ pub(crate) fn run() -> Result<ExitCode> {
             record_bypass("build-script-always-rerun");
             return Ok(());
         };
+        if declared_inputs_changed_since(&prediction, started_at)? {
+            // The result is keyed to the inputs as the run left them, but the
+            // script read them as they were before. Cargo runs it again, and
+            // that run starts from the tree this one left.
+            record_bypass("build-script-wrote-its-inputs");
+            return Ok(());
+        }
         let (action_bytes, action) = build_action(&binary_action, &prediction)?;
         publish(&action, &action_bytes, &output.stdout, &output.stderr)?;
         record_prediction(invocation, action, &prediction)
@@ -742,14 +756,20 @@ fn input_state(path: &Path, mappings: &[PathMapping]) -> Result<InputState> {
 }
 
 fn package_input_state(path: &Path, mappings: &[PathMapping]) -> Result<InputState> {
-    let mut excluded = vec![path.join(".git"), path.join("target")];
+    let excluded = default_package_exclusions(path)?;
+    input_state_at(path, mappings, &excluded, 0)
+}
+
+/// What Cargo's package-wide default input leaves out of `package`.
+fn default_package_exclusions(package: &Path) -> Result<Vec<PathBuf>> {
+    let mut excluded = vec![package.join(".git"), package.join("target")];
     if let Some(target) = std::env::var_os(session::TARGET_DIR_ENV) {
         let target = std::path::absolute(target)?;
-        if target.starts_with(path) {
+        if target.starts_with(package) {
             excluded.push(target);
         }
     }
-    input_state_at(path, mappings, &excluded, 0)
+    Ok(excluded)
 }
 
 fn input_state_at(
@@ -811,6 +831,64 @@ fn input_state_at(
         "declared build-script input is not a file or directory: {}",
         path.display()
     )
+}
+
+/// Whether anything a prediction declares as an input was modified at or after
+/// `started`, less [`TIMESTAMP_SLACK`].
+fn declared_inputs_changed_since(prediction: &Prediction, started: SystemTime) -> Result<bool> {
+    let since = started.checked_sub(TIMESTAMP_SLACK).unwrap_or(started);
+    let mappings = build_script_mappings();
+    let working_dir = std::env::current_dir()?;
+    for declared in &prediction.inputs {
+        let resolved_name =
+            String::from_utf8(denormalize_output_text(declared.as_bytes(), &mappings))
+                .expect("denormalizing UTF-8 paths preserves UTF-8");
+        let path = working_dir.join(resolved_name);
+        let excluded = if prediction.default_package {
+            default_package_exclusions(&path)?
+        } else {
+            Vec::new()
+        };
+        if modified_since(&path, &excluded, since, 0)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn modified_since(
+    path: &Path,
+    excluded: &[PathBuf],
+    since: SystemTime,
+    symlink_depth: usize,
+) -> Result<bool> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.modified()? >= since {
+        return Ok(true);
+    }
+    if metadata.file_type().is_symlink() {
+        if symlink_depth >= 64 {
+            return Ok(false);
+        }
+        let target = std::fs::read_link(path)?;
+        let resolved = path.parent().unwrap_or_else(|| Path::new("")).join(target);
+        return modified_since(&resolved, excluded, since, symlink_depth + 1);
+    }
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            if !excluded.iter().any(|excluded| entry.path() == *excluded)
+                && modified_since(&entry.path(), excluded, since, symlink_depth)?
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn out_dir_is_portable() -> Result<bool> {
@@ -1497,6 +1575,25 @@ mod tests {
             parse_prediction_with_mappings(&inside, &mappings)
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn an_input_modified_after_the_run_started_is_noticed_in_a_tree() {
+        let directory = tempfile::tempdir().unwrap();
+        let old = SystemTime::now() - Duration::from_secs(60);
+        std::fs::create_dir(directory.path().join("sub")).unwrap();
+        let file = directory.path().join("sub/input");
+        std::fs::write(&file, "x").unwrap();
+        for path in [&file, &directory.path().join("sub"), directory.path()] {
+            filetime::set_file_mtime(path, filetime::FileTime::from_system_time(old)).unwrap();
+        }
+        let since = SystemTime::now() - Duration::from_secs(30);
+        assert!(!modified_since(directory.path(), &[], since, 0).unwrap());
+        filetime::set_file_mtime(&file, filetime::FileTime::now()).unwrap();
+        assert!(modified_since(directory.path(), &[], since, 0).unwrap());
+        assert!(
+            !modified_since(directory.path(), &[directory.path().join("sub")], since, 0).unwrap()
         );
     }
 
