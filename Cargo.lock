@@ -303,7 +303,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -517,9 +517,9 @@ dependencies = [
 
 [[package]]
 name = "demand"
-version = "2.2.0"
+version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "465acbf6fac066b360cffc5d73706c9046595ff6935f7a7684ec32f7d410963d"
+checksum = "e7585a0f6254e4545ecd6efced4a844500ea857cac7ff214c7dfdbfde6c06c9d"
 dependencies = [
  "console",
  "fuzzy-matcher",
@@ -669,7 +669,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1965,7 +1965,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2254,7 +2254,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2311,7 +2311,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2721,7 +2721,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3071,35 +3071,36 @@ dependencies = [
 
 [[package]]
 name = "usage-argv"
-version = "6.5.0"
+version = "6.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cf8735c2d0154550e8241d30579e28b2840394c7a3efaf33b28ce706babe6f4"
+checksum = "d81d0292a01b769c28c094fc9da0596f49a4c78a6da88ffda53de9eafefc5b20"
 
 [[package]]
 name = "usage-config"
-version = "6.11.1"
+version = "6.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bf47002e31d27e4cad2326006ff50b88e726b6e8601f3a47cb2c2a3f4eb1357"
+checksum = "6d9f207fbe8bc0c04c454f0f0f64f06238e1ca7c1b87af6f7353166944d1c1dc"
 dependencies = [
  "toml",
 ]
 
 [[package]]
 name = "usage-derive"
-version = "6.5.0"
+version = "6.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfa7bc7653408788950770f2aa53f0600e025d50c8b049cdab054284436d2413"
+checksum = "6731f7bc17e630509b9c254ac13049dfc02451011d9dc9eb52865157304c03dc"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+ "toml",
 ]
 
 [[package]]
 name = "usage-rs"
-version = "6.5.0"
+version = "6.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c12de82d13507fdafd64170f5f735bd5fa7778f94b1f4a55e3b66e8ea3bde301"
+checksum = "b770a1ed5bf2c95707490f612e0c5597d7c664c6e37b60772ead3a8359526115"
 dependencies = [
  "usage-argv",
  "usage-config",
@@ -3109,9 +3110,9 @@ dependencies = [
 
 [[package]]
 name = "usage-test"
-version = "6.5.0"
+version = "6.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d3b624c2128c68c730930654cb718ef03c3792bfd7b2e8d4447ee58c2e4dfe7"
+checksum = "1011b07f3e21381eaaada43daeb5dce92469bc25c87921e6c957b2c3ba5ae716"
 dependencies = [
  "usage-argv",
 ]
@@ -3296,7 +3297,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
