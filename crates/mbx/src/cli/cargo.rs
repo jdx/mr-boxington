@@ -338,7 +338,21 @@ fn cargo_with_settings_bypass_log_and_roots(
         let lane = Path::new(lane)
             .strip_prefix("target")
             .unwrap_or(Path::new(""));
-        seed_target_view(config, &cargo, &roots.workspace_root, view, lane, arguments);
+        // The editor's placement names its own directory inside the view, so
+        // its lane is found from the view itself.
+        let view = if placing_editor {
+            target::view_dir(&config.target.root, &roots.workspace_root)
+        } else {
+            view.to_path_buf()
+        };
+        seed_target_view(
+            config,
+            &cargo,
+            &roots.workspace_root,
+            &view,
+            lane,
+            arguments,
+        );
     }
     if placement.directory.is_none() {
         // Placement declined, but an earlier one may have left a link this

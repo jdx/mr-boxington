@@ -4993,7 +4993,7 @@ mod target_views {
                 .count()
         };
         if units(first.path()) == 0 {
-            // Cargo before 1.100 keeps no unit directories to copy.
+            eprintln!("skipped: Cargo before 1.100 keeps no unit directories to copy");
             return;
         }
         let (seeded, stderr) = cargo_with(
@@ -5027,7 +5027,7 @@ mod target_views {
             &editor,
             &settings,
         );
-        let (_, stderr) = cargo_with(
+        let (seeded, stderr) = cargo_with(
             second.path(),
             store.path(),
             &reports.path().join("second-editor.json"),
@@ -5038,10 +5038,16 @@ mod target_views {
             stderr.contains("registry build units from"),
             "the new checkout's editor check should say what it copied: {stderr}"
         );
+        assert_eq!(
+            count(&seeded, "hits") + count(&seeded, "misses"),
+            1,
+            "only the workspace crate should be checked: {seeded}"
+        );
         assert!(
-            managed(second.path())
-                .join("rust-analyzer/debug/build/seeded-dep")
-                .is_dir()
+            !managed(second.path())
+                .join("rust-analyzer/rust-analyzer")
+                .exists(),
+            "the editor's units belong in its own directory, not one below it"
         );
     }
 
