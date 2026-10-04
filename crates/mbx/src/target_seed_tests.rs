@@ -1,6 +1,16 @@
 use super::*;
 use std::time::SystemTime;
 
+/// Seed a build's own profiles, outside any lane.
+fn seed(
+    view: &Path,
+    profiles: &[PathBuf],
+    packages: &BTreeSet<String>,
+    donors: &[Donor],
+) -> SeedOutcome {
+    super::seed(view, Path::new(""), profiles, packages, donors)
+}
+
 const LOCKFILE: &str = r#"
 version = 4
 
@@ -394,6 +404,37 @@ fn a_target_triple_the_donor_built_is_seeded_too() {
             .join(&triple)
             .join("build/serde/fedcba9876543210")
             .is_dir()
+    );
+}
+
+#[test]
+fn a_lane_is_seeded_from_the_same_lane_in_the_donor() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    unit(&from.path().join("debug"), "serde", "0123456789abcdef");
+    unit(
+        &from.path().join("check/debug"),
+        "serde",
+        "fedcba9876543210",
+    );
+
+    let outcome = super::seed(
+        to.path(),
+        Path::new("check"),
+        &[PathBuf::from("debug")],
+        &registry(),
+        &[donor(from.path())],
+    );
+
+    assert_eq!(outcome.units, 1);
+    assert!(
+        to.path()
+            .join("check/debug/build/serde/fedcba9876543210")
+            .is_dir()
+    );
+    assert!(
+        !to.path().join("debug").exists(),
+        "a lane's build should leave the build profiles alone"
     );
 }
 

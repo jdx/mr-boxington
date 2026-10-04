@@ -4946,6 +4946,111 @@ mod target_views {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_new_checkouts_first_check_starts_with_another_checkouts_check_units() {
+        let store = tempfile::tempdir().unwrap();
+        let cargo_home = tempfile::tempdir().unwrap();
+        let repository = tempfile::tempdir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_seeded_dependency(repository.path());
+        for checkout in [first.path(), second.path()] {
+            write_git_dependent_project(checkout, repository.path());
+        }
+        let home = cargo_home.path().to_str().unwrap();
+        let status = Command::new(cargo())
+            .current_dir(first.path())
+            .args(["generate-lockfile"])
+            .env("CARGO_HOME", home)
+            .status()
+            .expect("cargo should run");
+        assert!(status.success(), "the fixture should resolve");
+        std::fs::copy(
+            first.path().join("Cargo.lock"),
+            second.path().join("Cargo.lock"),
+        )
+        .unwrap();
+        let settings = [("MBX_TARGET_VIEWS", "1"), ("CARGO_HOME", home)];
+        let check = ["check", "--offline"];
+
+        cargo_with(
+            first.path(),
+            store.path(),
+            &reports.path().join("first.json"),
+            &check,
+            &settings,
+        );
+        let units = |checkout: &Path| {
+            managed(checkout)
+                .join("check/debug/build/seeded-dep")
+                .read_dir()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|unit| unit.path().join("fingerprint").is_dir())
+                .count()
+        };
+        if units(first.path()) == 0 {
+            eprintln!("skipped: Cargo before 1.100 keeps no unit directories to copy");
+            return;
+        }
+        let (seeded, stderr) = cargo_with(
+            second.path(),
+            store.path(),
+            &reports.path().join("second.json"),
+            &check,
+            &settings,
+        );
+        assert!(
+            stderr.contains("registry build units from"),
+            "the new checkout's check should say what it copied: {stderr}"
+        );
+        assert_eq!(units(second.path()), units(first.path()));
+        assert!(
+            !managed(second.path()).join("debug").exists(),
+            "a check should seed only its own lane"
+        );
+        assert_eq!(
+            count(&seeded, "hits") + count(&seeded, "misses"),
+            1,
+            "only the workspace crate should be checked: {seeded}"
+        );
+
+        // The editor's checks keep a directory of their own the same way.
+        let editor = ["check", "--offline", "--target-dir", "target/rust-analyzer"];
+        cargo_with(
+            first.path(),
+            store.path(),
+            &reports.path().join("first-editor.json"),
+            &editor,
+            &settings,
+        );
+        let (seeded, stderr) = cargo_with(
+            second.path(),
+            store.path(),
+            &reports.path().join("second-editor.json"),
+            &editor,
+            &settings,
+        );
+        assert!(
+            stderr.contains("registry build units from"),
+            "the new checkout's editor check should say what it copied: {stderr}"
+        );
+        assert_eq!(
+            count(&seeded, "hits") + count(&seeded, "misses"),
+            1,
+            "only the workspace crate should be checked: {seeded}"
+        );
+        assert!(
+            !managed(second.path())
+                .join("rust-analyzer/rust-analyzer")
+                .exists(),
+            "the editor's units belong in its own directory, not one below it"
+        );
+    }
+
     #[test]
     fn a_store_sweep_failure_still_frees_managed_target_directories() {
         let store = tempfile::tempdir().unwrap();

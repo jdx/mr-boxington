@@ -136,14 +136,18 @@ pub(crate) fn registry_packages(lockfile: &str) -> BTreeSet<String> {
     &registry - &path
 }
 
-/// Copy `packages`' units into each profile directory, relative to `view`,
-/// that has no `build/` directory yet. `profiles` starts with the host
-/// profile; the same profile below any target triple a donor has built is
-/// seeded too, since a target chosen by Cargo configuration or `host-tuple`
-/// never appears as a directory name in the arguments. Each directory comes
-/// from the first donor, most recent first, that has usable units for it.
+/// Copy `packages`' units into each profile directory, relative to `lane`
+/// in `view`, that has no `build/` directory yet. `lane` is empty for a
+/// build's own profiles, or the directory a check lane or the editor writes
+/// below the managed target, whose units come from the same directory in each
+/// donor. `profiles` starts with the host profile; the same profile below any
+/// target triple a donor has built is seeded too, since a target chosen by
+/// Cargo configuration or `host-tuple` never appears as a directory name in
+/// the arguments. Each directory comes from the first donor, most recent
+/// first, that has usable units for it.
 pub(crate) fn seed(
     view: &Path,
+    lane: &Path,
     profiles: &[PathBuf],
     packages: &BTreeSet<String>,
     donors: &[Donor],
@@ -155,11 +159,13 @@ pub(crate) fn seed(
     if packages.is_empty() {
         return outcome;
     }
+    let view = view.join(lane);
     let mut settled = BTreeSet::new();
     for donor in donors {
+        let donor_lane = donor.directory.join(lane);
         let mut candidates = profiles.to_vec();
         candidates.extend(
-            subdirectories(&donor.directory)
+            subdirectories(&donor_lane)
                 .into_iter()
                 .filter_map(|triple| Some(Path::new(triple.file_name()?).join(host)))
                 .filter(|candidate| candidate != host),
@@ -173,7 +179,7 @@ pub(crate) fn seed(
                 settled.insert(profile);
                 continue;
             }
-            let source = donor.directory.join(&profile);
+            let source = donor_lane.join(&profile);
             if !has_units(&source.join("build")) {
                 continue;
             }
