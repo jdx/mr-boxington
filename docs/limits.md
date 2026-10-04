@@ -75,6 +75,26 @@ compilations are never published to the shared cache. See
 [Cargo incremental mode](/incremental#cargo-incremental-mode) for the trade-off
 `MBX_INCREMENTAL=1` makes.
 
+## An edited crate's dependents compile again
+
+Changing only a function body in a library still compiles every crate that
+depends on it, even when the library's public interface is unchanged. mbx
+cannot restore those dependents from the shared cache.
+
+The reason is in rustc's metadata. rustc gives each compiled crate a hash of
+its whole source, function bodies included, and every dependent records that
+hash in its own `.rmeta` and `.rlib`. A later compilation that loads a
+dependent built against the old hash beside the edited library stops with
+`error[E0460]: found possibly newer version of crate`. A dependent's cached
+output is therefore usable only with the exact library build it was compiled
+against. Reusing it after a body edit would mean rewriting rustc's metadata,
+which mbx does not do.
+
+In the edit loop, those dependents use
+[learned incremental state](/incremental#learned-incremental-reuse) instead.
+rustc's own dependency tracking then reuses the work the edit did not affect,
+so a dependent costs a fraction of a full recompilation.
+
 ## Native linking is cached only where the linker can be described
 
 Native binaries and dynamic libraries link against an external linker, startup
