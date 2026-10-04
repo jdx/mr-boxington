@@ -323,11 +323,22 @@ fn cargo_with_settings_bypass_log_and_roots(
         ));
     }
     if config.target.seed
-        && !placing_editor
-        && check_lane.is_none()
         && let Some(view) = placement.directory.as_deref()
     {
-        seed_target_view(config, &cargo, &roots.workspace_root, view, arguments);
+        // A check lane and the editor's checks keep profiles of their own below
+        // the managed target, so they start from the same lane in another
+        // checkout rather than from its build profiles.
+        let lane = if placing_editor {
+            super::RUST_ANALYZER_TARGET_DIR
+        } else if check_lane.is_some() {
+            super::CHECK_LANE_TARGET_DIR
+        } else {
+            "target"
+        };
+        let lane = Path::new(lane)
+            .strip_prefix("target")
+            .unwrap_or(Path::new(""));
+        seed_target_view(config, &cargo, &roots.workspace_root, view, lane, arguments);
     }
     if placement.directory.is_none() {
         // Placement declined, but an earlier one may have left a link this
@@ -721,18 +732,21 @@ pub(super) fn place_target_view(config: &Config, roots: &Roots) -> TargetViewPla
 }
 
 /// Copy registry build units from another checkout into each profile this
-/// build writes that the checkout has not built yet.
+/// build writes that the checkout has not built yet. `lane` is where those
+/// profiles sit below the managed target: nowhere for a build, or the check
+/// lane's or the editor's directory.
 fn seed_target_view(
     config: &Config,
     cargo: &std::ffi::OsStr,
     workspace_root: &Path,
     view: &Path,
+    lane: &Path,
     arguments: &[String],
 ) {
     let profiles = crate::target_seed::profile_directories(arguments);
     if profiles
         .iter()
-        .all(|profile| view.join(profile).join("build").exists())
+        .all(|profile| view.join(lane).join(profile).join("build").exists())
     {
         return;
     }
@@ -767,7 +781,7 @@ fn seed_target_view(
     if !supported {
         return;
     }
-    let outcome = crate::target_seed::seed(view, &profiles, &packages, &donors);
+    let outcome = crate::target_seed::seed(view, lane, &profiles, &packages, &donors);
     if let Some(donor) = outcome.donor {
         crate::session::note(&format!(
             "mbx[target]: copied {} registry build units from {}",

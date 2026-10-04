@@ -262,13 +262,16 @@ first one with units for this checkout's dependencies. Where the filesystem
 records access times, it copies only the units that profile's latest build
 read. The same profile below each target triple the other checkout built is
 copied too, so a target chosen in Cargo configuration is covered. Copies are
-reflinks where the filesystem supports them. mbx skips this step when:
+reflinks where the filesystem supports them.
+
+`check` and `clippy` in their [check lane](#check-lanes), and editor checks
+under `target/rust-analyzer`, are seeded the same way from that directory in
+the other checkout. The first `cargo check` in a new worktree then checks only
+the workspace's own crates. mbx skips this step when:
 
 - the profile already has a `build/` directory in this checkout
 - the Cargo running this build is older than 1.100
 - a build holds the Cargo lock of either profile
-- the command is `check` or `clippy` in its [check lane](#check-lanes), or an
-  editor check under `target/rust-analyzer`
 - no other checkout was built by Cargo 1.100 or later
 
 Path dependencies and workspace members are never copied. Cargo trusts their
