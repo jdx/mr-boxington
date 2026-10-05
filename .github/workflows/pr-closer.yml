@@ -1,0 +1,21 @@
+name: pr-closer
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: pr-closer
+  cancel-in-progress: false
+
+jobs:
+  pr-closer:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+      checks: read
+      statuses: read
+    steps:
+      - uses: jdx/pr-closer@389c3b65873b020f75418c44ccca9987717eaf2f # PR #12 merge
