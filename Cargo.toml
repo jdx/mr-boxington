@@ -33,3 +33,6 @@ codegen-units = 1
 # tables keeps the frequently-started binary smaller without changing recovery.
 panic = "abort"
 strip = "symbols"
+
+[profile.dev]
+debug = 1
