@@ -1,5 +1,5 @@
 ---
-description: Install mbx with mise, Cargo, or verified release archives on Linux, macOS, and Windows.
+description: Install mbx with mise, Cargo, Nix, or verified release archives on Linux, macOS, and Windows.
 ---
 # Installation
 
@@ -54,6 +54,49 @@ prebuilt binary instead.
 
 You can now run `mbx build` in a Rust workspace. To make plain `cargo` commands
 use mbx too, run [`mbx setup`](/setup#standalone-setup).
+
+## Nix
+
+With Nix flakes enabled, run mbx directly from GitHub without installing it:
+
+```sh
+nix run github:jdx/mr-boxington -- --version
+nix run github:jdx/mr-boxington -- build
+```
+
+The flake provides `mbx` as its default package and app on Linux and macOS,
+for both x86-64 and ARM64. To include it in a project's dev shell, add it as
+a flake input:
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    mbx.url = "github:jdx/mr-boxington";
+    mbx.inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = { nixpkgs, mbx, ... }:
+    let
+      system = "x86_64-linux";
+      pkgs = nixpkgs.legacyPackages.${system};
+      mbxPackage = mbx.packages.${system}.mbx;
+    in {
+      devShells.${system}.default = pkgs.mkShell {
+        packages = [ pkgs.cargo pkgs.rustc mbxPackage ];
+        shellHook = ''
+          export PATH="${mbxPackage}/libexec/mbx:$PATH"
+        '';
+      };
+    };
+}
+```
+
+Set `system` to your platform and run `nix develop`. The hook puts mbx's
+Cargo wrapper first on `PATH`, so plain `cargo build`, `cargo test`, and
+other build commands use mbx automatically. The wrapper lives in
+`libexec/mbx/cargo`, separate from the package's `bin` directory, so adding
+the package alone does not change how Cargo runs.
 
 ## Release archives
 
