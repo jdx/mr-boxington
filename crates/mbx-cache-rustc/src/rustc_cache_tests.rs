@@ -1563,6 +1563,20 @@ fn models_parallel_frontend_options_in_the_action_key() {
         invocation(&["-Zunstable-options", "--jobs-frontend", "16"]),
         invocation(&["-Zunstable-options", "--jobs-frontend=16"])
     );
+
+    let synchronous_unwind = invocation(&["-Zuse-sync-unwind=yes"]);
+    assert_eq!(
+        synchronous_unwind,
+        invocation(&["-Z", "use-sync-unwind=yes"])
+    );
+    assert_ne!(
+        key(synchronous_unwind),
+        key(invocation(&["-Zuse-sync-unwind=no"]))
+    );
+    assert_eq!(
+        RustcInvocation::parse(&args(&["-Zuse-sync-unwind=true", "src/lib.rs"])),
+        Err(BypassReason::UnknownFlag("-Zuse-sync-unwind=true".into()))
+    );
 }
 
 #[test]
