@@ -1559,6 +1559,12 @@ impl<'a> Parser<'a> {
                     self.parsed.push(Argument::Plain(format!("-Z{option}")));
                     return Ok(());
                 }
+                // Selects a distinct unwind-table encoding. Preserve the
+                // exact value in the action key; reject other spellings.
+                "use-sync-unwind=yes" | "use-sync-unwind=no" => {
+                    self.parsed.push(Argument::Plain(format!("-Z{option}")));
+                    return Ok(());
+                }
                 "threads" | "threads=" => {
                     return Err(BypassReason::MissingValue("-Zthreads".into()));
                 }
