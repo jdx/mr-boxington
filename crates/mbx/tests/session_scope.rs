@@ -566,6 +566,14 @@ fn scheduled() {
 }
 "#,
     );
+    // The library's own, empty test binary finishes at once and is recorded
+    // as one core, so it must not share the ledger name of the binary under
+    // test.
+    std::fs::write(
+        root.path().join("Cargo.toml"),
+        "[package]\nname='scope-fixture'\nversion='0.0.0'\nedition='2021'\n\n[lib]\nname='scope_lib'\n",
+    )
+    .unwrap();
     // Rustdoc runs doctests through the same runner; they hold no permit.
     std::fs::write(
         root.path().join("src/lib.rs"),
@@ -628,6 +636,54 @@ pub fn documented() {}
         ledger.contains("scope-fixture/scope_fixture [test]\":1"),
         "{ledger}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_test_binary_that_finishes_in_under_a_second_is_weighed_one_core() {
+    let root = tempfile::tempdir().unwrap();
+    project(
+        root.path(),
+        r#"
+fn main() {}
+#[test]
+fn quick() {
+    let leases = std::path::Path::new(&std::env::var_os("MBX_CACHE_DIR").unwrap())
+        .join("scheduler/leases");
+    let held: Vec<String> = std::fs::read_dir(&leases)
+        .unwrap()
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect();
+    let weight = std::env::var("EXPECTED_WEIGHT").unwrap();
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert!(held[0].contains(&format!("\"weight\":{weight},")), "{held:?}");
+}
+"#,
+    );
+    std::fs::write(
+        root.path().join("Cargo.toml"),
+        "[package]\nname='scope-fixture'\nversion='0.0.0'\nedition='2021'\n\n[lib]\nname='scope_lib'\n",
+    )
+    .unwrap();
+    std::fs::write(root.path().join("src/lib.rs"), "").unwrap();
+    // Unmeasured, the suite asks for half of the 8 permits; one run that
+    // ends well under a second records it as a single core.
+    for expected in ["4", "1"] {
+        let output = mbx(root.path())
+            .env("MBX_SCHEDULER_CPUS", "8")
+            .env("MBX_SCHEDULER_MEMORY", "none")
+            .env("MBX_SCHEDULER_TESTS", "1")
+            .env("EXPECTED_WEIGHT", expected)
+            .args(["test", "--offline"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "expected weight {expected}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]

@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 const SHIM: &str = "mbx-test-runner";
-/// Shortest run whose CPU use is worth remembering. Below this, start-up
-/// dominates the average, and a suite this quick barely holds its permit.
+/// Shortest run whose CPU use is worth measuring. Below this, start-up
+/// dominates the average, so a complete run is remembered as one core.
 const MIN_CPU_SAMPLE: std::time::Duration = std::time::Duration::from_secs(1);
 /// The [`Overlay`] the shim reads back.
 const RUNNERS: &str = "MBX_TEST_RUNNERS";
@@ -252,15 +252,22 @@ pub fn dispatch() -> Option<ExitCode> {
             // A run that exited on its own, failing tests included, ran the
             // whole suite; one a signal stopped, or one narrowed to some of
             // its tests, says little about what the suite costs.
-            if status.code().is_some()
-                && wall >= MIN_CPU_SAMPLE
-                && !narrows_suite(&rest)
-                && let Some(cpu) = crate::scheduler::child_cpu_time()
-            {
-                crate::scheduler::record_test_cpu(
-                    demand,
-                    crate::scheduler::average_cores(cpu, wall),
-                );
+            if status.code().is_some() && !narrows_suite(&rest) {
+                // A suite this quick cannot keep cores busy long enough to
+                // matter, but unrecorded it would ask for half the pool on
+                // every run. Weigh it one core; a longer run raises that.
+                // Where CPU time cannot be measured nothing could raise it,
+                // so nothing is recorded.
+                let cores = crate::scheduler::child_cpu_time().map(|cpu| {
+                    if wall < MIN_CPU_SAMPLE {
+                        1
+                    } else {
+                        crate::scheduler::average_cores(cpu, wall)
+                    }
+                });
+                if let Some(cores) = cores {
+                    crate::scheduler::record_test_cpu(demand, cores);
+                }
             }
             drop(permit);
         }
