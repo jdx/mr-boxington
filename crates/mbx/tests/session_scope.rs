@@ -566,6 +566,14 @@ fn scheduled() {
 }
 "#,
     );
+    // The library's own, empty test binary finishes at once and is recorded
+    // as one core, so it must not share the ledger name of the binary under
+    // test.
+    std::fs::write(
+        root.path().join("Cargo.toml"),
+        "[package]\nname='scope-fixture'\nversion='0.0.0'\nedition='2021'\n\n[lib]\nname='scope_lib'\n",
+    )
+    .unwrap();
     // Rustdoc runs doctests through the same runner; they hold no permit.
     std::fs::write(
         root.path().join("src/lib.rs"),

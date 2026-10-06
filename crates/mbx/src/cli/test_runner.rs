@@ -256,12 +256,15 @@ pub fn dispatch() -> Option<ExitCode> {
                 // A suite this quick cannot keep cores busy long enough to
                 // matter, but unrecorded it would ask for half the pool on
                 // every run. Weigh it one core; a longer run raises that.
-                let cores = if wall < MIN_CPU_SAMPLE {
-                    Some(1)
-                } else {
-                    crate::scheduler::child_cpu_time()
-                        .map(|cpu| crate::scheduler::average_cores(cpu, wall))
-                };
+                // Where CPU time cannot be measured nothing could raise it,
+                // so nothing is recorded.
+                let cores = crate::scheduler::child_cpu_time().map(|cpu| {
+                    if wall < MIN_CPU_SAMPLE {
+                        1
+                    } else {
+                        crate::scheduler::average_cores(cpu, wall)
+                    }
+                });
                 if let Some(cores) = cores {
                     crate::scheduler::record_test_cpu(demand, cores);
                 }
