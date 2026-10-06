@@ -88,5 +88,17 @@ jobs:
             exit 0
           fi
 
+          # release-plz.yml opens the PR first and pushes the regenerated
+          # docs/cli commit to it in a later step. A nonempty body does not mean
+          # that step has finished, and a merge before it lands ships docs for
+          # the previous version, so wait while any release-plz run is active.
+          for status in queued in_progress; do
+            ACTIVE=$(gh run list -R jdx/mr-boxington --workflow release-plz.yml --status "$status" --json databaseId --jq 'length')
+            if [ "$ACTIVE" != "0" ]; then
+              echo "Skipping merge: a release-plz run is $status and may still be updating PR #$PR_NUMBER; will retry on the next scheduled run"
+              exit 0
+            fi
+          done
+
           echo "PR #$PR_NUMBER is ready for the daily release window"
           gh pr merge "$PR_NUMBER" -R jdx/mr-boxington --squash --auto
