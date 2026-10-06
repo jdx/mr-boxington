@@ -380,7 +380,7 @@ jobs:
           chmod +x "$RUNNER_TEMP/mbx-bin/mbx"
           echo "$RUNNER_TEMP/mbx-bin" >> "$GITHUB_PATH"
       - if: matrix.tool == 'rust-cache'
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}
           add-job-id-key: "false"
@@ -388,13 +388,13 @@ jobs:
           cache-all-crates: "true"
           cache-workspace-crates: "true"
       - if: matrix.tool == 'mbx'
-        uses: jdx/mr-boxington-action@1687e54eb349cadf61fa38b5813a77875489e8e6 # v1.2.0
+        uses: jdx/mr-boxington-action@9df1d4b18b2147788a7ee7a2c7b84ecf62fd89d3 # v1.5.0
         with:
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
           save-on-workflow-dispatch: "true"
       - if: startsWith(matrix.tool, 'mbx-registry')
-        uses: jdx/mr-boxington-action@1687e54eb349cadf61fa38b5813a77875489e8e6 # v1.2.0
+        uses: jdx/mr-boxington-action@9df1d4b18b2147788a7ee7a2c7b84ecf62fd89d3 # v1.5.0
         with:
           backend: local
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
@@ -469,7 +469,7 @@ jobs:
         run: echo "SMALL_EDIT_STARTED_NS=$(date +%s%N)" >> "$GITHUB_ENV"
       - if: matrix.tool == 'rust-cache'
         id: rust_cache_restore
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}
           add-job-id-key: "false"
@@ -479,12 +479,12 @@ jobs:
           save-if: "false"
       - if: matrix.tool == 'mbx'
         id: mbx_restore
-        uses: jdx/mr-boxington-action@1687e54eb349cadf61fa38b5813a77875489e8e6 # v1.2.0
+        uses: jdx/mr-boxington-action@9df1d4b18b2147788a7ee7a2c7b84ecf62fd89d3 # v1.5.0
         with:
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
       - if: startsWith(matrix.tool, 'mbx-registry')
-        uses: jdx/mr-boxington-action@1687e54eb349cadf61fa38b5813a77875489e8e6 # v1.2.0
+        uses: jdx/mr-boxington-action@9df1d4b18b2147788a7ee7a2c7b84ecf62fd89d3 # v1.5.0
         with:
           backend: local
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
