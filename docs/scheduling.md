@@ -137,8 +137,9 @@ have configured. Each test binary waits for permits before it starts:
   permits, and otherwise the binary asks for half the pool, rounded up.
 - A binary whose measured memory needs more permits takes that many instead.
 
-Only complete runs of at least a second are measured; a run narrowed by a test
-name, `--skip`, or `--ignored` is not. A recorded core count only goes up,
+Only complete runs are measured; a run narrowed by a test name, `--skip`, or
+`--ignored` is not. A run under a second is too short to average, so the binary
+is recorded as one core. A recorded core count only goes up,
 because a suite measured on a busy machine gets fewer cores than it would use.
 mbx measures CPU and memory on Unix only. On Windows, a binary always asks for
 its stated thread count or half the pool.
