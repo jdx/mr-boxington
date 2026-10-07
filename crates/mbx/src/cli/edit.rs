@@ -11,12 +11,40 @@ pub(super) fn run() -> Result<ExitCode> {
         .ok_or_else(|| eyre::eyre!("could not resolve the global configuration path"))?;
     let visual = editor_variable("VISUAL")?;
     let editor = editor_variable("EDITOR")?;
-    run_with(
-        &path,
-        visual.as_deref(),
-        editor.as_deref(),
-        |program, arguments| Command::new(program).args(arguments).status(),
-    )
+    run_with(&path, visual.as_deref(), editor.as_deref(), launch_editor)
+}
+
+/// Resolve the editor the way a shell would, so on Windows `code` finds
+/// `code.cmd`, then wait for it. A terminal editor owns Ctrl+C while it runs,
+/// so mbx must outlive the interrupt instead of dying and orphaning it.
+fn launch_editor(program: &OsStr, arguments: &[OsString]) -> io::Result<ExitStatus> {
+    let resolved = which::which(program).unwrap_or_else(|_| program.into());
+    #[cfg(unix)]
+    let _interrupt = SurviveInterrupt::install();
+    Command::new(resolved).args(arguments).status()
+}
+
+#[cfg(unix)]
+struct SurviveInterrupt(libc::sighandler_t);
+
+#[cfg(unix)]
+impl SurviveInterrupt {
+    fn install() -> Self {
+        extern "C" fn ignore(_: libc::c_int) {}
+        // A handler, not SIG_IGN: handlers reset on exec, so the editor keeps
+        // its default Ctrl+C behavior while only mbx survives.
+        let handler: extern "C" fn(libc::c_int) = ignore;
+        // SAFETY: the handler does nothing, so it is async-signal-safe.
+        Self(unsafe { libc::signal(libc::SIGINT, handler as libc::sighandler_t) })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SurviveInterrupt {
+    fn drop(&mut self) {
+        // SAFETY: restores the handler that install replaced.
+        unsafe { libc::signal(libc::SIGINT, self.0) };
+    }
 }
 
 fn editor_variable(name: &str) -> Result<Option<String>> {
@@ -99,6 +127,7 @@ fn split_words(input: &str, windows: bool) -> Result<Vec<String>> {
             (Some('\''), '\'') => quote = None,
             (Some('"'), '"') => quote = None,
             (Some('"'), '\\') if !windows => match chars.next() {
+                Some('\n') => {}
                 Some(next @ ('"' | '\\' | '$' | '`')) => word.push(next),
                 Some(next) => {
                     word.push('\\');
@@ -115,14 +144,14 @@ fn split_words(input: &str, windows: bool) -> Result<Vec<String>> {
                 quote = Some('\'');
                 started = true;
             }
-            (None, '\\') if !windows => {
-                word.push(
-                    chars
-                        .next()
-                        .ok_or_else(|| eyre::eyre!("trailing backslash"))?,
-                );
-                started = true;
-            }
+            (None, '\\') if !windows => match chars.next() {
+                Some('\n') => {}
+                Some(next) => {
+                    word.push(next);
+                    started = true;
+                }
+                None => eyre::bail!("trailing backslash"),
+            },
             (None, c) if c.is_whitespace() => {
                 if started {
                     words.push(std::mem::take(&mut word));
@@ -185,6 +214,10 @@ mod tests {
             split_words(r#"'/my dir/ed' a\ b "c \" d""#, false).unwrap(),
             ["/my dir/ed", "a b", "c \" d"]
         );
+        assert_eq!(
+            split_words("code \\\n--wait \"a\\\nb\"", false).unwrap(),
+            ["code", "--wait", "ab"]
+        );
         assert!(split_words("'open", false).is_err());
         assert!(split_words("\"open", true).is_err());
     }
@@ -201,8 +234,20 @@ mod tests {
         assert!(error.contains("not valid Unicode"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn survives_an_interrupt_delivered_while_the_editor_runs() {
+        let arguments = [
+            OsString::from("-c"),
+            OsString::from("kill -INT $PPID; sleep 0.1"),
+        ];
+        let status = launch_editor(OsStr::new("sh"), &arguments).unwrap();
+        assert!(status.success());
+    }
+
     #[test]
     fn rejects_an_empty_quoted_editor() {
+        assert!(split_editor_command(r#""""#).is_err());
         assert!(split_editor_command(r#"""#).is_err());
     }
 
