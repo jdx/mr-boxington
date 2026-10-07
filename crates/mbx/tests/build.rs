@@ -5526,6 +5526,87 @@ fn verification_is_clean_across_target_directories() {
         "a restore into another target directory diverged: {reported}"
     );
 }
+
+/// Runtime-only writes in an implicit package input withhold publication but
+/// must still audit a predicted result in full and sampled verification runs.
+#[cfg(unix)]
+#[test]
+fn verification_audits_results_when_implicit_build_script_inputs_change() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    std::fs::write(project.path().join("build.rs"), "fn main() {}\n").unwrap();
+    let runtime = project.path().join("runtime.txt");
+    std::fs::write(&runtime, "original\n").unwrap();
+    let wrapper = reports.path().join("mutating-rustc");
+    std::fs::write(
+        &wrapper,
+        r#"#!/bin/sh
+"$TEST_REAL_RUSTC" "$@"
+status=$?
+case " $* " in
+  *" --crate-name fixture "*)
+    if [ "$status" -eq 0 ] && [ "$TEST_MUTATE_DURING_COMPILE" = 1 ]; then
+      printf 'changed\n' > "$TEST_RUNTIME_PATH"
+    fi
+    ;;
+esac
+exit "$status"
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&wrapper).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&wrapper, permissions).unwrap();
+    let rustc = which::which("rustc").unwrap();
+    let settings = [
+        ("MBX_INCREMENTAL", "0"),
+        ("MBX_CACHE_LINKS", "0"),
+        ("RUSTC", wrapper.to_str().unwrap()),
+        ("TEST_REAL_RUSTC", rustc.to_str().unwrap()),
+        ("TEST_RUNTIME_PATH", runtime.to_str().unwrap()),
+    ];
+    cargo_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+        &["check", "--offline"],
+        &settings,
+    );
+    for mode in ["MBX_VERIFY", "MBX_VERIFY_SAMPLE_RATE"] {
+        std::fs::remove_dir_all(project.path().join("target")).unwrap();
+        std::fs::write(&runtime, "original\n").unwrap();
+        let mut settings = settings.to_vec();
+        settings.extend([
+            (mode, if mode == "MBX_VERIFY" { "1" } else { "100" }),
+            ("TEST_MUTATE_DURING_COMPILE", "1"),
+        ]);
+        let (stats, stderr) = cargo_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("verify.json"),
+            &["check", "--offline"],
+            &settings,
+        );
+        assert!(
+            stderr.contains("implicit build-script inputs changed"),
+            "{stderr}"
+        );
+        assert_eq!(
+            count(&stats, "verifications"),
+            1,
+            "{mode}: {stats}\n{stderr}"
+        );
+        assert_eq!(count(&stats, "divergences"), 0, "{mode}: {stats}\n{stderr}");
+        assert_eq!(
+            count(&stats["compiler"]["verification"], "invocations"),
+            1,
+            "the verification compile must be recorded exactly once: {stats}"
+        );
+    }
+}
+
 /// Write a fixture whose build script compiles C through `$CC`.
 ///
 /// Deliberately hand-rolled rather than using the `cc` crate: this suite

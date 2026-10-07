@@ -597,24 +597,30 @@ pub(crate) fn compile(
         && let Some(inputs) = &portable.build_script_inputs
         && let Err(error) = inputs.verify()
     {
-        session::record_compiler_invocation_with_diagnostic(
-            recorded_outcome,
-            Some(&timing.crate_name),
-            timing.duration_ns,
-            current_diagnostic,
-        );
         let invalid = discard_modified_compiler_result(&outputs, &input_snapshots, &error)
-            || validate_compiler_inputs(
-                &invocation,
-                &outputs,
-                &working_dir,
-                &portable,
-                compilation_started,
-                &input_snapshots,
-            )
-            .is_err_and(|error| {
-                discard_modified_compiler_result(&outputs, &input_snapshots, &error)
-            });
+            || (verification.is_none()
+                && validate_compiler_inputs(
+                    &invocation,
+                    &outputs,
+                    &working_dir,
+                    &portable,
+                    compilation_started,
+                    &input_snapshots,
+                )
+                .is_err_and(|error| {
+                    discard_modified_compiler_result(&outputs, &input_snapshots, &error)
+                }));
+        // A shadow compilation still audits the cached outputs below. That
+        // path records the invocation and validates rustc's own dep-info;
+        // ordinary bypasses and invalid results finish here instead.
+        if invalid || verification.is_none() {
+            session::record_compiler_invocation_with_diagnostic(
+                recorded_outcome,
+                Some(&timing.crate_name),
+                timing.duration_ns,
+                current_diagnostic.take(),
+            );
+        }
         if invalid {
             if !forwarded {
                 let _ = replay_bytes(&[], &output.stderr);
@@ -624,10 +630,12 @@ pub(crate) fn compile(
         session::report_shim_warning(&format!(
             "build-script inputs were not validated: {error:#}"
         ));
-        if !forwarded {
-            replay_bytes(&output.stdout, &output.stderr)?;
+        if verification.is_none() {
+            if !forwarded {
+                replay_bytes(&output.stdout, &output.stderr)?;
+            }
+            return Ok(exit_code(output.status));
         }
-        return Ok(exit_code(output.status));
     }
     if let Some(cached) = verification {
         session::record_compiler_invocation_with_diagnostic(
