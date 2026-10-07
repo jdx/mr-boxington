@@ -1,4 +1,6 @@
 [workspace]
+# Label the release PR so it is easy to find and filter.
+pr_labels = ["release"]
 # Releases happen by merging a release PR, not by any push that happens to
 # carry a version bump. Same choice as jdx/mbx-cache.
 release_always = false
