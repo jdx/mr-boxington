@@ -10,7 +10,9 @@ use crate::session;
 use eyre::{Context as _, Result, bail};
 use mbx_cache_core::{
     ActionPrediction, AgentRequest, AgentResponse, CacheDigest, CacheDirectory, CacheDirectoryNode,
-    CacheFileNode, CacheSymlinkNode, RemoteActionResult, RestoreStats, canonical_json,
+    CacheFileNode, CacheSymlinkNode, FileDigestCache, FileDigestResolution, FileDigestScope,
+    FileIdentity, NoFileDigestCache, RecordedFileDigest, RemoteActionResult, RestoreStats,
+    canonical_json, digest_file, digest_file_validated,
 };
 use mbx_cache_rustc::PathMapping;
 use serde::{Deserialize, Serialize};
@@ -757,9 +759,12 @@ pub(crate) struct CompilationInputs {
     manifest_dir: PathBuf,
     mappings: Vec<PathMapping>,
     implicit_package: bool,
+    compiler_directories: Vec<PathBuf>,
 }
 
 impl CompilationInputs {
+    /// Read only this package's declarations, ignoring an inherited OUT_DIR
+    /// when a nested Cargo invocation compiles a package without a build script.
     pub(crate) fn for_package(out_dir: &Path, manifest_dir: &Path) -> Result<Option<Self>> {
         // Nested Cargo commands can inherit their caller's OUT_DIR. Cargo
         // replaces it for a package with a build script, but leaves it alone
@@ -782,7 +787,18 @@ impl CompilationInputs {
         }
     }
 
+    /// Capture Cargo's declarations using the session's shared content ledger.
     pub(crate) fn read(out_dir: &Path, manifest_dir: &Path) -> Result<Self> {
+        Self::read_with_cache(out_dir, manifest_dir, session::file_digest_cache())
+    }
+
+    /// Capture a compilation key with an explicit ledger, including all file
+    /// contents, directory membership, symlink targets, and declared variables.
+    fn read_with_cache(
+        out_dir: &Path,
+        manifest_dir: &Path,
+        digests: &dyn FileDigestCache,
+    ) -> Result<Self> {
         let unit = out_dir
             .parent()
             .ok_or_else(|| eyre::eyre!("OUT_DIR has no parent"))?;
@@ -805,12 +821,24 @@ impl CompilationInputs {
             manifest_dir: manifest_dir.to_path_buf(),
             mappings,
             implicit_package: false,
+            compiler_directories: [
+                std::env::var_os(session::TARGET_DIR_ENV).map(PathBuf::from),
+                // Also covers Cargo's separate build directory, and callers
+                // without mbx's target-directory environment.
+                out_dir.ancestors().nth(3).map(Path::to_path_buf),
+            ]
+            .into_iter()
+            .flatten()
+            .map(std::fs::canonicalize)
+            .collect::<std::io::Result<_>>()?,
         };
-        (inputs.input.digest, inputs.implicit_package) = inputs.digest()?;
+        (inputs.input.digest, inputs.implicit_package) = inputs.digest(digests)?;
         Ok(inputs)
     }
 
-    fn digest(&self) -> Result<(CacheDigest, bool)> {
+    /// Rebuild the declaration signature, rejecting explicit watches that
+    /// include compiler outputs rather than silently excluding watched files.
+    fn digest(&self, digests: &dyn FileDigestCache) -> Result<(CacheDigest, bool)> {
         let stdout = std::fs::read_to_string(&self.input.path)
             .wrap_err("failed to read Cargo's build-script declarations")?;
         let mut inputs = BTreeMap::new();
@@ -830,7 +858,13 @@ impl CompilationInputs {
                 }
                 inputs.insert(
                     normalize_environment_value(path, &self.mappings),
-                    input_state(&self.manifest_dir.join(path), &self.mappings)?,
+                    InputTree::read(
+                        &self.manifest_dir.join(path),
+                        &self.mappings,
+                        &[],
+                        &self.compiler_directories,
+                        0,
+                    )?,
                 );
             } else if let Some(name) = directive.strip_prefix("rerun-if-env-changed=")
                 && !name.is_empty()
@@ -849,17 +883,34 @@ impl CompilationInputs {
         if implicit_package {
             inputs.insert(
                 "${build_script_manifest_dir}".into(),
-                package_input_state(&self.manifest_dir, &self.mappings)?,
+                InputTree::read(
+                    &self.manifest_dir,
+                    &self.mappings,
+                    &default_package_exclusions(&self.manifest_dir)?,
+                    &[],
+                    0,
+                )?,
             );
         }
+        let mut paths = BTreeSet::new();
+        for tree in inputs.values() {
+            tree.files(&mut paths);
+        }
+        let files = compilation_file_digests(paths, digests)?;
+        let inputs = inputs
+            .into_iter()
+            .map(|(path, tree)| Ok((path, tree.state(&mut |path| Ok(files[path].clone()))?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
         Ok((
             CacheDigest::blake3(&canonical_json(&(inputs, environment))?),
             implicit_package,
         ))
     }
 
+    /// Check the current bytes independently of any cached discovery digests.
     pub(crate) fn verify(&self) -> Result<()> {
-        if self.digest()?.0 != self.input.digest {
+        // Verify from disk even when the session ledger answered discovery.
+        if self.digest(&NoFileDigestCache)?.0 != self.input.digest {
             if self.implicit_package {
                 // The implicit tree can contain runtime state (including a
                 // cache configured inside the package). Such a mutation
@@ -875,10 +926,226 @@ impl CompilationInputs {
     }
 }
 
+/// Keep directory membership and symlink targets in the key while resolving
+/// regular-file contents in one ledger request for the entire declared tree.
+enum InputTree {
+    Missing,
+    File(PathBuf),
+    Directory(BTreeMap<String, Self>),
+    Symlink { target: String, referent: Box<Self> },
+}
+
+impl InputTree {
+    /// Capture an input's shape, following symlinks and preserving missing paths.
+    fn read(
+        path: &Path,
+        mappings: &[PathMapping],
+        excluded: &[PathBuf],
+        compiler_directories: &[PathBuf],
+        symlink_depth: usize,
+    ) -> Result<Self> {
+        Self::read_at(
+            path,
+            mappings,
+            excluded,
+            compiler_directories,
+            symlink_depth,
+            true,
+        )
+    }
+
+    /// Check output overlap at each declared root and symlink referent; ordinary
+    /// descendants stay within the parent already checked.
+    fn read_at(
+        path: &Path,
+        mappings: &[PathMapping],
+        excluded: &[PathBuf],
+        compiler_directories: &[PathBuf],
+        symlink_depth: usize,
+        check_overlap: bool,
+    ) -> Result<Self> {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self::Missing),
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() {
+            if symlink_depth >= 64 {
+                bail!("declared build-script input contains a symlink cycle");
+            }
+            let target = std::fs::read_link(path)?;
+            let resolved = path.parent().unwrap_or_else(|| Path::new("")).join(&target);
+            return Ok(Self::Symlink {
+                target: normalize_environment_value(&target.to_string_lossy(), mappings),
+                referent: Box::new(Self::read(
+                    &resolved,
+                    mappings,
+                    excluded,
+                    compiler_directories,
+                    symlink_depth + 1,
+                )?),
+            });
+        }
+        if check_overlap && !compiler_directories.is_empty() {
+            let resolved = std::fs::canonicalize(path)?;
+            if compiler_directories.iter().any(|directory| {
+                resolved.starts_with(directory)
+                    || (metadata.is_dir() && directory.starts_with(&resolved))
+            }) {
+                // Explicit watches must retain their complete meaning. Do not
+                // omit target files a macro might read; run rustc uncached
+                // instead of treating its own output writes as source edits.
+                bail!(
+                    "declared build-script input overlaps compiler outputs: {}",
+                    path.display()
+                );
+            }
+        }
+        if metadata.is_file() {
+            return Ok(Self::File(path.to_path_buf()));
+        }
+        if metadata.is_dir() {
+            let children = std::fs::read_dir(path)?
+                .map(|entry| {
+                    let entry = entry?;
+                    if excluded.iter().any(|excluded| entry.path() == *excluded) {
+                        return Ok(None);
+                    }
+                    Ok(Some((
+                        entry.file_name().to_string_lossy().into_owned(),
+                        // A child's ordinary path cannot reach outside its
+                        // checked parent. Symlink referents are checked anew.
+                        Self::read_at(
+                            &entry.path(),
+                            mappings,
+                            excluded,
+                            compiler_directories,
+                            symlink_depth,
+                            false,
+                        )?,
+                    )))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect();
+            return Ok(Self::Directory(children));
+        }
+        bail!(
+            "declared build-script input is not a file or directory: {}",
+            path.display()
+        )
+    }
+
+    /// Collect regular files across declarations for one batched ledger lookup.
+    fn files(&self, paths: &mut BTreeSet<PathBuf>) {
+        match self {
+            Self::Missing => {}
+            Self::File(path) => {
+                paths.insert(path.clone());
+            }
+            Self::Directory(children) => {
+                for child in children.values() {
+                    child.files(paths);
+                }
+            }
+            Self::Symlink { referent, .. } => referent.files(paths),
+        }
+    }
+
+    /// Hash the captured tree using the caller's strategy for regular files.
+    fn state(
+        self,
+        digest_file: &mut impl FnMut(&Path) -> Result<CacheDigest>,
+    ) -> Result<InputState> {
+        Ok(match self {
+            Self::Missing => InputState::Missing,
+            Self::File(path) => InputState::File {
+                digest: digest_file(&path)?,
+            },
+            Self::Directory(children) => InputState::Directory {
+                digest: CacheDigest::blake3(&canonical_json(
+                    &children
+                        .into_iter()
+                        .map(|(name, tree)| Ok((name, tree.state(digest_file)?)))
+                        .collect::<Result<BTreeMap<_, _>>>()?,
+                )?),
+            },
+            Self::Symlink { target, referent } => InputState::Symlink {
+                target,
+                referent: Box::new(referent.state(digest_file)?),
+            },
+        })
+    }
+}
+
+/// Reuse only digests whose file identities still match; validate and publish
+/// misses under the same content scope used by rustc's dep-info inputs.
+fn compilation_file_digests(
+    paths: BTreeSet<PathBuf>,
+    digests: &dyn FileDigestCache,
+) -> Result<BTreeMap<PathBuf, CacheDigest>> {
+    let identified = paths
+        .into_iter()
+        .map(|path| {
+            let identity = FileIdentity::for_digest_cache(&path, &std::fs::metadata(&path)?)?;
+            Ok((path, identity))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let queries = identified
+        .iter()
+        .filter_map(|(_, identity)| identity.clone())
+        .collect::<Vec<_>>();
+    let mut resolved = digests
+        .resolve(FileDigestScope::Content, &queries)
+        .into_iter();
+    let mut files = BTreeMap::new();
+    let mut fresh = Vec::new();
+    for (path, identity) in identified {
+        let cached = identity
+            .as_ref()
+            .and_then(|identity| match resolved.next() {
+                Some(FileDigestResolution::Digest(digest))
+                    if identity.len == digest.size
+                        && identity.still_describes().unwrap_or(false) =>
+                {
+                    Some(digest)
+                }
+                _ => None,
+            });
+        let digest = if let Some(digest) = cached {
+            digest
+        } else if let Some(observed) = digest_file_validated(FileDigestScope::Content, &path)? {
+            let digest = observed
+                .resolution
+                .into_digest()
+                .ok_or_else(|| eyre::eyre!("content digest resolution returned no digest"))?;
+            if let Some(file) = observed.cache_identity
+                && file.len == digest.size
+            {
+                fresh.push(RecordedFileDigest {
+                    file,
+                    digest: digest.clone(),
+                });
+            }
+            digest
+        } else {
+            digest_file(FileDigestScope::Content, &path)?
+                .into_digest()
+                .ok_or_else(|| eyre::eyre!("content digest resolution returned no digest"))?
+        };
+        files.insert(path, digest);
+    }
+    digests.record(FileDigestScope::Content, fresh);
+    Ok(files)
+}
+
+/// Hash all files in an explicit build-script execution input without exclusions.
 fn input_state(path: &Path, mappings: &[PathMapping]) -> Result<InputState> {
     input_state_at(path, mappings, &[], 0)
 }
 
+/// Hash Cargo's implicit package input while omitting package build directories.
 fn package_input_state(path: &Path, mappings: &[PathMapping]) -> Result<InputState> {
     let excluded = default_package_exclusions(path)?;
     input_state_at(path, mappings, &excluded, 0)
@@ -896,65 +1163,16 @@ fn default_package_exclusions(package: &Path) -> Result<Vec<PathBuf>> {
     Ok(excluded)
 }
 
+/// Preserve the execution adapter's direct content reads using the same tree
+/// representation as compilation-input discovery.
 fn input_state_at(
     path: &Path,
     mappings: &[PathMapping],
     excluded: &[PathBuf],
     symlink_depth: usize,
 ) -> Result<InputState> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(InputState::Missing);
-        }
-        Err(error) => return Err(error.into()),
-    };
-    if metadata.file_type().is_symlink() {
-        if symlink_depth >= 64 {
-            bail!("declared build-script input contains a symlink cycle");
-        }
-        let target = std::fs::read_link(path)?;
-        let resolved = if target.is_absolute() {
-            target.clone()
-        } else {
-            path.parent().unwrap_or_else(|| Path::new("")).join(&target)
-        };
-        return Ok(InputState::Symlink {
-            target: normalize_environment_value(&target.to_string_lossy(), mappings),
-            referent: Box::new(input_state_at(
-                &resolved,
-                mappings,
-                excluded,
-                symlink_depth + 1,
-            )?),
-        });
-    }
-    if metadata.is_file() {
-        return Ok(InputState::File {
-            digest: CacheDigest::blake3_file(path)?,
-        });
-    }
-    if metadata.is_dir() {
-        let mut entries = std::fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
-        entries.sort_by_key(std::fs::DirEntry::file_name);
-        let children = entries
-            .into_iter()
-            .filter(|entry| !excluded.iter().any(|excluded| entry.path() == *excluded))
-            .map(|entry| {
-                Ok((
-                    entry.file_name().to_string_lossy().into_owned(),
-                    input_state_at(&entry.path(), mappings, excluded, symlink_depth)?,
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
-        return Ok(InputState::Directory {
-            digest: CacheDigest::blake3(&canonical_json(&children)?),
-        });
-    }
-    bail!(
-        "declared build-script input is not a file or directory: {}",
-        path.display()
-    )
+    InputTree::read(path, mappings, excluded, &[], symlink_depth)?
+        .state(&mut |path| CacheDigest::blake3_file(path))
 }
 
 /// The moment a run starts, as the file system's own clock reports it.
@@ -1595,6 +1813,118 @@ mod tests {
             std::fs::remove_file(output).unwrap();
             assert!(CompilationInputs::read(&out_dir, package.path()).is_err());
         }
+    }
+
+    #[test]
+    fn compilation_inputs_bypass_watches_that_overlap_compiler_outputs() {
+        let package = tempfile::tempdir().unwrap();
+        let out_dir = package.path().join("artifacts/debug/build/fixture/out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let output = out_dir.parent().unwrap().join("output");
+        for watch in [
+            ".",
+            "artifacts",
+            "artifacts/debug",
+            "artifacts/../artifacts",
+            "artifacts/debug/build/fixture/out",
+        ] {
+            std::fs::write(&output, format!("cargo::rerun-if-changed={watch}\n")).unwrap();
+            let error = CompilationInputs::read(&out_dir, package.path())
+                .err()
+                .unwrap();
+            assert!(
+                error.to_string().contains("overlaps compiler outputs"),
+                "{error:#}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            let data = package.path().join("data");
+            std::fs::create_dir(&data).unwrap();
+            std::os::unix::fs::symlink("../artifacts/debug", data.join("outputs")).unwrap();
+            std::fs::write(&output, "cargo::rerun-if-changed=data\n").unwrap();
+            assert!(CompilationInputs::read(&out_dir, package.path()).is_err());
+        }
+    }
+
+    #[test]
+    fn compilation_inputs_batch_shared_digests_and_verify_without_the_ledger() {
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Ledger {
+            entries: Mutex<BTreeMap<FileIdentity, CacheDigest>>,
+            requests: Mutex<Vec<usize>>,
+            misses: Mutex<usize>,
+        }
+        impl FileDigestCache for Ledger {
+            fn find(
+                &self,
+                scope: FileDigestScope,
+                files: &[FileIdentity],
+            ) -> Vec<Option<CacheDigest>> {
+                assert_eq!(scope, FileDigestScope::Content);
+                self.requests.lock().unwrap().push(files.len());
+                let entries = self.entries.lock().unwrap();
+                files
+                    .iter()
+                    .map(|file| {
+                        let digest = entries.get(file).cloned();
+                        if digest.is_none() {
+                            *self.misses.lock().unwrap() += 1;
+                        }
+                        digest
+                    })
+                    .collect()
+            }
+
+            fn record(&self, scope: FileDigestScope, entries: Vec<RecordedFileDigest>) {
+                assert_eq!(scope, FileDigestScope::Content);
+                self.entries
+                    .lock()
+                    .unwrap()
+                    .extend(entries.into_iter().map(|entry| (entry.file, entry.digest)));
+            }
+        }
+
+        let package = tempfile::tempdir().unwrap();
+        let out_dir = package.path().join("target/debug/build/fixture/out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(
+            out_dir.parent().unwrap().join("output"),
+            "cargo::rerun-if-changed=data\n",
+        )
+        .unwrap();
+        let data = package.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("a.txt"), "first").unwrap();
+        std::fs::write(data.join("b.txt"), "second").unwrap();
+        let ledger = Ledger::default();
+        let first = CompilationInputs::read_with_cache(&out_dir, package.path(), &ledger).unwrap();
+        let second = CompilationInputs::read_with_cache(&out_dir, package.path(), &ledger).unwrap();
+        assert_eq!(first.input.digest, second.input.digest);
+        assert_eq!(*ledger.requests.lock().unwrap(), [2, 2]);
+        assert_eq!(
+            *ledger.misses.lock().unwrap(),
+            2,
+            "unchanged targets reuse both content digests"
+        );
+        first.verify().unwrap();
+        assert_eq!(
+            *ledger.requests.lock().unwrap(),
+            [2, 2],
+            "verification must not consult the ledger"
+        );
+        std::fs::write(data.join("a.txt"), "other").unwrap();
+        assert!(first.verify().is_err());
+        let changed =
+            CompilationInputs::read_with_cache(&out_dir, package.path(), &ledger).unwrap();
+        assert_ne!(first.input.digest, changed.input.digest);
+        assert_eq!(
+            *ledger.misses.lock().unwrap(),
+            3,
+            "only the edited file needs a new digest"
+        );
     }
 
     #[test]

@@ -3006,6 +3006,38 @@ pub fn embed(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
 }
 
 #[test]
+fn build_script_watching_compiler_outputs_keeps_successful_results() {
+    for custom_target in [false, true] {
+        let store = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_project(project.path());
+        std::fs::write(
+            project.path().join("build.rs"),
+            "fn main() { println!(\"cargo::rerun-if-changed=.\"); }\n",
+        )
+        .unwrap();
+        let target = project
+            .path()
+            .join(if custom_target { "artifacts" } else { "target" });
+        let target_name = target.to_str().unwrap();
+        for run in ["first", "second"] {
+            if run == "second" {
+                std::fs::write(project.path().join("src/lib.rs"), "pub fn changed() {}\n").unwrap();
+            }
+            cargo_with(
+                project.path(),
+                store.path(),
+                &reports.path().join(format!("{run}.json")),
+                &["build", "--offline"],
+                &[("MBX_INCREMENTAL", "0"), ("CARGO_TARGET_DIR", target_name)],
+            );
+            assert!(target.join("debug/libfixture.rlib").is_file());
+        }
+    }
+}
+
+#[test]
 fn build_script_declared_directory_invalidates_macro_compilations() {
     for (release, execution) in [(false, "1"), (true, "1"), (false, "0")] {
         let store = tempfile::tempdir().unwrap();
