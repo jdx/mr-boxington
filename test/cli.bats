@@ -19,6 +19,72 @@ setup() {
   assert_output --partial "cache"
   assert_output --partial "gc"
   assert_output --partial "doctor"
+  assert_output --partial "edit"
+}
+
+@test "edit creates the global config and passes editor arguments and a spaced path" {
+  local home_root="$BATS_TEST_TMPDIR/home root"
+  local config_root="$BATS_TEST_TMPDIR/config root"
+  local editor_dir="$BATS_TEST_TMPDIR/editor dir"
+  local editor="$editor_dir/fake editor"
+  local editor_log="$BATS_TEST_TMPDIR/editor.log"
+  mkdir -p "$editor_dir"
+  printf '#!/bin/sh\nprintf "%%s\\n%%s\\n" "$1" "$2" >"$MBX_EDIT_LOG"\n' >"$editor"
+  chmod +x "$editor"
+
+  run env HOME="$home_root" XDG_CONFIG_HOME="$config_root" MBX_EDIT_LOG="$editor_log" \
+    VISUAL="\"$editor\" --wait" EDITOR=false "$MBX_BIN" edit
+
+  assert_success
+  run cat "$editor_log"
+  assert_success
+  assert_line --index 0 "--wait"
+  local config_path
+  config_path="$(sed -n '2p' "$editor_log")"
+  assert_file_empty "$config_path"
+  [[ "$config_path" == *" "* ]]
+}
+
+@test "edit opens invalid existing config unchanged and empty VISUAL falls back to EDITOR" {
+  local config_log="$BATS_TEST_TMPDIR/config-path"
+  local locator="$BATS_TEST_TMPDIR/locator"
+  local editor="$BATS_TEST_TMPDIR/editor"
+  printf '#!/bin/sh\nprintf "%%s" "$1" >"$MBX_EDIT_LOG"\n' >"$locator"
+  chmod +x "$locator"
+  MBX_EDIT_LOG="$config_log" VISUAL="$locator" "$MBX_BIN" edit
+  local config
+  config="$(cat "$config_log")"
+  printf 'not valid toml = [' >"$config"
+  printf '#!/bin/sh\n[ "$(cat "$1")" = "not valid toml = [" ] || exit 91\nprintf "repaired = true\\n" >"$1"\n' >"$editor"
+  chmod +x "$editor"
+
+  run env VISUAL=' ' EDITOR="$editor" "$MBX_BIN" edit
+
+  assert_success
+  run cat "$config"
+  assert_output 'repaired = true'
+}
+
+@test "edit reports launch failures and unsuccessful exits" {
+  run env VISUAL="$BATS_TEST_TMPDIR/missing-editor" EDITOR= "$MBX_BIN" edit
+  assert_failure
+  assert_output --partial "failed to launch editor"
+  assert_output --partial "missing-editor"
+
+  run env VISUAL=false EDITOR= "$MBX_BIN" edit
+  assert_failure
+  assert_output --partial 'editor `false` exited unsuccessfully'
+}
+
+@test "config remains a Cargo passthrough" {
+  local cargo="$BATS_TEST_TMPDIR/cargo"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*"\n' >"$cargo"
+  chmod +x "$cargo"
+
+  run env CARGO="$cargo" "$MBX_BIN" config get build.target-dir
+
+  assert_success
+  assert_output --partial "config get build.target-dir"
 }
 
 @test "doctor validates an isolated local installation" {

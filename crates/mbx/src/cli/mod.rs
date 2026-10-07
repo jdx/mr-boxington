@@ -19,6 +19,7 @@ mod cargo;
 mod cargo_invocation;
 mod clean;
 mod doctor;
+mod edit;
 mod exec;
 mod explain;
 mod gc;
@@ -118,6 +119,8 @@ enum Commands {
     /// critical path (the chain of units the build waited on) and the time only
     /// one unit was running.
     Analyze(analyze::AnalyzeArgs),
+    /// Open the global configuration in $VISUAL, $EDITOR, or the platform's default editor.
+    Edit,
     /// Make plain Cargo commands run through mbx.
     ///
     /// mbx installs a stable Cargo shim and prints its path. When you pick a
@@ -229,6 +232,7 @@ fn with_toolchain(toolchain: Option<&str>, arguments: Vec<String>) -> Vec<String
 fn compiles_nothing(command: &Commands) -> Option<&'static str> {
     match command {
         Commands::Completion { .. } => Some("completion"),
+        Commands::Edit => Some("edit"),
         Commands::Setup(_) => Some("setup"),
         Commands::Settings(_) => Some("settings"),
         Commands::Gc(_) => Some("gc"),
@@ -287,6 +291,9 @@ pub fn run() -> Result<ExitCode> {
         print!("{}", Cli::completion_script(shell));
         return Ok(ExitCode::SUCCESS);
     }
+    if let Commands::Edit = cli.command {
+        return edit::run();
+    }
     // Settings resolve the configuration themselves, so a broken file can
     // still be read and repaired.
     if let Commands::Settings(args) = cli.command {
@@ -298,6 +305,7 @@ pub fn run() -> Result<ExitCode> {
             unreachable!("completion was handled before configuration loading")
         }
         Commands::Doctor(_) => unreachable!("doctor was handled before configuration loading"),
+        Commands::Edit => unreachable!("edit was handled before configuration loading"),
         Commands::Settings(_) => {
             unreachable!("settings were handled before configuration loading")
         }
