@@ -169,9 +169,9 @@ cmake_transition() {
 @test "CMake build scripts can switch between Cargo and mbx in one target directory" {
   cmake_transition
   # Cleaning native outputs before the second mbx run must still allow both
-  # C and C++ objects to restore through CMake's persisted launchers, alongside
-  # the Rust library whose build-script output has not changed.
-  run grep -E '"hits"[[:space:]]*:[[:space:]]*3' "$BATS_TEST_TMPDIR/mbx-4.json"
+  # C and C++ objects to restore through CMake's persisted launchers. The
+  # Rust library recompiles because the declared RECONFIGURE input changed.
+  run grep -E '"hits"[[:space:]]*:[[:space:]]*2' "$BATS_TEST_TMPDIR/mbx-4.json"
   assert_success
 }
 

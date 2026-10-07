@@ -747,6 +747,134 @@ fn build_action(
     Ok((bytes, digest))
 }
 
+/// Cargo's build-script declarations also invalidate the package's rustc
+/// compilations. Proc macros may read these paths without putting them in
+/// dep-info, so the declarations must be hashed before any compilation lookup.
+/// Read Cargo's recorded stdout, even when execution caching is disabled or
+/// Cargo ran the build script outside mbx.
+pub(crate) struct CompilationInputs {
+    pub(crate) input: mbx_cache_rustc::ActionInput,
+    manifest_dir: PathBuf,
+    mappings: Vec<PathMapping>,
+    implicit_package: bool,
+}
+
+impl CompilationInputs {
+    pub(crate) fn for_package(out_dir: &Path, manifest_dir: &Path) -> Result<Option<Self>> {
+        // Nested Cargo commands can inherit their caller's OUT_DIR. Cargo
+        // replaces it for a package with a build script, but leaves it alone
+        // for packages without one; those must not read the caller's inputs.
+        let manifest: toml::Value =
+            toml::from_str(&std::fs::read_to_string(manifest_dir.join("Cargo.toml"))?)?;
+        let has_script = match manifest
+            .get("package")
+            .and_then(|package| package.get("build"))
+        {
+            Some(toml::Value::Boolean(enabled)) => *enabled,
+            Some(toml::Value::String(_)) => true,
+            None => manifest_dir.join("build.rs").is_file(),
+            Some(_) => bail!("unsupported Cargo build-script declaration"),
+        };
+        if has_script {
+            Self::read(out_dir, manifest_dir).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub(crate) fn read(out_dir: &Path, manifest_dir: &Path) -> Result<Self> {
+        let unit = out_dir
+            .parent()
+            .ok_or_else(|| eyre::eyre!("OUT_DIR has no parent"))?;
+        // Cargo 1.100 moved the recorded output from `output` to `run/stdout`.
+        let output = if unit.join("run").is_dir() {
+            unit.join("run/stdout")
+        } else {
+            unit.join("output")
+        };
+        let mappings = build_script_mappings_with_env(|name| match name {
+            "OUT_DIR" => Some(out_dir.to_path_buf()),
+            "CARGO_MANIFEST_DIR" => Some(manifest_dir.to_path_buf()),
+            _ => std::env::var_os(name).map(PathBuf::from),
+        });
+        let mut inputs = Self {
+            input: mbx_cache_rustc::ActionInput {
+                path: output,
+                digest: CacheDigest::blake3(&[]),
+            },
+            manifest_dir: manifest_dir.to_path_buf(),
+            mappings,
+            implicit_package: false,
+        };
+        (inputs.input.digest, inputs.implicit_package) = inputs.digest()?;
+        Ok(inputs)
+    }
+
+    fn digest(&self) -> Result<(CacheDigest, bool)> {
+        let stdout = std::fs::read_to_string(&self.input.path)
+            .wrap_err("failed to read Cargo's build-script declarations")?;
+        let mut inputs = BTreeMap::new();
+        let mut environment = BTreeMap::new();
+        for line in stdout.lines() {
+            let Some(directive) = line
+                .strip_prefix("cargo::")
+                .or_else(|| line.strip_prefix("cargo:"))
+            else {
+                continue;
+            };
+            if let Some(path) = directive.strip_prefix("rerun-if-changed=") {
+                // An empty declaration asks Cargo to rerun every time. There
+                // is no finite compilation key that preserves that contract.
+                if path.is_empty() {
+                    bail!("build script declares an always-changing input");
+                }
+                inputs.insert(
+                    normalize_environment_value(path, &self.mappings),
+                    input_state(&self.manifest_dir.join(path), &self.mappings)?,
+                );
+            } else if let Some(name) = directive.strip_prefix("rerun-if-env-changed=")
+                && !name.is_empty()
+            {
+                let value = std::env::var_os(name)
+                    .map(|value| {
+                        value
+                            .into_string()
+                            .map_err(|_| eyre::eyre!("environment input is not UTF-8: {name}"))
+                    })
+                    .transpose()?;
+                environment.insert(name, value);
+            }
+        }
+        let implicit_package = inputs.is_empty() && environment.is_empty();
+        if implicit_package {
+            inputs.insert(
+                "${build_script_manifest_dir}".into(),
+                package_input_state(&self.manifest_dir, &self.mappings)?,
+            );
+        }
+        Ok((
+            CacheDigest::blake3(&canonical_json(&(inputs, environment))?),
+            implicit_package,
+        ))
+    }
+
+    pub(crate) fn verify(&self) -> Result<()> {
+        if self.digest()?.0 != self.input.digest {
+            if self.implicit_package {
+                // The implicit tree can contain runtime state (including a
+                // cache configured inside the package). Such a mutation
+                // prevents publication, but does not invalidate rustc's local
+                // result. Its actual dep-info inputs are checked separately.
+                bail!("implicit build-script inputs changed during compilation");
+            }
+            return Err(
+                mbx_cache_rustc::BypassReason::InputChanged(self.input.path.clone()).into(),
+            );
+        }
+        Ok(())
+    }
+}
+
 fn input_state(path: &Path, mappings: &[PathMapping]) -> Result<InputState> {
     input_state_at(path, mappings, &[], 0)
 }
@@ -1407,6 +1535,79 @@ mod tests {
         assert_eq!(parsed.environment, ["MODE"]);
         let encoded = String::from_utf8(canonical_json(&parsed).unwrap()).unwrap();
         assert_eq!(decode_prediction(&encoded).unwrap(), parsed);
+    }
+
+    #[test]
+    fn packages_without_build_scripts_ignore_an_inherited_out_dir() {
+        let package = tempfile::tempdir().unwrap();
+        let manifest = package.path().join("Cargo.toml");
+        let out_dir = package.path().join("foreign/out");
+        for declaration in ["", "build = false\n"] {
+            std::fs::write(
+                &manifest,
+                format!("[package]\nname = \"fixture\"\n{declaration}"),
+            )
+            .unwrap();
+            assert!(
+                CompilationInputs::for_package(&out_dir, package.path())
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        std::fs::write(
+            &manifest,
+            "[package]\nname = \"fixture\"\nbuild = \"builder/main.rs\"\n",
+        )
+        .unwrap();
+        assert!(CompilationInputs::for_package(&out_dir, package.path()).is_err());
+    }
+
+    #[test]
+    fn compilation_inputs_read_both_cargo_layouts_and_verify_directory_changes() {
+        for output_name in ["output", "run/stdout"] {
+            let package = tempfile::tempdir().unwrap();
+            let out_dir = package.path().join("target/debug/build/fixture/out");
+            let output = out_dir.parent().unwrap().join(output_name);
+            std::fs::create_dir_all(&out_dir).unwrap();
+            std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+            std::fs::write(&output, "cargo::rerun-if-changed=data\n").unwrap();
+            let snapshot = || CompilationInputs::read(&out_dir, package.path()).unwrap();
+            let missing = snapshot();
+            missing.verify().unwrap();
+            std::fs::create_dir(package.path().join("data")).unwrap();
+            assert!(matches!(
+                missing.verify().unwrap_err().downcast_ref(),
+                Some(mbx_cache_rustc::BypassReason::InputChanged(_))
+            ));
+            let empty = snapshot();
+            assert_ne!(missing.input.digest, empty.input.digest);
+            std::fs::write(package.path().join("data/new.txt"), "new").unwrap();
+            let populated = snapshot();
+            assert_ne!(empty.input.digest, populated.input.digest);
+            std::fs::write(
+                &output,
+                "cargo:rerun-if-changed=data\ncargo::rerun-if-changed=data\n",
+            )
+            .unwrap();
+            assert_eq!(populated.input.digest, snapshot().input.digest);
+            std::fs::write(&output, "cargo::rerun-if-changed=\n").unwrap();
+            assert!(CompilationInputs::read(&out_dir, package.path()).is_err());
+            std::fs::remove_file(output).unwrap();
+            assert!(CompilationInputs::read(&out_dir, package.path()).is_err());
+        }
+    }
+
+    #[test]
+    fn compilation_inputs_use_the_default_package_tree_without_target_outputs() {
+        let package = tempfile::tempdir().unwrap();
+        let out_dir = package.path().join("target/debug/build/fixture/out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(out_dir.parent().unwrap().join("output"), "").unwrap();
+        let before = CompilationInputs::read(&out_dir, package.path()).unwrap();
+        std::fs::write(out_dir.join("generated.rs"), "generated").unwrap();
+        before.verify().unwrap();
+        std::fs::write(package.path().join("new.txt"), "source").unwrap();
+        assert!(before.verify().is_err());
     }
 
     #[test]

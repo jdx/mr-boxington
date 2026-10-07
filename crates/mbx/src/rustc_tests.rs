@@ -1655,6 +1655,7 @@ fn external_native_mappings_preserve_installation_identity() {
     let mut portable = Portable {
         mappings: vec![PathMapping::new(&workspace, "workspace")],
         arguments: vec![],
+        build_script_inputs: None,
     };
     portable.map_external_native_paths(&invocation, &workspace);
     assert_eq!(portable.mappings.len(), 2);
@@ -1698,6 +1699,7 @@ fn relative_external_native_paths_are_mapped_from_the_working_directory() {
     let mut portable = Portable {
         mappings: vec![PathMapping::new(&workspace, "workspace")],
         arguments: vec![],
+        build_script_inputs: None,
     };
     portable.map_external_native_paths(&invocation, &workspace);
     assert_eq!(portable.mappings.len(), 2);
@@ -1725,6 +1727,7 @@ fn relative_external_native_paths_are_mapped_from_the_working_directory() {
     let mut absolute_portable = Portable {
         mappings: vec![PathMapping::new(&workspace, "workspace")],
         arguments: vec![],
+        build_script_inputs: None,
     };
     absolute_portable.map_external_native_paths(&absolute_invocation, &workspace);
     assert_eq!(

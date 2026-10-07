@@ -183,9 +183,27 @@ pub(crate) fn compile(
     let arguments = with_oso_prefix(arguments, cache_native_links || execution_only_build_script);
     let arguments = arguments.as_ref();
     let initial_invocation = RustcInvocation::parse_with(arguments, options)?;
-    // Before anything reads the environment: the key, the remapping and the
-    // compiler all take `OUT_DIR` from the process, and this is what decides
-    // which value they see.
+    // Keep Cargo's original OUT_DIR: stabilization moves generated sources to
+    // a content-addressed tree that has no Cargo-recorded build-script stdout.
+    let build_script_inputs = if session::is_cargo_build_script(initial_invocation.crate_name())
+        && session::compiles_only_a_binary(scanned)
+    {
+        None
+    } else {
+        std::env::var_os("OUT_DIR")
+            .map(|out_dir| {
+                let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
+                    .ok_or_else(|| eyre::eyre!("OUT_DIR has no CARGO_MANIFEST_DIR"))?;
+                crate::build_script::CompilationInputs::for_package(
+                    Path::new(&out_dir),
+                    Path::new(&manifest_dir),
+                )
+            })
+            .transpose()?
+            .flatten()
+    };
+    // Before the key, remapping, or compiler reads OUT_DIR, decide which
+    // generated tree this compilation will use.
     crate::out_dir::stabilize_for(initial_invocation.source());
     let initial_outputs = initial_invocation.outputs(&working_dir)?;
     let mut portable = Portable::detect(
@@ -193,6 +211,7 @@ pub(crate) fn compile(
         Some(&initial_outputs.directory),
         initial_invocation.target(),
     );
+    portable.build_script_inputs = build_script_inputs;
     portable.map_external_native_paths(&initial_invocation, &working_dir);
     let mut arguments = portable.applied_to(arguments);
     // Include the flag in both parsing/key construction and execution. This
@@ -571,6 +590,42 @@ pub(crate) fn compile(
         (_, false, true) => "miss",
         (_, false, false) => "unconsulted",
     };
+    if output.status.success()
+        && let Some(inputs) = &portable.build_script_inputs
+        && let Err(error) = inputs.verify()
+    {
+        session::record_compiler_invocation_with_diagnostic(
+            recorded_outcome,
+            Some(&timing.crate_name),
+            timing.duration_ns,
+            current_diagnostic,
+        );
+        let invalid = discard_modified_compiler_result(&outputs, &input_snapshots, &error)
+            || validate_compiler_inputs(
+                &invocation,
+                &outputs,
+                &working_dir,
+                &portable,
+                compilation_started,
+                &input_snapshots,
+            )
+            .is_err_and(|error| {
+                discard_modified_compiler_result(&outputs, &input_snapshots, &error)
+            });
+        if invalid {
+            if !forwarded {
+                let _ = replay_bytes(&[], &output.stderr);
+            }
+            return Ok(ExitCode::FAILURE);
+        }
+        session::report_shim_warning(&format!(
+            "build-script inputs were not validated: {error:#}"
+        ));
+        if !forwarded {
+            replay_bytes(&output.stdout, &output.stderr)?;
+        }
+        return Ok(exit_code(output.status));
+    }
     if let Some(cached) = verification {
         session::record_compiler_invocation_with_diagnostic(
             recorded_outcome,
@@ -2145,6 +2200,9 @@ fn base_action_context(
         portable_environment: BTreeSet::new(),
         inputs: Vec::new(),
     };
+    if let Some(inputs) = &portable.build_script_inputs {
+        context.inputs.push(inputs.input.clone());
+    }
     if Path::new(rustc).file_stem() == Some(OsStr::new("clippy-driver"))
         && let Some(path) = selected_clippy_config(working_dir)
     {
@@ -3173,6 +3231,8 @@ struct Portable {
     mappings: Vec<PathMapping>,
     /// Flags appended to the real rustc invocation, one per remapped value.
     arguments: Vec<OsString>,
+    /// Cargo's invalidation inputs, captured before OUT_DIR is stabilized.
+    build_script_inputs: Option<crate::build_script::CompilationInputs>,
 }
 
 impl Portable {
@@ -3202,6 +3262,7 @@ impl Portable {
         let mut portable = Self {
             mappings: PathMapping::ordered(&path_mappings(working_dir, target_output, target)),
             arguments: Vec::new(),
+            build_script_inputs: None,
         };
         // Before the values below, because rustc takes the last mapping that
         // matches: `OUT_DIR` usually sits under the workspace, and its own
