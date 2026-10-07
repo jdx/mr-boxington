@@ -986,6 +986,8 @@ fn write_permission_is_enforced(directory: &Path) -> bool {
     refused
 }
 
+/// Direct and build-script input mutations invalidate compiler results, while
+/// cache-service failures leave the successful local outputs usable.
 #[test]
 fn only_compiler_input_mutations_invalidate_local_outputs() {
     let path = PathBuf::from("src/lib.rs");
@@ -1003,6 +1005,12 @@ fn only_compiler_input_mutations_invalidate_local_outputs() {
     let overlapping = eyre::Report::new(BypassReason::InputModifiedDuringCompilation(path));
 
     assert!(compiler_input_was_modified(&changed, &snapshots));
+    assert!(compiler_input_was_modified(
+        &eyre::Report::new(BypassReason::BuildScriptInputsChanged(
+            "target/debug/build/fixture/output".into()
+        )),
+        &snapshots
+    ));
     assert!(compiler_input_was_modified(&overlapping, &snapshots));
     assert!(!compiler_input_was_modified(
         &eyre::eyre!("the cache is unavailable"),

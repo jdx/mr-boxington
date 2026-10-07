@@ -918,9 +918,10 @@ impl CompilationInputs {
                 // result. Its actual dep-info inputs are checked separately.
                 bail!("implicit build-script inputs changed during compilation");
             }
-            return Err(
-                mbx_cache_rustc::BypassReason::InputChanged(self.input.path.clone()).into(),
-            );
+            return Err(mbx_cache_rustc::BypassReason::BuildScriptInputsChanged(
+                self.input.path.clone(),
+            )
+            .into());
         }
         Ok(())
     }
@@ -1795,10 +1796,20 @@ mod tests {
             let missing = snapshot();
             missing.verify().unwrap();
             std::fs::create_dir(package.path().join("data")).unwrap();
-            assert!(matches!(
-                missing.verify().unwrap_err().downcast_ref(),
-                Some(mbx_cache_rustc::BypassReason::InputChanged(_))
-            ));
+            let error = missing.verify().unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<mbx_cache_rustc::BypassReason>(),
+                Some(&mbx_cache_rustc::BypassReason::BuildScriptInputsChanged(
+                    output.clone()
+                ))
+            );
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "build-script inputs changed during compilation (declarations: {})",
+                    output.display()
+                )
+            );
             let empty = snapshot();
             assert_ne!(missing.input.digest, empty.input.digest);
             std::fs::write(package.path().join("data/new.txt"), "new").unwrap();

@@ -929,7 +929,7 @@ fn compiler_input_was_modified(
     input_snapshots: &std::io::Result<BTreeMap<PathBuf, FileSnapshot>>,
 ) -> bool {
     match error.downcast_ref::<BypassReason>() {
-        Some(BypassReason::InputChanged(_)) => true,
+        Some(BypassReason::InputChanged(_) | BypassReason::BuildScriptInputsChanged(_)) => true,
         Some(BypassReason::InputModifiedDuringCompilation(path)) => input_snapshots
             .as_ref()
             .ok()
