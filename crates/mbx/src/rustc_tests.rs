@@ -986,6 +986,8 @@ fn write_permission_is_enforced(directory: &Path) -> bool {
     refused
 }
 
+/// Direct and build-script input mutations invalidate compiler results, while
+/// cache-service failures leave the successful local outputs usable.
 #[test]
 fn only_compiler_input_mutations_invalidate_local_outputs() {
     let path = PathBuf::from("src/lib.rs");
@@ -1003,6 +1005,12 @@ fn only_compiler_input_mutations_invalidate_local_outputs() {
     let overlapping = eyre::Report::new(BypassReason::InputModifiedDuringCompilation(path));
 
     assert!(compiler_input_was_modified(&changed, &snapshots));
+    assert!(compiler_input_was_modified(
+        &eyre::Report::new(BypassReason::BuildScriptInputsChanged(
+            "target/debug/build/fixture/output".into()
+        )),
+        &snapshots
+    ));
     assert!(compiler_input_was_modified(&overlapping, &snapshots));
     assert!(!compiler_input_was_modified(
         &eyre::eyre!("the cache is unavailable"),
@@ -1655,6 +1663,7 @@ fn external_native_mappings_preserve_installation_identity() {
     let mut portable = Portable {
         mappings: vec![PathMapping::new(&workspace, "workspace")],
         arguments: vec![],
+        build_script_inputs: None,
     };
     portable.map_external_native_paths(&invocation, &workspace);
     assert_eq!(portable.mappings.len(), 2);
@@ -1698,6 +1707,7 @@ fn relative_external_native_paths_are_mapped_from_the_working_directory() {
     let mut portable = Portable {
         mappings: vec![PathMapping::new(&workspace, "workspace")],
         arguments: vec![],
+        build_script_inputs: None,
     };
     portable.map_external_native_paths(&invocation, &workspace);
     assert_eq!(portable.mappings.len(), 2);
@@ -1725,6 +1735,7 @@ fn relative_external_native_paths_are_mapped_from_the_working_directory() {
     let mut absolute_portable = Portable {
         mappings: vec![PathMapping::new(&workspace, "workspace")],
         arguments: vec![],
+        build_script_inputs: None,
     };
     absolute_portable.map_external_native_paths(&absolute_invocation, &workspace);
     assert_eq!(

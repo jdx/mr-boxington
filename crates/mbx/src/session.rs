@@ -2269,6 +2269,7 @@ fn expected_rustc_bypass(reason: Option<&mbx_cache_rustc::BypassReason>) -> bool
                 | SplitOutputDirectories
                 | ImplicitEmitWithOutputFile(_)
                 | AmbiguousOutputName(_)
+                | BuildScriptInputOverlapsOutputs(_)
         )
     )
 }

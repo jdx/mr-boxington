@@ -2945,6 +2945,201 @@ fn a_library_named_like_a_build_script_restores(package: &str) {
     );
 }
 
+/// A proc macro can enumerate files without recording any of them in rustc's
+/// dep-info. Cargo relies on the package's build script to invalidate that
+/// compilation, even when its directives and generated output stay unchanged.
+fn write_untracked_macro_project(directory: &Path) {
+    for subdirectory in ["app/src", "embedder/src"] {
+        std::fs::create_dir_all(directory.join(subdirectory)).unwrap();
+    }
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\", \"embedder\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    std::fs::write(directory.join("app/Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nembedder = { path = \"../embedder\" }\n").unwrap();
+    std::fs::write(directory.join("embedder/Cargo.toml"),
+        "[package]\nname = \"embedder\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\nproc-macro = true\n").unwrap();
+    std::fs::write(
+        directory.join("app/build.rs"),
+        r#"
+fn main() {
+    println!("cargo::rerun-if-changed=../dist");
+    println!("cargo:rerun-if-env-changed=MBX_TEST_EMBEDDED_MODE");
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(out.join("generated.rs"), "pub const GENERATED: u32 = 0;").unwrap();
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(directory.join("embedder/src/lib.rs"), r#"
+#[proc_macro]
+pub fn embed(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let folder = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../dist");
+    let value = match std::fs::read_dir(folder) {
+        Err(_) => "missing".to_string(),
+        Ok(entries) => {
+            let mut files = entries.map(|entry| {
+                let entry = entry.unwrap();
+                format!("{}:{}", entry.file_name().to_string_lossy(), std::fs::read_to_string(entry.path()).unwrap())
+            }).collect::<Vec<_>>();
+            files.sort();
+            files.join(",")
+        }
+    };
+    let value = format!("{}{value}", std::env::var("MBX_TEST_EMBEDDED_MODE").unwrap_or_default());
+    format!("pub const VALUE: &str = {value:?};").parse().unwrap()
+}
+"#).unwrap();
+    std::fs::write(
+        directory.join("app/src/lib.rs"),
+        "embedder::embed!();\ninclude!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("app/src/main.rs"),
+        "fn main() { println!(\"{}\", app::VALUE); }\n",
+    )
+    .unwrap();
+    generate_lockfile(directory);
+}
+
+/// Watching the package root must retain successful rustc outputs even when
+/// compilation writes into a default or custom target directory inside it.
+#[test]
+fn build_script_watching_compiler_outputs_keeps_successful_results() {
+    for custom_target in [false, true] {
+        let store = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_project(project.path());
+        std::fs::write(
+            project.path().join("build.rs"),
+            "fn main() { println!(\"cargo::rerun-if-changed=.\"); }\n",
+        )
+        .unwrap();
+        let target = project
+            .path()
+            .join(if custom_target { "artifacts" } else { "target" });
+        let target_name = target.to_str().unwrap();
+        for run in ["first", "second"] {
+            if run == "second" {
+                std::fs::write(project.path().join("src/lib.rs"), "pub fn changed() {}\n").unwrap();
+            }
+            let (stats, stderr) = cargo_with(
+                project.path(),
+                store.path(),
+                &reports.path().join(format!("{run}.json")),
+                &["build", "--offline"],
+                &[("MBX_INCREMENTAL", "0"), ("CARGO_TARGET_DIR", target_name)],
+            );
+            assert!(target.join("debug/libfixture.rlib").is_file());
+            assert!(
+                stats["bypasses"]["build-script-input-overlaps-outputs"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    > 0,
+                "overlap should have a specific bypass reason: {stats}\n{stderr}"
+            );
+            assert!(
+                stats["bypasses"].get("other").is_none(),
+                "{stats}\n{stderr}"
+            );
+            assert!(
+                !stderr.contains("mbx[warning]: rustc cache bypassed"),
+                "{stderr}"
+            );
+        }
+    }
+}
+
+#[test]
+fn build_script_declared_directory_invalidates_macro_compilations() {
+    for (release, execution) in [(false, "1"), (true, "1"), (false, "0")] {
+        let store = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_untracked_macro_project(project.path());
+        let arguments = if release {
+            vec!["build", "--offline", "--release", "-p", "app"]
+        } else {
+            vec!["build", "--offline", "-p", "app"]
+        };
+        let profile = if release { "release" } else { "debug" };
+        let check = |expected: &str, mode: &str| {
+            cargo_with(
+                project.path(),
+                store.path(),
+                &reports.path().join("build.json"),
+                &arguments,
+                &[
+                    ("MBX_INCREMENTAL", "0"),
+                    ("MBX_BUILD_SCRIPT_EXECUTION", execution),
+                    ("MBX_TEST_EMBEDDED_MODE", mode),
+                ],
+            );
+            let output = Command::new(project.path().join(format!(
+                "target/{profile}/app{}",
+                std::env::consts::EXE_SUFFIX
+            )))
+            .output()
+            .unwrap();
+            assert!(output.status.success());
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap().trim(),
+                expected,
+                "the {profile} compile should observe the declared directory"
+            );
+        };
+        check("missing", "");
+        let dist = project.path().join("dist");
+        std::fs::create_dir(&dist).unwrap();
+        check("", "");
+        std::fs::write(dist.join("index.html"), "hi").unwrap();
+        check("index.html:hi", "");
+        std::fs::write(dist.join("index.html"), "updated").unwrap();
+        check("index.html:updated", "");
+        std::fs::write(dist.join("other.html"), "other").unwrap();
+        check("index.html:updated,other.html:other", "");
+        std::fs::remove_file(dist.join("index.html")).unwrap();
+        check("other.html:other", "");
+        check("modeother.html:other", "mode");
+        // With identical inputs, the package still restores in a new checkout
+        // through prediction, without a local dep-info file to consult.
+        let checkout = tempfile::tempdir().unwrap();
+        write_untracked_macro_project(checkout.path());
+        std::fs::create_dir(checkout.path().join("dist")).unwrap();
+        std::fs::write(checkout.path().join("dist/other.html"), "other").unwrap();
+        let (warm, stderr) = cargo_with(
+            checkout.path(),
+            store.path(),
+            &reports.path().join("warm.json"),
+            &arguments,
+            &[
+                ("MBX_INCREMENTAL", "0"),
+                ("MBX_BUILD_SCRIPT_EXECUTION", execution),
+                ("MBX_TEST_EMBEDDED_MODE", ""),
+            ],
+        );
+        assert!(
+            count(&warm, "hits") >= 4,
+            "unchanged compilations should restore in a new checkout: {warm}\n{stderr}"
+        );
+        let output = Command::new(checkout.path().join(format!(
+            "target/{profile}/app{}",
+            std::env::consts::EXE_SUFFIX
+        )))
+        .output()
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            "other.html:other"
+        );
+    }
+}
+
 #[test]
 fn changed_declared_input_executes_build_script_again() {
     let store = tempfile::tempdir().unwrap();
@@ -5346,6 +5541,87 @@ fn verification_is_clean_across_target_directories() {
         "a restore into another target directory diverged: {reported}"
     );
 }
+
+/// Runtime-only writes in an implicit package input withhold publication but
+/// must still audit a predicted result in full and sampled verification runs.
+#[cfg(unix)]
+#[test]
+fn verification_audits_results_when_implicit_build_script_inputs_change() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    std::fs::write(project.path().join("build.rs"), "fn main() {}\n").unwrap();
+    let runtime = project.path().join("runtime.txt");
+    std::fs::write(&runtime, "original\n").unwrap();
+    let wrapper = reports.path().join("mutating-rustc");
+    std::fs::write(
+        &wrapper,
+        r#"#!/bin/sh
+"$TEST_REAL_RUSTC" "$@"
+status=$?
+case " $* " in
+  *" --crate-name fixture "*)
+    if [ "$status" -eq 0 ] && [ "$TEST_MUTATE_DURING_COMPILE" = 1 ]; then
+      printf 'changed\n' > "$TEST_RUNTIME_PATH"
+    fi
+    ;;
+esac
+exit "$status"
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&wrapper).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&wrapper, permissions).unwrap();
+    let rustc = which::which("rustc").unwrap();
+    let settings = [
+        ("MBX_INCREMENTAL", "0"),
+        ("MBX_CACHE_LINKS", "0"),
+        ("RUSTC", wrapper.to_str().unwrap()),
+        ("TEST_REAL_RUSTC", rustc.to_str().unwrap()),
+        ("TEST_RUNTIME_PATH", runtime.to_str().unwrap()),
+    ];
+    cargo_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+        &["check", "--offline"],
+        &settings,
+    );
+    for mode in ["MBX_VERIFY", "MBX_VERIFY_SAMPLE_RATE"] {
+        std::fs::remove_dir_all(project.path().join("target")).unwrap();
+        std::fs::write(&runtime, "original\n").unwrap();
+        let mut settings = settings.to_vec();
+        settings.extend([
+            (mode, if mode == "MBX_VERIFY" { "1" } else { "100" }),
+            ("TEST_MUTATE_DURING_COMPILE", "1"),
+        ]);
+        let (stats, stderr) = cargo_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("verify.json"),
+            &["check", "--offline"],
+            &settings,
+        );
+        assert!(
+            stderr.contains("implicit build-script inputs changed"),
+            "{stderr}"
+        );
+        assert_eq!(
+            count(&stats, "verifications"),
+            1,
+            "{mode}: {stats}\n{stderr}"
+        );
+        assert_eq!(count(&stats, "divergences"), 0, "{mode}: {stats}\n{stderr}");
+        assert_eq!(
+            count(&stats["compiler"]["verification"], "invocations"),
+            1,
+            "the verification compile must be recorded exactly once: {stats}"
+        );
+    }
+}
+
 /// Write a fixture whose build script compiles C through `$CC`.
 ///
 /// Deliberately hand-rolled rather than using the `cc` crate: this suite

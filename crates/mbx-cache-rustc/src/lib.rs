@@ -88,6 +88,9 @@ impl BypassReason {
             Self::UnmappedAbsolutePath(_) => Some(
                 "Move the input under the workspace, target, Cargo, toolchain, or home roots so mbx can give it a portable cache name.",
             ),
+            Self::BuildScriptInputOverlapsOutputs(_) => Some(
+                "Keep compiler output directories outside watched trees, or narrow `rerun-if-changed` to source and asset paths.",
+            ),
             _ => None,
         }
     }
@@ -300,6 +303,13 @@ pub enum BypassReason {
         /// Underlying filesystem error.
         message: String,
     },
+    /// A declared build-script input includes files the compiler writes.
+    #[error("declared build-script input overlaps compiler outputs: {0}")]
+    BuildScriptInputOverlapsOutputs(PathBuf),
+    /// A build script's watched paths or environment changed after discovery.
+    /// The path identifies Cargo's recorded declarations, not a changed input.
+    #[error("build-script inputs changed during compilation (declarations: {0})")]
+    BuildScriptInputsChanged(PathBuf),
     /// Input contents changed after they were hashed.
     #[error("compiler input changed after discovery: {0}")]
     InputChanged(PathBuf),
