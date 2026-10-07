@@ -3005,6 +3005,8 @@ pub fn embed(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
     generate_lockfile(directory);
 }
 
+/// Watching the package root must retain successful rustc outputs even when
+/// compilation writes into a default or custom target directory inside it.
 #[test]
 fn build_script_watching_compiler_outputs_keeps_successful_results() {
     for custom_target in [false, true] {
