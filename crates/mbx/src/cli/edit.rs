@@ -227,15 +227,15 @@ mod tests {
         let path = root.path().join("config.toml");
         std::fs::write(&path, "not valid toml = [").unwrap();
 
-        run_with(&path, None, Some("vim"), |_, _| {
+        let result = run_with(&path, None, Some("vim"), |_, _| {
             assert_eq!(
                 std::fs::read_to_string(&path).unwrap(),
                 "not valid toml = ["
             );
             Ok(exit_status(0))
-        })
-        .unwrap();
+        });
 
+        assert_eq!(result.unwrap(), ExitCode::SUCCESS);
         assert_eq!(std::fs::read_to_string(path).unwrap(), "not valid toml = [");
     }
 
