@@ -150,6 +150,9 @@ struct Compilation<'a> {
     linker: Option<LinkerIdentity>,
 }
 
+/// Restore a compilation or run rustc and publish a validated result. Cargo's
+/// build-script declarations supplement dep-info when identifying inputs;
+/// unsupported or unsafe input trees let the caller fall back to uncached rustc.
 pub(crate) fn compile(
     rustc: &OsStr,
     arguments: &[OsString],
@@ -2185,6 +2188,8 @@ fn action_from_parsed_dep_info(
     Ok((candidates, discovered))
 }
 
+/// Build the shared key context for dep-info and prediction lookups, including
+/// the build-script input signature captured before OUT_DIR stabilization.
 fn base_action_context(
     rustc: &OsStr,
     working_dir: &Path,
