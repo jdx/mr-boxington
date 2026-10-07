@@ -995,9 +995,11 @@ impl InputTree {
                 // Explicit watches must retain their complete meaning. Do not
                 // omit target files a macro might read; run rustc uncached
                 // instead of treating its own output writes as source edits.
-                bail!(
-                    "declared build-script input overlaps compiler outputs: {}",
-                    path.display()
+                return Err(
+                    mbx_cache_rustc::BypassReason::BuildScriptInputOverlapsOutputs(
+                        path.to_path_buf(),
+                    )
+                    .into(),
                 );
             }
         }

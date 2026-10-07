@@ -3027,7 +3027,7 @@ fn build_script_watching_compiler_outputs_keeps_successful_results() {
             if run == "second" {
                 std::fs::write(project.path().join("src/lib.rs"), "pub fn changed() {}\n").unwrap();
             }
-            cargo_with(
+            let (stats, stderr) = cargo_with(
                 project.path(),
                 store.path(),
                 &reports.path().join(format!("{run}.json")),
@@ -3035,6 +3035,21 @@ fn build_script_watching_compiler_outputs_keeps_successful_results() {
                 &[("MBX_INCREMENTAL", "0"), ("CARGO_TARGET_DIR", target_name)],
             );
             assert!(target.join("debug/libfixture.rlib").is_file());
+            assert!(
+                stats["bypasses"]["build-script-input-overlaps-outputs"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    > 0,
+                "overlap should have a specific bypass reason: {stats}\n{stderr}"
+            );
+            assert!(
+                stats["bypasses"].get("other").is_none(),
+                "{stats}\n{stderr}"
+            );
+            assert!(
+                !stderr.contains("mbx[warning]: rustc cache bypassed"),
+                "{stderr}"
+            );
         }
     }
 }

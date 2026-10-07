@@ -1994,10 +1994,15 @@ fn json_target_linkers_match_equivalent_paths() {
     }
 }
 
+/// Expected cache limitations stay at debug severity; failed cache reads and
+/// unknown errors must retain warnings so actionable failures remain visible.
 #[test]
 fn routine_bypasses_are_debug_but_failed_cache_paths_are_warnings() {
     assert!(super::expected_rustc_bypass(Some(
         &mbx_cache_rustc::BypassReason::CompilerQuery
+    )));
+    assert!(super::expected_rustc_bypass(Some(
+        &mbx_cache_rustc::BypassReason::BuildScriptInputOverlapsOutputs(".".into())
     )));
     assert!(super::expected_cc_bypass(Some(
         &mbx_cache_cc::CcBypassReason::NotACompile
