@@ -20,6 +20,7 @@
 - [`mbx doctor [--json]`](/cli/doctor.md)
 - [`mbx explain [--last] [CARGO_COMMAND] [CARGO_ARGS]…`](/cli/explain.md)
 - [`mbx analyze`](/cli/analyze.md)
+- [`mbx edit`](/cli/edit.md)
 - [`mbx setup [FLAGS]`](/cli/setup.md)
 - [`mbx settings <SUBCOMMAND>`](/cli/settings.md)
 - [`mbx settings ls [KEY]`](/cli/settings/ls.md)
