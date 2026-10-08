@@ -39,6 +39,11 @@ jobs:
     if: ${{ github.repository_owner == 'jdx' }}
     permissions:
       contents: write
+      # release.yml declares the manual-only release notifier. Reusable
+      # workflows may not elevate above this caller even when that job skips.
+      pull-requests: read
+      issues: write
+      discussions: write
       # Required for crates.io trusted publishing: the OIDC token proves this
       # workflow, in this repository, is the configured publisher. No
       # long-lived CARGO_REGISTRY_TOKEN exists anywhere.
