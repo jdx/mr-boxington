@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.23.0](https://github.com/jdx/mr-boxington/compare/v1.22.0...v1.23.0) - 2026-10-08
+
+### Added
+
+- *(clean)* add --under to clean every workspace below a root ([#668](https://github.com/jdx/mr-boxington/pull/668))
+- *(cli)* add mbx edit to open the global configuration ([#665](https://github.com/jdx/mr-boxington/pull/665))
+- *(target)* seed check lanes and editor checks from other checkouts ([#644](https://github.com/jdx/mr-boxington/pull/644))
+
+### Fixed
+
+- *(cache)* do not reuse file digests recorded within a timestamp tick ([#674](https://github.com/jdx/mr-boxington/pull/674))
+- *(scheduler)* stop a lease-name test from colliding with its own leases ([#672](https://github.com/jdx/mr-boxington/pull/672))
+- *(scheduler)* stop a release LTO link from slowing dev links ([#670](https://github.com/jdx/mr-boxington/pull/670))
+- *(cache)* invalidate Rust compilations when build-script inputs change ([#667](https://github.com/jdx/mr-boxington/pull/667))
+- *(scheduler)* record one core for test suites that finish under a second ([#661](https://github.com/jdx/mr-boxington/pull/661))
+
 ## [1.22.0](https://github.com/jdx/mr-boxington/compare/v1.21.1...v1.22.0) - 2026-10-03
 
 ### Added
