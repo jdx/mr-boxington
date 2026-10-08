@@ -88,6 +88,17 @@ fn leases_never_collide_with_a_name_already_taken() {
         taken + 2,
         "the grant tried the taken name and moved on to the next"
     );
+    assert!(
+        leases
+            .join(format!(
+                "{}-{}-{}",
+                std::process::id(),
+                process_token(),
+                taken + 1
+            ))
+            .exists(),
+        "the successful retry uses the next nonce"
+    );
     assert_eq!(
         std::fs::read(&squatted).unwrap(),
         b"another namespace's lease",
