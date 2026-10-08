@@ -1912,6 +1912,8 @@ mod tests {
         std::fs::create_dir(&data).unwrap();
         std::fs::write(data.join("a.txt"), "first").unwrap();
         std::fs::write(data.join("b.txt"), "second").unwrap();
+        // Digests of files written this moment are withheld from reuse.
+        std::thread::sleep(std::time::Duration::from_millis(50));
         let ledger = Ledger::default();
         let first = CompilationInputs::read_with_cache(&out_dir, package.path(), &ledger).unwrap();
         let second = CompilationInputs::read_with_cache(&out_dir, package.path(), &ledger).unwrap();

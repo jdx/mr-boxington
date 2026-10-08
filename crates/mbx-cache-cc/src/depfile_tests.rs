@@ -667,6 +667,8 @@ impl FileDigestCache for ReplacingLedger {
         assert_eq!(files.len(), 1);
         std::fs::remove_file(&self.path).expect("remove old input");
         std::fs::rename(&self.replacement, &self.path).expect("replace input");
+        // Digests of files changed this moment are withheld from reuse.
+        std::thread::sleep(std::time::Duration::from_millis(50));
         vec![None]
     }
 

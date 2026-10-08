@@ -1231,6 +1231,8 @@ mod tests {
             assert_eq!(files.len(), 1);
             std::fs::remove_file(&self.path).unwrap();
             std::fs::rename(&self.replacement, &self.path).unwrap();
+            // Digests of files changed this moment are withheld from reuse.
+            std::thread::sleep(std::time::Duration::from_millis(50));
             vec![None]
         }
 
@@ -1299,6 +1301,8 @@ mod tests {
         let fresh_path = root.join("lib.rs");
         std::fs::write(&known_path, b"rlib bytes").unwrap();
         std::fs::write(&fresh_path, b"fn lib() {}").unwrap();
+        // Digests of files written this moment are withheld from reuse.
+        std::thread::sleep(std::time::Duration::from_millis(50));
         let metadata = std::fs::metadata(&known_path).unwrap();
         // A sentinel digest that hashing could never produce proves the read
         // was skipped: the discovered input carries it verbatim.

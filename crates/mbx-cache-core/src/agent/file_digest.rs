@@ -573,11 +573,60 @@ pub fn digest_file_validated(
             "file changed while its contents were being read",
         ));
     }
+    // A digest recorded this close to the file's last write cannot be trusted
+    // later: a second write in the same timestamp tick leaves the identity
+    // unchanged, so the record would keep answering for bytes it never read.
+    // The caller still gets the digest; it just is not offered for reuse.
+    let cache_identity = cache_identity.filter(|identity| !identity_is_racy(identity));
     Ok(Some(ValidatedFileDigest {
         resolution,
         identity,
         cache_identity,
     }))
+}
+
+/// Timestamp tick of a filesystem that keeps sub-second times. The kernel
+/// stamps files from a coarse clock that advances once per scheduler tick,
+/// at most 10 ms, so twice that leaves a margin.
+const FINE_TIMESTAMP_RACE_WINDOW: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Timestamp tick of a filesystem that keeps whole seconds (ext3, HFS+) or two
+/// (FAT).
+const COARSE_TIMESTAMP_RACE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether the file was last written so recently that another write could
+/// still land in the timestamp tick the identity records.
+///
+/// The same "racily clean" hazard git guards its index against: metadata that
+/// is equal before and after cannot show a write that left it unchanged, so a
+/// digest is only reusable once the file's last change is older than the
+/// filesystem's timestamp resolution at the moment it was read. A timestamp in
+/// the future is treated as racy too.
+fn identity_is_racy(identity: &FileIdentity) -> bool {
+    let nanos = |time: SystemTime| {
+        time.duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |since| since.subsec_nanos())
+    };
+    let coarse = nanos(identity.modified) == 0
+        && identity
+            .changed
+            .is_none_or(|(_, changed_nanos)| changed_nanos == 0);
+    let window = if coarse {
+        COARSE_TIMESTAMP_RACE_WINDOW
+    } else {
+        FINE_TIMESTAMP_RACE_WINDOW
+    };
+    let now = SystemTime::now();
+    let recent = |time: SystemTime| now.duration_since(time).map_or(true, |age| age < window);
+    recent(identity.modified)
+        || identity.changed.is_some_and(|(seconds, changed_nanos)| {
+            u64::try_from(seconds).map_or(true, |seconds| {
+                recent(
+                    SystemTime::UNIX_EPOCH
+                        + std::time::Duration::new(seconds, changed_nanos.try_into().unwrap_or(0)),
+                )
+            })
+        })
 }
 
 fn digest_reader(
@@ -861,6 +910,7 @@ mod tests {
             recorded: std::sync::Mutex::new(Vec::new()),
         };
 
+        settle_past_timestamp_race();
         let snapshot = capture_file_snapshot(&path, &cache, true, true, before)
             .unwrap()
             .unwrap();
@@ -907,6 +957,7 @@ mod tests {
             recorded: std::sync::Mutex::new(Vec::new()),
         };
 
+        settle_past_timestamp_race();
         let snapshot = capture_file_snapshot(&path, &cache, true, true, before)
             .unwrap()
             .unwrap();
@@ -1093,5 +1144,30 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// Let a just-written file age past the window in which its digest is
+    /// withheld from reuse.
+    fn settle_past_timestamp_race() {
+        std::thread::sleep(FINE_TIMESTAMP_RACE_WINDOW * 2);
+    }
+
+    #[test]
+    fn a_digest_of_a_just_written_file_is_not_offered_for_reuse() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("val.rs");
+        std::fs::write(&path, b"pub const VAL: &str = \"v1\";").unwrap();
+
+        let fresh = digest_file_validated(FileDigestScope::Content, &path)
+            .unwrap()
+            .unwrap();
+        assert!(fresh.resolution.into_digest().is_some());
+        assert_eq!(fresh.cache_identity, None);
+
+        settle_past_timestamp_race();
+        let settled = digest_file_validated(FileDigestScope::Content, &path)
+            .unwrap()
+            .unwrap();
+        assert!(settled.cache_identity.is_some());
     }
 }
