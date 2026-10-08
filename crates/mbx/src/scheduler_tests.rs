@@ -45,8 +45,13 @@ fn capacity_is_enforced_and_released() {
 
 #[test]
 fn leases_never_collide_with_a_name_already_taken() {
+    // This test's own counter: the process-wide one is advanced by every test
+    // running in parallel, which could hand the stand-in's name to a lease
+    // below or skip past it, and then the test would not exercise a collision.
+    static NONCE: AtomicU64 = AtomicU64::new(0);
     let directory = tempfile::tempdir().unwrap();
-    let pool = pool_at(directory.path(), 8, 0);
+    let mut pool = pool_at(directory.path(), 8, 0);
+    pool.lease_nonce = || NONCE.fetch_add(1, Ordering::Relaxed);
     let leases = directory.path().join(LEASES_DIR);
 
     let held: Vec<_> = (0..4)
@@ -64,7 +69,12 @@ fn leases_never_collide_with_a_name_already_taken() {
     // somebody else holds the lock on, since that is what makes the name
     // genuinely taken: an unlocked file of the same name is a dead holder's,
     // and reclaiming it is correct.
-    let squatted = leases.join(format!("{}-{}-{}", std::process::id(), process_token(), 99));
+    let taken = NONCE.load(Ordering::Relaxed);
+    let squatted = leases.join(format!(
+        "{}-{}-{taken}",
+        std::process::id(),
+        process_token()
+    ));
     std::fs::write(&squatted, b"another namespace's lease").unwrap();
     let mut elsewhere = fslock::LockFile::open(&squatted).unwrap();
     assert!(
@@ -72,8 +82,23 @@ fn leases_never_collide_with_a_name_already_taken() {
         "the stand-in holds its lease"
     );
 
-    LEASE_NONCE.store(99, Ordering::Relaxed);
     let next = pool.try_admit(1, None).unwrap().expect("permit");
+    assert_eq!(
+        NONCE.load(Ordering::Relaxed),
+        taken + 2,
+        "the grant tried the taken name and moved on to the next"
+    );
+    assert!(
+        leases
+            .join(format!(
+                "{}-{}-{}",
+                std::process::id(),
+                process_token(),
+                taken + 1
+            ))
+            .exists(),
+        "the successful retry uses the next nonce"
+    );
     assert_eq!(
         std::fs::read(&squatted).unwrap(),
         b"another namespace's lease",
