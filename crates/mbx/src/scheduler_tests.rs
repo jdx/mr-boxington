@@ -64,7 +64,17 @@ fn leases_never_collide_with_a_name_already_taken() {
     // somebody else holds the lock on, since that is what makes the name
     // genuinely taken: an unlocked file of the same name is a dead holder's,
     // and reclaiming it is correct.
-    let squatted = leases.join(format!("{}-{}-{}", std::process::id(), process_token(), 99));
+    //
+    // The nonce counter is shared with every test running in this process, so
+    // the squatted name has to be one nothing else will count up to. A small
+    // number can be handed to one of the leases above while they are admitted,
+    // which makes the stand-in collide with a live holder of this very test.
+    const SQUATTED_NONCE: u64 = 1 << 40;
+    let squatted = leases.join(format!(
+        "{}-{}-{SQUATTED_NONCE}",
+        std::process::id(),
+        process_token()
+    ));
     std::fs::write(&squatted, b"another namespace's lease").unwrap();
     let mut elsewhere = fslock::LockFile::open(&squatted).unwrap();
     assert!(
@@ -72,7 +82,7 @@ fn leases_never_collide_with_a_name_already_taken() {
         "the stand-in holds its lease"
     );
 
-    LEASE_NONCE.store(99, Ordering::Relaxed);
+    LEASE_NONCE.store(SQUATTED_NONCE, Ordering::Relaxed);
     let next = pool.try_admit(1, None).unwrap().expect("permit");
     assert_eq!(
         std::fs::read(&squatted).unwrap(),
