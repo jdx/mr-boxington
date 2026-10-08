@@ -208,6 +208,21 @@ impl Demand {
         }
     }
 
+    /// Remember a link apart from the same crate's links under other
+    /// code-generation settings.
+    ///
+    /// A release build with fat LTO and one codegen unit peaks several times
+    /// higher than a dev link of the same binary, and the ledger never lowers
+    /// a recorded peak, so without this one release build would charge every
+    /// later dev link its memory. Read from the rustc flags rather than the
+    /// profile name, since a custom profile inherits from `release`.
+    pub(crate) fn with_link_profile(mut self, arguments: &[std::ffi::OsString]) -> Self {
+        if self.links {
+            self.name = format!("{} [{}]", self.name, link_profile(arguments));
+        }
+        self
+    }
+
     /// A test binary, remembered apart from the crate that compiled it.
     ///
     /// Half the pool by default rather than all of it. libtest starts a
@@ -1152,6 +1167,51 @@ fn ledger_key(name: &str, links: bool) -> String {
     } else {
         name.to_string()
     }
+}
+
+/// The rustc flags that decide how much memory a link takes: optimization,
+/// LTO, codegen units and debug info. The last occurrence of each wins, as it
+/// does in rustc.
+fn link_profile(arguments: &[std::ffi::OsString]) -> String {
+    let (mut opt, mut lto, mut units, mut debug) = (None, None, None, None);
+    let mut arguments = arguments.iter().filter_map(|argument| argument.to_str());
+    while let Some(argument) = arguments.next() {
+        let setting = match argument {
+            "-C" => arguments.next(),
+            "-O" => {
+                opt = Some("2");
+                continue;
+            }
+            "-g" => {
+                debug = Some("2");
+                continue;
+            }
+            _ => argument.strip_prefix("-C"),
+        };
+        let Some(setting) = setting else { continue };
+        let (key, value) = setting.split_once('=').unwrap_or((setting, ""));
+        match key {
+            "opt-level" => opt = Some(value),
+            // A bare `-C lto` is fat LTO.
+            "lto" => {
+                lto = Some(match value {
+                    "" | "yes" | "y" | "on" | "true" | "fat" => "fat",
+                    "no" | "n" | "off" | "false" => "off",
+                    other => other,
+                })
+            }
+            "codegen-units" => units = Some(value),
+            "debuginfo" => debug = Some(value),
+            _ => {}
+        }
+    }
+    format!(
+        "opt{} lto-{} cgu{} debug{}",
+        opt.unwrap_or("0"),
+        lto.unwrap_or("off"),
+        units.unwrap_or("-"),
+        debug.unwrap_or("0"),
+    )
 }
 
 fn read_ledger(path: &Path) -> MemoryLedger {
