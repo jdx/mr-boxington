@@ -6537,7 +6537,7 @@ fn private_shims_support_nested_exec_and_survive_the_command() {
 fn mbx_clean_under_reports_when_a_deleted_root_has_no_records() {
     let directory = tempfile::tempdir().unwrap();
     let store = directory.path().join("cache");
-    let root = directory.path().join("deleted/session");
+    let root = directory.path().join("deleted").join("session");
     assert!(!root.exists());
 
     let output = mbx_command()
