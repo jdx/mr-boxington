@@ -2723,18 +2723,24 @@ impl CacheAgent {
         let Ok(Ok(Some(observed))) = resolved else {
             return FileDigestResolution::Unresolved;
         };
-        if observed.cache_identity.as_ref() != Some(&file) {
+        // A racy digest is right for this read but not for reuse: it is
+        // returned to this caller, never recorded or handed to waiters, who
+        // read the file themselves.
+        let reusable = observed.cache_identity.as_ref() == Some(&file);
+        if !(reusable || observed.racy && observed.identity == file) {
             return FileDigestResolution::Unresolved;
         }
         let resolution = match observed.resolution {
             FileDigestResolution::Digest(digest) if digest.size == file.len => {
-                let _ = self.record_file_digests(
-                    scope,
-                    vec![RecordedFileDigest {
-                        file: file.clone(),
-                        digest: digest.clone(),
-                    }],
-                );
+                if reusable {
+                    let _ = self.record_file_digests(
+                        scope,
+                        vec![RecordedFileDigest {
+                            file: file.clone(),
+                            digest: digest.clone(),
+                        }],
+                    );
+                }
                 FileDigestResolution::Digest(digest)
             }
             FileDigestResolution::EmbeddedTimestampMacro => {
@@ -2744,7 +2750,9 @@ impl CacheAgent {
                 FileDigestResolution::Unresolved
             }
         };
-        *lock.resolution.lock().unwrap() = Some(resolution.clone());
+        if reusable {
+            *lock.resolution.lock().unwrap() = Some(resolution.clone());
+        }
         resolution
     }
 

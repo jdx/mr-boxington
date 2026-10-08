@@ -6743,6 +6743,7 @@ async fn concurrent_file_digest_misses_share_one_large_read() {
     let path = directory.path().join("large-input.rlib");
     let bytes = vec![b'x'; 256 * 1024];
     std::fs::write(&path, &bytes).unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let metadata = std::fs::metadata(&path).unwrap();
     let identity = FileIdentity::for_digest_cache(&path, &metadata)
         .unwrap()
@@ -6824,6 +6825,7 @@ async fn concurrent_timestamp_macro_resolutions_share_one_read() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("timestamp-input.c");
     std::fs::write(&path, b"const char *built = __DATE__;\n").unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let metadata = std::fs::metadata(&path).unwrap();
     let identity = FileIdentity::for_digest_cache(&path, &metadata)
         .unwrap()
@@ -6874,6 +6876,7 @@ async fn abandoned_file_digest_owner_wakes_the_next_waiter() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("input.rlib");
     std::fs::write(&path, b"dependency bytes").unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let metadata = std::fs::metadata(&path).unwrap();
     let identity = FileIdentity::for_digest_cache(&path, &metadata)
         .unwrap()
@@ -7191,4 +7194,33 @@ fn benchmark_manifest_merge() {
             samples[4], samples[0], samples[8]
         );
     }
+}
+
+#[tokio::test]
+async fn a_racy_file_digest_is_returned_but_neither_recorded_nor_shared() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("input.rs");
+    std::fs::write(&path, b"pub const VAL: &str = \"v1\";").unwrap();
+    // A modification time ahead of the clock is racy however long the test
+    // stalls.
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() + Duration::from_secs(3600)),
+        )
+        .unwrap();
+    let identity = FileIdentity::for_digest_cache(&path, &std::fs::metadata(&path).unwrap())
+        .unwrap()
+        .unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+
+    let resolution = agent
+        .resolve_file_digest(FileDigestScope::Content, identity)
+        .await;
+
+    assert!(matches!(resolution, FileDigestResolution::Digest(_)));
+    assert!(agent.file_digests.lock().unwrap().is_empty());
 }

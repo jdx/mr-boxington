@@ -517,6 +517,9 @@ pub struct ValidatedFileDigest {
     pub identity: FileIdentity,
     /// Identity suitable for reuse in the digest ledger, when available.
     pub cache_identity: Option<FileIdentity>,
+    /// The file was written too recently for its digest to be reused, so
+    /// `cache_identity` was withheld. The digest is right for this read only.
+    pub racy: bool,
 }
 
 impl FileDigestResolution {
@@ -542,6 +545,9 @@ pub fn digest_file_validated(
     scope: FileDigestScope,
     path: &Path,
 ) -> io::Result<Option<ValidatedFileDigest>> {
+    // Taken before the read: a slow read must not make a file look settled
+    // that was still inside its timestamp tick when the first byte was read.
+    let started = SystemTime::now();
     let file = std::fs::File::open(path)?;
     let before = file.metadata()?;
     if !before.is_file() {
@@ -573,11 +579,67 @@ pub fn digest_file_validated(
             "file changed while its contents were being read",
         ));
     }
+    // A digest recorded this close to the file's last write cannot be trusted
+    // later: a second write in the same timestamp tick leaves the identity
+    // unchanged, so the record would keep answering for bytes it never read.
+    // The caller still gets the digest; it just is not offered for reuse.
+    let racy = cache_identity
+        .as_ref()
+        .is_some_and(|identity| identity_is_racy(identity, started));
+    let cache_identity = cache_identity.filter(|_| !racy);
     Ok(Some(ValidatedFileDigest {
         resolution,
         identity,
         cache_identity,
+        racy,
     }))
+}
+
+/// Timestamp tick of a filesystem that keeps sub-second times. The kernel
+/// stamps files from a coarse clock that advances once per scheduler tick,
+/// at most 10 ms, so twice that leaves a margin.
+const FINE_TIMESTAMP_RACE_WINDOW: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Timestamp tick of a filesystem that keeps whole seconds (ext3, HFS+) or two
+/// (FAT).
+const COARSE_TIMESTAMP_RACE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether the file was last written so recently that another write could
+/// still land in the timestamp tick the identity records.
+///
+/// The same "racily clean" hazard git guards its index against: metadata that
+/// is equal before and after cannot show a write that left it unchanged, so a
+/// digest is only reusable once the file's last change is older than the
+/// filesystem's timestamp resolution when the read began (`observed_at`). A timestamp in
+/// the future is treated as racy too.
+fn identity_is_racy(identity: &FileIdentity, observed_at: SystemTime) -> bool {
+    let nanos = |time: SystemTime| {
+        time.duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |since| since.subsec_nanos())
+    };
+    let coarse = nanos(identity.modified) == 0
+        && identity
+            .changed
+            .is_none_or(|(_, changed_nanos)| changed_nanos == 0);
+    let window = if coarse {
+        COARSE_TIMESTAMP_RACE_WINDOW
+    } else {
+        FINE_TIMESTAMP_RACE_WINDOW
+    };
+    let recent = |time: SystemTime| {
+        observed_at
+            .duration_since(time)
+            .map_or(true, |age| age < window)
+    };
+    recent(identity.modified)
+        || identity.changed.is_some_and(|(seconds, changed_nanos)| {
+            u64::try_from(seconds).map_or(true, |seconds| {
+                recent(
+                    SystemTime::UNIX_EPOCH
+                        + std::time::Duration::new(seconds, changed_nanos.try_into().unwrap_or(0)),
+                )
+            })
+        })
 }
 
 fn digest_reader(
@@ -861,6 +923,7 @@ mod tests {
             recorded: std::sync::Mutex::new(Vec::new()),
         };
 
+        settle_past_timestamp_race();
         let snapshot = capture_file_snapshot(&path, &cache, true, true, before)
             .unwrap()
             .unwrap();
@@ -907,6 +970,7 @@ mod tests {
             recorded: std::sync::Mutex::new(Vec::new()),
         };
 
+        settle_past_timestamp_race();
         let snapshot = capture_file_snapshot(&path, &cache, true, true, before)
             .unwrap()
             .unwrap();
@@ -1093,5 +1157,84 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// Let a just-written file age past the window in which its digest is
+    /// withheld from reuse.
+    fn settle_past_timestamp_race() {
+        std::thread::sleep(FINE_TIMESTAMP_RACE_WINDOW * 2);
+    }
+
+    /// A modification time ahead of the clock is racy however slowly the test
+    /// runs, so the withheld case does not depend on how long a stall lasts.
+    #[test]
+    fn a_digest_of_a_recently_changed_file_is_not_offered_for_reuse() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("val.rs");
+        std::fs::write(&path, b"pub const VAL: &str = \"v1\";").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(SystemTime::now() + std::time::Duration::from_secs(3600)),
+            )
+            .unwrap();
+
+        let fresh = digest_file_validated(FileDigestScope::Content, &path)
+            .unwrap()
+            .unwrap();
+        assert!(fresh.resolution.into_digest().is_some());
+        assert!(fresh.racy);
+        assert_eq!(fresh.cache_identity, None);
+    }
+
+    #[test]
+    fn a_digest_of_a_settled_file_is_offered_for_reuse() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("val.rs");
+        std::fs::write(&path, b"pub const VAL: &str = \"v1\";").unwrap();
+
+        settle_past_timestamp_race();
+        let settled = digest_file_validated(FileDigestScope::Content, &path)
+            .unwrap()
+            .unwrap();
+        assert!(!settled.racy);
+        assert!(settled.cache_identity.is_some());
+    }
+
+    #[test]
+    fn racy_window_follows_the_timestamp_resolution() {
+        let at = |seconds: u64, nanos: u32| {
+            SystemTime::UNIX_EPOCH + std::time::Duration::new(seconds, nanos)
+        };
+        let identity = |modified: SystemTime, changed: Option<(i64, i64)>| FileIdentity {
+            path: PathBuf::from("/x"),
+            len: 1,
+            modified,
+            changed,
+            object: None,
+        };
+        let now = at(1_000, 500_000_000);
+        let fine = |age_ms: u64| {
+            let when = now - std::time::Duration::from_millis(age_ms);
+            let since = when.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+            identity(
+                when,
+                Some((since.as_secs() as i64, i64::from(since.subsec_nanos()))),
+            )
+        };
+        assert!(identity_is_racy(&fine(5), now));
+        assert!(!identity_is_racy(&fine(25), now));
+        // A ctime newer than the mtime counts even when the mtime is old.
+        let touched = identity(at(10, 7), Some((1_000, 499_000_000)));
+        assert!(identity_is_racy(&touched, now));
+        // Whole-second stamps are withheld for two seconds.
+        let coarse = |age: u64| identity(at(1_000 - age, 0), Some((1_000 - age as i64, 0)));
+        assert!(identity_is_racy(&coarse(1), at(1_000, 0)));
+        assert!(!identity_is_racy(&coarse(3), at(1_000, 0)));
+        // A timestamp in the future is racy.
+        assert!(identity_is_racy(&identity(at(2_000, 1), None), now));
     }
 }
