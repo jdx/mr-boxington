@@ -270,6 +270,17 @@ pub(crate) fn is_recorded(root: &Path, workspace_root: &Path) -> bool {
     view_record_path(root, workspace_root).exists()
 }
 
+/// List workspaces with readable managed target records.
+pub(crate) fn workspaces(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut workspaces = Vec::new();
+    for (record_path, _) in views(root)? {
+        if let Some(record) = read_view_record(&record_path) {
+            workspaces.push(record.workspace_root);
+        }
+    }
+    Ok(workspaces)
+}
+
 /// `<root>/v1/<digest>.lock` for the view directory `<root>/v1/<digest>`.
 fn view_lock_path(directory: &Path) -> PathBuf {
     directory.with_extension("lock")
@@ -1677,7 +1688,11 @@ fn removal_path(directory: &Path) -> PathBuf {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    directory.with_file_name(format!("{name}{REMOVAL_SUFFIX}{}", std::process::id()))
+    directory.with_file_name(format!(
+        "{name}{REMOVAL_SUFFIX}{}-{}",
+        std::process::id(),
+        crate::util::random_string(12)
+    ))
 }
 
 /// Finish removing views a collector that died left moved aside.

@@ -38,7 +38,7 @@
 - [`mbx cache export [--group <GROUP>] [--format <FORMAT>] <ARCHIVE>`](/cli/cache/export.md)
 - [`mbx cache import <ARCHIVE>`](/cli/cache/import.md)
 - [`mbx cache remove [--interactive] [WORKSPACE]`](/cli/cache/remove.md)
-- [`mbx clean [WORKSPACE]`](/cli/clean.md)
+- [`mbx clean [--under <ROOT>] [WORKSPACE]`](/cli/clean.md)
 - [`mbx adopt [-r --recursive] [--dry-run] [PATH]…`](/cli/adopt.md)
 - [`mbx tui [--once]`](/cli/tui.md)
 - [`mbx stats [--json]`](/cli/stats.md)

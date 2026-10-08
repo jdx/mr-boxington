@@ -100,6 +100,26 @@ pub(crate) fn stats(root: &Path) -> Result<Stats> {
     Ok(stats)
 }
 
+/// List workspaces with readable learned incremental state records.
+pub(crate) fn workspaces(root: &Path) -> Result<Vec<PathBuf>> {
+    let listing = match std::fs::read_dir(root) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut workspaces = Vec::new();
+    for entry in listing {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() || entry.file_name() == LOCKS_DIR {
+            continue;
+        }
+        if let Some(record) = read_record(&entry.path().join(RECORD_FILE)) {
+            workspaces.push(record.workspace_root);
+        }
+    }
+    Ok(workspaces)
+}
+
 /// Collect deleted, expired, and least-recently-used checkout state.
 pub(crate) fn collect(
     root: &Path,

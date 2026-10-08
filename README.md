@@ -138,6 +138,7 @@ mbx explain --last           # explain the last recorded build
 mbx cache stats              # summarize the store, managed targets, and incremental state
 mbx gc --dry-run             # preview collection
 mbx clean                    # remove this workspace's managed target
+mbx clean --under /tmp/run   # remove recorded workspaces beneath a deleted root
 mbx adopt --recursive ~/src  # adopt existing target directories without deleting outputs
 ```
 
