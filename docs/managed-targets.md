@@ -110,10 +110,12 @@ each other; give them separate targets as described in
 
 `mbx clean` and `mbx cache remove` keep the target directory, with a warning,
 while a command run through mbx is using it. `mbx clean` also accepts a
-workspace path. It keeps shared cache objects and the workspace's cache
-claims, so a later build can restore matching outputs. `mbx cache remove`
-forgets those claims as well. Objects other workspaces use remain available,
-and collection later reclaims the ones nothing needs.
+workspace path, or `--under <ROOT>` to clean every workspace recorded at or
+beneath an absolute path, including nested worktrees. The root can already be
+deleted. It keeps shared cache objects and the workspace's cache claims, so a
+later build can restore matching outputs. `mbx cache remove` forgets those
+claims as well. Objects other workspaces use remain available, and collection
+later reclaims the ones nothing needs.
 
 `cargo clean` follows Cargo's own target-directory behavior and does not
 remove mbx's private incremental state.

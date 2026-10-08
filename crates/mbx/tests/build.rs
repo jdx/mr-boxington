@@ -6532,3 +6532,90 @@ fn private_shims_support_nested_exec_and_survive_the_command() {
         .unwrap();
     assert!(probe.status.success());
 }
+
+#[test]
+fn mbx_clean_under_reports_when_a_deleted_root_has_no_records() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("cache");
+    let root = directory.path().join("deleted").join("session");
+    assert!(!root.exists());
+
+    let output = mbx_command()
+        .args(["clean", "--under"])
+        .arg(&root)
+        .env("MBX_CACHE_DIR", &store)
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .expect("mbx clean --under should run");
+
+    assert!(
+        output.status.success(),
+        "clean failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        format!("nothing found under {}", root.display())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn mbx_clean_under_does_not_invoke_cargo_for_a_missing_root() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("cache");
+    let root = directory.path().join("deleted/session");
+    let cargo = directory.path().join("cargo-that-must-not-run");
+    let invoked = directory.path().join("cargo-was-invoked");
+    std::fs::write(
+        &cargo,
+        "#!/bin/sh\nprintf called > \"$MBX_TEST_CARGO_INVOKED\"\nexit 1\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&cargo).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&cargo, permissions).unwrap();
+
+    let output = mbx_command()
+        .args(["clean", "--under"])
+        .arg(&root)
+        .env("CARGO", &cargo)
+        .env("MBX_TEST_CARGO_INVOKED", &invoked)
+        .env("MBX_CACHE_DIR", &store)
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .expect("mbx clean --under should run");
+
+    assert!(
+        output.status.success(),
+        "clean failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!invoked.exists(), "clean --under must not run Cargo");
+}
+
+#[test]
+fn mbx_clean_under_rejects_relative_and_root_paths_and_conflicting_workspace() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("cache");
+    for arguments in [
+        vec!["clean", "--under", "relative/root"],
+        vec!["clean", "--under", "/"],
+        vec!["clean", "workspace", "--under", "/tmp/session"],
+    ] {
+        let output = mbx_command()
+            .current_dir(directory.path())
+            .args(arguments)
+            .env("MBX_CACHE_DIR", &store)
+            .env_remove("CARGO_TARGET_DIR")
+            .output()
+            .expect("mbx clean should run");
+        assert!(
+            !output.status.success(),
+            "arguments unexpectedly succeeded: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}

@@ -59,6 +59,19 @@ fn places_the_default_target_directory_under_the_managed_root() {
     assert_eq!(stats(&config.target.root).unwrap().views, 1);
 }
 
+#[test]
+fn concurrent_retirements_get_distinct_staging_paths() {
+    let directory = tempfile::tempdir().unwrap();
+    let view = directory.path().join("v1/0123456789abcdef");
+
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| removal_path(&view));
+        let second = scope.spawn(|| removal_path(&view));
+        (first.join().unwrap(), second.join().unwrap())
+    });
+    assert_ne!(first, second);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_directory_only_gitignore_still_hides_the_managed_link() {

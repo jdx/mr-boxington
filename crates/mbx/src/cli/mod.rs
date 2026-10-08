@@ -163,7 +163,10 @@ enum Commands {
     /// managed target. Shared store objects and the workspace's cache claims
     /// stay, so a later build can restore matching outputs; `mbx cache remove`
     /// also forgets the claims. A managed target or learned incremental state
-    /// that a running command is using is kept, with a warning.
+    /// that a running command is using is kept, with a warning. Use
+    /// `mbx clean --under <ROOT>` to remove every recorded workspace at or
+    /// below an absolute path, including nested worktrees. `--under` and the
+    /// positional workspace path cannot be used together.
     Clean(clean::CleanArgs),
     /// Move existing target directories under mbx management, contents intact.
     ///
