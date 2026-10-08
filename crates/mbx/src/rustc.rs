@@ -500,7 +500,8 @@ pub(crate) fn compile(
     // and before anything expensive starts. The timer starts afterwards: time
     // spent waiting for the machine is not time this compilation cost.
     let demand =
-        crate::scheduler::Demand::new(invocation.crate_name(), invocation.links_natively());
+        crate::scheduler::Demand::new(invocation.crate_name(), invocation.links_natively())
+            .with_link_profile(&profile_arguments(&arguments));
     let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
     // Capture these after admission: an edit while this compile waits for
     // capacity happened before rustc ran and belongs to the valid compilation
@@ -1000,6 +1001,12 @@ fn discard_compiler_outputs(outputs: &RustcOutputs) -> Result<()> {
     Ok(())
 }
 
+/// The arguments rustc effectively sees, with `@argfile` contents inline, for
+/// reading code-generation settings out of.
+fn profile_arguments(arguments: &[OsString]) -> Vec<OsString> {
+    RustcInvocation::expand_arguments(arguments).unwrap_or_else(|_| arguments.to_vec())
+}
+
 /// Compile a build script whose native link cannot be action-cached, then
 /// install the execution-cache launcher keyed by its compilation action.
 fn compile_execution_only_build_script(
@@ -1011,7 +1018,8 @@ fn compile_execution_only_build_script(
     outputs: &RustcOutputs,
     portable: &Portable,
 ) -> Result<ExitCode> {
-    let demand = crate::scheduler::Demand::new(invocation.crate_name(), true);
+    let demand = crate::scheduler::Demand::new(invocation.crate_name(), true)
+        .with_link_profile(&profile_arguments(arguments));
     let permit = crate::scheduler::pool().and_then(|pool| pool.admit(&demand));
     let required_inputs = invocation.required_inputs_in(working_dir);
     let source = working_dir.join(invocation.source());

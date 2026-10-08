@@ -1777,10 +1777,9 @@ fn run_transparent_rustc(
                 .to_str()
                 .is_some_and(|argument| argument.starts_with("--print"))
     });
-    let demand = crate_name
-        .as_deref()
-        .filter(|_| !is_query)
-        .map(|name| crate::scheduler::Demand::new(name, links_natively(described)));
+    let demand = crate_name.as_deref().filter(|_| !is_query).map(|name| {
+        crate::scheduler::Demand::new(name, links_natively(described)).with_link_profile(described)
+    });
     let permit = demand
         .as_ref()
         .and_then(|demand| crate::scheduler::pool().and_then(|pool| pool.admit(demand)));

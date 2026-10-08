@@ -196,6 +196,10 @@ pub(crate) struct Demand {
     /// Whether the ledger's record of cores this process kept busy replaces
     /// `threads`. Only test binaries are measured; a compiler is one thread.
     learns_cpu: bool,
+    /// The code-generation settings of a link, which key its window of recent
+    /// measurements: a release link's peaks must not stand in for a dev
+    /// link that has none of its own yet.
+    profile: Option<String>,
 }
 
 impl Demand {
@@ -205,7 +209,25 @@ impl Demand {
             links,
             threads: Some(1),
             learns_cpu: false,
+            profile: None,
         }
+    }
+
+    /// Remember a link apart from the same crate's links under other
+    /// code-generation settings.
+    ///
+    /// A release build with fat LTO and one codegen unit peaks several times
+    /// higher than a dev link of the same binary, and the ledger never lowers
+    /// a recorded peak, so without this one release build would charge every
+    /// later dev link its memory. Read from the rustc flags rather than the
+    /// profile name, since a custom profile inherits from `release`.
+    pub(crate) fn with_link_profile(mut self, arguments: &[std::ffi::OsString]) -> Self {
+        if self.links {
+            let profile = link_profile(arguments);
+            self.name = format!("{} [{profile}]", self.name);
+            self.profile = Some(profile);
+        }
+        self
     }
 
     /// A test binary, remembered apart from the crate that compiled it.
@@ -231,6 +253,7 @@ impl Demand {
             links: false,
             threads,
             learns_cpu: true,
+            profile: None,
         }
     }
 }
@@ -486,6 +509,9 @@ struct MemoryLedger {
     /// Average cores each test binary kept busy, by demand name.
     #[serde(default)]
     cpus: BTreeMap<String, u64>,
+    /// Recent link measurements by code-generation profile, newest last.
+    #[serde(default)]
+    profile_link_peaks: BTreeMap<String, Vec<u64>>,
 }
 
 /// The machine-wide permit pool one process draws from.
@@ -846,8 +872,18 @@ impl Pool {
             // history it can use instead. The heaviest of the window rather
             // than its average, because the cost of guessing low is an
             // out-of-memory kill and the cost of guessing high is a wait.
-            let measured = (ledger.link_peaks.len() >= MIN_LINK_SAMPLES)
-                .then(|| ledger.link_peaks.iter().copied().max())
+            //
+            // A link with a known profile consults only that profile's
+            // window, so a release LTO link never speaks for a dev link.
+            let window = match &demand.profile {
+                Some(profile) => ledger
+                    .profile_link_peaks
+                    .get(profile)
+                    .map_or(&[][..], Vec::as_slice),
+                None => ledger.link_peaks.as_slice(),
+            };
+            let measured = (window.len() >= MIN_LINK_SAMPLES)
+                .then(|| window.iter().copied().max())
                 .flatten();
             measured.unwrap_or_else(|| weight.saturating_mul(self.bytes_per_permit))
         });
@@ -1051,9 +1087,12 @@ impl Pool {
         ) else {
             return;
         };
-        if let Err(error) =
-            self.record_peak(&ledger_key(&demand.name, demand.links), peak, demand.links)
-        {
+        if let Err(error) = self.record_link_peak(
+            &ledger_key(&demand.name, demand.links),
+            peak,
+            demand.links,
+            demand.profile.as_deref(),
+        ) {
             debug!("compiler memory was not recorded: {error:#}");
         }
     }
@@ -1064,7 +1103,18 @@ impl Pool {
 
     /// Raise the recorded peak for one crate, never lowering it, and add a
     /// link's measurement to the machine-wide window whatever the entry does.
+    #[cfg(test)]
     fn record_peak(&self, name: &str, peak: u64, links: bool) -> Result<()> {
+        self.record_link_peak(name, peak, links, None)
+    }
+
+    fn record_link_peak(
+        &self,
+        name: &str,
+        peak: u64,
+        links: bool,
+        profile: Option<&str>,
+    ) -> Result<()> {
         std::fs::create_dir_all(&self.dir)
             .wrap_err_with(|| format!("failed to create {}", self.dir.display()))?;
         let mut lock = fslock::LockFile::open(&self.dir.join(LEDGER_LOCK))?;
@@ -1076,9 +1126,19 @@ impl Pool {
         // is already higher: it says what links cost around here lately, which
         // a measurement no worse than the last one still answers.
         if links {
-            ledger.link_peaks.push(peak);
-            let surplus = ledger.link_peaks.len().saturating_sub(MAX_LINK_SAMPLES);
-            ledger.link_peaks.drain(..surplus);
+            let window = match profile {
+                Some(profile) => ledger
+                    .profile_link_peaks
+                    .entry(profile.to_string())
+                    .or_default(),
+                None => &mut ledger.link_peaks,
+            };
+            window.push(peak);
+            let surplus = window.len().saturating_sub(MAX_LINK_SAMPLES);
+            window.drain(..surplus);
+            while ledger.profile_link_peaks.len() > MAX_LEDGER_ENTRIES {
+                ledger.profile_link_peaks.pop_first();
+            }
         }
         let known = ledger.crates.get(name).is_some_and(|known| *known >= peak);
         if known && !links {
@@ -1152,6 +1212,53 @@ fn ledger_key(name: &str, links: bool) -> String {
     } else {
         name.to_string()
     }
+}
+
+/// The rustc flags that decide how much memory a link takes: optimization,
+/// LTO, codegen units and debug info. The last occurrence of each wins, as it
+/// does in rustc.
+fn link_profile(arguments: &[std::ffi::OsString]) -> String {
+    let (mut opt, mut lto, mut units, mut debug) = (None, None, None, None);
+    let mut arguments = arguments.iter().filter_map(|argument| argument.to_str());
+    while let Some(argument) = arguments.next() {
+        let setting = match argument {
+            "-C" | "--codegen" => arguments.next(),
+            "-O" => {
+                opt = Some("3");
+                continue;
+            }
+            "-g" => {
+                debug = Some("2");
+                continue;
+            }
+            _ => argument
+                .strip_prefix("--codegen=")
+                .or_else(|| argument.strip_prefix("-C")),
+        };
+        let Some(setting) = setting else { continue };
+        let (key, value) = setting.split_once('=').unwrap_or((setting, ""));
+        match key {
+            "opt-level" => opt = Some(value),
+            // A bare `-C lto` is fat LTO.
+            "lto" => {
+                lto = Some(match value {
+                    "" | "yes" | "y" | "on" | "true" | "fat" => "fat",
+                    "no" | "n" | "off" | "false" => "off",
+                    other => other,
+                })
+            }
+            "codegen-units" => units = Some(value),
+            "debuginfo" => debug = Some(value),
+            _ => {}
+        }
+    }
+    format!(
+        "opt{} lto-{} cgu{} debug{}",
+        opt.unwrap_or("0"),
+        lto.unwrap_or("default"),
+        units.unwrap_or("-"),
+        debug.unwrap_or("0"),
+    )
 }
 
 fn read_ledger(path: &Path) -> MemoryLedger {

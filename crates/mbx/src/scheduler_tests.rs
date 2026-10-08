@@ -1029,3 +1029,82 @@ fn frozen_work_has_admission_priority_until_its_heartbeat_expires() {
     assert!(pool.try_admit(1, None).unwrap().is_some());
     drop(first);
 }
+
+#[test]
+fn link_profile_separates_release_from_dev_links() {
+    let args = |flags: &[&str]| -> Vec<std::ffi::OsString> {
+        flags.iter().map(std::ffi::OsString::from).collect()
+    };
+    let release = args(&["-C", "opt-level=3", "-C", "lto", "-C", "codegen-units=1"]);
+    let dev = args(&["-C", "debuginfo=0", "-C", "opt-level=0"]);
+    let release_demand = Demand::new("fallow", true).with_link_profile(&release);
+    let dev_demand = Demand::new("fallow", true).with_link_profile(&dev);
+    assert_ne!(
+        ledger_key(&release_demand.name, true),
+        ledger_key(&dev_demand.name, true)
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 8, 1024);
+    pool.record_peak(&ledger_key(&release_demand.name, true), 10_000_000, true)
+        .unwrap();
+    let (_, predicted) = pool.plan(&dev_demand);
+    assert_ne!(
+        predicted,
+        Some(10_000_000),
+        "a release peak must not charge a dev link"
+    );
+    let (_, predicted) = pool.plan(&release_demand);
+    assert_eq!(predicted, Some(10_000_000));
+
+    // Spelled `-Clto=fat` or as separate arguments, the profile is the same;
+    // non-links are untouched.
+    assert_eq!(
+        link_profile(&args(&["-Clto=fat", "-Copt-level=3", "-Ccodegen-units=1"])),
+        link_profile(&release)
+    );
+    assert_eq!(
+        Demand::new("lib", false).with_link_profile(&release).name,
+        "lib"
+    );
+}
+
+#[test]
+fn link_profile_reads_every_spelling_and_keeps_windows_apart() {
+    let args = |flags: &[&str]| -> Vec<std::ffi::OsString> {
+        flags.iter().map(std::ffi::OsString::from).collect()
+    };
+    assert_eq!(
+        link_profile(&args(&["-O"])),
+        link_profile(&args(&["-C", "opt-level=3"]))
+    );
+    assert_eq!(
+        link_profile(&args(&["--codegen=lto", "--codegen", "codegen-units=1"])),
+        link_profile(&args(&["-Clto", "-Ccodegen-units=1"]))
+    );
+    assert_ne!(
+        link_profile(&args(&[])),
+        link_profile(&args(&["-C", "lto=off"])),
+        "an absent lto setting is not an explicit off"
+    );
+
+    // Three release links must not make a never-measured dev link
+    // inherit a release-sized prediction.
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 8, 1024);
+    let release = Demand::new("bin", true).with_link_profile(&args(&["-Clto", "-Copt-level=3"]));
+    for _ in 0..3 {
+        pool.record_link_peak(
+            &ledger_key(&release.name, true),
+            1_000_000,
+            true,
+            release.profile.as_deref(),
+        )
+        .unwrap();
+    }
+    let dev = Demand::new("bin", true).with_link_profile(&args(&["-Copt-level=0"]));
+    let (_, predicted) = pool.plan(&dev);
+    assert_eq!(predicted, Some(LINK_WEIGHT * 1024));
+    let (_, predicted) = pool.plan(&release);
+    assert_eq!(predicted, Some(1_000_000));
+}
