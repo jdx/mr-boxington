@@ -7201,6 +7201,17 @@ async fn a_racy_file_digest_is_returned_but_neither_recorded_nor_shared() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("input.rs");
     std::fs::write(&path, b"pub const VAL: &str = \"v1\";").unwrap();
+    // A modification time ahead of the clock is racy however long the test
+    // stalls.
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() + Duration::from_secs(3600)),
+        )
+        .unwrap();
     let identity = FileIdentity::for_digest_cache(&path, &std::fs::metadata(&path).unwrap())
         .unwrap()
         .unwrap();

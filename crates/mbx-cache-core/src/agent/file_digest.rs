@@ -1165,24 +1165,45 @@ mod tests {
         std::thread::sleep(FINE_TIMESTAMP_RACE_WINDOW * 2);
     }
 
+    /// A modification time ahead of the clock is racy however slowly the test
+    /// runs, so the withheld case does not depend on how long a stall lasts.
     #[test]
-    fn a_digest_of_a_just_written_file_is_not_offered_for_reuse() {
+    fn a_digest_of_a_recently_changed_file_is_not_offered_for_reuse() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("val.rs");
         std::fs::write(&path, b"pub const VAL: &str = \"v1\";").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(SystemTime::now() + std::time::Duration::from_secs(3600)),
+            )
+            .unwrap();
 
         let fresh = digest_file_validated(FileDigestScope::Content, &path)
             .unwrap()
             .unwrap();
         assert!(fresh.resolution.into_digest().is_some());
+        assert!(fresh.racy);
         assert_eq!(fresh.cache_identity, None);
+    }
+
+    #[test]
+    fn a_digest_of_a_settled_file_is_offered_for_reuse() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("val.rs");
+        std::fs::write(&path, b"pub const VAL: &str = \"v1\";").unwrap();
 
         settle_past_timestamp_race();
         let settled = digest_file_validated(FileDigestScope::Content, &path)
             .unwrap()
             .unwrap();
+        assert!(!settled.racy);
         assert!(settled.cache_identity.is_some());
     }
+
     #[test]
     fn racy_window_follows_the_timestamp_resolution() {
         let at = |seconds: u64, nanos: u32| {
