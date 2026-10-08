@@ -169,6 +169,10 @@ const GATE_DEADLINE: Duration = Duration::from_secs(120);
 /// Distinguishes leases created by one process, which may hold several.
 static LEASE_NONCE: AtomicU64 = AtomicU64::new(0);
 
+fn next_lease_nonce() -> u64 {
+    LEASE_NONCE.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Names tried before giving up on finding an unused one.
 ///
 /// A collision needs two processes to draw the same token, so one retry
@@ -532,6 +536,8 @@ pub(crate) struct Pool {
     /// in different containers share leases but not pressure state.
     pressure_domain: &'static str,
     clock: fn() -> u64,
+    /// Source of the counter in lease names, injectable for tests.
+    lease_nonce: fn() -> u64,
 }
 
 /// The pool this process schedules against, or `None` when scheduling is off.
@@ -721,6 +727,7 @@ impl Pool {
             pressure_probe: crate::pressure::probe,
             pressure_domain: crate::pressure::domain(),
             clock: crate::pressure::now_ms,
+            lease_nonce: next_lease_nonce,
         }
     }
 
@@ -1014,7 +1021,7 @@ impl Pool {
                 "{}-{}-{}",
                 std::process::id(),
                 process_token(),
-                LEASE_NONCE.fetch_add(1, Ordering::Relaxed)
+                (self.lease_nonce)()
             ));
             match std::fs::OpenOptions::new()
                 .write(true)

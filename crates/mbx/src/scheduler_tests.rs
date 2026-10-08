@@ -45,8 +45,13 @@ fn capacity_is_enforced_and_released() {
 
 #[test]
 fn leases_never_collide_with_a_name_already_taken() {
+    // This test's own counter: the process-wide one is advanced by every test
+    // running in parallel, which could hand the stand-in's name to a lease
+    // below or skip past it, and then the test would not exercise a collision.
+    static NONCE: AtomicU64 = AtomicU64::new(0);
     let directory = tempfile::tempdir().unwrap();
-    let pool = pool_at(directory.path(), 8, 0);
+    let mut pool = pool_at(directory.path(), 8, 0);
+    pool.lease_nonce = || NONCE.fetch_add(1, Ordering::Relaxed);
     let leases = directory.path().join(LEASES_DIR);
 
     let held: Vec<_> = (0..4)
@@ -64,14 +69,9 @@ fn leases_never_collide_with_a_name_already_taken() {
     // somebody else holds the lock on, since that is what makes the name
     // genuinely taken: an unlocked file of the same name is a dead holder's,
     // and reclaiming it is correct.
-    //
-    // The nonce counter is shared with every test running in this process, so
-    // the squatted name has to be one nothing else will count up to. A small
-    // number can be handed to one of the leases above while they are admitted,
-    // which makes the stand-in collide with a live holder of this very test.
-    const SQUATTED_NONCE: u64 = 1 << 40;
+    let taken = NONCE.load(Ordering::Relaxed);
     let squatted = leases.join(format!(
-        "{}-{}-{SQUATTED_NONCE}",
+        "{}-{}-{taken}",
         std::process::id(),
         process_token()
     ));
@@ -82,8 +82,12 @@ fn leases_never_collide_with_a_name_already_taken() {
         "the stand-in holds its lease"
     );
 
-    LEASE_NONCE.store(SQUATTED_NONCE, Ordering::Relaxed);
     let next = pool.try_admit(1, None).unwrap().expect("permit");
+    assert_eq!(
+        NONCE.load(Ordering::Relaxed),
+        taken + 2,
+        "the grant tried the taken name and moved on to the next"
+    );
     assert_eq!(
         std::fs::read(&squatted).unwrap(),
         b"another namespace's lease",
