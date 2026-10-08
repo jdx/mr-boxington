@@ -2727,7 +2727,7 @@ impl CacheAgent {
         // returned to this caller, never recorded or handed to waiters, who
         // read the file themselves.
         let reusable = observed.cache_identity.as_ref() == Some(&file);
-        if !reusable && !(observed.racy && observed.identity == file) {
+        if !(reusable || observed.racy && observed.identity == file) {
             return FileDigestResolution::Unresolved;
         }
         let resolution = match observed.resolution {
