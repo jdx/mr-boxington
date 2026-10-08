@@ -138,6 +138,11 @@ jobs:
     if: ${{ needs.release-plz-release.outputs.tag != '' }}
     permissions:
       contents: write
+      # release.yml declares the manual-only release notifier. Reusable
+      # workflows may not elevate above this caller even when that job skips.
+      pull-requests: read
+      issues: write
+      discussions: write
       # A called workflow's token can only be narrower than its caller's, so
       # the packslip's signing and attestation permissions are granted here.
       id-token: write

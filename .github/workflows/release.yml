@@ -495,3 +495,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: gh release edit "$TAG" --repo "${{ github.repository }}" --draft=false
+
+  comment-release-fixes:
+    needs: attach
+    if: ${{ github.event_name == 'workflow_dispatch' && needs.attach.result == 'success' }}
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: write
+      discussions: write
+    uses: jdx/workflows/.github/workflows/comment-release-fixes.yml@4c952564543dd54d60f15ef4062af7fb60c5561d # v1.1.0
+    with:
+      tag: ${{ inputs.tag }}
+      marker_prefix: mr-boxington-fixed-in
