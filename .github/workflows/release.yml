@@ -504,7 +504,7 @@ jobs:
       pull-requests: read
       issues: write
       discussions: write
-    uses: jdx/workflows/.github/workflows/comment-release-fixes.yml@1409441597c7bc44a2f84e4801eac13a6611b85b
+    uses: jdx/workflows/.github/workflows/comment-release-fixes.yml@4c952564543dd54d60f15ef4062af7fb60c5561d
     with:
       tag: ${{ inputs.tag }}
       marker_prefix: mr-boxington-fixed-in
