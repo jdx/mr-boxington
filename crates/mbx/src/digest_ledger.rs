@@ -21,7 +21,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 const LEDGER_FILE: &str = "file-digests.json";
-const LEDGER_VERSION: u8 = 3;
+/// Version 4 drops ledgers written before digests recorded within a timestamp
+/// tick of the file's last write were withheld: those could hold a digest for
+/// bytes a later same-tick write replaced.
+const LEDGER_VERSION: u8 = 4;
 
 /// Entries kept on disk. Far above what a workspace and its dependency
 /// graph name, and a bound on a checkout that keeps renaming its outputs.

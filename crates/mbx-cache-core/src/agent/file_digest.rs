@@ -542,6 +542,9 @@ pub fn digest_file_validated(
     scope: FileDigestScope,
     path: &Path,
 ) -> io::Result<Option<ValidatedFileDigest>> {
+    // Taken before the read: a slow read must not make a file look settled
+    // that was still inside its timestamp tick when the first byte was read.
+    let started = SystemTime::now();
     let file = std::fs::File::open(path)?;
     let before = file.metadata()?;
     if !before.is_file() {
@@ -577,7 +580,7 @@ pub fn digest_file_validated(
     // later: a second write in the same timestamp tick leaves the identity
     // unchanged, so the record would keep answering for bytes it never read.
     // The caller still gets the digest; it just is not offered for reuse.
-    let cache_identity = cache_identity.filter(|identity| !identity_is_racy(identity));
+    let cache_identity = cache_identity.filter(|identity| !identity_is_racy(identity, started));
     Ok(Some(ValidatedFileDigest {
         resolution,
         identity,
@@ -600,9 +603,9 @@ const COARSE_TIMESTAMP_RACE_WINDOW: std::time::Duration = std::time::Duration::f
 /// The same "racily clean" hazard git guards its index against: metadata that
 /// is equal before and after cannot show a write that left it unchanged, so a
 /// digest is only reusable once the file's last change is older than the
-/// filesystem's timestamp resolution at the moment it was read. A timestamp in
+/// filesystem's timestamp resolution when the read began (`observed_at`). A timestamp in
 /// the future is treated as racy too.
-fn identity_is_racy(identity: &FileIdentity) -> bool {
+fn identity_is_racy(identity: &FileIdentity, observed_at: SystemTime) -> bool {
     let nanos = |time: SystemTime| {
         time.duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |since| since.subsec_nanos())
@@ -616,8 +619,11 @@ fn identity_is_racy(identity: &FileIdentity) -> bool {
     } else {
         FINE_TIMESTAMP_RACE_WINDOW
     };
-    let now = SystemTime::now();
-    let recent = |time: SystemTime| now.duration_since(time).map_or(true, |age| age < window);
+    let recent = |time: SystemTime| {
+        observed_at
+            .duration_since(time)
+            .map_or(true, |age| age < window)
+    };
     recent(identity.modified)
         || identity.changed.is_some_and(|(seconds, changed_nanos)| {
             u64::try_from(seconds).map_or(true, |seconds| {
@@ -1169,5 +1175,38 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(settled.cache_identity.is_some());
+    }
+    #[test]
+    fn racy_window_follows_the_timestamp_resolution() {
+        let at = |seconds: u64, nanos: u32| {
+            SystemTime::UNIX_EPOCH + std::time::Duration::new(seconds, nanos)
+        };
+        let identity = |modified: SystemTime, changed: Option<(i64, i64)>| FileIdentity {
+            path: PathBuf::from("/x"),
+            len: 1,
+            modified,
+            changed,
+            object: None,
+        };
+        let now = at(1_000, 500_000_000);
+        let fine = |age_ms: u64| {
+            let when = now - std::time::Duration::from_millis(age_ms);
+            let since = when.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+            identity(
+                when,
+                Some((since.as_secs() as i64, i64::from(since.subsec_nanos()))),
+            )
+        };
+        assert!(identity_is_racy(&fine(5), now));
+        assert!(!identity_is_racy(&fine(25), now));
+        // A ctime newer than the mtime counts even when the mtime is old.
+        let touched = identity(at(10, 7), Some((1_000, 499_000_000)));
+        assert!(identity_is_racy(&touched, now));
+        // Whole-second stamps are withheld for two seconds.
+        let coarse = |age: u64| identity(at(1_000 - age, 0), Some((1_000 - age as i64, 0)));
+        assert!(identity_is_racy(&coarse(1), at(1_000, 0)));
+        assert!(!identity_is_racy(&coarse(3), at(1_000, 0)));
+        // A timestamp in the future is racy.
+        assert!(identity_is_racy(&identity(at(2_000, 1), None), now));
     }
 }
