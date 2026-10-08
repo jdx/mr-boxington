@@ -7195,3 +7195,21 @@ fn benchmark_manifest_merge() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_racy_file_digest_is_returned_but_neither_recorded_nor_shared() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("input.rs");
+    std::fs::write(&path, b"pub const VAL: &str = \"v1\";").unwrap();
+    let identity = FileIdentity::for_digest_cache(&path, &std::fs::metadata(&path).unwrap())
+        .unwrap()
+        .unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+
+    let resolution = agent
+        .resolve_file_digest(FileDigestScope::Content, identity)
+        .await;
+
+    assert!(matches!(resolution, FileDigestResolution::Digest(_)));
+    assert!(agent.file_digests.lock().unwrap().is_empty());
+}

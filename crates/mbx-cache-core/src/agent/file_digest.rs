@@ -517,6 +517,9 @@ pub struct ValidatedFileDigest {
     pub identity: FileIdentity,
     /// Identity suitable for reuse in the digest ledger, when available.
     pub cache_identity: Option<FileIdentity>,
+    /// The file was written too recently for its digest to be reused, so
+    /// `cache_identity` was withheld. The digest is right for this read only.
+    pub racy: bool,
 }
 
 impl FileDigestResolution {
@@ -580,11 +583,15 @@ pub fn digest_file_validated(
     // later: a second write in the same timestamp tick leaves the identity
     // unchanged, so the record would keep answering for bytes it never read.
     // The caller still gets the digest; it just is not offered for reuse.
-    let cache_identity = cache_identity.filter(|identity| !identity_is_racy(identity, started));
+    let racy = cache_identity
+        .as_ref()
+        .is_some_and(|identity| identity_is_racy(identity, started));
+    let cache_identity = cache_identity.filter(|_| !racy);
     Ok(Some(ValidatedFileDigest {
         resolution,
         identity,
         cache_identity,
+        racy,
     }))
 }
 

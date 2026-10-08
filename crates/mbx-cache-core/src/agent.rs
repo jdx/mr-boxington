@@ -2723,12 +2723,13 @@ impl CacheAgent {
         let Ok(Ok(Some(observed))) = resolved else {
             return FileDigestResolution::Unresolved;
         };
-        // A digest withheld from reuse as racy has no cache identity, but it
-        // is still the answer for this read and waiters share it.
-        if observed.identity != file {
+        // A racy digest is right for this read but not for reuse: it is
+        // returned to this caller, never recorded or handed to waiters, who
+        // read the file themselves.
+        let reusable = observed.cache_identity.as_ref() == Some(&file);
+        if !reusable && !(observed.racy && observed.identity == file) {
             return FileDigestResolution::Unresolved;
         }
-        let reusable = observed.cache_identity.is_some();
         let resolution = match observed.resolution {
             FileDigestResolution::Digest(digest) if digest.size == file.len => {
                 if reusable {
@@ -2749,7 +2750,9 @@ impl CacheAgent {
                 FileDigestResolution::Unresolved
             }
         };
-        *lock.resolution.lock().unwrap() = Some(resolution.clone());
+        if reusable {
+            *lock.resolution.lock().unwrap() = Some(resolution.clone());
+        }
         resolution
     }
 
