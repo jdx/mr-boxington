@@ -39,7 +39,7 @@ pub(super) const LOW_DISK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// filled by unrelated data cannot make collection unbounded.
 const LOW_DISK_ROUNDS_PER_TIER: usize = 4;
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 pub(super) struct GcArgs {
     /// Size the action store may occupy afterwards, such as `20GiB`.
     ///

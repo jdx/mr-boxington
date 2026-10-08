@@ -2,7 +2,7 @@ use crate::config::Config;
 use eyre::Result;
 use std::process::ExitCode;
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 pub(super) struct TuiArgs {
     /// Print one plain-text snapshot instead of taking over the terminal.
     #[usage(long)]

@@ -3,7 +3,7 @@ use crate::config::{CliSettings, Config};
 use eyre::Result;
 use std::process::ExitCode;
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 #[usage(unknown_flags = "value")]
 pub(super) struct ExplainArgs {
     /// Explain this workspace's most recent recorded build without running Cargo.

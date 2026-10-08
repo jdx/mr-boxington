@@ -11,7 +11,7 @@ use std::process::ExitCode;
 
 const MAX_CLEAN_WORKERS: usize = 8;
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 #[usage(group("clean_scope"))]
 pub(super) struct CleanArgs {
     /// Workspace root whose managed target and learned incremental state are

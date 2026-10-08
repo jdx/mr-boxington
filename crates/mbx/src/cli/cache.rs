@@ -8,13 +8,13 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 pub(super) struct CacheArgs {
     #[usage(subcommand)]
     pub(super) command: CacheCommands,
 }
 
-#[derive(usage::Subcommands)]
+#[derive(usage_rs::Subcommands)]
 pub(super) enum CacheCommands {
     /// Print a session file's wrapper timings as Perfetto-compatible trace JSON.
     Trace(TraceArgs),
@@ -56,27 +56,27 @@ pub(super) enum CacheCommands {
     Remove(RemoveCacheArgs),
 }
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 pub(super) struct TraceArgs {
     /// Session history file, such as `$(mbx cache dir)/sessions/v1/<session>.jsonl`.
     session: PathBuf,
 }
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 pub(super) struct JsonArgs {
     /// Print a stable machine-readable report.
     #[usage(long)]
     json: bool,
 }
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 pub(super) struct LargestArgs {
     /// Maximum entries to print.
     #[usage(long, default = "20")]
     limit: usize,
 }
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 pub(super) struct ExportArgs {
     /// CI group to export instead of this checkout's last build.
     ///
@@ -97,13 +97,13 @@ pub(super) struct ExportArgs {
     archive: PathBuf,
 }
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 pub(super) struct ImportArgs {
     /// Tar archive or directory to import.
     archive: PathBuf,
 }
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 #[usage(group("removal_mode", required))]
 pub(super) struct RemoveCacheArgs {
     /// Workspace root to forget.

@@ -1493,7 +1493,7 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width",
  "url",
- "usage-config 6.12.1",
+ "usage-config",
  "usage-rs",
  "which",
  "windows-sys 0.61.2",
@@ -3063,18 +3063,12 @@ checksum = "3f31e087c07f22ebec8bdfacc0882da2acc40f4cebe7f7076c063989f3ed8591"
 
 [[package]]
 name = "usage-config"
-version = "6.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f058d1d0e7bc05309ea73e67c63000fd9d10c9755fd25e8f13f8833e3c937146"
-dependencies = [
- "toml",
-]
-
-[[package]]
-name = "usage-config"
 version = "7.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8dfa31ad90392105df7a10959ebccb95c19547c656e9609d360741bd08738f36"
+dependencies = [
+ "toml",
+]
 
 [[package]]
 name = "usage-derive"
@@ -3094,7 +3088,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6f78bceaa649166d281dc30c457b11e82509b757b710c20def341a02088688ff"
 dependencies = [
  "usage-argv",
- "usage-config 7.0.0",
+ "usage-config",
  "usage-derive",
  "usage-test",
 ]

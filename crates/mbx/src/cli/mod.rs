@@ -63,7 +63,7 @@ pub(crate) use setup::{
 #[cfg(test)]
 use {cache::*, cargo::*, exec::*, gc::*, settings::*, setup::*};
 
-#[derive(usage::Cli)]
+#[derive(usage_rs::Cli)]
 #[usage(completion = true)]
 #[usage(
     bin = "mbx",
@@ -92,7 +92,7 @@ struct Cli {
     command: Commands,
 }
 
-#[derive(usage::Subcommands)]
+#[derive(usage_rs::Subcommands)]
 enum Commands {
     /// Generate a self-contained shell completion script.
     Completion {
@@ -289,7 +289,7 @@ pub fn run() -> Result<ExitCode> {
         return doctor::run(args, toolchain);
     }
     if let Commands::Completion { shell } = &cli.command {
-        let shell = usage::complete::Shell::from_name(shell)
+        let shell = usage_rs::complete::Shell::from_name(shell)
             .ok_or_else(|| eyre::eyre!("unsupported shell: {shell}"))?;
         print!("{}", Cli::completion_script(shell));
         return Ok(ExitCode::SUCCESS);

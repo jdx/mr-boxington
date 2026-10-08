@@ -5,13 +5,13 @@ use std::process::ExitCode;
 use toml_edit::{DocumentMut, Item, TableLike};
 use usage_config::{PropMeta, Resolved, Scope, Ty, Value};
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 pub(super) struct SettingsArgs {
     #[usage(subcommand)]
     pub(super) command: SettingsCommands,
 }
 
-#[derive(usage::Subcommands)]
+#[derive(usage_rs::Subcommands)]
 pub(super) enum SettingsCommands {
     /// List settings and their current values.
     ///
@@ -48,7 +48,7 @@ pub(super) enum SettingsCommands {
     Unset(KeyArgs),
 }
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 pub(super) struct LsArgs {
     /// Setting or group to list, such as `gc` or `gc.max_size`.
     ///
@@ -56,13 +56,13 @@ pub(super) struct LsArgs {
     key: Option<String>,
 }
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 pub(super) struct KeyArgs {
     /// Setting name, such as `gc.max_size`.
     key: String,
 }
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 pub(super) struct SetArgs {
     /// Setting name, such as `gc.max_size`.
     key: String,
