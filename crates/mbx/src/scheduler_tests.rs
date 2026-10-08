@@ -1068,3 +1068,43 @@ fn link_profile_separates_release_from_dev_links() {
         "lib"
     );
 }
+
+#[test]
+fn link_profile_reads_every_spelling_and_keeps_windows_apart() {
+    let args = |flags: &[&str]| -> Vec<std::ffi::OsString> {
+        flags.iter().map(std::ffi::OsString::from).collect()
+    };
+    assert_eq!(
+        link_profile(&args(&["-O"])),
+        link_profile(&args(&["-C", "opt-level=3"]))
+    );
+    assert_eq!(
+        link_profile(&args(&["--codegen=lto", "--codegen", "codegen-units=1"])),
+        link_profile(&args(&["-Clto", "-Ccodegen-units=1"]))
+    );
+    assert_ne!(
+        link_profile(&args(&[])),
+        link_profile(&args(&["-C", "lto=off"])),
+        "an absent lto setting is not an explicit off"
+    );
+
+    // Three release links must not make a never-measured dev link
+    // inherit a release-sized prediction.
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 8, 1024);
+    let release = Demand::new("bin", true).with_link_profile(&args(&["-Clto", "-Copt-level=3"]));
+    for _ in 0..3 {
+        pool.record_link_peak(
+            &ledger_key(&release.name, true),
+            1_000_000,
+            true,
+            release.profile.as_deref(),
+        )
+        .unwrap();
+    }
+    let dev = Demand::new("bin", true).with_link_profile(&args(&["-Copt-level=0"]));
+    let (_, predicted) = pool.plan(&dev);
+    assert_eq!(predicted, Some(LINK_WEIGHT * 1024));
+    let (_, predicted) = pool.plan(&release);
+    assert_eq!(predicted, Some(1_000_000));
+}

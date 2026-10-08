@@ -196,6 +196,10 @@ pub(crate) struct Demand {
     /// Whether the ledger's record of cores this process kept busy replaces
     /// `threads`. Only test binaries are measured; a compiler is one thread.
     learns_cpu: bool,
+    /// The code-generation settings of a link, which key its window of recent
+    /// measurements: a release link's peaks must not stand in for a dev
+    /// link that has none of its own yet.
+    profile: Option<String>,
 }
 
 impl Demand {
@@ -205,6 +209,7 @@ impl Demand {
             links,
             threads: Some(1),
             learns_cpu: false,
+            profile: None,
         }
     }
 
@@ -218,7 +223,9 @@ impl Demand {
     /// profile name, since a custom profile inherits from `release`.
     pub(crate) fn with_link_profile(mut self, arguments: &[std::ffi::OsString]) -> Self {
         if self.links {
-            self.name = format!("{} [{}]", self.name, link_profile(arguments));
+            let profile = link_profile(arguments);
+            self.name = format!("{} [{profile}]", self.name);
+            self.profile = Some(profile);
         }
         self
     }
@@ -246,6 +253,7 @@ impl Demand {
             links: false,
             threads,
             learns_cpu: true,
+            profile: None,
         }
     }
 }
@@ -501,6 +509,9 @@ struct MemoryLedger {
     /// Average cores each test binary kept busy, by demand name.
     #[serde(default)]
     cpus: BTreeMap<String, u64>,
+    /// Recent link measurements by code-generation profile, newest last.
+    #[serde(default)]
+    profile_link_peaks: BTreeMap<String, Vec<u64>>,
 }
 
 /// The machine-wide permit pool one process draws from.
@@ -861,8 +872,18 @@ impl Pool {
             // history it can use instead. The heaviest of the window rather
             // than its average, because the cost of guessing low is an
             // out-of-memory kill and the cost of guessing high is a wait.
-            let measured = (ledger.link_peaks.len() >= MIN_LINK_SAMPLES)
-                .then(|| ledger.link_peaks.iter().copied().max())
+            //
+            // A link with a known profile consults only that profile's
+            // window, so a release LTO link never speaks for a dev link.
+            let window = match &demand.profile {
+                Some(profile) => ledger
+                    .profile_link_peaks
+                    .get(profile)
+                    .map_or(&[][..], Vec::as_slice),
+                None => ledger.link_peaks.as_slice(),
+            };
+            let measured = (window.len() >= MIN_LINK_SAMPLES)
+                .then(|| window.iter().copied().max())
                 .flatten();
             measured.unwrap_or_else(|| weight.saturating_mul(self.bytes_per_permit))
         });
@@ -1066,9 +1087,12 @@ impl Pool {
         ) else {
             return;
         };
-        if let Err(error) =
-            self.record_peak(&ledger_key(&demand.name, demand.links), peak, demand.links)
-        {
+        if let Err(error) = self.record_link_peak(
+            &ledger_key(&demand.name, demand.links),
+            peak,
+            demand.links,
+            demand.profile.as_deref(),
+        ) {
             debug!("compiler memory was not recorded: {error:#}");
         }
     }
@@ -1079,7 +1103,18 @@ impl Pool {
 
     /// Raise the recorded peak for one crate, never lowering it, and add a
     /// link's measurement to the machine-wide window whatever the entry does.
+    #[cfg(test)]
     fn record_peak(&self, name: &str, peak: u64, links: bool) -> Result<()> {
+        self.record_link_peak(name, peak, links, None)
+    }
+
+    fn record_link_peak(
+        &self,
+        name: &str,
+        peak: u64,
+        links: bool,
+        profile: Option<&str>,
+    ) -> Result<()> {
         std::fs::create_dir_all(&self.dir)
             .wrap_err_with(|| format!("failed to create {}", self.dir.display()))?;
         let mut lock = fslock::LockFile::open(&self.dir.join(LEDGER_LOCK))?;
@@ -1091,9 +1126,19 @@ impl Pool {
         // is already higher: it says what links cost around here lately, which
         // a measurement no worse than the last one still answers.
         if links {
-            ledger.link_peaks.push(peak);
-            let surplus = ledger.link_peaks.len().saturating_sub(MAX_LINK_SAMPLES);
-            ledger.link_peaks.drain(..surplus);
+            let window = match profile {
+                Some(profile) => ledger
+                    .profile_link_peaks
+                    .entry(profile.to_string())
+                    .or_default(),
+                None => &mut ledger.link_peaks,
+            };
+            window.push(peak);
+            let surplus = window.len().saturating_sub(MAX_LINK_SAMPLES);
+            window.drain(..surplus);
+            while ledger.profile_link_peaks.len() > MAX_LEDGER_ENTRIES {
+                ledger.profile_link_peaks.pop_first();
+            }
         }
         let known = ledger.crates.get(name).is_some_and(|known| *known >= peak);
         if known && !links {
@@ -1177,16 +1222,18 @@ fn link_profile(arguments: &[std::ffi::OsString]) -> String {
     let mut arguments = arguments.iter().filter_map(|argument| argument.to_str());
     while let Some(argument) = arguments.next() {
         let setting = match argument {
-            "-C" => arguments.next(),
+            "-C" | "--codegen" => arguments.next(),
             "-O" => {
-                opt = Some("2");
+                opt = Some("3");
                 continue;
             }
             "-g" => {
                 debug = Some("2");
                 continue;
             }
-            _ => argument.strip_prefix("-C"),
+            _ => argument
+                .strip_prefix("--codegen=")
+                .or_else(|| argument.strip_prefix("-C")),
         };
         let Some(setting) = setting else { continue };
         let (key, value) = setting.split_once('=').unwrap_or((setting, ""));
@@ -1208,7 +1255,7 @@ fn link_profile(arguments: &[std::ffi::OsString]) -> String {
     format!(
         "opt{} lto-{} cgu{} debug{}",
         opt.unwrap_or("0"),
-        lto.unwrap_or("off"),
+        lto.unwrap_or("default"),
         units.unwrap_or("-"),
         debug.unwrap_or("0"),
     )
