@@ -6,7 +6,7 @@ use bytesize::ByteSize;
 use eyre::{Result, WrapErr};
 use std::process::{Command, ExitCode};
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 pub(super) struct ReserveArgs {
     /// CPU permits to hold while the command runs.
     #[usage(long, value_name = "N")]

@@ -2,7 +2,7 @@ use crate::config::Config;
 use eyre::Result;
 use std::process::ExitCode;
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 pub(super) struct DoctorArgs {
     /// Print a stable machine-readable report.
     #[usage(long)]

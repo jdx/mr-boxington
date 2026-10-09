@@ -5,7 +5,7 @@ use bytesize::ByteSize;
 use eyre::Result;
 use std::process::ExitCode;
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 #[usage(unknown_flags = "value", dont_delimit_trailing_values = true)]
 pub(super) struct PrefetchArgs {
     /// Cargo command and arguments, such as `build --workspace --release`.

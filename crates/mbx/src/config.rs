@@ -117,7 +117,7 @@ const SCHEDULER_MEMORY_PERCENT: u64 = 85;
 const SCHEDULER_MEMORY_FALLBACK: u64 = 16 * GIB;
 
 /// The single declaration used to resolve and document mbx configuration.
-#[derive(Debug, usage::Config)]
+#[derive(Debug, usage_rs::Config)]
 #[usage(file(
     path = "<config directory>/mbx/config.toml",
     scope = "global",
@@ -375,7 +375,7 @@ pub(crate) struct RawConfig {
     linker: RawLinker,
 }
 
-#[derive(Debug, usage::Config)]
+#[derive(Debug, usage_rs::Config)]
 #[usage(prefix = "linker")]
 struct RawLinker {
     /// Linker used when the active Cargo profile has no matching selection.
@@ -395,7 +395,7 @@ struct RawLinker {
     _selection: Option<String>,
 }
 
-#[derive(Debug, usage::Config)]
+#[derive(Debug, usage_rs::Config)]
 #[usage(prefix = "scheduler")]
 struct RawScheduler {
     /// Coordinate real compilations machine-wide through a permit pool.
@@ -469,7 +469,7 @@ struct RawScheduler {
     tests: bool,
 }
 
-#[derive(Debug, usage::Config)]
+#[derive(Debug, usage_rs::Config)]
 #[usage(prefix = "remote")]
 struct RawRemote {
     /// Remote cache URL; its scheme selects the backend.
@@ -536,7 +536,7 @@ struct RawRemote {
     s3_conditional_writes: String,
 }
 
-#[derive(Debug, usage::Config)]
+#[derive(Debug, usage_rs::Config)]
 #[usage(prefix = "target")]
 struct RawTarget {
     /// Let mbx place eligible target directories under the managed target root.
@@ -589,7 +589,7 @@ struct RawTarget {
     evict_first: Option<Vec<String>>,
 }
 
-#[derive(Debug, usage::Config)]
+#[derive(Debug, usage_rs::Config)]
 #[usage(prefix = "gc")]
 struct RawGc {
     /// Sweep after a build when collection is due.
@@ -648,7 +648,7 @@ struct RawGc {
     interval: String,
 }
 
-#[derive(Debug, usage::Config)]
+#[derive(Debug, usage_rs::Config)]
 #[usage(prefix = "http")]
 struct RawHttp {
     /// Connect timeout, and how long a remote cache request may wait for data.

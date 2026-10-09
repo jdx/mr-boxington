@@ -41,7 +41,7 @@ const LEGACY_RUST_ANALYZER_CHECK_ARGUMENTS: [&str; 4] = [
     "--message-format=json",
 ];
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 pub(super) struct SetupArgs {
     /// Accept the recommended activation scope without prompting.
     ///

@@ -6,7 +6,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 pub(super) struct AdoptArgs {
     /// Search below each path for Cargo checkouts with a target directory.
     ///

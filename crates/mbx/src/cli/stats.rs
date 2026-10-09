@@ -2,7 +2,7 @@ use crate::config::{Config, SavingsStyle};
 use eyre::Result;
 use std::process::ExitCode;
 
-#[derive(usage::Args)]
+#[derive(usage_rs::Args)]
 pub(super) struct StatsArgs {
     /// Print a stable machine-readable report, with byte counts and nanoseconds.
     #[usage(long)]
