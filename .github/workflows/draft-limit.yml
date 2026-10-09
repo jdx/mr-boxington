@@ -13,7 +13,7 @@ on:
     types: [opened, reopened, converted_to_draft]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: draft-limit-caller-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions: {}

@@ -12,7 +12,7 @@ on:
       },
   }
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.release.tag_name || inputs.tag }}
+  group: comment-release-fixes-caller-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: false
 jobs:
   comment:
