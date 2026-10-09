@@ -7,7 +7,8 @@
 //! that real compilations draw from. Cache hits never touch it, and Cargo
 //! keeps its own dependency scheduling; only the processes that actually cost
 //! CPU and memory wait their turn. With `scheduler.tests`, the test binaries
-//! `cargo test` runs draw from the same pool (see `cli::test_runner`).
+//! `cargo test` and `cargo nextest` run draw from the same pool (see
+//! `cli::test_runner`).
 //!
 //! The pool is a directory of *lease* files, one per admitted compilation,
 //! each held under an OS file lock for the life of the compile. The kernel
@@ -52,6 +53,7 @@ use eyre::{Context, Result};
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::OnceLock;
@@ -72,6 +74,15 @@ const PRIORITY_WAIT_STAMP: &str = "priority-wait";
 const LEDGER_FILE: &str = "memory.json";
 /// Lock serializing ledger updates.
 const LEDGER_LOCK: &str = "memory.lock";
+/// Per-test history, kept apart from the shared suite ledger.
+const TEST_HISTORY_DIR: &str = "tests";
+/// Lock serializing per-test history updates, for every binary at once.
+///
+/// One lock rather than one per history file, because a lock file can never
+/// be removed safely: a writer already waiting on the removed file would lock
+/// it while a newcomer locks its replacement. Writes are rare -- a test's
+/// history changes only when a measurement exceeds it -- so they can share.
+const TEST_HISTORY_LOCK: &str = "tests.lock";
 
 /// Where the pool lives; empty means the session turned scheduling off.
 pub(crate) const SCHED_DIR_ENV: &str = "MBX_SCHED_DIR";
@@ -123,6 +134,13 @@ const MIN_LINK_SAMPLES: usize = 3;
 /// Links are the out-of-memory class -- rust-lang/cargo#12912 is about little
 /// else -- so they start heavy rather than waiting for history to say so.
 const LINK_WEIGHT: u64 = 2;
+/// Permits an unmeasured test starts with when memory scheduling is on.
+///
+/// Tests can allocate most of their working set at runtime, so allowing many
+/// cold tests to start together can exhaust memory before history is learned.
+const UNMEASURED_TEST_WEIGHT: u64 = 2;
+/// Most test names retained for one nextest binary.
+const MAX_TEST_HISTORY_ENTRIES: usize = 16_384;
 /// First delay after a refused admission.
 const POLL_INITIAL: Duration = Duration::from_millis(2);
 /// Longest delay between admission attempts.
@@ -187,9 +205,9 @@ fn process_token() -> &'static str {
     TOKEN.get_or_init(|| crate::util::random_string(8))
 }
 
-/// What one compilation -- or one test binary -- asks the pool for.
+/// What one compilation, test suite, or nextest test asks the pool for.
 pub(crate) struct Demand {
-    /// Compiler crate name, keying the peak-RSS ledger.
+    /// Demand name, also keying compiler and suite history.
     name: String,
     /// Whether the invocation links a native program.
     links: bool,
@@ -204,6 +222,14 @@ pub(crate) struct Demand {
     /// measurements: a release link's peaks must not stand in for a dev
     /// link that has none of its own yet.
     profile: Option<String>,
+    /// A nextest test whose measurements belong in its separate JSONL store.
+    per_test: Option<TestIdentity>,
+}
+
+#[derive(Debug, Clone)]
+struct TestIdentity {
+    binary: String,
+    test: String,
 }
 
 impl Demand {
@@ -214,6 +240,7 @@ impl Demand {
             threads: Some(1),
             learns_cpu: false,
             profile: None,
+            per_test: None,
         }
     }
 
@@ -258,6 +285,22 @@ impl Demand {
             threads,
             learns_cpu: true,
             profile: None,
+            per_test: None,
+        }
+    }
+
+    /// One nextest test, remembered apart from its binary's other tests.
+    pub(crate) fn nextest(binary: &str, test: &str) -> Self {
+        Self {
+            name: format!("{binary} {test} [nextest]"),
+            links: false,
+            threads: Some(1),
+            learns_cpu: true,
+            profile: None,
+            per_test: Some(TestIdentity {
+                binary: binary.to_owned(),
+                test: test.to_owned(),
+            }),
         }
     }
 }
@@ -445,6 +488,39 @@ pub(crate) fn prune_flights(cache_dir: &Path) {
     }
 }
 
+/// Drop nextest history no test binary has updated for a month.
+///
+/// Every history file is written under the one [`TEST_HISTORY_LOCK`], which
+/// is never removed, so a sweep holding it cannot race a writer: age is read
+/// under the lock, and a file a test appended to a moment ago is no longer
+/// stale by then. A lock somebody holds means tests are recording right now;
+/// the sweep leaves everything for the next `mbx gc` rather than wait.
+pub(crate) fn prune_test_history(cache_dir: &Path) {
+    let scheduler = cache_dir.join(SCHEDULER_DIR);
+    let Ok(entries) = std::fs::read_dir(scheduler.join(TEST_HISTORY_DIR)) else {
+        return;
+    };
+    let Ok(mut lock) = fslock::LockFile::open(&scheduler.join(TEST_HISTORY_LOCK)) else {
+        return;
+    };
+    if !lock.try_lock().is_ok_and(|taken| taken) {
+        return;
+    }
+    for path in entries.flatten().map(|entry| entry.path()) {
+        let history = path
+            .extension()
+            .is_some_and(|extension| extension == OsStr::new("jsonl"));
+        let stale = std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > FLIGHT_MAX_AGE);
+        if history && stale {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 impl Drop for Flight {
     fn drop(&mut self) {
         // The file stays: it holds the prediction the next build of this
@@ -516,6 +592,32 @@ struct MemoryLedger {
     /// Recent link measurements by code-generation profile, newest last.
     #[serde(default)]
     profile_link_peaks: BTreeMap<String, Vec<u64>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct TestMeasurement {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    peak: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cores: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TestHistoryLine {
+    binary: String,
+    test: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    peak: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cores: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+struct TestHistory {
+    tests: BTreeMap<String, TestMeasurement>,
+    /// Other keys with the same shortened hash, retained during compaction.
+    foreign: BTreeMap<(String, String), TestMeasurement>,
+    lines: usize,
 }
 
 /// The machine-wide permit pool one process draws from.
@@ -693,7 +795,13 @@ pub(crate) fn record_test_cpu(demand: &Demand, cores: u64) {
     let Some(pool) = pool() else {
         return;
     };
-    if let Err(error) = pool.record_cpu(&demand.name, cores) {
+    let recorded = match &demand.per_test {
+        Some(identity) => {
+            pool.record_test_history(&identity.binary, &identity.test, None, Some(cores))
+        }
+        None => pool.record_cpu(&demand.name, cores),
+    };
+    if let Err(error) = recorded {
         debug!("test CPU use was not recorded: {error:#}");
     }
 }
@@ -842,6 +950,45 @@ impl Pool {
 
     /// The permits this demand costs, and its predicted memory when known.
     fn plan(&self, demand: &Demand) -> (u64, Option<u64>) {
+        if let Some(identity) = &demand.per_test {
+            let history = read_test_history(
+                &test_history_path(&self.dir.join(TEST_HISTORY_DIR), &identity.binary),
+                &identity.binary,
+            );
+            let measurement = history.tests.get(&identity.test).copied().or_else(|| {
+                (!history.tests.is_empty()).then(|| {
+                    history.tests.values().fold(
+                        TestMeasurement::default(),
+                        |mut maximum, measurement| {
+                            maximum.peak = match (maximum.peak, measurement.peak) {
+                                (Some(left), Some(right)) => Some(left.max(right)),
+                                (left, right) => left.or(right),
+                            };
+                            maximum.cores = match (maximum.cores, measurement.cores) {
+                                (Some(left), Some(right)) => Some(left.max(right)),
+                                (left, right) => left.or(right),
+                            };
+                            maximum
+                        },
+                    )
+                })
+            });
+            let cores = measurement
+                .and_then(|measurement| measurement.cores)
+                .unwrap_or(1)
+                .max(1);
+            if self.bytes_per_permit == 0 {
+                return (cores.min(self.capacity), None);
+            }
+            let predicted = measurement
+                .and_then(|measurement| measurement.peak)
+                .unwrap_or_else(|| UNMEASURED_TEST_WEIGHT.saturating_mul(self.bytes_per_permit));
+            let weight = predicted
+                .div_ceil(self.bytes_per_permit)
+                .max(cores)
+                .clamp(1, self.capacity);
+            return (weight, Some(predicted));
+        }
         // What a test binary was measured using beats what it said or what
         // its harness would default to: libtest starts a thread per CPU
         // whether or not the tests keep them busy.
@@ -1079,7 +1226,7 @@ impl Pool {
     }
 
     fn note_compilation(&self, demand: &Demand, status: &ExitStatus) {
-        if self.bytes_per_permit == 0 {
+        if demand.per_test.is_none() && self.bytes_per_permit == 0 {
             return;
         }
         let Some(measured) = child_peak_rss_bytes() else {
@@ -1088,12 +1235,20 @@ impl Pool {
         let Some(peak) = ledger_peak(
             measured,
             oom_killed(status),
-            demand.links,
+            demand.links || demand.per_test.is_some(),
             status.success(),
             self.bytes_per_permit,
         ) else {
             return;
         };
+        if let Some(identity) = &demand.per_test {
+            if let Err(error) =
+                self.record_test_history(&identity.binary, &identity.test, Some(peak), None)
+            {
+                debug!("test memory was not recorded: {error:#}");
+            }
+            return;
+        }
         if let Err(error) = self.record_link_peak(
             &ledger_key(&demand.name, demand.links),
             peak,
@@ -1106,6 +1261,63 @@ impl Pool {
 
     fn ledger_path(&self) -> PathBuf {
         self.dir.join(LEDGER_FILE)
+    }
+
+    /// Raise a nextest test's memory or CPU history without changing suite
+    /// records in the shared ledger.
+    fn record_test_history(
+        &self,
+        binary: &str,
+        test: &str,
+        peak: Option<u64>,
+        cores: Option<u64>,
+    ) -> Result<()> {
+        let dir = self.dir.join(TEST_HISTORY_DIR);
+        std::fs::create_dir_all(&dir)
+            .wrap_err_with(|| format!("failed to create {}", dir.display()))?;
+        let path = test_history_path(&dir, binary);
+        let mut lock = fslock::LockFile::open(&self.dir.join(TEST_HISTORY_LOCK))?;
+        lock.lock()?;
+
+        let mut history = read_test_history(&path, binary);
+        let current = history.tests.get(test).copied().unwrap_or_default();
+        let raised_peak = peak.filter(|value| current.peak.is_none_or(|known| *value > known));
+        let raised_cores = cores.filter(|value| current.cores.is_none_or(|known| *value > known));
+        if raised_peak.is_none() && raised_cores.is_none() {
+            return Ok(());
+        }
+
+        let line = TestHistoryLine {
+            binary: binary.to_owned(),
+            test: test.to_owned(),
+            peak: raised_peak,
+            cores: raised_cores,
+        };
+        let mut contents = serde_json::to_vec(&line)?;
+        contents.push(b'\n');
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .wrap_err_with(|| format!("failed to append to {}", path.display()))?;
+        std::io::Write::write_all(&mut file, &contents)?;
+        drop(file);
+
+        let updated = history.tests.entry(test.to_owned()).or_default();
+        if let Some(peak) = raised_peak {
+            updated.peak = Some(peak);
+        }
+        if let Some(cores) = raised_cores {
+            updated.cores = Some(cores);
+        }
+        history.lines += 1;
+        let capped = enforce_test_history_cap(&mut history.tests, MAX_TEST_HISTORY_ENTRIES);
+        let distinct = history.tests.len().saturating_add(history.foreign.len());
+        let needs_compaction = history.lines > distinct.saturating_mul(2).saturating_add(64);
+        if capped || needs_compaction {
+            compact_test_history(&path, binary, &history.tests, &history.foreign)?;
+        }
+        Ok(())
     }
 
     /// Raise the recorded peak for one crate, never lowering it, and add a
@@ -1273,6 +1485,111 @@ fn read_ledger(path: &Path) -> MemoryLedger {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
+}
+
+fn test_history_path(dir: &Path, binary: &str) -> PathBuf {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(binary.as_bytes());
+    dir.join(format!("{}.jsonl", &hex::encode(digest)[..16]))
+}
+
+fn read_test_history(path: &Path, binary: &str) -> TestHistory {
+    let Ok(contents) = std::fs::read(path) else {
+        return TestHistory::default();
+    };
+    let contents = String::from_utf8_lossy(&contents);
+    let mut history = TestHistory {
+        lines: contents.lines().count(),
+        ..TestHistory::default()
+    };
+    for line in contents.lines() {
+        let Ok(entry) = serde_json::from_str::<TestHistoryLine>(line) else {
+            continue;
+        };
+        if entry.binary == binary {
+            let known = history.tests.entry(entry.test).or_default();
+            fold_measurement(
+                known,
+                TestMeasurement {
+                    peak: entry.peak,
+                    cores: entry.cores,
+                },
+            );
+        } else {
+            let known = history
+                .foreign
+                .entry((entry.binary, entry.test))
+                .or_default();
+            fold_measurement(
+                known,
+                TestMeasurement {
+                    peak: entry.peak,
+                    cores: entry.cores,
+                },
+            );
+        }
+    }
+    enforce_test_history_cap(&mut history.tests, MAX_TEST_HISTORY_ENTRIES);
+    history
+}
+
+fn enforce_test_history_cap(tests: &mut BTreeMap<String, TestMeasurement>, limit: usize) -> bool {
+    let mut capped = false;
+    while tests.len() > limit {
+        let smallest = tests
+            .iter()
+            .min_by(|(left_name, left), (right_name, right)| {
+                left.peak
+                    .unwrap_or(0)
+                    .cmp(&right.peak.unwrap_or(0))
+                    .then_with(|| left.cores.unwrap_or(0).cmp(&right.cores.unwrap_or(0)))
+                    .then_with(|| left_name.cmp(right_name))
+            })
+            .map(|(name, _)| name.clone())
+            .expect("an overfull test history has entries");
+        tests.remove(&smallest);
+        capped = true;
+    }
+    capped
+}
+
+fn compact_test_history(
+    path: &Path,
+    binary: &str,
+    tests: &BTreeMap<String, TestMeasurement>,
+    foreign: &BTreeMap<(String, String), TestMeasurement>,
+) -> Result<()> {
+    let mut contents = Vec::new();
+    for ((binary, test), measurement) in foreign {
+        let entry = TestHistoryLine {
+            binary: binary.clone(),
+            test: test.clone(),
+            peak: measurement.peak,
+            cores: measurement.cores,
+        };
+        contents.extend(serde_json::to_vec(&entry)?);
+        contents.push(b'\n');
+    }
+    for (test, measurement) in tests {
+        let entry = TestHistoryLine {
+            binary: binary.to_owned(),
+            test: test.to_owned(),
+            peak: measurement.peak,
+            cores: measurement.cores,
+        };
+        contents.extend(serde_json::to_vec(&entry)?);
+        contents.push(b'\n');
+    }
+    crate::util::write_advisory(path, &contents)
+}
+
+fn fold_measurement(current: &mut TestMeasurement, incoming: TestMeasurement) {
+    if let Some(peak) = incoming.peak {
+        current.peak = Some(current.peak.map_or(peak, |value| value.max(peak)));
+    }
+    if let Some(cores) = incoming.cores {
+        current.cores = Some(current.cores.map_or(cores, |value| value.max(cores)));
+    }
 }
 
 /// The live lease weights, reclaiming any lease whose holder has died.

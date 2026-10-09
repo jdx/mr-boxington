@@ -1133,3 +1133,208 @@ fn link_profile_reads_every_spelling_and_keeps_windows_apart() {
     let (_, predicted) = pool.plan(&release);
     assert_eq!(predicted, Some(1_000_000));
 }
+
+#[test]
+fn nextest_history_folds_measurements_and_appends_only_when_raised() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 8, 100);
+    let binary = "project/package::integration";
+    pool.record_test_history(binary, "test_a", Some(20), Some(2))
+        .unwrap();
+    pool.record_test_history(binary, "test_a", Some(10), Some(1))
+        .unwrap();
+    let path = test_history_path(&directory.path().join(TEST_HISTORY_DIR), binary);
+    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+
+    pool.record_test_history(binary, "test_a", Some(25), Some(3))
+        .unwrap();
+    let history = read_test_history(&path, binary);
+    assert_eq!(
+        history.tests.get("test_a"),
+        Some(&TestMeasurement {
+            peak: Some(25),
+            cores: Some(3),
+        })
+    );
+    assert_eq!(history.lines, 2);
+}
+
+#[test]
+fn nextest_history_compacts_repeated_raises() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 8, 100);
+    let binary = "project/package";
+    pool.record_test_history(binary, "test_a", Some(1), Some(1))
+        .unwrap();
+    for peak in 2..=67 {
+        pool.record_test_history(binary, "test_a", Some(peak), None)
+            .unwrap();
+    }
+    let path = test_history_path(&directory.path().join(TEST_HISTORY_DIR), binary);
+    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+    assert_eq!(
+        read_test_history(&path, binary).tests["test_a"].peak,
+        Some(67)
+    );
+}
+
+#[test]
+fn nextest_history_ignores_malformed_lines_and_binary_mismatches() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = test_history_path(directory.path(), "binary-a");
+    std::fs::write(
+        &path,
+        concat!(
+            "{\"binary\":\"binary-b\",\"test\":\"collision\",\"peak\":999}\n",
+            "not json\n",
+            "{\"binary\":\"binary-a\",\"test\":\"kept\",\"peak\":12}\n"
+        ),
+    )
+    .unwrap();
+    let history = read_test_history(&path, "binary-a");
+    assert_eq!(history.lines, 3);
+    assert_eq!(history.tests.len(), 1);
+    assert_eq!(history.tests["kept"].peak, Some(12));
+}
+
+#[test]
+fn nextest_history_compaction_preserves_hash_collision_records() {
+    let directory = tempfile::tempdir().unwrap();
+    let history_dir = directory.path().join(TEST_HISTORY_DIR);
+    std::fs::create_dir_all(&history_dir).unwrap();
+    let path = test_history_path(&history_dir, "binary-a");
+    let collision = "{\"binary\":\"binary-b\",\"test\":\"other\",\"peak\":999}\n";
+    std::fs::write(&path, collision.repeat(70)).unwrap();
+    let pool = pool_at(directory.path(), 8, 100);
+    pool.record_test_history("binary-a", "case", Some(20), None)
+        .unwrap();
+
+    assert_eq!(
+        read_test_history(&path, "binary-a").tests["case"].peak,
+        Some(20)
+    );
+    assert_eq!(
+        read_test_history(&path, "binary-b").tests["other"].peak,
+        Some(999)
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 2);
+}
+
+#[test]
+fn nextest_history_cap_drops_the_smallest_peaks_first() {
+    let mut tests = BTreeMap::from([
+        (
+            "small".into(),
+            TestMeasurement {
+                peak: Some(10),
+                cores: Some(1),
+            },
+        ),
+        (
+            "middle".into(),
+            TestMeasurement {
+                peak: Some(20),
+                cores: Some(2),
+            },
+        ),
+        (
+            "large".into(),
+            TestMeasurement {
+                peak: Some(30),
+                cores: Some(3),
+            },
+        ),
+    ]);
+    assert!(enforce_test_history_cap(&mut tests, 2));
+    assert!(!tests.contains_key("small"));
+    assert!(tests.contains_key("middle"));
+    assert!(tests.contains_key("large"));
+}
+
+#[test]
+fn nextest_plan_uses_test_then_sibling_history_and_cold_defaults() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 8, 100);
+    let measured = Demand::nextest("project/bin", "known");
+    pool.record_test_history("project/bin", "known", Some(350), Some(3))
+        .unwrap();
+    assert_eq!(pool.plan(&measured), (4, Some(350)));
+
+    let sibling = Demand::nextest("project/bin", "new");
+    assert_eq!(pool.plan(&sibling), (4, Some(350)));
+
+    let cold = Demand::nextest("project/cold", "first");
+    assert_eq!(pool.plan(&cold), (2, Some(200)));
+    let no_memory = pool_at(directory.path(), 8, 0);
+    assert_eq!(no_memory.plan(&cold), (1, None));
+}
+
+#[test]
+fn nextest_plan_clamps_to_capacity_and_ignores_suite_ledger_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 4, 100);
+    let nextest = Demand::nextest("project/bin", "case");
+    assert_eq!(pool.plan(&nextest), (2, Some(200)));
+
+    pool.record_test_history("project/bin", "case", Some(900), Some(12))
+        .unwrap();
+    assert!(read_ledger(&pool.ledger_path()).crates.is_empty());
+    assert!(read_ledger(&pool.ledger_path()).cpus.is_empty());
+    assert_eq!(pool.plan(&nextest), (4, Some(900)));
+
+    pool.record_peak(&nextest.name, 9_000, false).unwrap();
+    pool.record_cpu(&nextest.name, 9).unwrap();
+    assert_eq!(pool.plan(&nextest), (4, Some(900)));
+
+    let suite = Demand::test("project/bin", None);
+    pool.record_peak(&suite.name, 100, false).unwrap();
+    pool.record_cpu(&suite.name, 3).unwrap();
+    assert_eq!(pool.plan(&suite), (3, Some(100)));
+    let history = read_test_history(
+        &test_history_path(&pool.dir.join(TEST_HISTORY_DIR), "project/bin"),
+        "project/bin",
+    );
+    assert_eq!(history.tests.len(), 1);
+    assert!(history.tests.contains_key("case"));
+}
+
+#[test]
+fn nextest_plan_clamps_heavy_measurements_to_pool_capacity() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 4, 100);
+    pool.record_test_history("bin", "heavy", Some(900), Some(12))
+        .unwrap();
+    assert_eq!(pool.plan(&Demand::nextest("bin", "heavy")), (4, Some(900)));
+}
+
+#[test]
+fn nextest_history_pruning_removes_only_month_old_files() {
+    use std::time::{Duration, SystemTime};
+
+    let directory = tempfile::tempdir().unwrap();
+    let scheduler = directory.path().join(SCHEDULER_DIR);
+    let history_dir = scheduler.join(TEST_HISTORY_DIR);
+    std::fs::create_dir_all(&history_dir).unwrap();
+    let stale = history_dir.join("stale.jsonl");
+    let recent = history_dir.join("recent.jsonl");
+    std::fs::write(&stale, b"old\n").unwrap();
+    std::fs::write(&recent, b"new\n").unwrap();
+    let old = SystemTime::now() - FLIGHT_MAX_AGE - Duration::from_secs(1);
+    std::fs::File::open(&stale)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(old))
+        .unwrap();
+
+    // A writer holding the history lock keeps even stale history for now.
+    let mut held = fslock::LockFile::open(&scheduler.join(TEST_HISTORY_LOCK)).unwrap();
+    held.lock().unwrap();
+    prune_test_history(directory.path());
+    assert!(stale.exists());
+    drop(held);
+
+    prune_test_history(directory.path());
+    assert!(!stale.exists());
+    assert!(recent.exists());
+    // The lock is shared by every writer and is never removed.
+    assert!(scheduler.join(TEST_HISTORY_LOCK).exists());
+}
