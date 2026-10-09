@@ -445,6 +445,41 @@ fn work() { event("start"); std::thread::sleep(std::time::Duration::from_millis(
     }
 
     #[test]
+    fn a_cargo_alias_for_nextest_is_scheduled() {
+        if !nextest_available() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("fixture");
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        let cache = temp.path().join("shared-cache");
+        project(
+            &root,
+            "schedule-alias",
+            r#"#[test] fn through_the_alias() {
+    // Only mbx's runner turns scheduling off for the test's own children.
+    assert_eq!(std::env::var("MBX_SCHEDULER").unwrap(), "0");
+}"#,
+        );
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[alias]\nnt = \"nextest run\"\n",
+        )
+        .unwrap();
+        prepare_nextest(&root, &cache);
+        let output = mbx(&root)
+            .env("MBX_CACHE_DIR", &cache)
+            .env("MBX_SCHEDULER", "1")
+            .env("MBX_SCHEDULER_TESTS", "1")
+            .env("MBX_SCHEDULER_CPUS", "2")
+            .env("MBX_SCHEDULER_MEMORY", "none")
+            .args(["nt", "--offline"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", output_text(&output));
+    }
+
+    #[test]
     fn nextest_history_is_per_test_and_cargo_test_keeps_suite_history() {
         if !nextest_available() {
             return;

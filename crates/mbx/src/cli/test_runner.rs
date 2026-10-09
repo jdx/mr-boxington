@@ -64,7 +64,15 @@ impl TestRunner {
         workspace_root: &Path,
         directory: &Path,
     ) -> Result<Option<Self>> {
-        if !config.scheduler.enabled || !config.scheduler.tests || !wraps(arguments) {
+        if !config.scheduler.enabled || !config.scheduler.tests {
+            return Ok(None);
+        }
+        // What Cargo will run, not what was typed: an alias such as
+        // `nt = "nextest run"` runs tests as surely as the command it names.
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let expanded = super::cargo_invocation::expanded_arguments(&cargo, arguments);
+        let arguments = expanded.as_deref().unwrap_or(arguments);
+        if !wraps(arguments) {
             return Ok(None);
         }
         // Resolution is best-effort, like the pool itself: a configuration
