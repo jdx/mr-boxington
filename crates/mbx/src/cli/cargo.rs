@@ -1280,6 +1280,11 @@ pub(super) fn parse_cargo_roots(metadata: &[u8]) -> Option<Roots> {
 /// The CLI wins over `CARGO_BUILD_JOBS`, including `default`, just as it does
 /// in Cargo. Invalid values are left for Cargo to diagnose and do not make mbx
 /// invent a second interpretation.
+///
+/// `cargo nextest` gives `-j` and `--jobs` to its own test threads and passes
+/// `--build-jobs` to Cargo as `--jobs`, so for nextest only `--build-jobs` is
+/// read. A test-thread count is not a limit on compilers, and taking it for
+/// one would also cap the tests this build may hold permits for.
 fn cargo_job_limit(arguments: &[String]) -> Option<u64> {
     cargo_job_limit_with(
         arguments,
@@ -1293,6 +1298,7 @@ pub(super) fn cargo_job_limit_with(
     environment: Option<&str>,
     logical_cpus: u64,
 ) -> Option<u64> {
+    let nextest = super::launch::cargo_subcommand(arguments) == Some("nextest");
     let mut cli_value = None;
     let mut cli_seen = false;
     let mut index = 0;
@@ -1301,7 +1307,14 @@ pub(super) fn cargo_job_limit_with(
         if argument == "--" {
             break;
         }
-        let value = if argument == "-j" || argument == "--jobs" {
+        let value = if nextest {
+            if argument == "--build-jobs" {
+                index += 1;
+                arguments.get(index).map(String::as_str)
+            } else {
+                argument.strip_prefix("--build-jobs=")
+            }
+        } else if argument == "-j" || argument == "--jobs" {
             index += 1;
             arguments.get(index).map(String::as_str)
         } else if let Some(value) = argument.strip_prefix("--jobs=") {
