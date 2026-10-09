@@ -1338,3 +1338,66 @@ fn nextest_history_pruning_removes_only_month_old_files() {
     // The lock is shared by every writer and is never removed.
     assert!(scheduler.join(TEST_HISTORY_LOCK).exists());
 }
+
+#[test]
+fn planning_keeps_history_a_stable_suite_still_uses_from_looking_unused() {
+    use std::time::{Duration, SystemTime};
+
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 4, 100);
+    pool.record_test_history("bin", "case", Some(50), Some(1))
+        .unwrap();
+    let path = test_history_path(&pool.dir.join(TEST_HISTORY_DIR), "bin");
+    let age = |path: &Path| {
+        std::fs::metadata(path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .elapsed()
+            .unwrap_or_default()
+    };
+    let old = SystemTime::now() - FLIGHT_MAX_AGE + Duration::from_secs(60);
+    std::fs::File::open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(old))
+        .unwrap();
+
+    pool.plan(&Demand::nextest("bin", "case"));
+    assert!(age(&path) < TEST_HISTORY_REFRESH);
+    prune_test_history(directory.path());
+    assert!(path.exists());
+}
+
+#[test]
+fn a_test_that_raises_nothing_records_without_the_history_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 4, 100);
+    pool.record_test_history("bin", "case", Some(50), Some(2))
+        .unwrap();
+    let demand = Demand::nextest("bin", "case");
+    pool.plan(&demand);
+    let identity = demand.per_test.as_ref().unwrap();
+
+    // Held elsewhere for the whole call: a recording that needed it would
+    // block here instead of returning.
+    let mut held = fslock::LockFile::open(&pool.dir.join(TEST_HISTORY_LOCK)).unwrap();
+    held.lock().unwrap();
+    pool.record_test_measurement(identity, Some(40), Some(2))
+        .unwrap();
+    pool.record_test_measurement(identity, None, None).unwrap();
+    drop(held);
+
+    pool.record_test_measurement(identity, Some(80), None)
+        .unwrap();
+    let history = read_test_history(
+        &test_history_path(&pool.dir.join(TEST_HISTORY_DIR), "bin"),
+        "bin",
+    );
+    assert_eq!(
+        history.tests.get("case"),
+        Some(&TestMeasurement {
+            peak: Some(80),
+            cores: Some(2)
+        })
+    );
+}

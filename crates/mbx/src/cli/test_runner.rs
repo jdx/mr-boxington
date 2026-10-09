@@ -273,29 +273,29 @@ pub fn dispatch() -> Option<ExitCode> {
             .wrap_err_with(|| format!("failed to run {}", Path::new(&executable).display()))?;
         let wall = started.elapsed();
         if let Some((demand, permit)) = permit {
-            crate::scheduler::record_compiler_memory(demand, &status);
             // A run that exited on its own, failing tests included, ran the
             // whole suite; one a signal stopped, or one narrowed to some of
             // its tests, says little about what the suite costs. A nextest
             // test is always run narrowed to itself, which is what it is
             // remembered as.
-            if status.code().is_some() && (nextest_identity.is_some() || !narrows_suite(&rest)) {
-                // A suite this quick cannot keep cores busy long enough to
-                // matter, but unrecorded it would ask for half the pool on
-                // every run. Weigh it one core; a longer run raises that.
-                // Where CPU time cannot be measured nothing could raise it,
-                // so nothing is recorded.
-                let cores = crate::scheduler::child_cpu_time().map(|cpu| {
-                    if wall < MIN_CPU_SAMPLE {
-                        1
-                    } else {
-                        crate::scheduler::average_cores(cpu, wall)
-                    }
-                });
-                if let Some(cores) = cores {
-                    crate::scheduler::record_test_cpu(demand, cores);
+            //
+            // A suite this quick cannot keep cores busy long enough to
+            // matter, but unrecorded it would ask for half the pool on every
+            // run. Weigh it one core; a longer run raises that. Where CPU
+            // time cannot be measured nothing could raise it, so nothing is
+            // recorded.
+            let cores = (status.code().is_some()
+                && (nextest_identity.is_some() || !narrows_suite(&rest)))
+            .then(crate::scheduler::child_cpu_time)
+            .flatten()
+            .map(|cpu| {
+                if wall < MIN_CPU_SAMPLE {
+                    1
+                } else {
+                    crate::scheduler::average_cores(cpu, wall)
                 }
-            }
+            });
+            crate::scheduler::record_test_run(demand, &status, cores);
             drop(permit);
         }
         Ok(super::cargo::exit_code(status))

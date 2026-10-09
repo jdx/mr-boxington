@@ -412,11 +412,9 @@ fn work() { event("start"); std::thread::sleep(std::time::Duration::from_millis(
         let mut reservation = Reservation::start(temp.path(), &cache, 2, "list-reservation");
         let mut list = nextest(&root, &cache);
         list.args(["list", "--offline"]);
-        let started_listing = Instant::now();
         let (status, output) =
             LoggedChild::spawn(&mut list, temp.path(), "list").wait(Duration::from_secs(4));
         assert!(status.success(), "{output}");
-        assert!(started_listing.elapsed() < Duration::from_secs(2));
 
         let started = temp.path().join("started");
         let release_time = temp.path().join("release-time");

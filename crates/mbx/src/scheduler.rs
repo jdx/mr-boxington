@@ -139,6 +139,13 @@ const LINK_WEIGHT: u64 = 2;
 /// Tests can allocate most of their working set at runtime, so allowing many
 /// cold tests to start together can exhaust memory before history is learned.
 const UNMEASURED_TEST_WEIGHT: u64 = 2;
+/// How old a history file's timestamp may get before a reader refreshes it.
+///
+/// History is written only when a measurement rises, so a binary whose tests
+/// run every day at the same cost would otherwise look unused to `mbx gc`.
+/// Refreshing at most once a day keeps that one metadata write per binary
+/// per day, rather than one per test.
+const TEST_HISTORY_REFRESH: Duration = Duration::from_secs(24 * 60 * 60);
 /// Most test names retained for one nextest binary.
 const MAX_TEST_HISTORY_ENTRIES: usize = 16_384;
 /// First delay after a refused admission.
@@ -230,6 +237,10 @@ pub(crate) struct Demand {
 struct TestIdentity {
     binary: String,
     test: String,
+    /// What history said about this test when it was planned, so a finished
+    /// test whose measurements raise nothing records without taking the
+    /// history lock or reading the file again. `None` until planned.
+    known: std::cell::Cell<Option<TestMeasurement>>,
 }
 
 impl Demand {
@@ -300,6 +311,7 @@ impl Demand {
             per_test: Some(TestIdentity {
                 binary: binary.to_owned(),
                 test: test.to_owned(),
+                known: std::cell::Cell::new(None),
             }),
         }
     }
@@ -790,19 +802,37 @@ pub(crate) fn record_compiler_memory(demand: &Demand, status: &ExitStatus) {
     pool.note_compilation(demand, status);
 }
 
-/// Record the average cores a test binary kept busy, for its next admission.
-pub(crate) fn record_test_cpu(demand: &Demand, cores: u64) {
+/// Record what a finished test binary or nextest test cost, for its next
+/// admission: its peak memory, and the average cores it kept busy when
+/// `cores` says it ran long enough and completely enough to tell.
+pub(crate) fn record_test_run(demand: &Demand, status: &ExitStatus, cores: Option<u64>) {
     let Some(pool) = pool() else {
         return;
     };
-    let recorded = match &demand.per_test {
-        Some(identity) => {
-            pool.record_test_history(&identity.binary, &identity.test, None, Some(cores))
+    let Some(identity) = &demand.per_test else {
+        pool.note_compilation(demand, status);
+        if let Some(cores) = cores
+            && let Err(error) = pool.record_cpu(&demand.name, cores)
+        {
+            debug!("test CPU use was not recorded: {error:#}");
         }
-        None => pool.record_cpu(&demand.name, cores),
+        return;
     };
-    if let Err(error) = recorded {
-        debug!("test CPU use was not recorded: {error:#}");
+    // A successful test is a true reading of what it costs, so it is recorded
+    // whatever it measured, the way a successful link is: that is what lets a
+    // light test retire the unmeasured default. A failure can only show that
+    // a test is heavy.
+    let peak = child_peak_rss_bytes().and_then(|measured| {
+        ledger_peak(
+            measured,
+            oom_killed(status),
+            true,
+            status.success(),
+            pool.bytes_per_permit,
+        )
+    });
+    if let Err(error) = pool.record_test_measurement(identity, peak, cores) {
+        debug!("test measurements were not recorded: {error:#}");
     }
 }
 
@@ -951,10 +981,18 @@ impl Pool {
     /// The permits this demand costs, and its predicted memory when known.
     fn plan(&self, demand: &Demand) -> (u64, Option<u64>) {
         if let Some(identity) = &demand.per_test {
-            let history = read_test_history(
-                &test_history_path(&self.dir.join(TEST_HISTORY_DIR), &identity.binary),
-                &identity.binary,
-            );
+            let path = test_history_path(&self.dir.join(TEST_HISTORY_DIR), &identity.binary);
+            let history = read_test_history(&path, &identity.binary);
+            if !history.tests.is_empty() {
+                refresh_test_history(&path);
+            }
+            identity.known.set(Some(
+                history
+                    .tests
+                    .get(&identity.test)
+                    .copied()
+                    .unwrap_or_default(),
+            ));
             let measurement = history.tests.get(&identity.test).copied().or_else(|| {
                 (!history.tests.is_empty()).then(|| {
                     history.tests.values().fold(
@@ -1226,7 +1264,7 @@ impl Pool {
     }
 
     fn note_compilation(&self, demand: &Demand, status: &ExitStatus) {
-        if demand.per_test.is_none() && self.bytes_per_permit == 0 {
+        if self.bytes_per_permit == 0 {
             return;
         }
         let Some(measured) = child_peak_rss_bytes() else {
@@ -1235,20 +1273,12 @@ impl Pool {
         let Some(peak) = ledger_peak(
             measured,
             oom_killed(status),
-            demand.links || demand.per_test.is_some(),
+            demand.links,
             status.success(),
             self.bytes_per_permit,
         ) else {
             return;
         };
-        if let Some(identity) = &demand.per_test {
-            if let Err(error) =
-                self.record_test_history(&identity.binary, &identity.test, Some(peak), None)
-            {
-                debug!("test memory was not recorded: {error:#}");
-            }
-            return;
-        }
         if let Err(error) = self.record_link_peak(
             &ledger_key(&demand.name, demand.links),
             peak,
@@ -1261,6 +1291,31 @@ impl Pool {
 
     fn ledger_path(&self) -> PathBuf {
         self.dir.join(LEDGER_FILE)
+    }
+
+    /// Raise a planned nextest test's history, skipping the lock and the read
+    /// entirely when nothing measured exceeds what planning found.
+    ///
+    /// Most runs of most tests raise nothing, and every test in a run would
+    /// otherwise queue on the one history lock to parse its binary's file.
+    /// A value another process raised since planning is caught under the
+    /// lock, which is where the comparison is repeated.
+    fn record_test_measurement(
+        &self,
+        identity: &TestIdentity,
+        peak: Option<u64>,
+        cores: Option<u64>,
+    ) -> Result<()> {
+        let raises = |value: Option<u64>, known: Option<u64>| {
+            value.is_some_and(|value| known.is_none_or(|known| value > known))
+        };
+        if let Some(known) = identity.known.get()
+            && !raises(peak, known.peak)
+            && !raises(cores, known.cores)
+        {
+            return Ok(());
+        }
+        self.record_test_history(&identity.binary, &identity.test, peak, cores)
     }
 
     /// Raise a nextest test's memory or CPU history without changing suite
@@ -1491,6 +1546,24 @@ fn test_history_path(dir: &Path, binary: &str) -> PathBuf {
     use sha2::Digest as _;
     let digest = sha2::Sha256::digest(binary.as_bytes());
     dir.join(format!("{}.jsonl", &hex::encode(digest)[..16]))
+}
+
+/// Mark a history file as still in use, at most once per
+/// [`TEST_HISTORY_REFRESH`].
+///
+/// Done without the history lock. A sweep that judged the file stale just
+/// before this refresh can still delete it, which costs that binary one run
+/// at the unmeasured estimate; skipping the refresh would cost it that every
+/// month.
+fn refresh_test_history(path: &Path) {
+    let old = std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age > TEST_HISTORY_REFRESH);
+    if old && let Ok(file) = std::fs::OpenOptions::new().append(true).open(path) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
 }
 
 fn read_test_history(path: &Path, binary: &str) -> TestHistory {
