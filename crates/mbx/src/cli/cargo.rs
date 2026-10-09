@@ -380,7 +380,11 @@ fn cargo_with_settings_bypass_log_and_roots(
         &roots.workspace_root,
         session_dir.path(),
     )?;
-    let cargo_jobs = cargo_job_limit(arguments);
+    // What Cargo will run, not what was typed: with an alias such as
+    // `nt = "nextest run"`, `-j` belongs to nextest rather than to Cargo.
+    let expanded = super::cargo_invocation::expanded_arguments(&cargo, arguments)
+        .unwrap_or_else(|| arguments.to_vec());
+    let cargo_jobs = cargo_job_limit(&expanded);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
