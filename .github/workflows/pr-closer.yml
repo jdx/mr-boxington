@@ -17,5 +17,6 @@ jobs:
       pull-requests: write
       checks: read
       statuses: read
+    timeout-minutes: 10
     steps:
       - uses: jdx/pr-closer@389c3b65873b020f75418c44ccca9987717eaf2f # PR #12 merge

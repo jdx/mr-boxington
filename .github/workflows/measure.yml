@@ -93,6 +93,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository }}
+        shell: bash
         run: |
           sha=$(cat /tmp/tak-out/sha)
           git config user.name "github-actions[bot]"
@@ -149,6 +150,7 @@ jobs:
             --verify
       - name: Publish job summary
         if: always()
+        shell: bash
         run: |
           find "$RUNNER_TEMP/mbx-measurements" -name '*.md' -type f -print0 \
             | sort -z \
