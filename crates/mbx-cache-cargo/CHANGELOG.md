@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.12](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.3.11...mbx-cache-cargo-v0.3.12) - 2026-10-08
+
+### Added
+
+- *(clean)* add --under to clean every workspace below a root ([#668](https://github.com/jdx/mr-boxington/pull/668))
+
 ## [0.3.11](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.3.10...mbx-cache-cargo-v0.3.11) - 2026-10-03
 
 ### Other

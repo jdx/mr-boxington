@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.22](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.21...mbx-cache-protocol-v0.5.22) - 2026-10-08
+
+### Added
+
+- *(clean)* add --under to clean every workspace below a root ([#668](https://github.com/jdx/mr-boxington/pull/668))
+
 ## [0.5.21](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.20...mbx-cache-protocol-v0.5.21) - 2026-10-03
 
 ### Other

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.19.4...mbx-cache-core-v0.20.0) - 2026-10-08
+
+### Added
+
+- *(clean)* add --under to clean every workspace below a root ([#668](https://github.com/jdx/mr-boxington/pull/668))
+
+### Fixed
+
+- *(cache)* do not reuse file digests recorded within a timestamp tick ([#674](https://github.com/jdx/mr-boxington/pull/674))
+
 ## [0.19.4](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.19.3...mbx-cache-core-v0.19.4) - 2026-10-03
 
 ### Other
