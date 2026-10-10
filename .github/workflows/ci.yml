@@ -37,6 +37,10 @@ jobs:
           rustup target add wasm32-unknown-unknown
       - name: Run hk checks
         run: hk check --all
+        # online jactionlint checks (impostor commits, known-vulnerable actions, ...) run in CI only
+        env:
+          JACTIONLINT_ONLINE: 1
+          GITHUB_TOKEN: ${{ github.token }}
       - name: Test benchmark driver
         run: python3 -m unittest discover -s benchmarks -p 'test_*.py'
       - name: Check dependencies

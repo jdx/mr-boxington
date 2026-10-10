@@ -19,4 +19,4 @@ jobs:
       statuses: read
     timeout-minutes: 10
     steps:
-      - uses: jdx/pr-closer@389c3b65873b020f75418c44ccca9987717eaf2f # PR #12 merge
+      - uses: jdx/pr-closer@312c76903a271a54fb3a2b91fa507cd8bef28f78 # v1.2.1

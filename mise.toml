@@ -201,7 +201,7 @@ tak = { version = "latest", minimum_release_age = "0s" }
 aube = { version = "latest", lazy = true, lazy_bins = ["aube"], minimum_release_age = "0s" }
 hk = { version = "latest", minimum_release_age = "0s" }
 communique = { version = "latest", minimum_release_age = "0s" }
-jactionlint = { version = "latest", minimum_release_age = "0s" }
+jactionlint = "2.1.0"
 lychee = "0.24.2"
 node = "24"
 # Rust is deliberately absent: the toolchain floats to whatever the
