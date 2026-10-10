@@ -1,6 +1,6 @@
 [package]
 name = "mbx"
-version = "1.23.0"
+version = "1.23.1"
 description = "A build cache for Rust projects"
 edition.workspace = true
 rust-version.workspace = true
