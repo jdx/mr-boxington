@@ -14,6 +14,17 @@ fn pool_at(dir: &Path, capacity: u64, bytes_per_permit: u64) -> Pool {
     pool
 }
 
+fn encode_history_map(binary: &str, records: &BTreeMap<u64, TestMeasurement>) -> Vec<u8> {
+    let records: Vec<_> = records
+        .iter()
+        .map(|(hash, measurement)| TestHistoryRecord {
+            hash: *hash,
+            measurement: *measurement,
+        })
+        .collect();
+    encode_test_history(binary, &records)
+}
+
 #[test]
 fn capacity_is_enforced_and_released() {
     let directory = tempfile::tempdir().unwrap();
@@ -1132,4 +1143,398 @@ fn link_profile_reads_every_spelling_and_keeps_windows_apart() {
     assert_eq!(predicted, Some(LINK_WEIGHT * 1024));
     let (_, predicted) = pool.plan(&release);
     assert_eq!(predicted, Some(1_000_000));
+}
+
+#[test]
+fn nextest_history_only_raises_measurements() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 8, 100);
+    let binary = "project/package::integration";
+    pool.record_test_history(binary, "test_a", Some(20), Some(2))
+        .unwrap();
+    pool.record_test_history(binary, "test_a", Some(10), Some(1))
+        .unwrap();
+    let path = test_history_path(&directory.path().join(TEST_HISTORY_DIR), binary);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        TEST_HISTORY_HEADER_LEN + TEST_HISTORY_RECORD_LEN
+    );
+
+    pool.record_test_history(binary, "test_a", Some(25), Some(3))
+        .unwrap();
+    let records = read_test_history_records(&path, binary);
+    assert_eq!(
+        records
+            .iter()
+            .find(|record| record.hash == test_history_hash("test_a"))
+            .map(|record| record.measurement),
+        Some(TestMeasurement {
+            peak: Some(25),
+            cores: Some(3),
+        })
+    );
+}
+
+#[test]
+fn nextest_history_binary_search_finds_first_last_and_missing_records() {
+    let directory = tempfile::tempdir().unwrap();
+    for count in [1, 2, 512] {
+        let binary = format!("project/package-{count}");
+        let names: Vec<_> = (0..count).map(|index| format!("test_{index}")).collect();
+        let mut records = BTreeMap::new();
+        for (index, name) in names.iter().enumerate() {
+            records.insert(
+                test_history_hash(name),
+                TestMeasurement {
+                    peak: Some(index as u64 + 10),
+                    cores: Some(index as u64 % 8 + 1),
+                },
+            );
+        }
+        assert_eq!(records.len(), count);
+        let path = test_history_path(directory.path(), &binary);
+        std::fs::write(&path, encode_history_map(&binary, &records)).unwrap();
+
+        let mut ordered: Vec<_> = names
+            .iter()
+            .map(|name| (test_history_hash(name), name.as_str()))
+            .collect();
+        ordered.sort_unstable_by_key(|(hash, _)| *hash);
+        for (_, name) in [ordered[0], ordered[count - 1]] {
+            let lookup = lookup_test_history(&path, &binary, name);
+            assert_eq!(lookup.test, Some(records[&test_history_hash(name)]));
+            assert_eq!(lookup.header.count, count as u64);
+        }
+        let missing = "not-in-this-file";
+        assert!(!records.contains_key(&test_history_hash(missing)));
+        assert_eq!(
+            lookup_test_history(&path, &binary, missing).test,
+            None,
+            "missing hash in {count}-record file"
+        );
+    }
+}
+
+#[test]
+fn nextest_plan_uses_header_maxima_for_a_new_test() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 8, 100);
+    let binary = "project/bin";
+    pool.record_test_history(binary, "heavy", Some(450), Some(3))
+        .unwrap();
+    pool.record_test_history(binary, "small", Some(100), Some(1))
+        .unwrap();
+
+    let new_test = Demand::nextest(binary, "new");
+    assert_eq!(pool.plan(&new_test), (5, Some(450)));
+    assert_eq!(
+        new_test.per_test.as_ref().unwrap().known.get(),
+        Some(TestMeasurement::default()),
+        "a missing test keeps its own measurement unknown"
+    );
+}
+
+#[test]
+fn nextest_history_rejects_bad_headers_and_ignores_partial_tail() {
+    let directory = tempfile::tempdir().unwrap();
+    let binary = "binary-a";
+    let path = test_history_path(directory.path(), binary);
+    let records = BTreeMap::from([
+        (
+            test_history_hash("first"),
+            TestMeasurement {
+                peak: Some(12),
+                cores: Some(2),
+            },
+        ),
+        (
+            test_history_hash("last"),
+            TestMeasurement {
+                peak: Some(42),
+                cores: Some(4),
+            },
+        ),
+    ]);
+    let bytes = encode_history_map(binary, &records);
+
+    std::fs::write(&path, []).unwrap();
+    assert_eq!(lookup_test_history(&path, binary, "first").header.count, 0);
+    std::fs::write(&path, &bytes[..17]).unwrap();
+    assert_eq!(lookup_test_history(&path, binary, "first").header.count, 0);
+
+    let mut bad_magic = bytes.clone();
+    bad_magic[0] ^= 1;
+    std::fs::write(&path, bad_magic).unwrap();
+    assert_eq!(lookup_test_history(&path, binary, "first").header.count, 0);
+
+    std::fs::write(&path, &bytes).unwrap();
+    assert_eq!(
+        lookup_test_history(&path, "binary-b", "first").header.count,
+        0
+    );
+
+    let mut partial_tail = bytes;
+    partial_tail.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7]);
+    std::fs::write(&path, partial_tail).unwrap();
+    let lookup = lookup_test_history(&path, binary, "last");
+    assert_eq!(lookup.header.count, 2);
+    assert_eq!(lookup.test, Some(records[&test_history_hash("last")]));
+    assert_eq!(read_test_history_records(&path, binary).len(), 2);
+
+    let pool = pool_at(directory.path(), 8, 100);
+    let collision_path = test_history_path(&pool.dir.join(TEST_HISTORY_DIR), binary);
+    std::fs::create_dir_all(collision_path.parent().unwrap()).unwrap();
+    std::fs::write(&collision_path, encode_history_map("binary-b", &records)).unwrap();
+    pool.record_test_history(binary, "replacement", Some(7), None)
+        .unwrap();
+    let rewritten = read_test_history_records(&collision_path, binary);
+    assert_eq!(rewritten.len(), 1);
+    assert_eq!(rewritten[0].hash, test_history_hash("replacement"));
+    assert_eq!(
+        read_test_history_header(&File::open(collision_path).unwrap(), binary)
+            .unwrap()
+            .maximum
+            .peak,
+        Some(7)
+    );
+}
+
+#[test]
+fn nextest_history_cap_drops_the_smallest_peak_first() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 8, 100);
+    let binary = "binary-with-many-tests";
+    let path = test_history_path(&pool.dir.join(TEST_HISTORY_DIR), binary);
+    let records: BTreeMap<_, _> = (1..=MAX_TEST_HISTORY_ENTRIES as u64 + 1)
+        .map(|hash| {
+            (
+                hash,
+                TestMeasurement {
+                    peak: Some(hash),
+                    cores: Some(1),
+                },
+            )
+        })
+        .collect();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, encode_history_map(binary, &records)).unwrap();
+
+    let new_test = "new-test";
+    let new_hash = test_history_hash(new_test);
+    assert!(!records.contains_key(&new_hash));
+    pool.record_test_history(
+        binary,
+        new_test,
+        Some(MAX_TEST_HISTORY_ENTRIES as u64 + 10),
+        None,
+    )
+    .unwrap();
+    let capped = read_test_history_records(&path, binary);
+    assert_eq!(capped.len(), MAX_TEST_HISTORY_ENTRIES);
+    assert!(
+        !capped.iter().any(|record| record.hash == 1),
+        "the smallest peak should be dropped"
+    );
+    assert!(capped.iter().any(|record| record.hash == new_hash));
+    assert_eq!(
+        std::fs::metadata(path).unwrap().len(),
+        TEST_HISTORY_HEADER_LEN + TEST_HISTORY_RECORD_LEN * MAX_TEST_HISTORY_ENTRIES as u64
+    );
+}
+
+#[test]
+fn nextest_history_cap_breaks_equal_peak_ties_by_cores() {
+    let mut records = vec![
+        TestHistoryRecord {
+            hash: 1,
+            measurement: TestMeasurement {
+                peak: Some(10),
+                cores: Some(1),
+            },
+        },
+        TestHistoryRecord {
+            hash: 2,
+            measurement: TestMeasurement {
+                peak: Some(10),
+                cores: Some(2),
+            },
+        },
+        TestHistoryRecord {
+            hash: 3,
+            measurement: TestMeasurement {
+                peak: Some(20),
+                cores: Some(1),
+            },
+        },
+    ];
+    assert!(enforce_test_history_cap(&mut records, 2));
+    assert!(!records.iter().any(|record| record.hash == 1));
+    assert!(records.iter().any(|record| record.hash == 2));
+    assert!(records.iter().any(|record| record.hash == 3));
+}
+
+#[test]
+fn nextest_plan_uses_test_then_sibling_history_and_cold_defaults() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 8, 100);
+    let measured = Demand::nextest("project/bin", "known");
+    pool.record_test_history("project/bin", "known", Some(350), Some(3))
+        .unwrap();
+    assert_eq!(pool.plan(&measured), (4, Some(350)));
+
+    let sibling = Demand::nextest("project/bin", "new");
+    assert_eq!(pool.plan(&sibling), (4, Some(350)));
+
+    let cold = Demand::nextest("project/cold", "first");
+    assert_eq!(pool.plan(&cold), (2, Some(200)));
+    let no_memory = pool_at(directory.path(), 8, 0);
+    assert_eq!(no_memory.plan(&cold), (1, None));
+}
+
+#[test]
+fn nextest_plan_clamps_to_capacity_and_ignores_suite_ledger_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 4, 100);
+    let nextest = Demand::nextest("project/bin", "case");
+    assert_eq!(pool.plan(&nextest), (2, Some(200)));
+
+    pool.record_test_history("project/bin", "case", Some(900), Some(12))
+        .unwrap();
+    assert!(read_ledger(&pool.ledger_path()).crates.is_empty());
+    assert!(read_ledger(&pool.ledger_path()).cpus.is_empty());
+    assert_eq!(pool.plan(&nextest), (4, Some(900)));
+
+    pool.record_peak(&nextest.name, 9_000, false).unwrap();
+    pool.record_cpu(&nextest.name, 9).unwrap();
+    assert_eq!(pool.plan(&nextest), (4, Some(900)));
+
+    let suite = Demand::test("project/bin", None);
+    pool.record_peak(&suite.name, 100, false).unwrap();
+    pool.record_cpu(&suite.name, 3).unwrap();
+    assert_eq!(pool.plan(&suite), (3, Some(100)));
+    let history = read_test_history_records(
+        &test_history_path(&pool.dir.join(TEST_HISTORY_DIR), "project/bin"),
+        "project/bin",
+    );
+    assert_eq!(history.len(), 1);
+    assert!(
+        history
+            .iter()
+            .any(|record| record.hash == test_history_hash("case"))
+    );
+}
+
+#[test]
+fn nextest_plan_clamps_heavy_measurements_to_pool_capacity() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 4, 100);
+    pool.record_test_history("bin", "heavy", Some(900), Some(12))
+        .unwrap();
+    assert_eq!(pool.plan(&Demand::nextest("bin", "heavy")), (4, Some(900)));
+}
+
+#[test]
+fn nextest_history_pruning_removes_old_regular_files() {
+    use std::time::{Duration, SystemTime};
+
+    let directory = tempfile::tempdir().unwrap();
+    let scheduler = directory.path().join(SCHEDULER_DIR);
+    let history_dir = scheduler.join(TEST_HISTORY_DIR);
+    std::fs::create_dir_all(&history_dir).unwrap();
+    let stale = history_dir.join("stale.hist");
+    let legacy = history_dir.join("legacy.jsonl");
+    let recent = history_dir.join("recent.hist");
+    std::fs::write(&stale, b"old\n").unwrap();
+    std::fs::write(&legacy, b"old\n").unwrap();
+    std::fs::write(&recent, b"new\n").unwrap();
+    let old = SystemTime::now() - FLIGHT_MAX_AGE - Duration::from_secs(1);
+    std::fs::File::open(&stale)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(old))
+        .unwrap();
+    std::fs::File::open(&legacy)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(old))
+        .unwrap();
+
+    // A writer holding the history lock keeps even stale history for now.
+    let mut held = fslock::LockFile::open(&scheduler.join(TEST_HISTORY_LOCK)).unwrap();
+    held.lock().unwrap();
+    prune_test_history(directory.path());
+    assert!(stale.exists());
+    assert!(legacy.exists());
+    drop(held);
+
+    prune_test_history(directory.path());
+    assert!(!stale.exists());
+    assert!(!legacy.exists());
+    assert!(recent.exists());
+    // The lock is shared by every writer and is never removed.
+    assert!(scheduler.join(TEST_HISTORY_LOCK).exists());
+}
+
+#[test]
+fn planning_keeps_history_a_stable_suite_still_uses_from_looking_unused() {
+    use std::time::{Duration, SystemTime};
+
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 4, 100);
+    pool.record_test_history("bin", "case", Some(50), Some(1))
+        .unwrap();
+    let path = test_history_path(&pool.dir.join(TEST_HISTORY_DIR), "bin");
+    let age = |path: &Path| {
+        std::fs::metadata(path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .elapsed()
+            .unwrap_or_default()
+    };
+    let old = SystemTime::now() - FLIGHT_MAX_AGE + Duration::from_secs(60);
+    std::fs::File::open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(old))
+        .unwrap();
+
+    pool.plan(&Demand::nextest("bin", "case"));
+    assert!(age(&path) < TEST_HISTORY_REFRESH);
+    prune_test_history(directory.path());
+    assert!(path.exists());
+}
+
+#[test]
+fn a_test_that_raises_nothing_records_without_the_history_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = pool_at(directory.path(), 4, 100);
+    pool.record_test_history("bin", "case", Some(50), Some(2))
+        .unwrap();
+    let demand = Demand::nextest("bin", "case");
+    pool.plan(&demand);
+    let identity = demand.per_test.as_ref().unwrap();
+
+    // Held elsewhere for the whole call: a recording that needed it would
+    // block here instead of returning.
+    let mut held = fslock::LockFile::open(&pool.dir.join(TEST_HISTORY_LOCK)).unwrap();
+    held.lock().unwrap();
+    pool.record_test_measurement(identity, Some(40), Some(2))
+        .unwrap();
+    pool.record_test_measurement(identity, None, None).unwrap();
+    drop(held);
+
+    pool.record_test_measurement(identity, Some(80), None)
+        .unwrap();
+    let history = read_test_history_records(
+        &test_history_path(&pool.dir.join(TEST_HISTORY_DIR), "bin"),
+        "bin",
+    );
+    assert_eq!(
+        history
+            .iter()
+            .find(|record| record.hash == test_history_hash("case"))
+            .map(|record| record.measurement),
+        Some(TestMeasurement {
+            peak: Some(80),
+            cores: Some(2)
+        })
+    );
 }

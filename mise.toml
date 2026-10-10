@@ -204,6 +204,8 @@ communique = { version = "latest", minimum_release_age = "0s" }
 jactionlint = { version = "latest", minimum_release_age = "0s" }
 lychee = "0.24.2"
 node = "24"
+# Native scheduler integration tests exercise cargo-nextest's test runner.
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.140"
 # Rust is deliberately absent: the toolchain floats to whatever the
 # runner image ships, so a new stable is caught by CI rather than by a
 # user. The benchmark workflows pin their own, because a measurement is

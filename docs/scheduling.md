@@ -118,18 +118,23 @@ reservation, like an admitted compiler, is never preempted.
 
 ## Schedule test binaries
 
-By default, permits cover compilers only. When several `cargo test` commands
-reach their test runs together, each libtest harness starts a thread per CPU.
-Set `scheduler.tests = true` (`MBX_SCHEDULER_TESTS=1`) to run test binaries
-through the same pool:
+By default, permits cover compilers only. When several test commands reach
+their test runs together, each libtest harness can start threads across the
+machine. Set `scheduler.tests = true` (`MBX_SCHEDULER_TESTS=1`) to run test
+binaries through the same pool:
 
 ```sh
 MBX_SCHEDULER_TESTS=1 mbx test --workspace   # this run
 mbx settings set scheduler.tests true        # every run from now on
+MBX_SCHEDULER_TESTS=1 mbx nextest run        # schedule each nextest test
 ```
 
-mbx becomes Cargo's target runner for `cargo test` and calls any runner you
-have configured. Each test binary waits for permits before it starts:
+mbx becomes Cargo's target runner for `cargo test` and `cargo nextest`, and
+calls any runner you have configured. Cargo test binaries wait for permits as
+a suite; nextest waits separately for each test. Listing tests does not take a
+permit.
+
+For Cargo test, each test binary waits for permits before it starts:
 
 - Once a binary has been measured, it asks for the average number of cores it
   kept busy: CPU time divided by wall time, rounded to the nearest core.
@@ -137,18 +142,38 @@ have configured. Each test binary waits for permits before it starts:
   permits, and otherwise the binary asks for half the pool, rounded up.
 - A binary whose measured memory needs more permits takes that many instead.
 
-Only complete runs are measured; a run narrowed by a test name, `--skip`, or
-`--ignored` is not. A run under a second is too short to average, so the binary
-is recorded as one core. A recorded core count only goes up,
+For Cargo test, only complete suite runs are measured; a run narrowed by a
+test name, `--skip`, or `--ignored` is not. A run under a second is too short
+to average, so the binary is recorded as one core. A recorded core count only goes up,
 because a suite measured on a busy machine gets fewer cores than it would use.
-mbx measures CPU and memory on Unix only. On Windows, a binary always asks for
-its stated thread count or half the pool.
+mbx measures CPU and memory on Unix only. On Windows, a Cargo test binary asks
+for its stated thread count or half the pool; an unmeasured nextest test asks
+for one core and, when memory scheduling is on, two memory permits.
 
 History is kept per Git repository, package, and test binary. Worktrees of one
 repository share it; separate clones and unrelated projects do not. Outside
 Git, projects that share a package and test name share history. A run with a
 stated thread count keeps its history apart from runs at the default thread
 count.
+
+Nextest history is kept separately for each Git repository, nextest binary ID,
+and test name. A test with history uses its own measurements. A new test uses
+the largest measurements of other tests in that binary; when the binary has
+no history, it starts with one core and, when memory scheduling is on, two
+memory permits. Successful tests record their measured peak even when they use
+less than one permit, so later runs can use a smaller estimate. On Unix, peak
+memory is the largest single process reported by `rusage`; a descendant's
+peak is folded in when it exits, but concurrent child processes are not added
+together.
+
+nextest starts a test's `slow-timeout` clock, including any `terminate-after`
+limit, when it starts mbx's runner. Time spent waiting for a permit therefore
+counts as test time, and nextest offers runners no way to pause the clock. A
+test that waits can be reported as SLOW, and with `terminate-after` it can be
+killed before it starts. After one second of waiting, mbx writes a note to the
+test's stderr, which nextest shows beside the report. If your nextest profile
+sets `terminate-after`, leave room in it for queueing, or lower nextest's
+`--test-threads` so fewer tests queue at once.
 
 Builds a test starts, such as trybuild or compile-fail suites, are charged to
 the test's permits and run without taking permits of their own.
@@ -157,9 +182,13 @@ These run unscheduled:
 
 - doctests
 - `cargo test --no-run`
+- nextest test listings
 - commands with `--config`, a `+toolchain` override, or a directory change
   (`-C`, `--directory`)
-- test runners other than `cargo test`
+- tests run from `--archive-file` when their binaries target a triple other
+  than the requested or host target
+- test binaries run directly, without `cargo test` or `cargo nextest`
+- other test runners
 
 ## Choose the scope of a limit
 
@@ -169,7 +198,7 @@ These run unscheduled:
 | `scheduler.reserve_cpus` | Capacity left outside that pool |
 | Cargo `-j` or `CARGO_BUILD_JOBS` | How much of the pool one build may hold |
 | `scheduler.priority = "low"` | Whether a build yields to waiting normal-priority work |
-| `scheduler.tests = true` | Whether `cargo test` binaries take permits |
+| `scheduler.tests = true` | Whether Cargo test binaries and nextest tests take permits |
 
 A memory budget schedules work using measurements; it is not an operating-system
 memory limit. A compiler process can still exceed its estimate. For laptop
