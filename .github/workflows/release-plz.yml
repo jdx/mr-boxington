@@ -101,6 +101,7 @@ jobs:
         if: steps.mbx-tag.outputs.tag == '' && steps.release-pr.outputs.number != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
           user_agent="mr-boxington release workflow (https://github.com/${{ github.repository }})"
           failed=false

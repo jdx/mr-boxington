@@ -11,6 +11,12 @@ on:
           },
       },
   }
+concurrency:
+  group: comment-release-fixes-caller-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+  # Every dispatch for a tag must run: without a queue a later pending dry run
+  # would replace a pending live one, and the comments would never be posted.
+  queue: max
 jobs:
   comment:
     permissions:

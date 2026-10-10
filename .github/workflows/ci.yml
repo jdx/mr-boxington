@@ -37,6 +37,10 @@ jobs:
           rustup target add wasm32-unknown-unknown
       - name: Run hk checks
         run: hk check --all
+        # online jactionlint checks (impostor commits, known-vulnerable actions, ...) run in CI only
+        env:
+          JACTIONLINT_ONLINE: 1
+          GITHUB_TOKEN: ${{ github.token }}
       - name: Test benchmark driver
         run: python3 -m unittest discover -s benchmarks -p 'test_*.py'
       - name: Check dependencies
@@ -142,6 +146,8 @@ jobs:
       RUSTUP_TOOLCHAIN: "1.91"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Install the minimum supported Rust toolchain
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
       - uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1.7.0
@@ -163,6 +169,8 @@ jobs:
       RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Install nightly
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -198,6 +206,7 @@ jobs:
         with:
           cache: rust
       - name: Build the end-to-end tests
+        shell: bash
         run: |
           cargo test --locked --package mbx --test build --no-run --message-format=json \
             | jq -r 'select(.profile.test == true and .target.name == "build") | .executable' \
@@ -208,20 +217,6 @@ jobs:
       - name: Run the end-to-end tests under nightly Cargo
         run: RUSTUP_TOOLCHAIN=nightly "$(cat build-test-binary)"
 
-  zizmor:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
-        with:
-          advanced-security: false
-          min-severity: high
-
   final:
     permissions: {}
     needs:
@@ -230,7 +225,6 @@ jobs:
       - linux
       - nightly
       - test
-      - zizmor
     runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
     timeout-minutes: 1
     # Run on success or upstream failure but skip when the workflow is cancelled
@@ -243,7 +237,6 @@ jobs:
           needs.linux.result != 'success' ||
           needs.compatibility.result != 'success' ||
           needs.nightly.result != 'success' ||
-          needs.test.result != 'success' ||
-          needs.zizmor.result != 'success'
+          needs.test.result != 'success'
         run: exit 1
       - run: echo "All CI jobs completed successfully"
