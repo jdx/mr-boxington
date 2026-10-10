@@ -560,42 +560,38 @@ pub fn observe(name: &str, heavy: bool) {
             let binary_id = &observation.binary;
             let test = &observation.test;
             assert!(test.contains(name), "{test:?} does not identify {name}");
-            let history = histories
-                .iter()
-                .find(|(file, entry)| {
-                    let key = entry["binary"].as_str().unwrap_or_default();
-                    file == &history_file_name(key)
-                        && key.rsplit('/').next() == Some(binary_id.as_str())
-                        && entry["test"] == test.as_str()
-                })
-                .unwrap_or_else(|| {
-                    panic!("missing per-test history for {binary_id}/{test}: {histories:?}")
-                });
-            let binary_key = history.1["binary"].as_str().unwrap();
-            assert_eq!(history.0, history_file_name(binary_key));
-            let history = &history.1;
-            peaks.insert(
-                name,
-                history["peak"].as_u64().expect("recorded peak memory"),
-            );
-            if root
-                .ancestors()
-                .any(|ancestor| ancestor.join(".git").exists())
-            {
-                let (repo_id, history_id) = binary_key
-                    .split_once('/')
-                    .expect("Git checkout history key must include repo identity");
+            let binary_key = history_binary_key(&root, binary_id);
+            if let Some((repo_id, history_id)) = binary_key.split_once('/') {
                 assert_eq!(repo_id.len(), 12, "repo identity is not 12 hex chars");
                 assert!(repo_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
                 assert_eq!(history_id, binary_id);
             } else {
-                assert_eq!(binary_key, binary_id);
+                assert_eq!(binary_key, *binary_id);
             }
+            let history_name = history_file_name(&binary_key);
+            let test_hash = history_test_hash(test);
+            let history = histories
+                .iter()
+                .find(|history| {
+                    history.name == history_name
+                        && history.binary_tag == history_binary_tag(&binary_key)
+                        && history
+                            .records
+                            .iter()
+                            .any(|record| record.hash == test_hash)
+                })
+                .unwrap_or_else(|| {
+                    panic!("missing per-test history for {binary_id}/{test}: {histories:?}")
+                });
+            let history = history
+                .records
+                .iter()
+                .find(|record| record.hash == test_hash)
+                .unwrap();
+            peaks.insert(name, history.peak);
+            assert!(history.cores > 0, "history did not record a core count");
             if name == "unit_heavy" {
-                assert!(
-                    history["peak"].as_u64().unwrap_or_default() > 200 * 1024 * 1024,
-                    "{history}"
-                );
+                assert!(history.peak > 200 * 1024 * 1024, "{history:?}");
             }
         }
         assert!(
@@ -698,26 +694,102 @@ pub fn observe(name: &str, heavy: bool) {
 
     fn history_file_name(binary: &str) -> String {
         let digest = Sha256::digest(binary.as_bytes());
-        format!("{}.jsonl", &hex::encode(digest)[..16])
+        format!("{}.hist", hex::encode(&digest[..8]))
     }
 
-    fn history_entries(cache: &Path) -> Vec<(String, Value)> {
+    fn history_test_hash(test: &str) -> u64 {
+        let digest = Sha256::digest(test.as_bytes());
+        u64::from_le_bytes(digest[..8].try_into().unwrap())
+    }
+
+    fn history_binary_tag(binary: &str) -> u64 {
+        let digest = Sha256::digest(binary.as_bytes());
+        u64::from_le_bytes(digest[8..16].try_into().unwrap())
+    }
+
+    fn history_binary_key(workspace_root: &Path, binary_id: &str) -> String {
+        let Some(checkout) = workspace_root
+            .ancestors()
+            .find(|directory| directory.join(".git").exists())
+        else {
+            return binary_id.to_owned();
+        };
+        let dot_git = checkout.join(".git");
+        let common = if dot_git.is_dir() {
+            dot_git
+        } else {
+            let pointer = fs::read_to_string(&dot_git).unwrap();
+            let git_dir = checkout.join(pointer.strip_prefix("gitdir:").unwrap().trim());
+            match fs::read_to_string(git_dir.join("commondir")) {
+                Ok(common) => git_dir.join(common.trim()),
+                Err(_) => git_dir,
+            }
+        }
+        .canonicalize()
+        .unwrap();
+        let digest = Sha256::digest(common.as_os_str().as_encoded_bytes());
+        format!("{}/{}", hex::encode(&digest[..6]), binary_id)
+    }
+
+    fn read_history_u64(bytes: &[u8]) -> u64 {
+        u64::from_le_bytes(bytes.try_into().unwrap())
+    }
+
+    #[derive(Debug)]
+    struct HistoryRecord {
+        hash: u64,
+        peak: u64,
+        cores: u64,
+    }
+
+    #[derive(Debug)]
+    struct HistoryFile {
+        name: String,
+        binary_tag: u64,
+        records: Vec<HistoryRecord>,
+    }
+
+    fn history_entries(cache: &Path) -> Vec<HistoryFile> {
         let dir = cache.join("scheduler/tests");
         let mut entries = Vec::new();
         for file in fs::read_dir(dir).unwrap() {
             let file = file.unwrap().path();
-            if file
-                .extension()
-                .is_none_or(|extension| extension != "jsonl")
-            {
+            if file.extension().is_none_or(|extension| extension != "hist") {
                 continue;
             }
-            for line in fs::read_to_string(&file).unwrap().lines() {
-                entries.push((
-                    file.file_name().unwrap().to_string_lossy().into_owned(),
-                    serde_json::from_str(line).unwrap(),
-                ));
-            }
+            let bytes = fs::read(&file).unwrap();
+            assert!(bytes.len() >= 32, "short history file: {}", file.display());
+            assert_eq!(&bytes[..8], b"mbxtest\x01");
+            assert_eq!(
+                (bytes.len() - 32) % 24,
+                0,
+                "partial record in {}",
+                file.display()
+            );
+            let max_peak = read_history_u64(&bytes[16..24]);
+            let max_cores = read_history_u64(&bytes[24..32]);
+            let records: Vec<_> = bytes[32..]
+                .chunks_exact(24)
+                .map(|record| HistoryRecord {
+                    hash: read_history_u64(&record[..8]),
+                    peak: read_history_u64(&record[8..16]),
+                    cores: read_history_u64(&record[16..24]),
+                })
+                .collect();
+            assert_eq!(
+                records.iter().map(|record| record.peak).max().unwrap_or(0),
+                max_peak
+            );
+            assert_eq!(
+                records.iter().map(|record| record.cores).max().unwrap_or(0),
+                max_cores
+            );
+            assert!(records.windows(2).all(|pair| pair[0].hash < pair[1].hash));
+            entries.push(HistoryFile {
+                name: file.file_name().unwrap().to_string_lossy().into_owned(),
+                binary_tag: read_history_u64(&bytes[8..16]),
+                records,
+            });
         }
         entries
     }

@@ -53,7 +53,7 @@ use eyre::{Context, Result};
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::OnceLock;
@@ -76,6 +76,12 @@ const LEDGER_FILE: &str = "memory.json";
 const LEDGER_LOCK: &str = "memory.lock";
 /// Per-test history, kept apart from the shared suite ledger.
 const TEST_HISTORY_DIR: &str = "tests";
+/// Magic and version for the compact per-test history format.
+const TEST_HISTORY_MAGIC: &[u8; 8] = b"mbxtest\x01";
+/// Bytes in a per-test history header.
+const TEST_HISTORY_HEADER_LEN: u64 = 32;
+/// Bytes in one per-test history record.
+const TEST_HISTORY_RECORD_LEN: u64 = 24;
 /// Lock serializing per-test history updates, for every binary at once.
 ///
 /// One lock rather than one per history file, because a lock file can never
@@ -229,7 +235,7 @@ pub(crate) struct Demand {
     /// measurements: a release link's peaks must not stand in for a dev
     /// link that has none of its own yet.
     profile: Option<String>,
-    /// A nextest test whose measurements belong in its separate JSONL store.
+    /// A nextest test whose measurements belong in its separate history file.
     per_test: Option<TestIdentity>,
 }
 
@@ -518,16 +524,17 @@ pub(crate) fn prune_test_history(cache_dir: &Path) {
     if !lock.try_lock().is_ok_and(|taken| taken) {
         return;
     }
-    for path in entries.flatten().map(|entry| entry.path()) {
-        let history = path
-            .extension()
-            .is_some_and(|extension| extension == OsStr::new("jsonl"));
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let path = entry.path();
         let stale = std::fs::metadata(&path)
             .and_then(|metadata| metadata.modified())
             .ok()
             .and_then(|modified| modified.elapsed().ok())
             .is_some_and(|age| age > FLIGHT_MAX_AGE);
-        if history && stale {
+        if stale {
             let _ = std::fs::remove_file(&path);
         }
     }
@@ -606,30 +613,28 @@ struct MemoryLedger {
     profile_link_peaks: BTreeMap<String, Vec<u64>>,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct TestMeasurement {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     peak: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     cores: Option<u64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct TestHistoryLine {
-    binary: String,
-    test: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    peak: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    cores: Option<u64>,
+#[derive(Debug, Clone, Copy, Default)]
+struct TestHistoryHeader {
+    count: u64,
+    maximum: TestMeasurement,
 }
 
-#[derive(Debug, Default)]
-struct TestHistory {
-    tests: BTreeMap<String, TestMeasurement>,
-    /// Other keys with the same shortened hash, retained during compaction.
-    foreign: BTreeMap<(String, String), TestMeasurement>,
-    lines: usize,
+#[derive(Debug, Clone, Copy, Default)]
+struct TestHistoryLookup {
+    test: Option<TestMeasurement>,
+    header: TestHistoryHeader,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TestHistoryRecord {
+    hash: u64,
+    measurement: TestMeasurement,
 }
 
 /// The machine-wide permit pool one process draws from.
@@ -982,35 +987,14 @@ impl Pool {
     fn plan(&self, demand: &Demand) -> (u64, Option<u64>) {
         if let Some(identity) = &demand.per_test {
             let path = test_history_path(&self.dir.join(TEST_HISTORY_DIR), &identity.binary);
-            let history = read_test_history(&path, &identity.binary);
-            if !history.tests.is_empty() {
+            let history = lookup_test_history(&path, &identity.binary, &identity.test);
+            if history.header.count > 0 {
                 refresh_test_history(&path);
             }
-            identity.known.set(Some(
-                history
-                    .tests
-                    .get(&identity.test)
-                    .copied()
-                    .unwrap_or_default(),
-            ));
-            let measurement = history.tests.get(&identity.test).copied().or_else(|| {
-                (!history.tests.is_empty()).then(|| {
-                    history.tests.values().fold(
-                        TestMeasurement::default(),
-                        |mut maximum, measurement| {
-                            maximum.peak = match (maximum.peak, measurement.peak) {
-                                (Some(left), Some(right)) => Some(left.max(right)),
-                                (left, right) => left.or(right),
-                            };
-                            maximum.cores = match (maximum.cores, measurement.cores) {
-                                (Some(left), Some(right)) => Some(left.max(right)),
-                                (left, right) => left.or(right),
-                            };
-                            maximum
-                        },
-                    )
-                })
-            });
+            identity.known.set(Some(history.test.unwrap_or_default()));
+            let measurement = history
+                .test
+                .or_else(|| (history.header.count > 0).then_some(history.header.maximum));
             let cores = measurement
                 .and_then(|measurement| measurement.cores)
                 .unwrap_or(1)
@@ -1297,7 +1281,7 @@ impl Pool {
     /// entirely when nothing measured exceeds what planning found.
     ///
     /// Most runs of most tests raise nothing, and every test in a run would
-    /// otherwise queue on the one history lock to parse its binary's file.
+    /// otherwise queue on the one history lock to read its binary's file.
     /// A value another process raised since planning is caught under the
     /// lock, which is where the comparison is repeated.
     fn record_test_measurement(
@@ -1334,44 +1318,39 @@ impl Pool {
         let mut lock = fslock::LockFile::open(&self.dir.join(TEST_HISTORY_LOCK))?;
         lock.lock()?;
 
-        let mut history = read_test_history(&path, binary);
-        let current = history.tests.get(test).copied().unwrap_or_default();
-        let raised_peak = peak.filter(|value| current.peak.is_none_or(|known| *value > known));
-        let raised_cores = cores.filter(|value| current.cores.is_none_or(|known| *value > known));
-        if raised_peak.is_none() && raised_cores.is_none() {
+        let hash = test_history_hash(test);
+        let mut records = read_test_history_records(&path, binary);
+        let position = records.binary_search_by_key(&hash, |record| record.hash);
+        let current = position
+            .as_ref()
+            .ok()
+            .map(|index| records[*index].measurement)
+            .unwrap_or_default();
+        let updated = raise_measurement(
+            current,
+            TestMeasurement {
+                peak: peak.filter(|value| *value > 0),
+                cores: cores.filter(|value| *value > 0),
+            },
+        );
+        if updated == current {
             return Ok(());
         }
 
-        let line = TestHistoryLine {
-            binary: binary.to_owned(),
-            test: test.to_owned(),
-            peak: raised_peak,
-            cores: raised_cores,
-        };
-        let mut contents = serde_json::to_vec(&line)?;
-        contents.push(b'\n');
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .wrap_err_with(|| format!("failed to append to {}", path.display()))?;
-        std::io::Write::write_all(&mut file, &contents)?;
-        drop(file);
-
-        let updated = history.tests.entry(test.to_owned()).or_default();
-        if let Some(peak) = raised_peak {
-            updated.peak = Some(peak);
+        match position {
+            Ok(index) => records[index].measurement = updated,
+            Err(index) => records.insert(
+                index,
+                TestHistoryRecord {
+                    hash,
+                    measurement: updated,
+                },
+            ),
         }
-        if let Some(cores) = raised_cores {
-            updated.cores = Some(cores);
-        }
-        history.lines += 1;
-        let capped = enforce_test_history_cap(&mut history.tests, MAX_TEST_HISTORY_ENTRIES);
-        let distinct = history.tests.len().saturating_add(history.foreign.len());
-        let needs_compaction = history.lines > distinct.saturating_mul(2).saturating_add(64);
-        if capped || needs_compaction {
-            compact_test_history(&path, binary, &history.tests, &history.foreign)?;
-        }
+        enforce_test_history_cap(&mut records, MAX_TEST_HISTORY_ENTRIES);
+        let contents = encode_test_history(binary, &records);
+        crate::util::write_advisory(&path, &contents)
+            .wrap_err_with(|| format!("failed to write {}", path.display()))?;
         Ok(())
     }
 
@@ -1545,7 +1524,19 @@ fn read_ledger(path: &Path) -> MemoryLedger {
 fn test_history_path(dir: &Path, binary: &str) -> PathBuf {
     use sha2::Digest as _;
     let digest = sha2::Sha256::digest(binary.as_bytes());
-    dir.join(format!("{}.jsonl", &hex::encode(digest)[..16]))
+    dir.join(format!("{}.hist", hex::encode(&digest[..8])))
+}
+
+fn test_history_hash(test: &str) -> u64 {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(test.as_bytes());
+    u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 has eight bytes"))
+}
+
+fn test_history_binary_tag(binary: &str) -> u64 {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(binary.as_bytes());
+    u64::from_le_bytes(digest[8..16].try_into().expect("SHA-256 has sixteen bytes"))
 }
 
 /// Mark a history file as still in use, at most once per
@@ -1566,102 +1557,216 @@ fn refresh_test_history(path: &Path) {
     }
 }
 
-fn read_test_history(path: &Path, binary: &str) -> TestHistory {
-    let Ok(contents) = std::fs::read(path) else {
-        return TestHistory::default();
-    };
-    let contents = String::from_utf8_lossy(&contents);
-    let mut history = TestHistory {
-        lines: contents.lines().count(),
-        ..TestHistory::default()
-    };
-    for line in contents.lines() {
-        let Ok(entry) = serde_json::from_str::<TestHistoryLine>(line) else {
-            continue;
-        };
-        if entry.binary == binary {
-            let known = history.tests.entry(entry.test).or_default();
-            fold_measurement(
-                known,
-                TestMeasurement {
-                    peak: entry.peak,
-                    cores: entry.cores,
-                },
-            );
-        } else {
-            let known = history
-                .foreign
-                .entry((entry.binary, entry.test))
-                .or_default();
-            fold_measurement(
-                known,
-                TestMeasurement {
-                    peak: entry.peak,
-                    cores: entry.cores,
-                },
-            );
-        }
+fn parse_test_history_header(
+    bytes: &[u8],
+    file_len: u64,
+    binary: &str,
+) -> Option<TestHistoryHeader> {
+    if bytes.len() != TEST_HISTORY_HEADER_LEN as usize
+        || file_len < TEST_HISTORY_HEADER_LEN
+        || &bytes[..8] != TEST_HISTORY_MAGIC
+        || read_u64(&bytes[8..16]) != test_history_binary_tag(binary)
+    {
+        return None;
     }
-    enforce_test_history_cap(&mut history.tests, MAX_TEST_HISTORY_ENTRIES);
-    history
+    Some(TestHistoryHeader {
+        count: (file_len - TEST_HISTORY_HEADER_LEN) / TEST_HISTORY_RECORD_LEN,
+        maximum: TestMeasurement {
+            peak: nonzero(read_u64(&bytes[16..24])),
+            cores: nonzero(read_u64(&bytes[24..32])),
+        },
+    })
 }
 
-fn enforce_test_history_cap(tests: &mut BTreeMap<String, TestMeasurement>, limit: usize) -> bool {
+fn read_test_history_header(file: &File, binary: &str) -> Option<TestHistoryHeader> {
+    let file_len = file.metadata().ok()?.len();
+    if file_len < TEST_HISTORY_HEADER_LEN {
+        return None;
+    }
+    let mut bytes = [0; TEST_HISTORY_HEADER_LEN as usize];
+    read_exact_at(file, &mut bytes, 0).ok()?;
+    parse_test_history_header(&bytes, file_len, binary)
+}
+
+fn lookup_test_history(path: &Path, binary: &str, test: &str) -> TestHistoryLookup {
+    let Ok(file) = File::open(path) else {
+        return TestHistoryLookup::default();
+    };
+    let Some(header) = read_test_history_header(&file, binary) else {
+        return TestHistoryLookup::default();
+    };
+
+    let hash = test_history_hash(test);
+    let mut low = 0;
+    let mut high = header.count;
+    let mut found = None;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let offset = TEST_HISTORY_HEADER_LEN + middle * TEST_HISTORY_RECORD_LEN;
+        let mut bytes = [0; TEST_HISTORY_RECORD_LEN as usize];
+        if read_exact_at(&file, &mut bytes, offset).is_err() {
+            break;
+        }
+        let record = decode_test_history_record(&bytes);
+        match record.hash.cmp(&hash) {
+            std::cmp::Ordering::Less => low = middle + 1,
+            std::cmp::Ordering::Greater => high = middle,
+            std::cmp::Ordering::Equal => {
+                found = Some(record.measurement);
+                break;
+            }
+        }
+    }
+    TestHistoryLookup {
+        test: found,
+        header,
+    }
+}
+
+fn read_test_history_records(path: &Path, binary: &str) -> Vec<TestHistoryRecord> {
+    let Ok(contents) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    let Some(header) = contents
+        .get(..TEST_HISTORY_HEADER_LEN as usize)
+        .and_then(|bytes| parse_test_history_header(bytes, contents.len() as u64, binary))
+    else {
+        return Vec::new();
+    };
+
+    let mut records: Vec<_> = contents[TEST_HISTORY_HEADER_LEN as usize..]
+        .chunks_exact(TEST_HISTORY_RECORD_LEN as usize)
+        .take(header.count as usize)
+        .map(decode_test_history_record)
+        .collect();
+    records.sort_unstable_by_key(|record| record.hash);
+    let mut unique: Vec<TestHistoryRecord> = Vec::with_capacity(records.len());
+    for record in records {
+        if let Some(previous) = unique
+            .last_mut()
+            .filter(|previous| previous.hash == record.hash)
+        {
+            previous.measurement = raise_measurement(previous.measurement, record.measurement);
+        } else {
+            unique.push(record);
+        }
+    }
+    unique
+}
+
+fn decode_test_history_record(bytes: &[u8]) -> TestHistoryRecord {
+    TestHistoryRecord {
+        hash: read_u64(&bytes[..8]),
+        measurement: TestMeasurement {
+            peak: nonzero(read_u64(&bytes[8..16])),
+            cores: nonzero(read_u64(&bytes[16..24])),
+        },
+    }
+}
+
+fn encode_test_history(binary: &str, records: &[TestHistoryRecord]) -> Vec<u8> {
+    let maximum = records
+        .iter()
+        .fold(TestMeasurement::default(), |maximum, record| {
+            raise_measurement(maximum, record.measurement)
+        });
+    let mut bytes = Vec::with_capacity(
+        TEST_HISTORY_HEADER_LEN as usize + records.len() * TEST_HISTORY_RECORD_LEN as usize,
+    );
+    bytes.extend_from_slice(TEST_HISTORY_MAGIC);
+    bytes.extend_from_slice(&test_history_binary_tag(binary).to_le_bytes());
+    bytes.extend_from_slice(&maximum.peak.unwrap_or(0).to_le_bytes());
+    bytes.extend_from_slice(&maximum.cores.unwrap_or(0).to_le_bytes());
+    for record in records {
+        bytes.extend_from_slice(&record.hash.to_le_bytes());
+        bytes.extend_from_slice(&record.measurement.peak.unwrap_or(0).to_le_bytes());
+        bytes.extend_from_slice(&record.measurement.cores.unwrap_or(0).to_le_bytes());
+    }
+    bytes
+}
+
+fn read_u64(bytes: &[u8]) -> u64 {
+    u64::from_le_bytes(bytes.try_into().expect("history field is eight bytes"))
+}
+
+fn nonzero(value: u64) -> Option<u64> {
+    (value != 0).then_some(value)
+}
+
+#[cfg(unix)]
+fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::unix::fs::FileExt as _;
+    file.read_at(buffer, offset)
+}
+
+#[cfg(windows)]
+fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::windows::fs::FileExt as _;
+    file.seek_read(buffer, offset)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut file = file.try_clone()?;
+    file.seek(SeekFrom::Start(offset))?;
+    file.read(buffer)
+}
+
+fn read_exact_at(file: &File, mut buffer: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    while !buffer.is_empty() {
+        match read_at(file, buffer, offset) {
+            Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+            Ok(read) => {
+                offset = offset
+                    .checked_add(read as u64)
+                    .ok_or(std::io::ErrorKind::InvalidInput)?;
+                buffer = &mut buffer[read..];
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn enforce_test_history_cap(records: &mut Vec<TestHistoryRecord>, limit: usize) -> bool {
     let mut capped = false;
-    while tests.len() > limit {
-        let smallest = tests
+    while records.len() > limit {
+        let smallest = records
             .iter()
-            .min_by(|(left_name, left), (right_name, right)| {
-                left.peak
+            .enumerate()
+            .min_by(|(_, left), (_, right)| {
+                left.measurement
+                    .peak
                     .unwrap_or(0)
-                    .cmp(&right.peak.unwrap_or(0))
-                    .then_with(|| left.cores.unwrap_or(0).cmp(&right.cores.unwrap_or(0)))
-                    .then_with(|| left_name.cmp(right_name))
+                    .cmp(&right.measurement.peak.unwrap_or(0))
+                    .then_with(|| {
+                        left.measurement
+                            .cores
+                            .unwrap_or(0)
+                            .cmp(&right.measurement.cores.unwrap_or(0))
+                    })
+                    .then_with(|| left.hash.cmp(&right.hash))
             })
-            .map(|(name, _)| name.clone())
+            .map(|(index, _)| index)
             .expect("an overfull test history has entries");
-        tests.remove(&smallest);
+        records.remove(smallest);
         capped = true;
     }
     capped
 }
 
-fn compact_test_history(
-    path: &Path,
-    binary: &str,
-    tests: &BTreeMap<String, TestMeasurement>,
-    foreign: &BTreeMap<(String, String), TestMeasurement>,
-) -> Result<()> {
-    let mut contents = Vec::new();
-    for ((binary, test), measurement) in foreign {
-        let entry = TestHistoryLine {
-            binary: binary.clone(),
-            test: test.clone(),
-            peak: measurement.peak,
-            cores: measurement.cores,
-        };
-        contents.extend(serde_json::to_vec(&entry)?);
-        contents.push(b'\n');
-    }
-    for (test, measurement) in tests {
-        let entry = TestHistoryLine {
-            binary: binary.to_owned(),
-            test: test.to_owned(),
-            peak: measurement.peak,
-            cores: measurement.cores,
-        };
-        contents.extend(serde_json::to_vec(&entry)?);
-        contents.push(b'\n');
-    }
-    crate::util::write_advisory(path, &contents)
-}
-
-fn fold_measurement(current: &mut TestMeasurement, incoming: TestMeasurement) {
-    if let Some(peak) = incoming.peak {
-        current.peak = Some(current.peak.map_or(peak, |value| value.max(peak)));
-    }
-    if let Some(cores) = incoming.cores {
-        current.cores = Some(current.cores.map_or(cores, |value| value.max(cores)));
+fn raise_measurement(current: TestMeasurement, incoming: TestMeasurement) -> TestMeasurement {
+    TestMeasurement {
+        peak: match (current.peak, incoming.peak) {
+            (Some(current), Some(incoming)) => Some(current.max(incoming)),
+            (current, incoming) => current.or(incoming),
+        },
+        cores: match (current.cores, incoming.cores) {
+            (Some(current), Some(incoming)) => Some(current.max(incoming)),
+            (current, incoming) => current.or(incoming),
+        },
     }
 }
 
