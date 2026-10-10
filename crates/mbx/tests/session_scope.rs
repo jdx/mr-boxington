@@ -491,6 +491,62 @@ fn main() {
     }
 }
 
+/// nextest's `-j` is its test-thread count, and an alias that names nextest
+/// must be read as nextest: only `--build-jobs` limits the build's permits.
+#[cfg(unix)]
+#[test]
+fn nextest_test_threads_do_not_limit_build_permits_through_an_alias() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    project(root.path(), "fn main() {}\n");
+    std::fs::create_dir_all(root.path().join(".cargo")).unwrap();
+    std::fs::write(
+        root.path().join(".cargo/config.toml"),
+        "[alias]\nnt = \"nextest run\"\n",
+    )
+    .unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let program = bin.join("cargo-nextest");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\nprintf '%s' \"$MBX_SCHED_BUILD_SLOTS\" > \"$SLOTS_FILE\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let slots = root.path().join("slots");
+    for (typed, expected) in [
+        (&["nextest", "run", "-j", "1"][..], "8"),
+        (&["nt", "-j", "1"], "8"),
+        (&["nt", "--test-threads=1"], "8"),
+        (&["nt", "--build-jobs", "2"], "2"),
+    ] {
+        let _ = std::fs::remove_file(&slots);
+        let output = mbx(root.path())
+            .env("PATH", &path)
+            .env("SLOTS_FILE", &slots)
+            .env("MBX_SCHEDULER", "1")
+            .env("MBX_SCHEDULER_CPUS", "8")
+            .args(typed)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{typed:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&slots).unwrap(),
+            expected,
+            "{typed:?}"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn launch_preserves_non_unicode_environment_and_temporary_paths_with_spaces() {

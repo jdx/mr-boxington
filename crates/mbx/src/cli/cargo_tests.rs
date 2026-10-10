@@ -275,6 +275,56 @@ fn cargo_jobs_follow_cargo_cli_and_environment_precedence() {
 }
 
 #[test]
+fn nextest_test_threads_are_not_cargo_jobs() {
+    let args = |values: &[&str]| {
+        values
+            .iter()
+            .map(|value| (*value).into())
+            .collect::<Vec<_>>()
+    };
+
+    for threads in [
+        &["nextest", "run", "-j", "4"][..],
+        &["nextest", "run", "-j4"],
+        &["nextest", "run", "--jobs", "4"],
+        &["nextest", "run", "--jobs=4"],
+        &["nextest", "run", "--test-threads", "4"],
+    ] {
+        assert_eq!(
+            cargo_job_limit_with(&args(threads), Some("3"), 12),
+            Some(3),
+            "{threads:?} sets nextest's test threads, not Cargo's jobs"
+        );
+        assert_eq!(cargo_job_limit_with(&args(threads), None, 12), None);
+    }
+    assert_eq!(
+        cargo_job_limit_with(
+            &args(&["nextest", "run", "--build-jobs", "2"]),
+            Some("3"),
+            12
+        ),
+        Some(2)
+    );
+    assert_eq!(
+        cargo_job_limit_with(
+            &args(&["nextest", "run", "--build-jobs=-2", "-j", "1"]),
+            None,
+            12
+        ),
+        Some(10)
+    );
+    assert_eq!(
+        cargo_job_limit_with(
+            &args(&["nextest", "run", "--", "--build-jobs", "2"]),
+            None,
+            12
+        ),
+        None,
+        "test-harness arguments are not nextest options"
+    );
+}
+
+#[test]
 fn cargo_help_does_not_trigger_target_migration() {
     assert!(cargo_help_requested(&["build".into(), "--help".into()]));
     assert!(cargo_help_requested(&["help".into(), "build".into()]));

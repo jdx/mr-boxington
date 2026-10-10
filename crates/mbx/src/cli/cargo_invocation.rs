@@ -141,13 +141,21 @@ fn config_override(arguments: &[OsString]) -> bool {
 /// and a lane is chosen on every run, so reading configuration for it would
 /// cost a lookup on the path this exists to keep short. Only a shorthand such
 /// as `c` or a configured alias reads configuration.
+///
+/// Cargo is never asked to classify what the expansion leaves. Its listing
+/// answers what kind of command that is, which no caller here needs, and an
+/// alias the configuration could not show is refused either way: the
+/// listing refuses it, and without the listing it stays unexpanded, so the
+/// caller sees the typed alias name rather than any command it might stand
+/// for. Skipping the listing keeps a `cargo --list` off every run of an
+/// external command such as `cargo nextest`.
 pub(super) fn expanded_arguments(cargo: &OsStr, arguments: &[String]) -> Option<Vec<String>> {
     let typed = super::launch::cargo_subcommand(arguments)?;
     if builtin(typed) || typed == "clippy" {
         return Some(arguments.to_vec());
     }
     let typed_arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
-    let resolved = super::strings(&resolve(cargo, &typed_arguments)?.arguments).ok()?;
+    let resolved = super::strings(&resolve_with(cargo, &typed_arguments, false)?.arguments).ok()?;
     // An expansion that brings its own `--` would hand a flag added after the
     // alias to the compiler rather than to Cargo.
     let separator = |arguments: &[String]| arguments.iter().any(|argument| argument == "--");
@@ -158,6 +166,12 @@ pub(super) fn expanded_arguments(cargo: &OsStr, arguments: &[String]) -> Option<
 }
 
 pub(super) fn resolve(cargo: &OsStr, arguments: &[OsString]) -> Option<Invocation> {
+    resolve_with(cargo, arguments, true)
+}
+
+/// Expand aliases, then, when `classify` is set, ask Cargo's listing what kind
+/// of command remains. Without it, what remains is [`Kind::Unknown`].
+fn resolve_with(cargo: &OsStr, arguments: &[OsString], classify: bool) -> Option<Invocation> {
     let mut arguments = arguments.to_vec();
     let mut aliases = None;
     let mut expanded = BTreeSet::new();
@@ -229,6 +243,12 @@ pub(super) fn resolve(cargo: &OsStr, arguments: &[OsString]) -> Option<Invocatio
         }
         if expanded.contains(command) {
             return None;
+        }
+        if !classify {
+            return Some(Invocation {
+                arguments,
+                kind: Kind::Unknown,
+            });
         }
         // Only classification comes from the listing. If Cargo sees an alias
         // our supported configuration did not, refuse rather than interpreting
