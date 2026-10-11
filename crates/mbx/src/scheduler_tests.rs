@@ -1433,6 +1433,17 @@ fn nextest_plan_clamps_heavy_measurements_to_pool_capacity() {
     assert_eq!(pool.plan(&Demand::nextest("bin", "heavy")), (4, Some(900)));
 }
 
+/// Set a file's modification time. Opened for writing, because Windows
+/// refuses to change the times of a file opened read-only.
+fn backdate(path: &Path, time: std::time::SystemTime) {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(time))
+        .unwrap();
+}
+
 #[test]
 fn nextest_history_pruning_removes_old_regular_files() {
     use std::time::{Duration, SystemTime};
@@ -1448,14 +1459,8 @@ fn nextest_history_pruning_removes_old_regular_files() {
     std::fs::write(&legacy, b"old\n").unwrap();
     std::fs::write(&recent, b"new\n").unwrap();
     let old = SystemTime::now() - FLIGHT_MAX_AGE - Duration::from_secs(1);
-    std::fs::File::open(&stale)
-        .unwrap()
-        .set_times(std::fs::FileTimes::new().set_modified(old))
-        .unwrap();
-    std::fs::File::open(&legacy)
-        .unwrap()
-        .set_times(std::fs::FileTimes::new().set_modified(old))
-        .unwrap();
+    backdate(&stale, old);
+    backdate(&legacy, old);
 
     // A writer holding the history lock keeps even stale history for now.
     let mut held = fslock::LockFile::open(&scheduler.join(TEST_HISTORY_LOCK)).unwrap();
@@ -1491,10 +1496,7 @@ fn planning_keeps_history_a_stable_suite_still_uses_from_looking_unused() {
             .unwrap_or_default()
     };
     let old = SystemTime::now() - FLIGHT_MAX_AGE + Duration::from_secs(60);
-    std::fs::File::open(&path)
-        .unwrap()
-        .set_times(std::fs::FileTimes::new().set_modified(old))
-        .unwrap();
+    backdate(&path, old);
 
     pool.plan(&Demand::nextest("bin", "case"));
     assert!(age(&path) < TEST_HISTORY_REFRESH);
