@@ -167,6 +167,15 @@ pub(crate) fn is_shim_directory(directory: &Path) -> bool {
     directory.join(SHIM_DIR_MARKER).is_file()
 }
 
+/// The binary the native shims link to: the running executable with symlinks
+/// resolved. The native directory is keyed by this path, so its links must
+/// point there too; a link to a launch alias would be written over the real
+/// path's shims and dangle once the alias went away.
+pub(super) fn native_shim_target() -> Result<PathBuf> {
+    let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
+    Ok(std::fs::canonicalize(&executable).unwrap_or(executable))
+}
+
 /// Install the C and C++ shims, resolving the compilers they will run.
 ///
 /// Resolution happens here rather than in the shim so the whole build agrees on
@@ -176,11 +185,7 @@ pub(super) fn install_cc_shims(shims_dir: &Path) -> Result<Option<CcShims>> {
     if !cfg!(any(unix, windows)) {
         return Ok(None);
     }
-    let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
-    // The directory is keyed by the resolved path, so its links must point
-    // there too: a link to a launch alias would be written over the real
-    // path's shims and dangle once the alias went away.
-    let executable = std::fs::canonicalize(&executable).unwrap_or(executable);
+    let executable = native_shim_target()?;
     // Before anything resolves a compiler: the lookups below skip directories
     // mbx owns, and this one qualifies as soon as a shim lands in it.
     std::fs::create_dir_all(shims_dir)?;

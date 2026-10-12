@@ -10,7 +10,9 @@
 //! whichever compiler CMake settles on is cached: one an existing build
 //! directory recorded without mbx, or one the build named itself.
 
-use super::shims::{CcShims, is_target_triple, link_path_shim, resolve_on_path};
+use super::shims::{
+    CcShims, is_target_triple, link_path_shim, native_shim_target, resolve_on_path,
+};
 use super::{
     pin_names_a_compiler, record_cc_bypass, reserve_stderr_for_compiler, run_transparent_cc,
     session_socket,
@@ -37,7 +39,7 @@ pub(super) fn environment(
     compilers: &CcShims,
     build_environment: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>> {
-    let executable = std::env::current_exe()?;
+    let executable = native_shim_target()?;
     let mut environment = BTreeMap::new();
     let mut programs = BTreeMap::new();
     let mut choices: BTreeMap<_, _> = std::env::vars()
@@ -111,7 +113,7 @@ pub(super) fn exec_arguments(
     if !is_cmake(program) || !configures(arguments) {
         return Ok(());
     }
-    install_launchers(directory, &std::env::current_exe()?)?;
+    install_launchers(directory, &native_shim_target()?)?;
     environment.extend(add_launchers(arguments, directory, &LAUNCHERS));
     Ok(())
 }
