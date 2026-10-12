@@ -528,6 +528,7 @@ impl RustcInvocation {
         paths.extend(self.required_inputs.iter().map(absolute));
         let admitted_roots = native_input_roots(&working_dir, path_mappings.unwrap_or_default());
         let mut native_bytes = 0_u64;
+        let mut counted = BTreeSet::new();
         for argument in &self.arguments {
             if path_mappings.is_some()
                 && let Argument::SearchPath { kind, path } = argument
@@ -543,6 +544,7 @@ impl RustcInvocation {
                     &admitted_roots,
                     &mut paths,
                     &mut native_bytes,
+                    &mut counted,
                 )?;
             }
         }
@@ -582,11 +584,14 @@ pub(super) fn native_input_roots(
 
 /// Add regular files beneath an admitted native search directory, enforcing
 /// the prediction input count and the caller's cumulative native byte budget.
+/// `counted` holds the files already charged to that budget, so overlapping
+/// walks charge each file once even when `paths` already names it.
 pub(super) fn collect_native_directory(
     directory: &Path,
     admitted_roots: &[PathBuf],
     paths: &mut BTreeSet<PathBuf>,
     native_bytes: &mut u64,
+    counted: &mut BTreeSet<PathBuf>,
 ) -> Result<(), BypassReason> {
     let directory = normalize_components(directory);
     if !admitted_roots
@@ -654,7 +659,8 @@ pub(super) fn collect_native_directory(
                 // A directory named by several `-L native=` arguments, or nested
                 // under another one, is walked more than once; count each file
                 // against the budget only the first time it is seen.
-                if paths.insert(path) {
+                paths.insert(path.clone());
+                if counted.insert(path) {
                     *native_bytes = native_bytes
                         .checked_add(len)
                         .ok_or_else(|| BypassReason::UnsupportedSearchPath("native".into()))?;
@@ -798,9 +804,10 @@ mod tests {
         let roots = native_input_roots(directory.path(), &[]);
         let mut paths = BTreeSet::new();
         let mut native_bytes = MAX_NATIVE_INPUT_BYTES - 1;
+        let mut counted = BTreeSet::new();
 
         assert_eq!(
-            collect_native_directory(&native, &roots, &mut paths, &mut native_bytes),
+            collect_native_directory(&native, &roots, &mut paths, &mut native_bytes, &mut counted),
             Err(BypassReason::UnsupportedSearchPath("native".into()))
         );
     }
@@ -815,13 +822,33 @@ mod tests {
         let roots = native_input_roots(directory.path(), &[]);
         let mut paths = BTreeSet::new();
         let mut native_bytes = 0;
+        let mut counted = BTreeSet::new();
 
         for dir in [&native, &native, &native.join("lib")] {
-            collect_native_directory(dir, &roots, &mut paths, &mut native_bytes).unwrap();
+            collect_native_directory(dir, &roots, &mut paths, &mut native_bytes, &mut counted)
+                .unwrap();
         }
 
         assert_eq!(paths.len(), 2);
         assert_eq!(native_bytes, 5);
+    }
+
+    #[test]
+    fn native_directory_charges_files_already_named_as_inputs() {
+        let directory = tempfile::tempdir().unwrap();
+        let native = directory.path().join("native");
+        std::fs::create_dir_all(&native).unwrap();
+        let archive = native.join("libfoo.a");
+        std::fs::write(&archive, b"xx").unwrap();
+        let roots = native_input_roots(directory.path(), &[]);
+        let mut paths = BTreeSet::from([archive]);
+        let mut native_bytes = 0;
+        let mut counted = BTreeSet::new();
+
+        collect_native_directory(&native, &roots, &mut paths, &mut native_bytes, &mut counted)
+            .unwrap();
+
+        assert_eq!(native_bytes, 2);
     }
 
     #[test]

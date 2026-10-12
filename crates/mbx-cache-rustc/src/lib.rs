@@ -1157,6 +1157,7 @@ impl RustcInputPrediction {
         let mut named = BTreeSet::new();
         let admitted_roots = dep_info::native_input_roots(working_dir, path_mappings);
         let mut native_bytes = 0_u64;
+        let mut counted = BTreeSet::new();
         for path in &self.inputs {
             if self.version >= 3
                 && let Some(path) = path.strip_prefix(NATIVE_DIRECTORY_PREDICTION_PREFIX)
@@ -1167,6 +1168,7 @@ impl RustcInputPrediction {
                     &admitted_roots,
                     &mut paths,
                     &mut native_bytes,
+                    &mut counted,
                 )?;
             } else {
                 let path = denormalize_path(path, path_mappings)?;
