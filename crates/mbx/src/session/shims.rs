@@ -774,8 +774,16 @@ fn superseded_binary(directory: &Path, identity: &str) -> bool {
 /// release would be one that collection could never tell was finished with:
 /// its links still resolve. Windows shims are copies, so there the binary
 /// keys them instead.
+///
+/// Symlinks are resolved first, so a binary reached through a link and
+/// through its real path is one installation. Otherwise the two spellings get
+/// two `HOST_CC` values, and every build script that tracks it reruns when a
+/// build switches between them.
 pub(super) fn installation_identity(executable: &Path) -> Result<String> {
-    let executable = std::path::absolute(executable)?;
+    let executable = match std::fs::canonicalize(executable) {
+        Ok(resolved) => resolved,
+        Err(_) => std::path::absolute(executable)?,
+    };
     Ok(CacheDigest::blake3(executable.as_os_str().as_encoded_bytes()).hash)
 }
 

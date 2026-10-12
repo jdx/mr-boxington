@@ -913,6 +913,22 @@ fn an_installation_keeps_its_identity_across_an_upgrade_in_place() {
 
 #[cfg(unix)]
 #[test]
+fn a_symlinked_binary_is_the_same_installation_as_its_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let binary = directory.path().join("mbx");
+    std::fs::write(&binary, b"release").unwrap();
+    let link = directory.path().join("link/mbx");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&binary, &link).unwrap();
+    assert_eq!(
+        installation_identity(&binary).unwrap(),
+        installation_identity(&link).unwrap(),
+        "one binary must have one HOST_CC however it is reached"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn only_shim_directories_nothing_can_use_are_collected() {
     let directory = tempfile::tempdir().unwrap();
     let shims = directory.path().join("shims");
