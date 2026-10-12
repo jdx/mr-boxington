@@ -682,12 +682,13 @@ fn is_linker_irrelevant_directory(path: &Path) -> bool {
     name == "pkgconfig" || name == "cmake" || name.ends_with(".dSYM")
 }
 
-/// Metadata and header files, which `-l` resolution never opens.
+/// pkg-config and CMake metadata. Headers stay hashed: linker scripts can
+/// `INCLUDE` files from a search path, and `+verbatim` names any file.
 fn is_linker_irrelevant_file(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
-            ["pc", "cmake", "h", "hh", "hpp", "hxx", "inc"]
+            ["pc", "cmake"]
                 .iter()
                 .any(|ignored| extension.eq_ignore_ascii_case(ignored))
         })
@@ -836,7 +837,6 @@ mod tests {
             "lib/pkgconfig/zlib.pc",
             "check.dSYM/Contents/Resources/Relocations/aarch64/check.yml",
             "cmake/Config.cmake",
-            "include/zlib.h",
             "top.pc",
         ] {
             let path = native.join(ignored);
