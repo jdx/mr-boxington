@@ -1678,6 +1678,7 @@ pub fn run_rustc_shim() -> ExitCode {
     let out_dir = std::env::var_os("OUT_DIR").map(PathBuf::from);
     let (unit_id, dependencies) = crate::unit_graph::rustc_unit(&described, out_dir.as_deref());
     crate::phase_timing::identify(unit_id, dependencies);
+    let mut bypassed = false;
     if std::env::var_os(PREVIOUS_RUSTC_WRAPPER_ENV).is_none()
         && (!is_workspace_wrapper || cacheable_workspace_wrapper)
     {
@@ -1690,11 +1691,12 @@ pub fn run_rustc_shim() -> ExitCode {
             Ok(exit_code) => return exit_code,
             Err(error) => {
                 record_bypass(&error);
+                bypassed = true;
             }
         }
     }
 
-    run_transparent_rustc(rustc, arguments, &described)
+    run_transparent_rustc(rustc, arguments, &described, bypassed)
 }
 
 /// Explicit Cargo targets must not affect host build scripts or proc macros.
@@ -1760,6 +1762,7 @@ fn run_transparent_rustc(
     rustc: OsString,
     arguments: Vec<OsString>,
     described: &[OsString],
+    bypassed: bool,
 ) -> ExitCode {
     // The compiler below may replace this process, and with it any lease on
     // a stable `OUT_DIR`; it compiles against Cargo's own tree instead.
@@ -1796,6 +1799,9 @@ fn run_transparent_rustc(
         Command::new(&rustc)
     };
     command.args(&arguments);
+    if bypassed && let Some(flag) = crate::rustc::bypassed_library_incremental_flag(described) {
+        command.arg(flag);
+    }
     command.env_remove(PREVIOUS_RUSTC_WRAPPER_ENV);
     command.env_remove(PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV);
     #[cfg(unix)]
@@ -2001,6 +2007,31 @@ pub(crate) fn compiles_only_a_binary(arguments: &[OsString]) -> bool {
         }
     }
     !types.is_empty() && types.iter().all(|kind| *kind == "bin")
+}
+
+/// Whether rustc is asked for a native library output that mbx cannot cache:
+/// a `staticlib`, `cdylib`, or `dylib`, possibly beside an `rlib`.
+pub(crate) fn compiles_an_uncacheable_library(arguments: &[OsString]) -> bool {
+    let mut types = Vec::new();
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        let value = if argument == "--crate-type" {
+            arguments.next().and_then(|value| value.to_str())
+        } else {
+            argument
+                .to_str()
+                .and_then(|argument| argument.strip_prefix("--crate-type="))
+        };
+        if let Some(value) = value {
+            types.extend(value.split(','));
+        }
+    }
+    types
+        .iter()
+        .all(|kind| matches!(*kind, "lib" | "rlib" | "staticlib" | "cdylib" | "dylib"))
+        && types
+            .iter()
+            .any(|kind| matches!(*kind, "staticlib" | "cdylib" | "dylib"))
 }
 
 /// Whether the shim should verify cached results against a real compilation.

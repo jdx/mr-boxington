@@ -1295,7 +1295,7 @@ fn learned_plan(
 /// A session gives it a persistent per-checkout root outside Cargo's target
 /// directory. A standalone shim falls back to its target directory when one is
 /// available, and compiles normally when it has nowhere to put state.
-fn incremental_directory(invocation: &CacheDigest, crate_name: &str) -> Option<PathBuf> {
+pub(crate) fn incremental_directory(invocation: &CacheDigest, crate_name: &str) -> Option<PathBuf> {
     let root = incremental_root()?;
     let key = invocation.key();
     let shard = key.get(..16)?;
@@ -1319,6 +1319,56 @@ fn incremental_directory(invocation: &CacheDigest, crate_name: &str) -> Option<P
             None
         }
     }
+}
+
+/// The incremental flag for a workspace library that mbx cannot cache.
+///
+/// A `staticlib`, `cdylib`, or `dylib` bypasses the cache before any learned
+/// plan exists, and mbx has already told Cargo not to compile incrementally,
+/// so such a crate would otherwise recompile from scratch on every edit. It
+/// never restores from the store, so settled sources have nothing to lose by
+/// keeping state, and the churn streak that gates cacheable crates has
+/// nothing to decide here.
+///
+/// Keyed on the whole argument list, which names the unit's output directory
+/// and metadata, so another profile, target, or feature set gets its own
+/// directory.
+pub(crate) fn bypassed_library_incremental_flag(arguments: &[OsString]) -> Option<OsString> {
+    if !session::learned_incremental_requested()
+        || session::verify_requested()
+        || !session::compiles_an_uncacheable_library(arguments)
+        || arguments.iter().any(|argument| {
+            argument
+                .to_str()
+                .is_some_and(|argument| argument.contains("incremental="))
+        })
+    {
+        return None;
+    }
+    // Only library crate types reach here, which a build script never has, so
+    // a library that merely shares a build script's name is still covered.
+    let crate_name = session::crate_name_argument(arguments)?;
+    let root = std::fs::canonicalize(std::env::var_os(session::WORKSPACE_ROOT_ENV)?).ok()?;
+    let working_dir = std::env::current_dir().ok()?;
+    let in_workspace = arguments.iter().any(|argument| {
+        let path = Path::new(argument);
+        path.extension().is_some_and(|extension| extension == "rs")
+            && !argument.as_encoded_bytes().starts_with(b"-")
+            && std::fs::canonicalize(working_dir.join(path))
+                .is_ok_and(|source| source.starts_with(&root))
+    });
+    if !in_workspace {
+        return None;
+    }
+    let mut identity = Vec::new();
+    for argument in arguments {
+        identity.extend_from_slice(argument.as_encoded_bytes());
+        identity.push(0);
+    }
+    let directory = incremental_directory(&CacheDigest::blake3(&identity), &crate_name)?;
+    let mut flag = OsString::from("-Cincremental=");
+    flag.push(directory);
+    Some(flag)
 }
 
 /// Make sure the unit's state directory exists and is inside its budget.

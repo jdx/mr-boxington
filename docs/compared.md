@@ -68,12 +68,14 @@ To include the test runs themselves in that budget, enable test scheduling:
 
 ```sh
 MBX_SCHEDULER_TESTS=1 mbx test --workspace
+MBX_SCHEDULER_TESTS=1 mbx nextest run --workspace
 ```
 
-Test binaries then wait for room alongside compilations. mbx accounts for
-their parallelism and, on Unix, their measured memory use; it does not force
-every suite to run its tests one at a time. To schedule tests for all your
-agents, set `scheduler.tests = true` in your [configuration](/configuration).
+Cargo test binaries and individual nextest tests wait for room alongside
+compilations. mbx accounts for their parallelism and, on Unix, their measured
+memory use; it does not force every suite to run its tests one at a time. To
+schedule tests for all your agents, set `scheduler.tests = true` in your
+[configuration](/configuration).
 
 Scheduling reduces the risk of overload; it is not a hard memory limit.
 See [Parallel builds](/scheduling) for setup and test-runner limitations.

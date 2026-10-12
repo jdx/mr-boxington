@@ -2923,6 +2923,17 @@ fn fuse_ld_is_modeled_for_native_links_only() {
     assert_eq!(invocation.fuse_ld(), Some("mold"));
 }
 
+/// An explicit `-Clinker` is inert where nothing links, so an rlib or a
+/// metadata-only check stays cacheable instead of bypassing on the option.
+#[test]
+fn an_explicit_linker_is_inert_for_a_library() {
+    for emit in ["--emit=dep-info,metadata,link", "--emit=dep-info,metadata"] {
+        let library = args(&["--crate-type=rlib", emit, "-Clinker=clang", "src/lib.rs"]);
+        RustcInvocation::parse(&library)
+            .expect("a `-Clinker` selection is inert where nothing links");
+    }
+}
+
 /// The first link argument the adapter modeled: ld64's `-oso_prefix` names a
 /// checkout-specific path, so its value normalizes like every other path in
 /// the key instead of pinning the key to one checkout's spelling.

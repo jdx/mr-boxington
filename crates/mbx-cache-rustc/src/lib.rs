@@ -2000,7 +2000,8 @@ impl<'a> Parser<'a> {
             matches!(argument, Argument::Plain(value) if value.starts_with("--codegen=linker="))
         }) && !matches!(
             link_output,
-            LinkOutput::NativeExecutable
+            LinkOutput::Library
+                | LinkOutput::NativeExecutable
                 | LinkOutput::NativeProcMacro
                 | LinkOutput::NativeSharedLibrary
         ) {

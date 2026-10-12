@@ -164,6 +164,7 @@ pub(super) fn run(
     // budget arithmetic or the dry run's accounting.
     if !dry_run {
         crate::scheduler::prune_flights(&config.cache_dir);
+        crate::scheduler::prune_test_history(&config.cache_dir);
     }
     let outcome = if dry_run {
         store::gc_dry_run(&store, store_budget)
@@ -608,6 +609,7 @@ fn run_sweep_body(config: &Config, retention: &RetentionSettings) -> Sweep {
     });
     let store_budget = store_budget(retention, config.gc.max_bytes, non_store_bytes);
     crate::scheduler::prune_flights(&config.cache_dir);
+    crate::scheduler::prune_test_history(&config.cache_dir);
     let outcome = match store::gc(&config.store_dir(), store_budget) {
         Ok(outcome) => outcome,
         Err(error) => {

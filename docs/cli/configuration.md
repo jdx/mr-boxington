@@ -553,7 +553,9 @@ Takes effect only with `scheduler.cgroup_root` set, `scheduler.pressure` on, and
 - **Default:** `false`
 - **Set with:** `MBX_SCHEDULER_TESTS`
 
-Run `cargo test` binaries under the same permit pool.
+Run `cargo test` and `cargo nextest` binaries under the same permit pool.
+
+nextest admits each test separately; `cargo test` admits each binary.
 
 This may also be set in workspace `.mbx.toml`; the environment variable wins.
 

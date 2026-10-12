@@ -2027,6 +2027,64 @@ fn editing_one_crate_takes_its_dependents_private_too() {
 }
 
 #[test]
+fn a_staticlib_the_cache_bypasses_still_compiles_incrementally() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    // Tauri's template lists `staticlib` beside `rlib`; the `staticlib` alone
+    // makes mbx bypass the crate before any learned plan exists.
+    let manifest = project.path().join("Cargo.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text.push_str("\n[lib]\ncrate-type = [\"staticlib\", \"rlib\"]\n");
+    std::fs::write(&manifest, text).unwrap();
+    generate_lockfile(project.path());
+
+    let cold = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+    );
+    assert_eq!(
+        count(&cold, "hits") + count(&cold, "misses"),
+        0,
+        "the library is still bypassed, not cached: {cold}"
+    );
+    assert_eq!(
+        learned_sessions(store.path()),
+        1,
+        "the bypassed library should keep incremental state from its first build"
+    );
+
+    edit_project(project.path(), 1);
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("edit.json"),
+    );
+    assert_eq!(
+        learned_sessions(store.path()),
+        1,
+        "an edit should reuse the library's state rather than start another"
+    );
+
+    // The opt-out is checked against a store of its own, where any state at
+    // all would have to come from this build.
+    let off = tempfile::tempdir().unwrap();
+    build_with(
+        project.path(),
+        off.path(),
+        &reports.path().join("off.json"),
+        &[("MBX_LEARNED_INCREMENTAL", "0")],
+    );
+    assert_eq!(
+        learned_sessions(off.path()),
+        0,
+        "learned_incremental = false should leave the bypassed library alone"
+    );
+}
+
+#[test]
 fn learned_incremental_can_be_turned_off() {
     let store = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();

@@ -461,7 +461,9 @@ struct RawScheduler {
     /// while `scheduler.suspend` is in effect.
     #[usage(env = "MBX_SCHEDULER_CGROUP_ROOT")]
     cgroup_root: Option<PathBuf>,
-    /// Run `cargo test` binaries under the same permit pool.
+    /// Run `cargo test` and `cargo nextest` binaries under the same permit pool.
+    ///
+    /// nextest admits each test separately; `cargo test` admits each binary.
     ///
     /// This may also be set in workspace `.mbx.toml`; the environment
     /// variable wins.
@@ -847,7 +849,7 @@ pub struct SchedulerSettings {
     pub memory_bytes: Option<u64>,
     /// Priority of this build's compilations against other builds.
     pub priority: SchedulerPriority,
-    /// Whether `cargo test` binaries take permits too.
+    /// Whether `cargo test` and `cargo nextest` binaries take permits too.
     pub tests: bool,
     /// Gate new compilations on live memory pressure.
     pub pressure: bool,

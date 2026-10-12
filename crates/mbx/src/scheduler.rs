@@ -7,7 +7,8 @@
 //! that real compilations draw from. Cache hits never touch it, and Cargo
 //! keeps its own dependency scheduling; only the processes that actually cost
 //! CPU and memory wait their turn. With `scheduler.tests`, the test binaries
-//! `cargo test` runs draw from the same pool (see `cli::test_runner`).
+//! `cargo test` and `cargo nextest` run draw from the same pool (see
+//! `cli::test_runner`).
 //!
 //! The pool is a directory of *lease* files, one per admitted compilation,
 //! each held under an OS file lock for the life of the compile. The kernel
@@ -52,6 +53,7 @@ use eyre::{Context, Result};
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::OnceLock;
@@ -72,6 +74,21 @@ const PRIORITY_WAIT_STAMP: &str = "priority-wait";
 const LEDGER_FILE: &str = "memory.json";
 /// Lock serializing ledger updates.
 const LEDGER_LOCK: &str = "memory.lock";
+/// Per-test history, kept apart from the shared suite ledger.
+const TEST_HISTORY_DIR: &str = "tests";
+/// Magic and version for the compact per-test history format.
+const TEST_HISTORY_MAGIC: &[u8; 8] = b"mbxtest\x01";
+/// Bytes in a per-test history header.
+const TEST_HISTORY_HEADER_LEN: u64 = 32;
+/// Bytes in one per-test history record.
+const TEST_HISTORY_RECORD_LEN: u64 = 24;
+/// Lock serializing per-test history updates, for every binary at once.
+///
+/// One lock rather than one per history file, because a lock file can never
+/// be removed safely: a writer already waiting on the removed file would lock
+/// it while a newcomer locks its replacement. Writes are rare -- a test's
+/// history changes only when a measurement exceeds it -- so they can share.
+const TEST_HISTORY_LOCK: &str = "tests.lock";
 
 /// Where the pool lives; empty means the session turned scheduling off.
 pub(crate) const SCHED_DIR_ENV: &str = "MBX_SCHED_DIR";
@@ -123,6 +140,20 @@ const MIN_LINK_SAMPLES: usize = 3;
 /// Links are the out-of-memory class -- rust-lang/cargo#12912 is about little
 /// else -- so they start heavy rather than waiting for history to say so.
 const LINK_WEIGHT: u64 = 2;
+/// Permits an unmeasured test starts with when memory scheduling is on.
+///
+/// Tests can allocate most of their working set at runtime, so allowing many
+/// cold tests to start together can exhaust memory before history is learned.
+const UNMEASURED_TEST_WEIGHT: u64 = 2;
+/// How old a history file's timestamp may get before a reader refreshes it.
+///
+/// History is written only when a measurement rises, so a binary whose tests
+/// run every day at the same cost would otherwise look unused to `mbx gc`.
+/// Refreshing at most once a day keeps that one metadata write per binary
+/// per day, rather than one per test.
+const TEST_HISTORY_REFRESH: Duration = Duration::from_secs(24 * 60 * 60);
+/// Most test names retained for one nextest binary.
+const MAX_TEST_HISTORY_ENTRIES: usize = 16_384;
 /// First delay after a refused admission.
 const POLL_INITIAL: Duration = Duration::from_millis(2);
 /// Longest delay between admission attempts.
@@ -187,9 +218,9 @@ fn process_token() -> &'static str {
     TOKEN.get_or_init(|| crate::util::random_string(8))
 }
 
-/// What one compilation -- or one test binary -- asks the pool for.
+/// What one compilation, test suite, or nextest test asks the pool for.
 pub(crate) struct Demand {
-    /// Compiler crate name, keying the peak-RSS ledger.
+    /// Demand name, also keying compiler and suite history.
     name: String,
     /// Whether the invocation links a native program.
     links: bool,
@@ -204,6 +235,18 @@ pub(crate) struct Demand {
     /// measurements: a release link's peaks must not stand in for a dev
     /// link that has none of its own yet.
     profile: Option<String>,
+    /// A nextest test whose measurements belong in its separate history file.
+    per_test: Option<TestIdentity>,
+}
+
+#[derive(Debug, Clone)]
+struct TestIdentity {
+    binary: String,
+    test: String,
+    /// What history said about this test when it was planned, so a finished
+    /// test whose measurements raise nothing records without taking the
+    /// history lock or reading the file again. `None` until planned.
+    known: std::cell::Cell<Option<TestMeasurement>>,
 }
 
 impl Demand {
@@ -214,6 +257,7 @@ impl Demand {
             threads: Some(1),
             learns_cpu: false,
             profile: None,
+            per_test: None,
         }
     }
 
@@ -258,6 +302,23 @@ impl Demand {
             threads,
             learns_cpu: true,
             profile: None,
+            per_test: None,
+        }
+    }
+
+    /// One nextest test, remembered apart from its binary's other tests.
+    pub(crate) fn nextest(binary: &str, test: &str) -> Self {
+        Self {
+            name: format!("{binary} {test} [nextest]"),
+            links: false,
+            threads: Some(1),
+            learns_cpu: true,
+            profile: None,
+            per_test: Some(TestIdentity {
+                binary: binary.to_owned(),
+                test: test.to_owned(),
+                known: std::cell::Cell::new(None),
+            }),
         }
     }
 }
@@ -445,6 +506,40 @@ pub(crate) fn prune_flights(cache_dir: &Path) {
     }
 }
 
+/// Drop nextest history no test binary has updated for a month.
+///
+/// Every history file is written under the one [`TEST_HISTORY_LOCK`], which
+/// is never removed, so a sweep holding it cannot race a writer: age is read
+/// under the lock, and a file a test appended to a moment ago is no longer
+/// stale by then. A lock somebody holds means tests are recording right now;
+/// the sweep leaves everything for the next `mbx gc` rather than wait.
+pub(crate) fn prune_test_history(cache_dir: &Path) {
+    let scheduler = cache_dir.join(SCHEDULER_DIR);
+    let Ok(entries) = std::fs::read_dir(scheduler.join(TEST_HISTORY_DIR)) else {
+        return;
+    };
+    let Ok(mut lock) = fslock::LockFile::open(&scheduler.join(TEST_HISTORY_LOCK)) else {
+        return;
+    };
+    if !lock.try_lock().is_ok_and(|taken| taken) {
+        return;
+    }
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let stale = std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > FLIGHT_MAX_AGE);
+        if stale {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 impl Drop for Flight {
     fn drop(&mut self) {
         // The file stays: it holds the prediction the next build of this
@@ -516,6 +611,30 @@ struct MemoryLedger {
     /// Recent link measurements by code-generation profile, newest last.
     #[serde(default)]
     profile_link_peaks: BTreeMap<String, Vec<u64>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct TestMeasurement {
+    peak: Option<u64>,
+    cores: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TestHistoryHeader {
+    count: u64,
+    maximum: TestMeasurement,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TestHistoryLookup {
+    test: Option<TestMeasurement>,
+    header: TestHistoryHeader,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TestHistoryRecord {
+    hash: u64,
+    measurement: TestMeasurement,
 }
 
 /// The machine-wide permit pool one process draws from.
@@ -688,13 +807,37 @@ pub(crate) fn record_compiler_memory(demand: &Demand, status: &ExitStatus) {
     pool.note_compilation(demand, status);
 }
 
-/// Record the average cores a test binary kept busy, for its next admission.
-pub(crate) fn record_test_cpu(demand: &Demand, cores: u64) {
+/// Record what a finished test binary or nextest test cost, for its next
+/// admission: its peak memory, and the average cores it kept busy when
+/// `cores` says it ran long enough and completely enough to tell.
+pub(crate) fn record_test_run(demand: &Demand, status: &ExitStatus, cores: Option<u64>) {
     let Some(pool) = pool() else {
         return;
     };
-    if let Err(error) = pool.record_cpu(&demand.name, cores) {
-        debug!("test CPU use was not recorded: {error:#}");
+    let Some(identity) = &demand.per_test else {
+        pool.note_compilation(demand, status);
+        if let Some(cores) = cores
+            && let Err(error) = pool.record_cpu(&demand.name, cores)
+        {
+            debug!("test CPU use was not recorded: {error:#}");
+        }
+        return;
+    };
+    // A successful test is a true reading of what it costs, so it is recorded
+    // whatever it measured, the way a successful link is: that is what lets a
+    // light test retire the unmeasured default. A failure can only show that
+    // a test is heavy.
+    let peak = child_peak_rss_bytes().and_then(|measured| {
+        ledger_peak(
+            measured,
+            oom_killed(status),
+            true,
+            status.success(),
+            pool.bytes_per_permit,
+        )
+    });
+    if let Err(error) = pool.record_test_measurement(identity, peak, cores) {
+        debug!("test measurements were not recorded: {error:#}");
     }
 }
 
@@ -842,6 +985,32 @@ impl Pool {
 
     /// The permits this demand costs, and its predicted memory when known.
     fn plan(&self, demand: &Demand) -> (u64, Option<u64>) {
+        if let Some(identity) = &demand.per_test {
+            let path = test_history_path(&self.dir.join(TEST_HISTORY_DIR), &identity.binary);
+            let history = lookup_test_history(&path, &identity.binary, &identity.test);
+            if history.header.count > 0 {
+                refresh_test_history(&path);
+            }
+            identity.known.set(Some(history.test.unwrap_or_default()));
+            let measurement = history
+                .test
+                .or_else(|| (history.header.count > 0).then_some(history.header.maximum));
+            let cores = measurement
+                .and_then(|measurement| measurement.cores)
+                .unwrap_or(1)
+                .max(1);
+            if self.bytes_per_permit == 0 {
+                return (cores.min(self.capacity), None);
+            }
+            let predicted = measurement
+                .and_then(|measurement| measurement.peak)
+                .unwrap_or_else(|| UNMEASURED_TEST_WEIGHT.saturating_mul(self.bytes_per_permit));
+            let weight = predicted
+                .div_ceil(self.bytes_per_permit)
+                .max(cores)
+                .clamp(1, self.capacity);
+            return (weight, Some(predicted));
+        }
         // What a test binary was measured using beats what it said or what
         // its harness would default to: libtest starts a thread per CPU
         // whether or not the tests keep them busy.
@@ -1108,6 +1277,83 @@ impl Pool {
         self.dir.join(LEDGER_FILE)
     }
 
+    /// Raise a planned nextest test's history, skipping the lock and the read
+    /// entirely when nothing measured exceeds what planning found.
+    ///
+    /// Most runs of most tests raise nothing, and every test in a run would
+    /// otherwise queue on the one history lock to read its binary's file.
+    /// A value another process raised since planning is caught under the
+    /// lock, which is where the comparison is repeated.
+    fn record_test_measurement(
+        &self,
+        identity: &TestIdentity,
+        peak: Option<u64>,
+        cores: Option<u64>,
+    ) -> Result<()> {
+        let raises = |value: Option<u64>, known: Option<u64>| {
+            value.is_some_and(|value| known.is_none_or(|known| value > known))
+        };
+        if let Some(known) = identity.known.get()
+            && !raises(peak, known.peak)
+            && !raises(cores, known.cores)
+        {
+            return Ok(());
+        }
+        self.record_test_history(&identity.binary, &identity.test, peak, cores)
+    }
+
+    /// Raise a nextest test's memory or CPU history without changing suite
+    /// records in the shared ledger.
+    fn record_test_history(
+        &self,
+        binary: &str,
+        test: &str,
+        peak: Option<u64>,
+        cores: Option<u64>,
+    ) -> Result<()> {
+        let dir = self.dir.join(TEST_HISTORY_DIR);
+        std::fs::create_dir_all(&dir)
+            .wrap_err_with(|| format!("failed to create {}", dir.display()))?;
+        let path = test_history_path(&dir, binary);
+        let mut lock = fslock::LockFile::open(&self.dir.join(TEST_HISTORY_LOCK))?;
+        lock.lock()?;
+
+        let hash = test_history_hash(test);
+        let mut records = read_test_history_records(&path, binary);
+        let position = records.binary_search_by_key(&hash, |record| record.hash);
+        let current = position
+            .as_ref()
+            .ok()
+            .map(|index| records[*index].measurement)
+            .unwrap_or_default();
+        let updated = raise_measurement(
+            current,
+            TestMeasurement {
+                peak: peak.filter(|value| *value > 0),
+                cores: cores.filter(|value| *value > 0),
+            },
+        );
+        if updated == current {
+            return Ok(());
+        }
+
+        match position {
+            Ok(index) => records[index].measurement = updated,
+            Err(index) => records.insert(
+                index,
+                TestHistoryRecord {
+                    hash,
+                    measurement: updated,
+                },
+            ),
+        }
+        enforce_test_history_cap(&mut records, MAX_TEST_HISTORY_ENTRIES);
+        let contents = encode_test_history(binary, &records);
+        crate::util::write_advisory(&path, &contents)
+            .wrap_err_with(|| format!("failed to write {}", path.display()))?;
+        Ok(())
+    }
+
     /// Raise the recorded peak for one crate, never lowering it, and add a
     /// link's measurement to the machine-wide window whatever the entry does.
     #[cfg(test)]
@@ -1273,6 +1519,255 @@ fn read_ledger(path: &Path) -> MemoryLedger {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
+}
+
+fn test_history_path(dir: &Path, binary: &str) -> PathBuf {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(binary.as_bytes());
+    dir.join(format!("{}.hist", hex::encode(&digest[..8])))
+}
+
+fn test_history_hash(test: &str) -> u64 {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(test.as_bytes());
+    u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 has eight bytes"))
+}
+
+fn test_history_binary_tag(binary: &str) -> u64 {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(binary.as_bytes());
+    u64::from_le_bytes(digest[8..16].try_into().expect("SHA-256 has sixteen bytes"))
+}
+
+/// Mark a history file as still in use, at most once per
+/// [`TEST_HISTORY_REFRESH`].
+///
+/// Done without the history lock. A sweep that judged the file stale just
+/// before this refresh can still delete it, which costs that binary one run
+/// at the unmeasured estimate; skipping the refresh would cost it that every
+/// month.
+fn refresh_test_history(path: &Path) {
+    let old = std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age > TEST_HISTORY_REFRESH);
+    if old && let Ok(file) = std::fs::OpenOptions::new().append(true).open(path) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
+}
+
+fn parse_test_history_header(
+    bytes: &[u8],
+    file_len: u64,
+    binary: &str,
+) -> Option<TestHistoryHeader> {
+    if bytes.len() != TEST_HISTORY_HEADER_LEN as usize
+        || file_len < TEST_HISTORY_HEADER_LEN
+        || &bytes[..8] != TEST_HISTORY_MAGIC
+        || read_u64(&bytes[8..16]) != test_history_binary_tag(binary)
+    {
+        return None;
+    }
+    Some(TestHistoryHeader {
+        count: (file_len - TEST_HISTORY_HEADER_LEN) / TEST_HISTORY_RECORD_LEN,
+        maximum: TestMeasurement {
+            peak: nonzero(read_u64(&bytes[16..24])),
+            cores: nonzero(read_u64(&bytes[24..32])),
+        },
+    })
+}
+
+fn read_test_history_header(file: &File, binary: &str) -> Option<TestHistoryHeader> {
+    let file_len = file.metadata().ok()?.len();
+    if file_len < TEST_HISTORY_HEADER_LEN {
+        return None;
+    }
+    let mut bytes = [0; TEST_HISTORY_HEADER_LEN as usize];
+    read_exact_at(file, &mut bytes, 0).ok()?;
+    parse_test_history_header(&bytes, file_len, binary)
+}
+
+fn lookup_test_history(path: &Path, binary: &str, test: &str) -> TestHistoryLookup {
+    let Ok(file) = File::open(path) else {
+        return TestHistoryLookup::default();
+    };
+    let Some(header) = read_test_history_header(&file, binary) else {
+        return TestHistoryLookup::default();
+    };
+
+    let hash = test_history_hash(test);
+    let mut low = 0;
+    let mut high = header.count;
+    let mut found = None;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let offset = TEST_HISTORY_HEADER_LEN + middle * TEST_HISTORY_RECORD_LEN;
+        let mut bytes = [0; TEST_HISTORY_RECORD_LEN as usize];
+        if read_exact_at(&file, &mut bytes, offset).is_err() {
+            break;
+        }
+        let record = decode_test_history_record(&bytes);
+        match record.hash.cmp(&hash) {
+            std::cmp::Ordering::Less => low = middle + 1,
+            std::cmp::Ordering::Greater => high = middle,
+            std::cmp::Ordering::Equal => {
+                found = Some(record.measurement);
+                break;
+            }
+        }
+    }
+    TestHistoryLookup {
+        test: found,
+        header,
+    }
+}
+
+fn read_test_history_records(path: &Path, binary: &str) -> Vec<TestHistoryRecord> {
+    let Ok(contents) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    let Some(header) = contents
+        .get(..TEST_HISTORY_HEADER_LEN as usize)
+        .and_then(|bytes| parse_test_history_header(bytes, contents.len() as u64, binary))
+    else {
+        return Vec::new();
+    };
+
+    let mut records: Vec<_> = contents[TEST_HISTORY_HEADER_LEN as usize..]
+        .chunks_exact(TEST_HISTORY_RECORD_LEN as usize)
+        .take(header.count as usize)
+        .map(decode_test_history_record)
+        .collect();
+    records.sort_unstable_by_key(|record| record.hash);
+    let mut unique: Vec<TestHistoryRecord> = Vec::with_capacity(records.len());
+    for record in records {
+        if let Some(previous) = unique
+            .last_mut()
+            .filter(|previous| previous.hash == record.hash)
+        {
+            previous.measurement = raise_measurement(previous.measurement, record.measurement);
+        } else {
+            unique.push(record);
+        }
+    }
+    unique
+}
+
+fn decode_test_history_record(bytes: &[u8]) -> TestHistoryRecord {
+    TestHistoryRecord {
+        hash: read_u64(&bytes[..8]),
+        measurement: TestMeasurement {
+            peak: nonzero(read_u64(&bytes[8..16])),
+            cores: nonzero(read_u64(&bytes[16..24])),
+        },
+    }
+}
+
+fn encode_test_history(binary: &str, records: &[TestHistoryRecord]) -> Vec<u8> {
+    let maximum = records
+        .iter()
+        .fold(TestMeasurement::default(), |maximum, record| {
+            raise_measurement(maximum, record.measurement)
+        });
+    let mut bytes = Vec::with_capacity(
+        TEST_HISTORY_HEADER_LEN as usize + records.len() * TEST_HISTORY_RECORD_LEN as usize,
+    );
+    bytes.extend_from_slice(TEST_HISTORY_MAGIC);
+    bytes.extend_from_slice(&test_history_binary_tag(binary).to_le_bytes());
+    bytes.extend_from_slice(&maximum.peak.unwrap_or(0).to_le_bytes());
+    bytes.extend_from_slice(&maximum.cores.unwrap_or(0).to_le_bytes());
+    for record in records {
+        bytes.extend_from_slice(&record.hash.to_le_bytes());
+        bytes.extend_from_slice(&record.measurement.peak.unwrap_or(0).to_le_bytes());
+        bytes.extend_from_slice(&record.measurement.cores.unwrap_or(0).to_le_bytes());
+    }
+    bytes
+}
+
+fn read_u64(bytes: &[u8]) -> u64 {
+    u64::from_le_bytes(bytes.try_into().expect("history field is eight bytes"))
+}
+
+fn nonzero(value: u64) -> Option<u64> {
+    (value != 0).then_some(value)
+}
+
+#[cfg(unix)]
+fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::unix::fs::FileExt as _;
+    file.read_at(buffer, offset)
+}
+
+#[cfg(windows)]
+fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::windows::fs::FileExt as _;
+    file.seek_read(buffer, offset)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut file = file.try_clone()?;
+    file.seek(SeekFrom::Start(offset))?;
+    file.read(buffer)
+}
+
+fn read_exact_at(file: &File, mut buffer: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    while !buffer.is_empty() {
+        match read_at(file, buffer, offset) {
+            Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+            Ok(read) => {
+                offset = offset
+                    .checked_add(read as u64)
+                    .ok_or(std::io::ErrorKind::InvalidInput)?;
+                buffer = &mut buffer[read..];
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn enforce_test_history_cap(records: &mut Vec<TestHistoryRecord>, limit: usize) -> bool {
+    let mut capped = false;
+    while records.len() > limit {
+        let smallest = records
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| {
+                left.measurement
+                    .peak
+                    .unwrap_or(0)
+                    .cmp(&right.measurement.peak.unwrap_or(0))
+                    .then_with(|| {
+                        left.measurement
+                            .cores
+                            .unwrap_or(0)
+                            .cmp(&right.measurement.cores.unwrap_or(0))
+                    })
+                    .then_with(|| left.hash.cmp(&right.hash))
+            })
+            .map(|(index, _)| index)
+            .expect("an overfull test history has entries");
+        records.remove(smallest);
+        capped = true;
+    }
+    capped
+}
+
+fn raise_measurement(current: TestMeasurement, incoming: TestMeasurement) -> TestMeasurement {
+    TestMeasurement {
+        peak: match (current.peak, incoming.peak) {
+            (Some(current), Some(incoming)) => Some(current.max(incoming)),
+            (current, incoming) => current.or(incoming),
+        },
+        cores: match (current.cores, incoming.cores) {
+            (Some(current), Some(incoming)) => Some(current.max(incoming)),
+            (current, incoming) => current.or(incoming),
+        },
+    }
 }
 
 /// The live lease weights, reclaiming any lease whose holder has died.

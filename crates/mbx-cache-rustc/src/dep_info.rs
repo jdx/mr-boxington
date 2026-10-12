@@ -634,7 +634,11 @@ pub(super) fn collect_native_directory(
                 message: error.to_string(),
             })?;
             if file_type.is_dir() {
-                pending.push(path);
+                if !is_linker_irrelevant_directory(&path) {
+                    pending.push(path);
+                }
+            } else if is_linker_irrelevant_file(&path) {
+                continue;
             } else if file_type.is_file() || file_type.is_symlink() {
                 // Homebrew's versionless dylibs are symlinks. Hash their
                 // referents under the searched name, but do not follow directory
@@ -674,6 +678,29 @@ pub(super) fn collect_native_directory(
         }
     }
     Ok(())
+}
+
+/// Directories that build scripts leave beside libraries but that a linker
+/// never reads. They often record the absolute output path (`prefix=` in
+/// pkg-config files, `binary-path:` in dSYM relocation YAML), so hashing them
+/// would make the key depend on the target directory.
+fn is_linker_irrelevant_directory(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name == "pkgconfig" || name == "cmake" || name.ends_with(".dSYM")
+}
+
+/// pkg-config and CMake metadata. Headers stay hashed: linker scripts can
+/// `INCLUDE` files from a search path, and `+verbatim` names any file.
+fn is_linker_irrelevant_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["pc", "cmake"]
+                .iter()
+                .any(|ignored| extension.eq_ignore_ascii_case(ignored))
+        })
 }
 
 fn render_argument(argument: &Argument) -> Result<OsString, BypassReason> {
@@ -849,6 +876,37 @@ mod tests {
             .unwrap();
 
         assert_eq!(native_bytes, 2);
+    }
+
+    #[test]
+    fn native_directory_skips_files_the_linker_never_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let native = directory.path().join("native");
+        for ignored in [
+            "lib/pkgconfig/zlib.pc",
+            "check.dSYM/Contents/Resources/Relocations/aarch64/check.yml",
+            "cmake/Config.cmake",
+            "top.pc",
+        ] {
+            let path = native.join(ignored);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"prefix=/abs/target\n").unwrap();
+        }
+        std::fs::write(native.join("libz.a"), b"!<arch>\n").unwrap();
+        std::fs::create_dir_all(native.join("lib")).unwrap();
+        std::fs::write(native.join("lib/libz.so.1"), b"elf").unwrap();
+        let roots = native_input_roots(directory.path(), &[]);
+        let mut paths = BTreeSet::new();
+        let mut native_bytes = 0;
+        let mut counted = BTreeSet::new();
+
+        collect_native_directory(&native, &roots, &mut paths, &mut native_bytes, &mut counted)
+            .unwrap();
+
+        assert_eq!(
+            paths.into_iter().collect::<Vec<_>>(),
+            vec![native.join("lib/libz.so.1"), native.join("libz.a")]
+        );
     }
 
     #[test]

@@ -1,11 +1,11 @@
 //! Test binaries under the machine-wide permit pool.
 //!
-//! The pool paces compilers, but `cargo test` spends much of its time running
+//! The pool paces compilers, but test commands spend much of their time running
 //! test binaries, and libtest sizes itself to the whole machine. Three
 //! worktrees testing at once are three suites each starting a thread per CPU.
 //! With `scheduler.tests`, mbx installs itself as Cargo's target runner for
-//! the command; each test binary then waits for permits like a compiler does,
-//! and chains to whatever runner was configured before.
+//! `cargo test` and `cargo nextest`; each test binary then waits for permits
+//! like a compiler does, and chains to whatever runner was configured before.
 //!
 //! Work a test starts is charged to the test's own permits: its children see
 //! scheduling turned off. Otherwise a test that builds something -- trybuild,
@@ -56,15 +56,23 @@ pub(super) struct TestRunner {
 }
 
 impl TestRunner {
-    /// Wrap this command's test binaries, when it is a `cargo test` and
-    /// scheduling them is on. `None` leaves Cargo's runners alone.
+    /// Wrap this command's test binaries when scheduling them is on. `None`
+    /// leaves Cargo's runners alone.
     pub(super) fn prepare(
         config: &crate::config::Config,
         arguments: &[String],
         workspace_root: &Path,
         directory: &Path,
     ) -> Result<Option<Self>> {
-        if !config.scheduler.enabled || !config.scheduler.tests || !wraps(arguments) {
+        if !config.scheduler.enabled || !config.scheduler.tests {
+            return Ok(None);
+        }
+        // What Cargo will run, not what was typed: an alias such as
+        // `nt = "nextest run"` runs tests as surely as the command it names.
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let expanded = super::cargo_invocation::expanded_arguments(&cargo, arguments);
+        let arguments = expanded.as_deref().unwrap_or(arguments);
+        if !wraps(arguments) {
             return Ok(None);
         }
         // Resolution is best-effort, like the pool itself: a configuration
@@ -74,7 +82,15 @@ impl TestRunner {
             let inherited = inherited_overlay().runners;
             let mut keys = Vec::new();
             let mut runners = BTreeMap::new();
-            for target in super::launch::requested_targets(&cargo, arguments)? {
+            let mut targets = super::launch::requested_targets(&cargo, arguments)?;
+            let host = cargo.host_triple()?.to_owned();
+            if !targets
+                .iter()
+                .any(|target| target.triple() == host.as_str())
+            {
+                targets.extend(cargo.build_target_for_config([host])?);
+            }
+            for target in targets {
                 let triple = target.triple().to_owned();
                 let runner = cargo.runner(&target)?.map(|runner| Runner {
                     path: runner.path,
@@ -157,7 +173,7 @@ fn wraps(arguments: &[String]) -> bool {
         .collect();
     matches!(
         super::launch::cargo_subcommand(arguments),
-        Some("test" | "t")
+        Some("test" | "t" | "nextest")
     ) && !args.iter().any(|arg| {
         arg.starts_with('+')
             || arg.starts_with("-C")
@@ -219,28 +235,45 @@ pub fn dispatch() -> Option<ExitCode> {
                 None => command.env_remove(key),
             };
         }
+        let package = std::env::var("CARGO_PKG_NAME").ok();
+        let nextest_phase = std::env::var("NEXTEST_TEST_PHASE").ok();
+        let nextest_identity = nextest_test_identity(NextestIdentityInput {
+            phase: nextest_phase.as_deref(),
+            execution_mode: std::env::var("NEXTEST_EXECUTION_MODE").ok().as_deref(),
+            binary_id: std::env::var("NEXTEST_BINARY_ID").ok().as_deref(),
+            test_name: std::env::var("NEXTEST_TEST_NAME").ok().as_deref(),
+            package: package.as_deref(),
+            project: overlay.project.as_deref(),
+            executable: Path::new(&executable),
+            arguments: &rest,
+        });
         // Cargo names its test binaries with a metadata hash. Rustdoc runs
         // each doctest through the same runner, from a temporary binary with
         // no hash, and those run unscheduled: a permit per doctest would
         // serialize a crate's doc examples behind half the pool apiece.
-        let demand = test_binary_name(Path::new(&executable)).map(|name| {
+        let suite_demand = test_binary_name(Path::new(&executable)).map(|name| {
             crate::scheduler::Demand::test(
-                &ledger_name(
-                    overlay.project.as_deref(),
-                    std::env::var("CARGO_PKG_NAME").ok().as_deref(),
-                    &name,
-                ),
+                &ledger_name(overlay.project.as_deref(), package.as_deref(), &name),
                 test_threads(&rest, std::env::var("RUST_TEST_THREADS").ok().as_deref()),
             )
         });
+        let demand = nextest_identity
+            .as_ref()
+            .map_or(suite_demand, |(binary, test)| {
+                Some(crate::scheduler::Demand::nextest(binary, test))
+            });
         // Listing a suite starts no tests and costs nothing worth waiting for.
         let permit = demand
             .as_ref()
-            .filter(|_| !lists_tests(&rest))
+            .filter(|_| !lists_tests(&rest) && nextest_phase.as_deref() != Some("list"))
             .and_then(|demand| {
-                crate::scheduler::pool()?
-                    .admit(demand)
-                    .map(|permit| (demand, permit))
+                let pool = crate::scheduler::pool()?;
+                let permit = if nextest_identity.is_some() {
+                    admit_nextest(pool, demand)
+                } else {
+                    pool.admit(demand)
+                }?;
+                Some((demand, permit))
             });
         let started = std::time::Instant::now();
         let status = command
@@ -248,27 +281,29 @@ pub fn dispatch() -> Option<ExitCode> {
             .wrap_err_with(|| format!("failed to run {}", Path::new(&executable).display()))?;
         let wall = started.elapsed();
         if let Some((demand, permit)) = permit {
-            crate::scheduler::record_compiler_memory(demand, &status);
             // A run that exited on its own, failing tests included, ran the
             // whole suite; one a signal stopped, or one narrowed to some of
-            // its tests, says little about what the suite costs.
-            if status.code().is_some() && !narrows_suite(&rest) {
-                // A suite this quick cannot keep cores busy long enough to
-                // matter, but unrecorded it would ask for half the pool on
-                // every run. Weigh it one core; a longer run raises that.
-                // Where CPU time cannot be measured nothing could raise it,
-                // so nothing is recorded.
-                let cores = crate::scheduler::child_cpu_time().map(|cpu| {
-                    if wall < MIN_CPU_SAMPLE {
-                        1
-                    } else {
-                        crate::scheduler::average_cores(cpu, wall)
-                    }
-                });
-                if let Some(cores) = cores {
-                    crate::scheduler::record_test_cpu(demand, cores);
+            // its tests, says little about what the suite costs. A nextest
+            // test is always run narrowed to itself, which is what it is
+            // remembered as.
+            //
+            // A suite this quick cannot keep cores busy long enough to
+            // matter, but unrecorded it would ask for half the pool on every
+            // run. Weigh it one core; a longer run raises that. Where CPU
+            // time cannot be measured nothing could raise it, so nothing is
+            // recorded.
+            let cores = (status.code().is_some()
+                && (nextest_identity.is_some() || !narrows_suite(&rest)))
+            .then(crate::scheduler::child_cpu_time)
+            .flatten()
+            .map(|cpu| {
+                if wall < MIN_CPU_SAMPLE {
+                    1
+                } else {
+                    crate::scheduler::average_cores(cpu, wall)
                 }
-            }
+            });
+            crate::scheduler::record_test_run(demand, &status, cores);
             drop(permit);
         }
         Ok(super::cargo::exit_code(status))
@@ -378,6 +413,99 @@ fn lists_tests(arguments: &[OsString]) -> bool {
         .any(|arg| arg == "--list")
 }
 
+/// The nextest test this runner invocation is starting, when its environment
+/// and arguments identify one.
+struct NextestIdentityInput<'a> {
+    phase: Option<&'a str>,
+    execution_mode: Option<&'a str>,
+    binary_id: Option<&'a str>,
+    test_name: Option<&'a str>,
+    package: Option<&'a str>,
+    project: Option<&'a str>,
+    executable: &'a Path,
+    arguments: &'a [OsString],
+}
+
+fn nextest_test_identity(input: NextestIdentityInput<'_>) -> Option<(String, String)> {
+    if input.phase == Some("list") || lists_tests(input.arguments) {
+        return None;
+    }
+    let running = input.phase == Some("run")
+        || (input.phase.is_none() && input.execution_mode == Some("process-per-test"));
+    if !running {
+        return None;
+    }
+    let test = input
+        .test_name
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .or_else(|| exact_test_name(input.arguments))?;
+    let binary = input
+        .binary_id
+        .filter(|id| !id.is_empty())
+        .map(|id| ledger_name(input.project, None, id))
+        .or_else(|| {
+            let name = test_binary_name(input.executable)?;
+            Some(ledger_name(input.project, input.package, &name))
+        })?;
+    Some((binary, test))
+}
+
+fn exact_test_name(arguments: &[OsString]) -> Option<String> {
+    let mut arguments = arguments.iter().filter_map(|argument| argument.to_str());
+    while let Some(argument) = arguments.next() {
+        if argument == "--" {
+            return None;
+        }
+        if argument == "--exact" {
+            return arguments.next().map(str::to_owned);
+        }
+        if let Some(name) = argument.strip_prefix("--exact=") {
+            return (!name.is_empty()).then(|| name.to_owned());
+        }
+    }
+    None
+}
+
+/// How long a nextest test waits for permits before saying so.
+const WAIT_NOTICE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Admit one nextest test, saying so on stderr when it has to wait.
+///
+/// nextest starts a test's slow-timeout and terminate-after clocks when it
+/// starts this shim, so the wait for permits counts as test time, and nothing
+/// a runner can do pauses those clocks. nextest captures the test's stderr
+/// and shows it beside a SLOW, TIMEOUT or failure report, so a test killed
+/// while it was still queued says so instead of looking like it hung. The
+/// notice is printed while the wait is still going, because the kill
+/// arrives before admission would have returned.
+fn admit_nextest(
+    pool: &crate::scheduler::Pool,
+    demand: &crate::scheduler::Demand,
+) -> Option<crate::scheduler::Permit> {
+    let (admitted, wait) = std::sync::mpsc::channel::<()>();
+    let notice = std::thread::spawn(move || {
+        // Admission ends the wait by dropping the sender, which disconnects.
+        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = wait.recv_timeout(WAIT_NOTICE) {
+            eprintln!(
+                "mbx: waiting for machine-wide scheduler capacity before starting this test; nextest counts this wait toward its slow-timeout"
+            );
+        }
+    });
+    let started = std::time::Instant::now();
+    let permit = pool.admit(demand);
+    let waited = started.elapsed();
+    drop(admitted);
+    let _ = notice.join();
+    if permit.is_some() && waited >= WAIT_NOTICE {
+        eprintln!(
+            "mbx: test started after waiting {:.1}s for scheduler capacity",
+            waited.as_secs_f64()
+        );
+    }
+    permit
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,14 +519,18 @@ mod tests {
     }
 
     #[test]
-    fn only_plain_test_commands_are_wrapped() {
+    fn cargo_test_and_nextest_commands_are_wrapped() {
         assert!(wraps(&strings(&["test"])));
         assert!(wraps(&strings(&["t", "--workspace"])));
+        assert!(wraps(&strings(&["nextest", "run"])));
+        assert!(wraps(&strings(&["nextest", "r"])));
+        assert!(wraps(&strings(&["nextest", "list"])));
         assert!(wraps(&strings(&["--color", "always", "test"])));
         assert!(wraps(&strings(&["test", "--", "--config"])));
         assert!(!wraps(&strings(&["build"])));
         assert!(!wraps(&strings(&["run", "--", "test"])));
         assert!(!wraps(&strings(&["test", "--no-run"])));
+        assert!(!wraps(&strings(&["nextest", "run", "--no-run"])));
         assert!(!wraps(&strings(&["+nightly", "test"])));
         assert!(!wraps(&strings(&["test", "--config", "a.toml"])));
         assert!(!wraps(&strings(&["test", "--config=a.toml"])));
@@ -406,6 +538,113 @@ mod tests {
         assert!(!wraps(&strings(&["-Cother", "test"])));
         assert!(!wraps(&strings(&["--directory", "other", "test"])));
         assert!(!wraps(&strings(&["--directory=other", "test"])));
+    }
+
+    #[test]
+    fn nextest_identity_uses_phase_environment_and_exact_filter() {
+        let executable = Path::new("target/debug/deps/mbx-0123456789abcdef");
+        let args = os(&["--exact", "suite::case", "--nocapture"]);
+        assert_eq!(
+            nextest_test_identity(NextestIdentityInput {
+                phase: Some("run"),
+                execution_mode: Some("process-per-test"),
+                binary_id: Some("mbx::integration"),
+                test_name: Some("suite::case"),
+                package: Some("mbx"),
+                project: Some("ab12"),
+                executable,
+                arguments: &args,
+            }),
+            Some(("ab12/mbx::integration".into(), "suite::case".into()))
+        );
+        let args = os(&["--exact=suite::case", "--nocapture"]);
+        assert_eq!(
+            nextest_test_identity(NextestIdentityInput {
+                phase: None,
+                execution_mode: Some("process-per-test"),
+                binary_id: None,
+                test_name: None,
+                package: Some("mbx"),
+                project: Some("ab12"),
+                executable,
+                arguments: &args,
+            }),
+            Some(("ab12/mbx/mbx".into(), "suite::case".into()))
+        );
+        let args = os(&["--exact", "suite::case"]);
+        assert_eq!(
+            nextest_test_identity(NextestIdentityInput {
+                phase: Some("run"),
+                execution_mode: None,
+                binary_id: Some("mbx"),
+                test_name: None,
+                package: None,
+                project: None,
+                executable,
+                arguments: &args,
+            }),
+            Some(("mbx".into(), "suite::case".into()))
+        );
+    }
+
+    #[test]
+    fn nextest_listing_and_unknown_runs_have_no_test_identity() {
+        let executable = Path::new("target/debug/deps/mbx-0123456789abcdef");
+        let args = os(&["--exact", "suite::case"]);
+        assert_eq!(
+            nextest_test_identity(NextestIdentityInput {
+                phase: Some("list"),
+                execution_mode: Some("process-per-test"),
+                binary_id: Some("mbx"),
+                test_name: Some("suite::case"),
+                package: None,
+                project: None,
+                executable,
+                arguments: &args,
+            }),
+            None
+        );
+        let list_args = os(&["--list"]);
+        assert_eq!(
+            nextest_test_identity(NextestIdentityInput {
+                phase: Some("run"),
+                execution_mode: None,
+                binary_id: Some("mbx"),
+                test_name: Some("suite::case"),
+                package: None,
+                project: None,
+                executable,
+                arguments: &list_args,
+            }),
+            None
+        );
+        assert_eq!(
+            nextest_test_identity(NextestIdentityInput {
+                phase: None,
+                execution_mode: None,
+                binary_id: Some("mbx"),
+                test_name: Some("suite::case"),
+                package: None,
+                project: None,
+                executable,
+                arguments: &args,
+            }),
+            None
+        );
+        let doctest = Path::new("doctest-temp");
+        assert_eq!(
+            nextest_test_identity(NextestIdentityInput {
+                phase: Some("run"),
+                execution_mode: None,
+                binary_id: None,
+                test_name: None,
+                package: None,
+                project: None,
+                executable: doctest,
+                arguments: &args,
+            }),
+            None
+        );
     }
 
     #[test]
