@@ -645,17 +645,20 @@ pub(super) fn collect_native_directory(
                         return Err(BypassReason::UnsupportedSearchPath("native".into()));
                     }
                 }
-                *native_bytes = native_bytes
-                    .checked_add(
-                        std::fs::metadata(&path)
-                            .map_err(|error| BypassReason::InputRead {
-                                path: path.clone(),
-                                message: error.to_string(),
-                            })?
-                            .len(),
-                    )
-                    .ok_or_else(|| BypassReason::UnsupportedSearchPath("native".into()))?;
-                paths.insert(path);
+                let len = std::fs::metadata(&path)
+                    .map_err(|error| BypassReason::InputRead {
+                        path: path.clone(),
+                        message: error.to_string(),
+                    })?
+                    .len();
+                // A directory named by several `-L native=` arguments, or nested
+                // under another one, is walked more than once; count each file
+                // against the budget only the first time it is seen.
+                if paths.insert(path) {
+                    *native_bytes = native_bytes
+                        .checked_add(len)
+                        .ok_or_else(|| BypassReason::UnsupportedSearchPath("native".into()))?;
+                }
             } else {
                 return Err(BypassReason::UnsupportedSearchPath("native".into()));
             }
@@ -800,6 +803,25 @@ mod tests {
             collect_native_directory(&native, &roots, &mut paths, &mut native_bytes),
             Err(BypassReason::UnsupportedSearchPath("native".into()))
         );
+    }
+
+    #[test]
+    fn native_directory_walked_twice_counts_bytes_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let native = directory.path().join("native");
+        std::fs::create_dir_all(native.join("lib")).unwrap();
+        std::fs::write(native.join("input.lib"), b"xx").unwrap();
+        std::fs::write(native.join("lib").join("nested.lib"), b"yyy").unwrap();
+        let roots = native_input_roots(directory.path(), &[]);
+        let mut paths = BTreeSet::new();
+        let mut native_bytes = 0;
+
+        for dir in [&native, &native, &native.join("lib")] {
+            collect_native_directory(dir, &roots, &mut paths, &mut native_bytes).unwrap();
+        }
+
+        assert_eq!(paths.len(), 2);
+        assert_eq!(native_bytes, 5);
     }
 
     #[test]
