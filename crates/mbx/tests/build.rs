@@ -2068,12 +2068,19 @@ fn a_staticlib_the_cache_bypasses_still_compiles_incrementally() {
         "an edit should reuse the library's state rather than start another"
     );
 
-    edit_project(project.path(), 2);
+    // The opt-out is checked against a store of its own, where any state at
+    // all would have to come from this build.
+    let off = tempfile::tempdir().unwrap();
     build_with(
         project.path(),
-        store.path(),
+        off.path(),
         &reports.path().join("off.json"),
         &[("MBX_LEARNED_INCREMENTAL", "0")],
+    );
+    assert_eq!(
+        learned_sessions(off.path()),
+        0,
+        "learned_incremental = false should leave the bypassed library alone"
     );
 }
 

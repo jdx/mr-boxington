@@ -123,8 +123,9 @@ A host `cdylib` is cached the same way on Linux. On macOS a `cdylib` records
 its own output path as its install name, and on Windows it leaves an import
 library beside the DLL, so it bypasses on both.
 
-A workspace library with a `staticlib`, a `dylib`, or more than one crate type
-(such as Tauri's `["staticlib", "cdylib", "rlib"]`) is never cached. mbx
+A workspace library with a `staticlib`, a `dylib`, or several crate types
+including `staticlib`, `cdylib`, or `dylib` (such as Tauri's
+`["staticlib", "cdylib", "rlib"]`) is never cached. mbx
 compiles it with its own incremental state, as it does a workspace crate that
 keeps changing, so an edit recompiles only what changed. Setting
 [`learned_incremental`](/incremental) (`MBX_LEARNED_INCREMENTAL=0`)

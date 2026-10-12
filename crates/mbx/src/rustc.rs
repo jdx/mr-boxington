@@ -1345,10 +1345,9 @@ pub(crate) fn bypassed_library_incremental_flag(arguments: &[OsString]) -> Optio
     {
         return None;
     }
+    // Only library crate types reach here, which a build script never has, so
+    // a library that merely shares a build script's name is still covered.
     let crate_name = session::crate_name_argument(arguments)?;
-    if session::is_cargo_build_script(&crate_name) {
-        return None;
-    }
     let root = std::fs::canonicalize(std::env::var_os(session::WORKSPACE_ROOT_ENV)?).ok()?;
     let working_dir = std::env::current_dir().ok()?;
     let in_workspace = arguments.iter().any(|argument| {
