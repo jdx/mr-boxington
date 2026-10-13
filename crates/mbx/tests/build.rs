@@ -3568,9 +3568,14 @@ fn a_build_script_depending_on_out_dir_shares_between_checkouts() {
         );
         hits = count(&stats, "hits");
     }
-    assert!(
-        hits > 0,
-        "the second checkout recompiled the OUT_DIR reader"
+    assert!(hits > 0, "the second checkout reused nothing");
+    // The generated build script's own compilation hits either way, so the
+    // OUT_DIR reader is checked by crate.
+    let outcomes = second_build_outcomes(store.path());
+    assert_eq!(
+        outcomes.get("fixture").map(String::as_str),
+        Some("hit"),
+        "the OUT_DIR reader recompiled: {outcomes:?}"
     );
 }
 
