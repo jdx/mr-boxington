@@ -3534,6 +3534,35 @@ fn a_compilation_that_reads_out_dir_shares_between_checkouts_with_the_same_gener
     }
 }
 
+/// A build script may declare a dependence on `OUT_DIR` itself, as the
+/// `build-rs` crate does. The shim swaps `OUT_DIR` for a stable copy while
+/// rustc runs, and the declaration must not read as a changed input.
+#[test]
+fn a_build_script_depending_on_out_dir_still_compiles_an_out_dir_reader() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_generated_project(project.path(), Generated::Include);
+    let script = project.path().join("build.rs");
+    let source = std::fs::read_to_string(&script).unwrap().replace(
+        "fn main() {",
+        "fn main() {\n    println!(\"cargo::rerun-if-env-changed=OUT_DIR\");",
+    );
+    std::fs::write(&script, source).unwrap();
+
+    let (_, stderr) = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("report.json"),
+        &[],
+    );
+
+    assert!(
+        !stderr.contains("compilation result was discarded"),
+        "{stderr}"
+    );
+}
+
 /// Generated sources that differ between checkouts are different inputs, and
 /// the compilation that reads them is keyed to its own.
 #[test]

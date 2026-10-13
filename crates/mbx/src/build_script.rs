@@ -756,6 +756,10 @@ fn build_action(
 /// Cargo ran the build script outside mbx.
 pub(crate) struct CompilationInputs {
     pub(crate) input: mbx_cache_rustc::ActionInput,
+    /// Cargo's own `OUT_DIR`. The shim later points the process variable at a
+    /// stable copy, so a declared `OUT_DIR` dependency has to read this value
+    /// both when the key is taken and when it is verified.
+    out_dir: PathBuf,
     manifest_dir: PathBuf,
     mappings: Vec<PathMapping>,
     implicit_package: bool,
@@ -818,6 +822,7 @@ impl CompilationInputs {
                 path: output,
                 digest: CacheDigest::blake3(&[]),
             },
+            out_dir: out_dir.to_path_buf(),
             manifest_dir: manifest_dir.to_path_buf(),
             mappings,
             implicit_package: false,
@@ -869,13 +874,17 @@ impl CompilationInputs {
             } else if let Some(name) = directive.strip_prefix("rerun-if-env-changed=")
                 && !name.is_empty()
             {
-                let value = std::env::var_os(name)
-                    .map(|value| {
-                        value
-                            .into_string()
-                            .map_err(|_| eyre::eyre!("environment input is not UTF-8: {name}"))
-                    })
-                    .transpose()?;
+                let value = if name == "OUT_DIR" {
+                    Some(self.out_dir.as_os_str().to_owned())
+                } else {
+                    std::env::var_os(name)
+                }
+                .map(|value| {
+                    value
+                        .into_string()
+                        .map_err(|_| eyre::eyre!("environment input is not UTF-8: {name}"))
+                })
+                .transpose()?;
                 environment.insert(name, value);
             }
         }
@@ -1826,6 +1835,28 @@ mod tests {
             std::fs::remove_file(output).unwrap();
             assert!(CompilationInputs::read(&out_dir, package.path()).is_err());
         }
+    }
+
+    #[test]
+    fn a_declared_out_dir_dependency_survives_the_shim_replacing_the_variable() {
+        let package = tempfile::tempdir().unwrap();
+        let out_dir = package.path().join("target/debug/build/fixture/out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(
+            out_dir.parent().unwrap().join("output"),
+            "cargo::rerun-if-env-changed=OUT_DIR\n",
+        )
+        .unwrap();
+        let inputs = CompilationInputs::read(&out_dir, package.path()).unwrap();
+        // The shim moves OUT_DIR to a stable copy after the key is taken.
+        let original = std::env::var_os("OUT_DIR");
+        unsafe { std::env::set_var("OUT_DIR", package.path().join("stable")) };
+        let verified = inputs.verify();
+        match original {
+            Some(value) => unsafe { std::env::set_var("OUT_DIR", value) },
+            None => unsafe { std::env::remove_var("OUT_DIR") },
+        }
+        verified.unwrap();
     }
 
     #[test]
