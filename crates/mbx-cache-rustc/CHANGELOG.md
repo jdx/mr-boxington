@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.20.0...mbx-cache-rustc-v0.20.1) - 2026-10-13
+
+### Fixed
+
+- *(cache)* count a repeated -L native directory once against the 2 GiB limit ([#691](https://github.com/jdx/mr-boxington/pull/691))
+- *(cache)* stop target-path-bearing files in -L native dirs from missing the cache ([#692](https://github.com/jdx/mr-boxington/pull/692))
+- *(cache)* cache rlibs and checks when Cargo sets an explicit linker ([#694](https://github.com/jdx/mr-boxington/pull/694))
+
 ## [0.20.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.19.4...mbx-cache-rustc-v0.20.0) - 2026-10-08
 
 ### Added
