@@ -884,7 +884,16 @@ impl CompilationInputs {
                         .into_string()
                         .map_err(|_| eyre::eyre!("environment input is not UTF-8: {name}"))
                 })
-                .transpose()?;
+                .transpose()?
+                // Cargo's `OUT_DIR` names the checkout; the placeholder lets
+                // checkouts with the same declarations share a key.
+                .map(|value| {
+                    if name == "OUT_DIR" {
+                        normalize_environment_value(&value, &self.mappings)
+                    } else {
+                        value
+                    }
+                });
                 environment.insert(name, value);
             }
         }
@@ -1837,26 +1846,57 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_declared_out_dir_dependency_survives_the_shim_replacing_the_variable() {
-        let package = tempfile::tempdir().unwrap();
-        let out_dir = package.path().join("target/debug/build/fixture/out");
+    fn declare_out_dir_dependency(root: &Path) -> PathBuf {
+        let out_dir = root.join("target/debug/build/fixture/out");
         std::fs::create_dir_all(&out_dir).unwrap();
         std::fs::write(
             out_dir.parent().unwrap().join("output"),
             "cargo::rerun-if-env-changed=OUT_DIR\n",
         )
         .unwrap();
+        out_dir
+    }
+
+    #[test]
+    fn a_declared_out_dir_dependency_survives_the_shim_replacing_the_variable() {
+        // Replacing OUT_DIR is process-wide, so it happens in a child process.
+        const CHILD_ENV: &str = "MBX_TEST_DECLARED_OUT_DIR_REPLACED";
+        const NAME: &str = "build_script::tests::a_declared_out_dir_dependency_survives_the_shim_replacing_the_variable";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([NAME, "--exact", "--test-threads=1"])
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .contains("test result: ok. 1 passed"),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+        let package = tempfile::tempdir().unwrap();
+        let out_dir = declare_out_dir_dependency(package.path());
         let inputs = CompilationInputs::read(&out_dir, package.path()).unwrap();
         // The shim moves OUT_DIR to a stable copy after the key is taken.
-        let original = std::env::var_os("OUT_DIR");
         unsafe { std::env::set_var("OUT_DIR", package.path().join("stable")) };
-        let verified = inputs.verify();
-        match original {
-            Some(value) => unsafe { std::env::set_var("OUT_DIR", value) },
-            None => unsafe { std::env::remove_var("OUT_DIR") },
-        }
-        verified.unwrap();
+        inputs.verify().unwrap();
+    }
+
+    #[test]
+    fn a_declared_out_dir_dependency_keys_checkouts_alike() {
+        let digests = [(); 2].map(|()| {
+            let package = tempfile::tempdir().unwrap();
+            let out_dir = declare_out_dir_dependency(package.path());
+            CompilationInputs::read(&out_dir, package.path())
+                .unwrap()
+                .input
+                .digest
+        });
+        assert_eq!(digests[0], digests[1]);
     }
 
     #[test]
