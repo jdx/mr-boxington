@@ -801,7 +801,7 @@ fn another_installations_shim_directory_never_supplies_the_real_compiler() {
     let other_mbx = directory.path().join("other-mbx");
     std::fs::write(&other_mbx, b"#!/bin/sh\n").unwrap();
     std::os::unix::fs::symlink(&other_mbx, theirs.join("cc")).unwrap();
-    mark_shim_directory(&theirs);
+    mark_shim_directory(&theirs).unwrap();
     let real_cc = real_dir.join("cc");
     std::fs::write(&real_cc, b"#!/bin/sh\n").unwrap();
 
@@ -830,7 +830,7 @@ fn the_compiler_never_inherits_a_shim_directory_on_path() {
     for path in [&shims, &ccache, &bin] {
         std::fs::create_dir(path).unwrap();
     }
-    mark_shim_directory(&shims);
+    mark_shim_directory(&shims).unwrap();
     let path = std::env::join_paths([&shims, &ccache, &bin]).unwrap();
 
     assert_eq!(
@@ -854,7 +854,7 @@ fn a_compiler_named_inside_another_installations_shims_is_left_alone() {
     std::fs::create_dir(&theirs).unwrap();
     let planted = theirs.join("aarch64-linux-musl-gcc");
     std::fs::write(&planted, b"#!/bin/sh\n").unwrap();
-    mark_shim_directory(&theirs);
+    mark_shim_directory(&theirs).unwrap();
     let executable = directory.path().join("mbx");
     std::fs::write(&executable, b"#!/bin/sh\n").unwrap();
 
@@ -872,7 +872,7 @@ fn a_pin_naming_a_shim_falls_back_to_the_search() {
     let real_dir = directory.path().join("bin");
     std::fs::create_dir(&shims).unwrap();
     std::fs::create_dir(&real_dir).unwrap();
-    mark_shim_directory(&shims);
+    mark_shim_directory(&shims).unwrap();
     let running = directory.path().join("mbx");
     std::fs::write(&running, b"#!/bin/sh\n").unwrap();
 
@@ -899,7 +899,7 @@ fn host_driver_lookup_skips_another_installations_shims() {
     let other_mbx = directory.path().join("other-mbx");
     std::fs::write(&other_mbx, b"#!/bin/sh\n").unwrap();
     std::os::unix::fs::symlink(&other_mbx, theirs.join("cc")).unwrap();
-    mark_shim_directory(&theirs);
+    mark_shim_directory(&theirs).unwrap();
     let real_cc = real_dir.join("cc");
     std::fs::write(&real_cc, b"#!/bin/sh\n").unwrap();
 
@@ -961,7 +961,7 @@ fn only_shim_directories_nothing_can_use_are_collected() {
     let install = |kind: &str, identity: &str, target: Option<&Path>| {
         let per_binary = shims.join(kind).join(identity);
         std::fs::create_dir_all(&per_binary).unwrap();
-        mark_shim_directory(&per_binary);
+        mark_shim_directory(&per_binary).unwrap();
         if let Some(target) = target {
             let name = if kind == "rust" { "mbx-rustc" } else { "mbx-c" };
             std::os::unix::fs::symlink(target, per_binary.join(name)).unwrap();
@@ -1031,7 +1031,7 @@ fn superseded_rustc_shims_go_once_no_session_holds_them() {
     let install = |identity: &str, target: &Path| {
         let per_binary = shims.join("rust").join(identity);
         std::fs::create_dir_all(&per_binary).unwrap();
-        mark_shim_directory(&per_binary);
+        mark_shim_directory(&per_binary).unwrap();
         std::os::unix::fs::symlink(target, per_binary.join("mbx-rustc")).unwrap();
         per_binary
     };
@@ -1106,10 +1106,10 @@ fn marking_a_directory_agrees_with_reading_it_back() {
     let plain = directory.path().join("plain");
     std::fs::create_dir(&plain).unwrap();
     assert!(!is_shim_directory(&plain));
-    mark_shim_directory(&plain);
+    mark_shim_directory(&plain).unwrap();
     assert!(is_shim_directory(&plain), "a marked directory reads back");
     // Idempotent: a second call leaves the existing marker alone.
-    mark_shim_directory(&plain);
+    mark_shim_directory(&plain).unwrap();
     assert!(is_shim_directory(&plain));
 
     // A `.mbx-shims` that is not a file is not a marker, and marking must not
@@ -1118,7 +1118,7 @@ fn marking_a_directory_agrees_with_reading_it_back() {
     let occupied = directory.path().join("occupied");
     std::fs::create_dir(&occupied).unwrap();
     std::fs::create_dir(occupied.join(".mbx-shims")).unwrap();
-    mark_shim_directory(&occupied);
+    mark_shim_directory(&occupied).unwrap();
     assert!(
         !is_shim_directory(&occupied),
         "a directory named .mbx-shims must never count as a marker"
