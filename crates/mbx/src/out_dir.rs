@@ -701,11 +701,14 @@ fn discard_tree(root: &Path, name: &str, path: &Path) -> std::io::Result<u64> {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
     }
+    // A name no earlier discard used, so a leftover from a failed deletion is
+    // neither replaced nor removed here and stays counted by the sweep.
+    static DISCARDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = DISCARDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let doomed = root.join(format!(
-        "{STAGING_PREFIX}discard-{name}-{}",
+        "{STAGING_PREFIX}discard-{name}-{}-{sequence}",
         std::process::id()
     ));
-    let _ = remove_tree(&doomed);
     if let Err(error) = std::fs::rename(path, &doomed) {
         let _ = make_directory_read_only(path);
         return Err(error);
