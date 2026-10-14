@@ -54,7 +54,9 @@ and target roots to the restoring environment. Output trees that contain none
 of those paths can therefore cross target directories. An output file that
 embeds the output directory, the package or workspace root, the target
 directory, or `CARGO_HOME` puts the literal output directory into the action
-key, so the result is reused only at the same location. A symlink that may
+key, so the result is reused only at the same location. This includes the
+spelling a script gets from `canonicalize`, which resolves the managed target
+symlink. A symlink that may
 escape `OUT_DIR` makes the execution uncacheable.
 
 The launcher mbx leaves in a target directory is transparent when the build

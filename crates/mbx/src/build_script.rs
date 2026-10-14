@@ -17,6 +17,7 @@ use mbx_cache_core::{
 use mbx_cache_rustc::PathMapping;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -1296,22 +1297,38 @@ fn modified_since(
     Ok(false)
 }
 
-fn out_dir_is_portable() -> Result<bool> {
-    let Some(out_dir) = std::env::var_os("OUT_DIR") else {
-        return Ok(false);
-    };
-    let needles = [
+/// Every spelling of the roots a build script's output must not embed.
+///
+/// The managed target directory is a symlink, so a script that canonicalizes a
+/// path under `OUT_DIR` writes the resolved spelling, which names the managed
+/// target rather than the checkout. Searching only for the spelling in the
+/// environment would call that output portable and restore it, still naming
+/// the checkout that produced it, into another.
+fn embedded_root_needles(environment: impl Fn(&str) -> Option<OsString>) -> BTreeSet<String> {
+    let mut needles = BTreeSet::new();
+    for name in [
         "OUT_DIR",
         "CARGO_MANIFEST_DIR",
         session::WORKSPACE_ROOT_ENV,
         session::TARGET_DIR_ENV,
         "CARGO_HOME",
-    ]
-    .into_iter()
-    .filter_map(std::env::var_os)
-    .map(|value| value.to_string_lossy().into_owned())
-    .filter(|value| !value.is_empty())
-    .collect::<BTreeSet<_>>();
+    ] {
+        let Some(value) = environment(name).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        if let Ok(resolved) = std::fs::canonicalize(&value) {
+            needles.insert(resolved.to_string_lossy().into_owned());
+        }
+        needles.insert(value.to_string_lossy().into_owned());
+    }
+    needles
+}
+
+fn out_dir_is_portable() -> Result<bool> {
+    let Some(out_dir) = std::env::var_os("OUT_DIR") else {
+        return Ok(false);
+    };
+    let needles = embedded_root_needles(|name| std::env::var_os(name));
     let root = PathBuf::from(&out_dir);
     if !root.is_dir() {
         return Ok(true);
@@ -2067,6 +2084,26 @@ mod tests {
             normalize_environment_value(&cargo_bin.to_string_lossy(), &mappings),
             PathBuf::from("${cargo_home}").join("bin").to_string_lossy()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_root_needles_include_the_resolved_spelling() {
+        let directory = tempfile::tempdir().unwrap();
+        let managed = std::fs::canonicalize(directory.path())
+            .unwrap()
+            .join("managed");
+        std::fs::create_dir_all(managed.join("out")).unwrap();
+        let link = directory.path().join("target");
+        std::os::unix::fs::symlink(&managed, &link).unwrap();
+        let out_dir = link.join("out");
+
+        let needles = embedded_root_needles(|name| {
+            (name == "OUT_DIR").then(|| out_dir.clone().into_os_string())
+        });
+
+        assert!(needles.contains(&out_dir.to_string_lossy().into_owned()));
+        assert!(needles.contains(&managed.join("out").to_string_lossy().into_owned()));
     }
 
     #[test]
