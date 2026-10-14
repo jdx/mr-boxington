@@ -818,6 +818,29 @@ fn another_installations_shim_directory_never_supplies_the_real_compiler() {
     );
 }
 
+#[test]
+fn the_compiler_never_inherits_a_shim_directory_on_path() {
+    // ccache's masquerade link looks the compiler up on `PATH` again and skips
+    // only links to ccache, so a shim directory ahead of `/usr/bin` sends it
+    // back into the shim until the machine runs out of processes.
+    let directory = tempfile::tempdir().unwrap();
+    let shims = directory.path().join("shims");
+    let ccache = directory.path().join("ccache");
+    let bin = directory.path().join("bin");
+    for path in [&shims, &ccache, &bin] {
+        std::fs::create_dir(path).unwrap();
+    }
+    mark_shim_directory(&shims);
+    let path = std::env::join_paths([&shims, &ccache, &bin]).unwrap();
+
+    assert_eq!(
+        path_without_shim_directories(&path),
+        Some(std::env::join_paths([&ccache, &bin]).unwrap())
+    );
+    let clean = std::env::join_paths([&ccache, &bin]).unwrap();
+    assert_eq!(path_without_shim_directories(&clean), None);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_compiler_named_inside_another_installations_shims_is_left_alone() {
