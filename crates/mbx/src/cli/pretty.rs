@@ -462,7 +462,7 @@ impl CursorQuery {
         }
         let mut out = Vec::with_capacity(data.len());
         let mut rest = data.as_slice();
-        while let Some(at) = rest
+        if let Some(at) = rest
             .windows(Self::QUERY.len())
             .position(|window| window == Self::QUERY)
         {
