@@ -548,6 +548,7 @@ pub(crate) fn collect(
     // least recently.
     let mut trees: Vec<(String, PathBuf, u64, Option<Duration>)> = Vec::new();
     let mut lease_dirs = Vec::new();
+    let mut staging_bytes = 0_u64;
     for entry in entries {
         // An entry that cannot be read is still on the disk. It is kept and
         // counted, not skipped, so a budget sized from this walk sees it.
@@ -573,6 +574,11 @@ pub(crate) fn collect(
             if abandoned && !dry_run {
                 let _ = remove_tree(&path);
             }
+            // What is still on the disk counts toward the budget, so a
+            // discarded tree whose deletion failed is not forgotten.
+            if path.exists() {
+                staging_bytes = staging_bytes.saturating_add(tree_bytes(&path));
+            }
             continue;
         }
         if let Some(digest) = name.strip_suffix(".leases") {
@@ -588,7 +594,7 @@ pub(crate) fn collect(
         trees.push((name, path, 0, age));
     }
     trees.sort_by_key(|tree| std::cmp::Reverse(tree.3));
-    let mut remaining_bytes = 0_u64;
+    let mut remaining_bytes = staging_bytes;
     for tree in &mut trees {
         tree.2 = tree_bytes(&tree.1);
         remaining_bytes = remaining_bytes.saturating_add(tree.2);
