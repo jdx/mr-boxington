@@ -560,7 +560,7 @@ fn a_collected_tree_leaves_no_half_removed_directory_under_its_name() {
     release_all_under(&root);
 
     let name = stable.file_name().unwrap().to_string_lossy().into_owned();
-    discard_tree(&root, &name, &stable).unwrap();
+    assert_eq!(discard_tree(&root, &name, &stable).unwrap(), 0);
 
     assert!(!stable.exists());
     let leftovers: Vec<_> = std::fs::read_dir(&root)
