@@ -850,8 +850,9 @@ fn cursor_query_is_answered_and_hidden_even_when_split_across_reads() {
         shown.extend(query.answer(chunk.to_vec(), &mut input).unwrap());
     }
     shown.extend(query.answer(b"[0m".to_vec(), &mut input).unwrap());
-    assert_eq!(shown, b"abcd\x1b[0m");
-    assert_eq!(input, b"\x1b[1;1R\x1b[1;1R");
+    // Only the startup request is answered; the later one reaches the terminal.
+    assert_eq!(shown, b"abcd\x1b[6n\x1b[0m");
+    assert_eq!(input, b"\x1b[1;1R");
 }
 
 #[test]

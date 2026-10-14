@@ -205,13 +205,10 @@ fn run_inner(
             match receive.recv_timeout(Duration::from_millis(20)) {
                 Ok(Ok(bytes)) => {
                     last_output = Instant::now();
-                    // Once output is proxied, the real terminal owns cursor queries.
-                    let bytes = if cfg!(windows) && !proxy {
+                    let bytes = if cfg!(windows) {
                         cursor_query.answer(bytes, &mut input)?
                     } else {
-                        let mut held = cursor_query.take();
-                        held.extend(bytes);
-                        held
+                        bytes
                     };
                     decoder.feed(&bytes, &mut model, &mut screen, mode, &mut proxy, &stats)?
                 }
@@ -439,10 +436,13 @@ fn key_bytes(key: event::KeyEvent) -> Vec<u8> {
 ///
 /// ConPTY emits nothing else until the host replies, so without an answer the
 /// build never starts. The request is consumed here rather than shown, since
-/// the real terminal would answer it a second time into Cargo's input.
+/// the real terminal would answer it a second time into Cargo's input. Only
+/// that startup request is answered; later queries, such as those from a
+/// program run by `cargo run`, go to the real terminal.
 #[derive(Default)]
 struct CursorQuery {
     held: Vec<u8>,
+    answered: bool,
 }
 
 impl CursorQuery {
@@ -457,6 +457,9 @@ impl CursorQuery {
     fn answer(&mut self, bytes: Vec<u8>, input: &mut impl Write) -> io::Result<Vec<u8>> {
         let mut data = std::mem::take(&mut self.held);
         data.extend(bytes);
+        if self.answered {
+            return Ok(data);
+        }
         let mut out = Vec::with_capacity(data.len());
         let mut rest = data.as_slice();
         while let Some(at) = rest
@@ -467,6 +470,9 @@ impl CursorQuery {
             rest = &rest[at + Self::QUERY.len()..];
             input.write_all(Self::REPLY)?;
             input.flush()?;
+            self.answered = true;
+            out.extend_from_slice(rest);
+            return Ok(out);
         }
         // Hold back a trailing prefix of the request that the next read may complete.
         let keep = (1..Self::QUERY.len())
