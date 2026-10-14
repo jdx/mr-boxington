@@ -576,8 +576,11 @@ pub(crate) fn collect(
             }
             // What is still on the disk counts toward the budget, so a
             // discarded tree whose deletion failed is not forgotten.
-            // A dry run projects the sweep, which deletes an abandoned one.
-            if !(abandoned && dry_run) && path.exists() {
+            // A dry run projecting a sweep leaves out an abandoned one, which
+            // the sweep deletes; a measurement (no limits) counts what is
+            // on the disk.
+            let projecting = dry_run && (max_bytes.is_some() || max_age.is_some());
+            if !(abandoned && projecting) && path.exists() {
                 staging_bytes = staging_bytes.saturating_add(tree_bytes(&path));
             }
             continue;
