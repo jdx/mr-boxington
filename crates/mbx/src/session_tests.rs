@@ -1118,7 +1118,7 @@ fn marking_a_directory_agrees_with_reading_it_back() {
     let occupied = directory.path().join("occupied");
     std::fs::create_dir(&occupied).unwrap();
     std::fs::create_dir(occupied.join(".mbx-shims")).unwrap();
-    mark_shim_directory(&occupied).unwrap();
+    mark_shim_directory(&occupied).unwrap_err();
     assert!(
         !is_shim_directory(&occupied),
         "a directory named .mbx-shims must never count as a marker"

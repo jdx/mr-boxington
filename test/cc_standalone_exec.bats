@@ -294,6 +294,13 @@ EOF
   cat >"$wrapper/cc" <<'EOF'
 #!/bin/sh
 self=$(dirname "$0")
+# Bounded so a regression fails here rather than running away.
+count=$(($(cat "$self/count" 2>/dev/null || echo 0) + 1))
+echo "$count" >"$self/count"
+if [ "$count" -gt 20 ]; then
+  echo "wrapper was re-entered $count times" >&2
+  exit 1
+fi
 old_ifs=$IFS
 IFS=:
 for dir in $PATH; do
@@ -308,8 +315,7 @@ exit 1
 EOF
   chmod +x "$real/cc" "$wrapper/cc"
 
-  run timeout 20 env MBX_CC=1 PATH="$wrapper:$real:$PATH" \
-    "$MBX_BIN" exec sh -c 'cc -c nothing.c'
+  run env MBX_CC=1 PATH="$wrapper:$real:$PATH" "$MBX_BIN" exec sh -c 'cc -c nothing.c'
   assert_success
   assert_output --partial "reached-real-cc"
 }
