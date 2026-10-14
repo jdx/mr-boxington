@@ -853,3 +853,13 @@ fn cursor_query_is_answered_and_hidden_even_when_split_across_reads() {
     assert_eq!(shown, b"abcd\x1b[0m");
     assert_eq!(input, b"\x1b[1;1R\x1b[1;1R");
 }
+
+#[test]
+fn incomplete_cursor_query_at_end_of_output_is_returned() {
+    let mut query = CursorQuery::default();
+    let mut input = Vec::new();
+    let shown = query.answer(b"done\x1b[6".to_vec(), &mut input).unwrap();
+    assert_eq!(shown, b"done");
+    assert_eq!(query.take(), b"\x1b[6");
+    assert!(input.is_empty());
+}

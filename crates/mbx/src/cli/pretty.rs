@@ -205,10 +205,13 @@ fn run_inner(
             match receive.recv_timeout(Duration::from_millis(20)) {
                 Ok(Ok(bytes)) => {
                     last_output = Instant::now();
-                    let bytes = if cfg!(windows) {
+                    // Once output is proxied, the real terminal owns cursor queries.
+                    let bytes = if cfg!(windows) && !proxy {
                         cursor_query.answer(bytes, &mut input)?
                     } else {
-                        bytes
+                        let mut held = cursor_query.take();
+                        held.extend(bytes);
+                        held
                     };
                     decoder.feed(&bytes, &mut model, &mut screen, mode, &mut proxy, &stats)?
                 }
@@ -249,6 +252,10 @@ fn run_inner(
             } else {
                 screen.repaint()?;
             }
+        }
+        let held = cursor_query.take();
+        if !held.is_empty() {
+            decoder.feed(&held, &mut model, &mut screen, mode, &mut proxy, &stats)?;
         }
         decoder.finish(&mut screen)?;
         child.wait().map_err(|e| eyre::eyre!(e))
@@ -441,6 +448,11 @@ struct CursorQuery {
 impl CursorQuery {
     const QUERY: &'static [u8] = b"\x1b[6n";
     const REPLY: &'static [u8] = b"\x1b[1;1R";
+
+    /// Returns the bytes held back while waiting for the rest of a request.
+    fn take(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.held)
+    }
 
     fn answer(&mut self, bytes: Vec<u8>, input: &mut impl Write) -> io::Result<Vec<u8>> {
         let mut data = std::mem::take(&mut self.held);
