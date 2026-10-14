@@ -611,7 +611,7 @@ pub(crate) fn collect(
         }
         if !dry_run {
             let _ = std::fs::remove_file(marker_path(root, name));
-            if let Err(error) = remove_tree(path) {
+            if let Err(error) = discard_tree(root, name, path) {
                 log::warn!(
                     "could not remove the generated source tree {}: {error}",
                     path.display()
@@ -664,6 +664,35 @@ fn age_of(path: &Path, now: SystemTime) -> Option<Duration> {
         .and_then(|metadata| metadata.modified())
         .ok()?;
     now.duration_since(modified).ok()
+}
+
+/// Take a published tree out of use, all or nothing.
+///
+/// A tree is reused because its directory exists, so deleting it in place can
+/// leave a half-emptied directory under its name when a file cannot be
+/// removed (on Windows, one another process holds open): every later
+/// compilation would take it for complete and fail on the missing files. The
+/// tree is therefore renamed to a staging name first, which either happens
+/// whole or leaves the tree as it was, and only then deleted. A deletion that
+/// fails after the rename is left for the staging sweep.
+fn discard_tree(root: &Path, name: &str, path: &Path) -> std::io::Result<()> {
+    // macOS will not rename a directory it cannot write.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    let doomed = root.join(format!(
+        "{STAGING_PREFIX}discard-{name}-{}",
+        std::process::id()
+    ));
+    let _ = remove_tree(&doomed);
+    if let Err(error) = std::fs::rename(path, &doomed) {
+        let _ = make_directory_read_only(path);
+        return Err(error);
+    }
+    let _ = remove_tree(&doomed);
+    Ok(())
 }
 
 /// Remove a tree that was made read-only. Unlinking needs a writable parent
