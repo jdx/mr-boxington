@@ -445,7 +445,11 @@ fn find_prediction(invocation: &CacheDigest) -> Result<Option<Prediction>> {
         Some(AgentResponse::ActionPrediction {
             prediction: Some(found),
         }) if found.adapter == ADAPTER && found.invocation == *invocation => {
-            Ok(Some(decode_prediction(&found.payload)?))
+            let prediction = decode_prediction(&found.payload)?;
+            // Older predictions judged portability without resolving symlinks
+            // in the output, so a portable verdict cannot be trusted. Treat
+            // the prediction as absent and let the run record a current one.
+            Ok((!prediction_predates_resolved_paths(&prediction)).then_some(prediction))
         }
         Some(AgentResponse::ActionPrediction { prediction: None }) => Ok(None),
         Some(AgentResponse::Error { message }) => bail!(message),
@@ -466,7 +470,7 @@ fn decode_prediction(payload: &str) -> Result<Prediction> {
         // Version 1 predates Cargo-default package inputs. Every prediction it
         // stored came from explicit rerun directives, so false is exact.
         1 => !has_default_package && !prediction.default_package,
-        2 => has_default_package,
+        2 | 3 => has_default_package,
         _ => false,
     };
     if !supported_version
@@ -477,6 +481,13 @@ fn decode_prediction(payload: &str) -> Result<Prediction> {
         bail!("cached build-script prediction is unsupported");
     }
     Ok(prediction)
+}
+
+/// Whether a prediction's portable verdict came from a check that searched
+/// only the spellings in the environment. Version 3 also searches the
+/// symlink-resolved ones.
+fn prediction_predates_resolved_paths(prediction: &Prediction) -> bool {
+    prediction.portable_out_dir && prediction.version < 3
 }
 
 fn record_prediction(
@@ -684,7 +695,7 @@ fn parse_prediction_with_mappings(
         inputs: inputs.into_iter().collect(),
         environment: environment.into_iter().collect(),
         portable_out_dir: out_dir_is_portable()?,
-        version: 2,
+        version: 3,
     }))
 }
 
@@ -2126,6 +2137,21 @@ mod tests {
             .is_err(),
             "version 2 must carry its default-package mode"
         );
+    }
+
+    #[test]
+    fn predictions_judged_before_resolved_paths_are_not_trusted() {
+        let payload = |portable: bool, version: u8| {
+            format!(
+                r#"{{"default_package":false,"environment":[],"inputs":["input.h"],"portable_out_dir":{portable},"version":{version}}}"#
+            )
+        };
+        let stale = decode_prediction(&payload(true, 2)).unwrap();
+        assert!(prediction_predates_resolved_paths(&stale));
+        let conservative = decode_prediction(&payload(false, 2)).unwrap();
+        assert!(!prediction_predates_resolved_paths(&conservative));
+        let current = decode_prediction(&payload(true, 3)).unwrap();
+        assert!(!prediction_predates_resolved_paths(&current));
     }
 
     #[test]
