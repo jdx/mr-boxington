@@ -3724,7 +3724,7 @@ fn publish_result<'a>(
     // recorded. Only a record that can be restored is kept: otherwise the
     // normal publication below is what repairs it, and an identical result
     // still goes through it so it is uploaded when remote writes are on.
-    if existing_result_supersedes(&result) {
+    if existing_result_supersedes(&result, outputs) {
         return Ok(action);
     }
 
@@ -3748,11 +3748,11 @@ fn publish_result<'a>(
 
 /// Whether the store already holds a restorable result for this key that
 /// differs from `result`, which the store would refuse to replace.
-fn existing_result_supersedes(result: &RemoteActionResult) -> bool {
-    existing_restorable_result(result).unwrap_or(false)
+fn existing_result_supersedes(result: &RemoteActionResult, outputs: &RustcOutputs) -> bool {
+    existing_restorable_result(result, outputs).unwrap_or(false)
 }
 
-fn existing_restorable_result(result: &RemoteActionResult) -> Result<bool> {
+fn existing_restorable_result(result: &RemoteActionResult, outputs: &RustcOutputs) -> Result<bool> {
     let responses = session::request_agent(&[AgentRequest::FindActionResult {
         action: result.action.clone(),
     }])?;
@@ -3779,8 +3779,14 @@ fn existing_restorable_result(result: &RemoteActionResult) -> Result<bool> {
         read_canonical_blob(&roots[1], &metadata_digest, "rustc metadata")?;
     let directory: CacheDirectory =
         read_canonical_blob(&roots[2], &output_root_digest, "output directory")?;
+    if metadata.version != 1 || metadata.kind != "rustc" {
+        return Ok(false);
+    }
     let mut digests = vec![metadata.stdout, metadata.stderr];
-    digests.extend(directory.files.into_iter().map(|file| file.digest));
+    // The entries restore would accept, so a record it would reject is
+    // replaced rather than kept.
+    let files = validated_outputs(directory, outputs)?;
+    digests.extend(files.into_iter().map(|(node, _)| node.digest));
     find_blobs(&digests)?;
     Ok(true)
 }
