@@ -3619,6 +3619,20 @@ fn publish_result<'a>(
     if outputs.files.is_empty() {
         bail!("rustc produced no cacheable outputs");
     }
+    // A key another checkout already published keeps that record. Outputs
+    // that embed the checkout path differ byte for byte between checkouts
+    // under one key, which the store refuses by design; asking first means a
+    // compile that lost the race neither warns, nor leaves its blobs in the
+    // store unreferenced, nor skips refreshing the prediction.
+    if let Some(AgentResponse::ActionResult { result: Some(_) }) =
+        session::request_agent(&[AgentRequest::FindActionResult {
+            action: candidates.publishable().digest.clone(),
+        }])
+        .ok()
+        .and_then(|responses| responses.into_iter().next())
+    {
+        return Ok(candidates.publishable());
+    }
     let staging = staging_directory()?;
     let mut blobs = Vec::new();
     let stdout = staged_bytes(
