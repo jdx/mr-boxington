@@ -287,6 +287,29 @@ impl LocalActionCache {
         Ok(Some(result))
     }
 
+    /// Whether the objects `result` names that this index can see are all
+    /// present and verified: its metadata, its output directory and the files
+    /// that directory lists.
+    fn is_intact(&self, result: &RemoteActionResult) -> bool {
+        let present = |digest: &CacheDigest| matches!(self.cas.find(digest), Ok(Some(_)));
+        let (Some(metadata), Some(output_root)) = (&result.metadata, &result.output_root) else {
+            return false;
+        };
+        if !present(&result.action) || !present(metadata) {
+            return false;
+        }
+        let Ok(Some(path)) = self.cas.find(output_root) else {
+            return false;
+        };
+        let Ok(bytes) = fs::read(path) else {
+            return false;
+        };
+        let Ok(directory) = serde_json::from_slice::<crate::CacheDirectory>(&bytes) else {
+            return false;
+        };
+        directory.files.iter().all(|file| present(&file.digest))
+    }
+
     /// Atomically publish an action result after validating all referenced objects.
     pub fn store(&self, result: &RemoteActionResult) -> Result<PathBuf> {
         if result.version != 1 {
@@ -310,7 +333,13 @@ impl LocalActionCache {
                 if existing == *result {
                     return Ok(destination);
                 }
-                bail!("local action key already has a different result");
+                // A different record is kept so a key never changes under a
+                // reader, unless its objects are gone or torn: then it can
+                // never be restored, and this result is the repair.
+                if self.is_intact(&existing) {
+                    bail!("local action key already has a different result");
+                }
+                true
             }
             Ok(None) => false,
             Err(_) => true,
@@ -534,5 +563,54 @@ mod tests {
         assert!(actions.find(&action).is_err());
         assert_eq!(actions.store(&result).unwrap(), path);
         assert_eq!(actions.find(&action).unwrap(), Some(result));
+    }
+
+    #[test]
+    fn keeps_a_different_result_until_its_objects_are_gone() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = LocalCas::new(directory.path());
+        let actions = LocalActionCache::new(directory.path());
+        let action = CacheDigest::blake3(b"action");
+        cas.store_bytes(&action, b"action").unwrap();
+        let publish = |name: &[u8], contents: &[u8]| {
+            let file = CacheDigest::blake3(contents);
+            cas.store_bytes(&file, contents).unwrap();
+            let listing = canonical_json(&crate::CacheDirectory {
+                directories: Vec::new(),
+                files: vec![crate::CacheFileNode {
+                    digest: file.clone(),
+                    executable: false,
+                    mode: 0o644,
+                    name: String::from_utf8(name.to_vec()).unwrap(),
+                }],
+                symlinks: Vec::new(),
+                version: 1,
+            })
+            .unwrap();
+            let output_root = CacheDigest::blake3(&listing);
+            let metadata = CacheDigest::blake3(name);
+            cas.store_bytes(&output_root, &listing).unwrap();
+            cas.store_bytes(&metadata, name).unwrap();
+            (
+                file,
+                RemoteActionResult {
+                    action: action.clone(),
+                    metadata: Some(metadata),
+                    output_root: Some(output_root),
+                    version: 1,
+                },
+            )
+        };
+        let (file, first) = publish(b"libx.rlib", b"built in checkout a");
+        let (_, second) = publish(b"libx.rlib", b"built in checkout bb");
+
+        actions.store(&first).unwrap();
+        let error = actions.store(&second).unwrap_err();
+        assert!(error.to_string().contains("different result"));
+        assert_eq!(actions.find(&action).unwrap(), Some(first));
+
+        fs::remove_file(cas.path_for(&file).unwrap()).unwrap();
+        actions.store(&second).unwrap();
+        assert_eq!(actions.find(&action).unwrap(), Some(second));
     }
 }
