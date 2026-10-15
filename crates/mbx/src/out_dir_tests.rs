@@ -549,3 +549,29 @@ fn an_unlistable_root_measures_as_unknown_not_empty() {
         "a root that does not exist yet holds nothing"
     );
 }
+
+#[test]
+fn a_collected_tree_leaves_no_half_removed_directory_under_its_name() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("out-dirs");
+    let source = directory.path().join("a/out");
+    write_tree(&source, &[("generated.rs", b"one"), ("sub/two.rs", b"two")]);
+    let stable = stabilize(&source, &root).unwrap().unwrap();
+    release_all_under(&root);
+
+    let name = stable.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(discard_tree(&root, &name, &stable).unwrap(), 0);
+
+    assert!(!stable.exists());
+    let leftovers: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(STAGING_PREFIX)
+        })
+        .collect();
+    assert!(leftovers.is_empty(), "the renamed tree is deleted too");
+}

@@ -1582,6 +1582,23 @@ impl<'a> Parser<'a> {
                 }
                 _ => {}
             }
+            if option == "share-generics" {
+                return Err(BypassReason::MissingValue("-Zshare-generics".into()));
+            }
+            if let Some(value) = option.strip_prefix("share-generics=") {
+                if matches!(
+                    value,
+                    "y" | "yes" | "on" | "true" | "n" | "no" | "off" | "false"
+                ) {
+                    self.parsed.push(Argument::Plain(format!("-Z{option}")));
+                    return Ok(());
+                }
+                return Err(if value.is_empty() {
+                    BypassReason::MissingValue("-Zshare-generics".into())
+                } else {
+                    BypassReason::UnknownFlag(format!("-Z{option}"))
+                });
+            }
             if option.starts_with("threads=") {
                 self.parsed.push(Argument::Plain(format!("-Z{option}")));
                 return Ok(());
@@ -1659,6 +1676,21 @@ impl<'a> Parser<'a> {
         let name = value.split_once('=').map_or(value, |(name, _)| name);
         if name == "incremental" {
             return Err(BypassReason::Incremental);
+        }
+        if name == "profile-use" {
+            let Some((_, profile)) = value.split_once('=') else {
+                return Err(BypassReason::MissingValue("-Cprofile-use".into()));
+            };
+            if profile.is_empty() {
+                return Err(BypassReason::MissingValue("-Cprofile-use".into()));
+            }
+            let path = PathBuf::from(profile);
+            self.required_inputs.push(path.clone());
+            self.parsed.push(Argument::Path {
+                flag: "-Cprofile-use".into(),
+                path,
+            });
+            return Ok(());
         }
         if SUPPORTED_CODEGEN_OPTIONS.binary_search(&name).is_err()
             && !matches!(name, "linker" | "linker-flavor")

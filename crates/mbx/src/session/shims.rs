@@ -143,23 +143,18 @@ pub(crate) const SHIM_DIR_MARKER: &str = ".mbx-shims";
 
 /// Record that mbx owns `directory`, so other installs skip the shims in it.
 ///
-/// Best effort. A marker that cannot be written leaves the location and
-/// identity checks doing what they did before, which is the behavior every
-/// release up to now shipped.
-pub(crate) fn mark_shim_directory(directory: &Path) {
+/// An error is fatal to the install that asked: a directory of runnable shims
+/// that is not marked is invisible to every `PATH` filter, and a compiler
+/// driver such as ccache that searches `PATH` for itself would find the shim
+/// and run it again until the machine runs out of processes.
+pub(crate) fn mark_shim_directory(directory: &Path) -> std::io::Result<()> {
     // The same predicate the readers use, rather than a second spelling of it:
     // `exists` would count a `.mbx-shims` that is not a file as marked and skip
     // the write, while every reader went on treating the directory as nobody's.
     if is_shim_directory(directory) {
-        return;
+        return Ok(());
     }
-    let marker = directory.join(SHIM_DIR_MARKER);
-    if let Err(error) = std::fs::write(&marker, b"") {
-        debug!(
-            "the shim directory {} was not marked: {error}",
-            directory.display()
-        );
-    }
+    std::fs::write(directory.join(SHIM_DIR_MARKER), b"")
 }
 
 /// Whether mbx installed shims into `directory`.
@@ -189,7 +184,7 @@ pub(super) fn install_cc_shims(shims_dir: &Path) -> Result<Option<CcShims>> {
     // Before anything resolves a compiler: the lookups below skip directories
     // mbx owns, and this one qualifies as soon as a shim lands in it.
     std::fs::create_dir_all(shims_dir)?;
-    mark_shim_directory(shims_dir);
+    mark_shim_directory(shims_dir).wrap_err("failed to mark the shim directory")?;
     // Each language stands alone. An image with a C compiler and no C++ one is
     // ordinary, and it must not cost a C-only sys-crate its caching.
     //
@@ -334,7 +329,7 @@ pub fn install_path_shims(directory: &Path) -> Result<Option<PathShims>> {
     }
     let executable = std::env::current_exe().wrap_err("failed to locate the running mbx binary")?;
     std::fs::create_dir_all(directory)?;
-    mark_shim_directory(directory);
+    mark_shim_directory(directory).wrap_err("failed to mark the shim directory")?;
     let mut compilers = BTreeMap::new();
     for (name, _) in PATH_SHIM_NAMES {
         let destination = directory.join(name);
@@ -507,9 +502,9 @@ pub(super) fn install_session_shims(
     std::fs::create_dir_all(&native)?;
     // Every level: the root holds the `mbx exec` compiler shims, and each
     // per-binary directory holds the shims a session points its build at.
-    mark_shim_directory(persistent_shims);
-    mark_shim_directory(&binary_shims);
-    mark_shim_directory(&native);
+    mark_shim_directory(persistent_shims).wrap_err("failed to mark the shim directory")?;
+    mark_shim_directory(&binary_shims).wrap_err("failed to mark the shim directory")?;
+    mark_shim_directory(&native).wrap_err("failed to mark the shim directory")?;
     // Refreshed every session, so collection can tell a directory some
     // installation still uses from one nothing has used in a long time.
     touch_shim_directory(&binary_shims);

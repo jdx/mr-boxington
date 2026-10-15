@@ -840,3 +840,27 @@ fn each_carriage_return_gets_its_own_grace_period() {
     assert!(frame.awaiting_lf(expired + Duration::from_millis(1)));
     assert!(!frame.awaiting_lf(expired + Duration::from_millis(1) + CR_GRACE));
 }
+
+#[test]
+fn cursor_query_is_answered_and_hidden_even_when_split_across_reads() {
+    let mut query = CursorQuery::default();
+    let mut input = Vec::new();
+    let mut shown = Vec::new();
+    for chunk in [&b"ab\x1b["[..], b"6ncd\x1b[6n\x1b"] {
+        shown.extend(query.answer(chunk.to_vec(), &mut input).unwrap());
+    }
+    shown.extend(query.answer(b"[0m".to_vec(), &mut input).unwrap());
+    // Only the startup request is answered; the later one reaches the terminal.
+    assert_eq!(shown, b"abcd\x1b[6n\x1b[0m");
+    assert_eq!(input, b"\x1b[1;1R");
+}
+
+#[test]
+fn incomplete_cursor_query_at_end_of_output_is_returned() {
+    let mut query = CursorQuery::default();
+    let mut input = Vec::new();
+    let shown = query.answer(b"done\x1b[6".to_vec(), &mut input).unwrap();
+    assert_eq!(shown, b"done");
+    assert_eq!(query.take(), b"\x1b[6");
+    assert!(input.is_empty());
+}

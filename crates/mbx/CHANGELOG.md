@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.24.0](https://github.com/jdx/mr-boxington/compare/v1.23.0...v1.24.0) - 2026-10-13
+
+### Added
+
+- support llvm-ar and llvm-ranlib ([#699](https://github.com/jdx/mr-boxington/pull/699))
+- *(scheduler)* schedule each cargo-nextest test in the shared pool ([#684](https://github.com/jdx/mr-boxington/pull/684))
+
+### Fixed
+
+- *(rustc)* build crates whose build script declares OUT_DIR as an input ([#700](https://github.com/jdx/mr-boxington/pull/700))
+- *(incremental)* compile staticlib and cdylib workspace libraries incrementally ([#695](https://github.com/jdx/mr-boxington/pull/695))
+- *(shims)* share one HOST_CC between a binary and its symlinks ([#693](https://github.com/jdx/mr-boxington/pull/693))
+- *(scheduler)* stop reading nextest's -j as a Cargo build-job limit ([#685](https://github.com/jdx/mr-boxington/pull/685))
+- *(deps)* update rust crate usage to v7 ([#675](https://github.com/jdx/mr-boxington/pull/675))
+
 ## [1.23.0](https://github.com/jdx/mr-boxington/compare/v1.22.0...v1.23.0) - 2026-10-08
 
 ### Added

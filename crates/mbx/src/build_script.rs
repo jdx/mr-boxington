@@ -17,6 +17,7 @@ use mbx_cache_core::{
 use mbx_cache_rustc::PathMapping;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -444,7 +445,11 @@ fn find_prediction(invocation: &CacheDigest) -> Result<Option<Prediction>> {
         Some(AgentResponse::ActionPrediction {
             prediction: Some(found),
         }) if found.adapter == ADAPTER && found.invocation == *invocation => {
-            Ok(Some(decode_prediction(&found.payload)?))
+            let prediction = decode_prediction(&found.payload)?;
+            // Older predictions judged portability without resolving symlinks
+            // in the output, so a portable verdict cannot be trusted. Treat
+            // the prediction as absent and let the run record a current one.
+            Ok((!prediction_predates_resolved_paths(&prediction)).then_some(prediction))
         }
         Some(AgentResponse::ActionPrediction { prediction: None }) => Ok(None),
         Some(AgentResponse::Error { message }) => bail!(message),
@@ -465,7 +470,7 @@ fn decode_prediction(payload: &str) -> Result<Prediction> {
         // Version 1 predates Cargo-default package inputs. Every prediction it
         // stored came from explicit rerun directives, so false is exact.
         1 => !has_default_package && !prediction.default_package,
-        2 => has_default_package,
+        2 | 3 => has_default_package,
         _ => false,
     };
     if !supported_version
@@ -476,6 +481,13 @@ fn decode_prediction(payload: &str) -> Result<Prediction> {
         bail!("cached build-script prediction is unsupported");
     }
     Ok(prediction)
+}
+
+/// Whether a prediction's portable verdict came from a check that searched
+/// only the spellings in the environment. Version 3 also searches the
+/// symlink-resolved ones.
+fn prediction_predates_resolved_paths(prediction: &Prediction) -> bool {
+    prediction.portable_out_dir && prediction.version < 3
 }
 
 fn record_prediction(
@@ -683,7 +695,7 @@ fn parse_prediction_with_mappings(
         inputs: inputs.into_iter().collect(),
         environment: environment.into_iter().collect(),
         portable_out_dir: out_dir_is_portable()?,
-        version: 2,
+        version: 3,
     }))
 }
 
@@ -1296,22 +1308,38 @@ fn modified_since(
     Ok(false)
 }
 
-fn out_dir_is_portable() -> Result<bool> {
-    let Some(out_dir) = std::env::var_os("OUT_DIR") else {
-        return Ok(false);
-    };
-    let needles = [
+/// Every spelling of the roots a build script's output must not embed.
+///
+/// The managed target directory is a symlink, so a script that canonicalizes a
+/// path under `OUT_DIR` writes the resolved spelling, which names the managed
+/// target rather than the checkout. Searching only for the spelling in the
+/// environment would call that output portable and restore it, still naming
+/// the checkout that produced it, into another.
+fn embedded_root_needles(environment: impl Fn(&str) -> Option<OsString>) -> BTreeSet<String> {
+    let mut needles = BTreeSet::new();
+    for name in [
         "OUT_DIR",
         "CARGO_MANIFEST_DIR",
         session::WORKSPACE_ROOT_ENV,
         session::TARGET_DIR_ENV,
         "CARGO_HOME",
-    ]
-    .into_iter()
-    .filter_map(std::env::var_os)
-    .map(|value| value.to_string_lossy().into_owned())
-    .filter(|value| !value.is_empty())
-    .collect::<BTreeSet<_>>();
+    ] {
+        let Some(value) = environment(name).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        if let Ok(resolved) = std::fs::canonicalize(&value) {
+            needles.insert(resolved.to_string_lossy().into_owned());
+        }
+        needles.insert(value.to_string_lossy().into_owned());
+    }
+    needles
+}
+
+fn out_dir_is_portable() -> Result<bool> {
+    let Some(out_dir) = std::env::var_os("OUT_DIR") else {
+        return Ok(false);
+    };
+    let needles = embedded_root_needles(|name| std::env::var_os(name));
     let root = PathBuf::from(&out_dir);
     if !root.is_dir() {
         return Ok(true);
@@ -2069,6 +2097,26 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn embedded_root_needles_include_the_resolved_spelling() {
+        let directory = tempfile::tempdir().unwrap();
+        let managed = std::fs::canonicalize(directory.path())
+            .unwrap()
+            .join("managed");
+        std::fs::create_dir_all(managed.join("out")).unwrap();
+        let link = directory.path().join("target");
+        std::os::unix::fs::symlink(&managed, &link).unwrap();
+        let out_dir = link.join("out");
+
+        let needles = embedded_root_needles(|name| {
+            (name == "OUT_DIR").then(|| out_dir.clone().into_os_string())
+        });
+
+        assert!(needles.contains(&out_dir.to_string_lossy().into_owned()));
+        assert!(needles.contains(&managed.join("out").to_string_lossy().into_owned()));
+    }
+
     #[test]
     fn version_one_predictions_remain_usable() {
         let payload =
@@ -2089,6 +2137,21 @@ mod tests {
             .is_err(),
             "version 2 must carry its default-package mode"
         );
+    }
+
+    #[test]
+    fn predictions_judged_before_resolved_paths_are_not_trusted() {
+        let payload = |portable: bool, version: u8| {
+            format!(
+                r#"{{"default_package":false,"environment":[],"inputs":["input.h"],"portable_out_dir":{portable},"version":{version}}}"#
+            )
+        };
+        let stale = decode_prediction(&payload(true, 2)).unwrap();
+        assert!(prediction_predates_resolved_paths(&stale));
+        let conservative = decode_prediction(&payload(false, 2)).unwrap();
+        assert!(!prediction_predates_resolved_paths(&conservative));
+        let current = decode_prediction(&payload(true, 3)).unwrap();
+        assert!(!prediction_predates_resolved_paths(&current));
     }
 
     #[test]

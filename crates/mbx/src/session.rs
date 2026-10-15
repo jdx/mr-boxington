@@ -1506,6 +1506,7 @@ pub fn run_cc_shim(language: CcLanguage) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    hide_shim_directories_from_compiler();
     // A shim reached outside a session has no agent to ask, and this is the
     // ordinary way a persisted compiler path is invoked: a build configured
     // under `mbx exec` and then built without it. Stand aside before probing
@@ -1520,6 +1521,38 @@ pub fn run_cc_shim(language: CcLanguage) -> ExitCode {
         }
     }
     run_transparent_cc(compiler, arguments)
+}
+
+/// Drop mbx's shim directories from the `PATH` the real compiler inherits.
+///
+/// A compiler driver that finds its own compiler on `PATH` would find this shim
+/// first and run it again. ccache's masquerade links (`/usr/lib/ccache/cc`) do
+/// exactly that: they skip only links to ccache, so the shim they land on starts
+/// another ccache, which lands on the shim, until the process limit is hit.
+/// Called after the compiler is resolved, because resolution needs the full
+/// `PATH`.
+fn hide_shim_directories_from_compiler() {
+    let Some(path) = std::env::var_os("PATH") else {
+        return;
+    };
+    if let Some(stripped) = path_without_shim_directories(&path) {
+        // SAFETY: the shim is single-threaded at this point; nothing else is
+        // reading or writing the environment.
+        unsafe { std::env::set_var("PATH", stripped) };
+    }
+}
+
+/// `path` with every mbx shim directory removed, or `None` when none was there.
+fn path_without_shim_directories(path: &OsStr) -> Option<OsString> {
+    let directories = std::env::split_paths(path).collect::<Vec<_>>();
+    let kept = directories
+        .iter()
+        .filter(|directory| !is_shim_directory(directory))
+        .collect::<Vec<_>>();
+    if kept.len() == directories.len() {
+        return None;
+    }
+    std::env::join_paths(kept).ok()
 }
 
 /// The compiler a cc shim stands in for.

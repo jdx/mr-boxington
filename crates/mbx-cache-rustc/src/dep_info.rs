@@ -1001,6 +1001,82 @@ mod tests {
         );
     }
 
+    #[test]
+    fn profile_use_is_discovered_verified_and_rehashed_by_prediction() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let source = root.join("lib.rs");
+        let profile = root.join("profile.profdata");
+        std::fs::write(&source, "pub fn library() {}\n").unwrap();
+        std::fs::write(&profile, "first profile").unwrap();
+        let invocation = RustcInvocation::parse(&[
+            "--crate-name=widget".into(),
+            "--crate-type=lib".into(),
+            "--emit=dep-info,metadata".into(),
+            format!("-Cprofile-use={}", profile.display()).into(),
+            "lib.rs".into(),
+        ])
+        .unwrap();
+        let mappings = vec![PathMapping::new(root, "workspace")];
+        let dep_info = RustcDepInfo::parse("widget.d: lib.rs\n").unwrap();
+        let discover = || {
+            invocation
+                .discover_inputs_with_mappings(
+                    &dep_info,
+                    root,
+                    &mappings,
+                    &mbx_cache_core::NoFileDigestCache,
+                )
+                .unwrap()
+        };
+        let initial_inputs = discover();
+        assert!(
+            initial_inputs
+                .inputs
+                .iter()
+                .any(|input| input.path == profile)
+        );
+        let mut context = library_context(root, mappings.clone());
+        initial_inputs.clone().apply_to(&mut context).unwrap();
+        let initial_action = invocation.action(context.clone()).unwrap();
+        let prediction = invocation.prediction(&context, &initial_inputs).unwrap();
+
+        std::fs::write(&profile, "updated profile").unwrap();
+        assert_eq!(
+            initial_inputs.verify(),
+            Err(BypassReason::InputChanged(profile.clone()))
+        );
+        context.inputs.clear();
+        let predicted = prediction
+            .discover(root, &mappings, &mbx_cache_core::NoFileDigestCache)
+            .unwrap();
+        predicted.clone().apply_to(&mut context).unwrap();
+        let predicted_action = invocation.action(context.clone()).unwrap();
+        assert_ne!(predicted_action.digest, initial_action.digest);
+        context.inputs.clear();
+        discover().apply_to(&mut context).unwrap();
+        assert_eq!(predicted_action, invocation.action(context).unwrap());
+
+        let missing_profile = root.join("missing.profdata");
+        let missing_invocation = RustcInvocation::parse(&[
+            "--crate-name=widget".into(),
+            "--crate-type=lib".into(),
+            "--emit=dep-info,metadata".into(),
+            format!("-Cprofile-use={}", missing_profile.display()).into(),
+            "lib.rs".into(),
+        ])
+        .unwrap();
+        assert!(matches!(
+            missing_invocation.discover_inputs_with_mappings(
+                &dep_info,
+                root,
+                &mappings,
+                &mbx_cache_core::NoFileDigestCache,
+            ),
+            Err(BypassReason::InputRead { path, .. }) if path == missing_profile
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn precompile_snapshot_does_not_depend_on_the_host_clock() {

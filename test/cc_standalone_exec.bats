@@ -280,6 +280,46 @@ EOF
   (cd "$project" && ! "$MBX_BIN" exec make hello)
 }
 
+@test "a compiler wrapper that searches PATH for the compiler does not find the shim" {
+  # ccache's masquerade links (/usr/lib/ccache/cc) look the compiler up on PATH
+  # again, skipping only themselves. With mbx's shim directory ahead of the real
+  # compiler they used to land on the shim, which ran them again, until the
+  # machine ran out of processes.
+  local wrapper="$BATS_TEST_TMPDIR/wrapper" real="$BATS_TEST_TMPDIR/real"
+  mkdir -p "$wrapper" "$real"
+  cat >"$real/cc" <<'EOF'
+#!/bin/sh
+echo reached-real-cc
+EOF
+  cat >"$wrapper/cc" <<'EOF'
+#!/bin/sh
+self=$(dirname "$0")
+# Bounded so a regression fails here rather than running away.
+count=$(($(cat "$self/count" 2>/dev/null || echo 0) + 1))
+echo "$count" >"$self/count"
+if [ "$count" -gt 20 ]; then
+  echo "wrapper was re-entered $count times" >&2
+  exit 1
+fi
+old_ifs=$IFS
+IFS=:
+for dir in $PATH; do
+  [ "$dir" = "$self" ] && continue
+  if [ -x "$dir/cc" ]; then
+    IFS=$old_ifs
+    exec "$dir/cc" "$@"
+  fi
+done
+echo "wrapper found no compiler" >&2
+exit 1
+EOF
+  chmod +x "$real/cc" "$wrapper/cc"
+
+  run env MBX_CC=1 PATH="$wrapper:$real:$PATH" "$MBX_BIN" exec sh -c 'cc -c nothing.c'
+  assert_success
+  assert_output --partial "reached-real-cc"
+}
+
 @test "MBX_CC=0 runs the command plainly" {
   local project="$BATS_TEST_TMPDIR/plain"
   write_project "$project"

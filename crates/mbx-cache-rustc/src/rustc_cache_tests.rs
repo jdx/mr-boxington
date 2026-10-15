@@ -610,6 +610,183 @@ fn an_unknown_native_library_kind_bypasses_as_an_unknown_flag() {
     );
 }
 
+#[test]
+fn profile_use_is_a_content_hashed_required_path_across_spellings_and_checkouts() {
+    let (_first_directory, first_workspace, _) = static_library_fixture();
+    let (_second_directory, second_workspace, _) = static_library_fixture();
+    let first_profile = first_workspace.join("profile.profdata");
+    let second_profile = second_workspace.join("profile.profdata");
+    std::fs::write(&first_profile, "profile contents").unwrap();
+    std::fs::write(&second_profile, "profile contents").unwrap();
+    let spellings = [
+        "attached-c",
+        "separate-c",
+        "attached-codegen",
+        "separate-codegen",
+    ];
+    let action_for = |working_dir: &Path, spelling: &str| {
+        let profile = working_dir.join("profile.profdata");
+        let option = format!("profile-use={}", profile.display());
+        let mut arguments = args(&["--crate-type=lib", "--emit=metadata", "src.rs"]);
+        match spelling {
+            "attached-c" => arguments.push(format!("-C{option}").into()),
+            "separate-c" => arguments.extend(args(&["-C", &option])),
+            "attached-codegen" => arguments.push(format!("--codegen={option}").into()),
+            "separate-codegen" => arguments.extend(args(&["--codegen", &option])),
+            _ => unreachable!("known profile-use spelling"),
+        }
+        let invocation = RustcInvocation::parse(&arguments).unwrap();
+        assert!(
+            invocation
+                .required_inputs_in(working_dir)
+                .contains(&profile)
+        );
+        invocation
+            .action(ActionContext {
+                working_dir: working_dir.to_path_buf(),
+                path_mappings: vec![PathMapping::new(working_dir, "workspace")],
+                inputs: vec![
+                    ActionInput {
+                        path: working_dir.join("src.rs"),
+                        digest: digest("source"),
+                    },
+                    ActionInput {
+                        path: profile.clone(),
+                        digest: CacheDigest::blake3_file(&profile).unwrap(),
+                    },
+                ],
+                ..context(&[])
+            })
+            .unwrap()
+    };
+    let expected = action_for(&first_workspace, spellings[0]);
+    assert_eq!(
+        action_for(&second_workspace, spellings[0]).digest,
+        expected.digest,
+        "mapped checkout paths must have the same key"
+    );
+    for spelling in &spellings {
+        assert_eq!(
+            action_for(&first_workspace, spelling).digest,
+            expected.digest,
+            "spelling {spelling} must normalize to the same key"
+        );
+    }
+    std::fs::write(&first_profile, "changed profile").unwrap();
+    for spelling in &spellings {
+        assert_ne!(
+            action_for(&first_workspace, spelling).digest,
+            expected.digest,
+            "profile contents must affect the key for {spelling}"
+        );
+    }
+
+    let missing_profile = first_workspace.join("missing.profdata");
+    let invocation = RustcInvocation::parse(&args(&[
+        "--crate-type=lib",
+        "--emit=metadata",
+        &format!("-Cprofile-use={}", missing_profile.display()),
+        "src.rs",
+    ]))
+    .unwrap();
+    assert_eq!(
+        invocation.action(ActionContext {
+            working_dir: first_workspace.clone(),
+            path_mappings: vec![PathMapping::new(&first_workspace, "workspace")],
+            inputs: vec![ActionInput {
+                path: first_workspace.join("src.rs"),
+                digest: digest("source"),
+            }],
+            ..context(&[])
+        }),
+        Err(BypassReason::MissingRequiredInput(
+            "${workspace}/missing.profdata".into()
+        ))
+    );
+    for spelling in [
+        vec!["-Cprofile-use"],
+        vec!["-C", "profile-use"],
+        vec!["-Cprofile-use="],
+        vec!["-C", "profile-use="],
+        vec!["--codegen=profile-use"],
+        vec!["--codegen", "profile-use"],
+        vec!["--codegen=profile-use="],
+        vec!["--codegen", "profile-use="],
+    ] {
+        let mut arguments = args(&["--crate-type=lib", "--emit=metadata", "src.rs"]);
+        arguments.extend(args(&spelling));
+        assert!(matches!(
+            RustcInvocation::parse(&arguments),
+            Err(BypassReason::MissingValue(_))
+        ));
+    }
+    assert_eq!(
+        RustcInvocation::parse(&args(&[
+            "--crate-type=lib",
+            "--emit=metadata",
+            "-Cprofile-generate=profile.profdata",
+            "src.rs",
+        ]))
+        .unwrap_err(),
+        BypassReason::UnknownCodegenOption("profile-generate".into())
+    );
+}
+
+#[test]
+fn share_generics_explicit_boolean_values_are_keyed() {
+    let valid_values = ["y", "yes", "on", "true", "n", "no", "off", "false"];
+    let mut digests = Vec::new();
+    for value in valid_values {
+        let invocation = RustcInvocation::parse(&args(&[
+            "--crate-type=lib",
+            "--emit=metadata",
+            &format!("-Zshare-generics={value}"),
+            "src.rs",
+        ]))
+        .unwrap_or_else(|error| panic!("share-generics={value}: {error}"));
+        digests.push(
+            invocation
+                .action(context(&[("/work/project/src.rs", "source")]))
+                .unwrap()
+                .digest,
+        );
+    }
+    assert_ne!(digests[0], digests[4], "y and n must have different keys");
+    let attached = RustcInvocation::parse(&args(&[
+        "--crate-type=lib",
+        "--emit=metadata",
+        "-Zshare-generics=y",
+        "src.rs",
+    ]))
+    .unwrap();
+    let separate = RustcInvocation::parse(&args(&[
+        "--crate-type=lib",
+        "--emit=metadata",
+        "-Z",
+        "share-generics=y",
+        "src.rs",
+    ]))
+    .unwrap();
+    let source = [("/work/project/src.rs", "source")];
+    assert_eq!(
+        attached.action(context(&source)).unwrap().digest,
+        separate.action(context(&source)).unwrap().digest,
+        "attached and separate -Z spellings must normalize equally"
+    );
+    for value in ["maybe", ""] {
+        assert!(
+            RustcInvocation::parse(&args(&[
+                "--crate-type=lib",
+                "--emit=metadata",
+                &format!("-Zshare-generics={value}"),
+                "src.rs",
+            ]))
+            .is_err(),
+            "invalid share-generics value {value:?} must bypass"
+        );
+    }
+}
+
 /// The archive is keyed by content like an `--extern` artifact, along both
 /// discovery paths: a rebuilt archive with the same name can never be
 /// restored against, and a prediction replays exactly the key dep-info

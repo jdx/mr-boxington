@@ -548,6 +548,7 @@ pub(crate) fn collect(
     // least recently.
     let mut trees: Vec<(String, PathBuf, u64, Option<Duration>)> = Vec::new();
     let mut lease_dirs = Vec::new();
+    let mut staging_bytes = 0_u64;
     for entry in entries {
         // An entry that cannot be read is still on the disk. It is kept and
         // counted, not skipped, so a budget sized from this walk sees it.
@@ -573,6 +574,15 @@ pub(crate) fn collect(
             if abandoned && !dry_run {
                 let _ = remove_tree(&path);
             }
+            // What is still on the disk counts toward the budget, so a
+            // discarded tree whose deletion failed is not forgotten.
+            // A dry run projecting a sweep leaves out an abandoned one, which
+            // the sweep deletes; a measurement (no limits) counts what is
+            // on the disk.
+            let projecting = dry_run && (max_bytes.is_some() || max_age.is_some());
+            if !(abandoned && projecting) && path.exists() {
+                staging_bytes = staging_bytes.saturating_add(tree_bytes(&path));
+            }
             continue;
         }
         if let Some(digest) = name.strip_suffix(".leases") {
@@ -588,7 +598,7 @@ pub(crate) fn collect(
         trees.push((name, path, 0, age));
     }
     trees.sort_by_key(|tree| std::cmp::Reverse(tree.3));
-    let mut remaining_bytes = 0_u64;
+    let mut remaining_bytes = staging_bytes;
     for tree in &mut trees {
         tree.2 = tree_bytes(&tree.1);
         remaining_bytes = remaining_bytes.saturating_add(tree.2);
@@ -609,22 +619,29 @@ pub(crate) fn collect(
         if leased(root, name, !dry_run).unwrap_or(true) {
             continue;
         }
+        let mut leftover = 0_u64;
         if !dry_run {
             let _ = std::fs::remove_file(marker_path(root, name));
-            if let Err(error) = remove_tree(path) {
-                log::warn!(
-                    "could not remove the generated source tree {}: {error}",
-                    path.display()
-                );
-                continue;
+            match discard_tree(root, name, path) {
+                Ok(left) => leftover = left,
+                Err(error) => {
+                    log::warn!(
+                        "could not remove the generated source tree {}: {error}",
+                        path.display()
+                    );
+                    continue;
+                }
             }
             let _ = std::fs::remove_dir_all(leases_dir(root, name));
             let _ = std::fs::remove_file(publish_lock_path(root, name));
         }
         kept -= 1;
-        remaining_bytes = remaining_bytes.saturating_sub(*bytes);
+        // Bytes of a discarded tree whose deletion failed are still on disk.
+        remaining_bytes = remaining_bytes.saturating_sub(bytes.saturating_sub(leftover));
         outcome.removed_directories += 1;
-        outcome.removed_bytes = outcome.removed_bytes.saturating_add(*bytes);
+        outcome.removed_bytes = outcome
+            .removed_bytes
+            .saturating_add(bytes.saturating_sub(leftover));
     }
     outcome.remaining_directories += kept;
     outcome.remaining_bytes = outcome.remaining_bytes.saturating_add(remaining_bytes);
@@ -664,6 +681,44 @@ fn age_of(path: &Path, now: SystemTime) -> Option<Duration> {
         .and_then(|metadata| metadata.modified())
         .ok()?;
     now.duration_since(modified).ok()
+}
+
+/// Take a published tree out of use, all or nothing.
+///
+/// A tree is reused because its directory exists, so deleting it in place can
+/// leave a half-emptied directory under its name when a file cannot be
+/// removed (on Windows, one another process holds open): every later
+/// compilation would take it for complete and fail on the missing files. The
+/// tree is therefore renamed to a staging name first, which either happens
+/// whole or leaves the tree as it was, and only then deleted. A deletion that
+/// fails after the rename is left for the staging sweep.
+///
+/// Returns the bytes the deletion left on disk, zero when it finished.
+fn discard_tree(root: &Path, name: &str, path: &Path) -> std::io::Result<u64> {
+    // macOS will not rename a directory it cannot write.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    // A name no earlier discard used, so a leftover from a failed deletion is
+    // neither replaced nor removed here and stays counted by the sweep.
+    static DISCARDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = DISCARDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let doomed = root.join(format!(
+        "{STAGING_PREFIX}discard-{name}-{}-{sequence}",
+        std::process::id()
+    ));
+    if let Err(error) = std::fs::rename(path, &doomed) {
+        let _ = make_directory_read_only(path);
+        return Err(error);
+    }
+    let _ = remove_tree(&doomed);
+    Ok(if doomed.exists() {
+        tree_bytes(&doomed)
+    } else {
+        0
+    })
 }
 
 /// Remove a tree that was made read-only. Unlinking needs a writable parent
