@@ -2934,6 +2934,32 @@ fn an_explicit_linker_is_inert_for_a_library() {
     }
 }
 
+/// `-Clinker-flavor` only matters to a real link, so an rlib or a metadata-only
+/// check stays cacheable while every linking output still bypasses.
+#[test]
+fn linker_flavor_is_inert_for_a_library_only() {
+    for emit in ["--emit=dep-info,metadata,link", "--emit=dep-info,metadata"] {
+        let library = args(&[
+            "--crate-type=rlib",
+            emit,
+            "-Clinker-flavor=lld-link",
+            "src/lib.rs",
+        ]);
+        RustcInvocation::parse(&library)
+            .expect("a `-Clinker-flavor` selection is inert where nothing links");
+    }
+    let native = args(&[
+        "--test",
+        "--emit=dep-info,link",
+        "-Clinker-flavor=lld-link",
+        "src/lib.rs",
+    ]);
+    assert_eq!(
+        RustcInvocation::parse_with(&native, native_links()),
+        Err(BypassReason::UnknownCodegenOption("linker-flavor".into()))
+    );
+}
+
 /// The first link argument the adapter modeled: ld64's `-oso_prefix` names a
 /// checkout-specific path, so its value normalizes like every other path in
 /// the key instead of pinning the key to one checkout's spelling.

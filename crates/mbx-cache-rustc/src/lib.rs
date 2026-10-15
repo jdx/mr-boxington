@@ -1660,7 +1660,9 @@ impl<'a> Parser<'a> {
         if name == "incremental" {
             return Err(BypassReason::Incremental);
         }
-        if SUPPORTED_CODEGEN_OPTIONS.binary_search(&name).is_err() && name != "linker" {
+        if SUPPORTED_CODEGEN_OPTIONS.binary_search(&name).is_err()
+            && !matches!(name, "linker" | "linker-flavor")
+        {
             return Err(BypassReason::UnknownCodegenOption(name.into()));
         }
         // Cargo compiles every dependency of an LTO build with this flag, so
@@ -2006,6 +2008,17 @@ impl<'a> Parser<'a> {
                 | LinkOutput::NativeSharedLibrary
         ) {
             return Err(BypassReason::UnknownCodegenOption("linker".into()));
+        }
+        // `-Clinker-flavor` tells rustc how to drive the linker, which no
+        // identity probe describes, so every real link declines it. An rlib or
+        // a metadata-only compilation never reaches the linker, so the value
+        // is inert there and the key carries its text.
+        if link_output != LinkOutput::Library
+            && self.parsed.iter().any(|argument| {
+                matches!(argument, Argument::Plain(value) if value.starts_with("--codegen=linker-flavor="))
+            })
+        {
+            return Err(BypassReason::UnknownCodegenOption("linker-flavor".into()));
         }
         // `-oso_prefix` is modeled, but only where ld64 is the linker reading
         // it: a native macOS link. Any other linker sees an option this
