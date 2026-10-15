@@ -292,13 +292,11 @@ impl LocalActionCache {
     /// that directory lists.
     fn is_intact(&self, result: &RemoteActionResult) -> bool {
         let present = |digest: &CacheDigest| matches!(self.cas.find(digest), Ok(Some(_)));
-        let (Some(metadata), Some(output_root)) = (&result.metadata, &result.output_root) else {
-            return false;
-        };
-        if !present(&result.action) || !present(metadata) {
-            return false;
-        }
-        self.directory_is_intact(output_root, &mut std::collections::BTreeSet::new())
+        present(&result.action)
+            && result.metadata.as_ref().is_none_or(present)
+            && result.output_root.as_ref().is_none_or(|root| {
+                self.directory_is_intact(root, &mut std::collections::BTreeSet::new())
+            })
     }
 
     /// Whether `digest` names a directory object whose files and nested
