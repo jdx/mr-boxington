@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.24.1](https://github.com/jdx/mr-boxington/compare/v1.24.0...v1.24.1) - 2026-10-15
+
+### Fixed
+
+- *(rustc)* stop warning and leaking blobs when another checkout already published a key ([#719](https://github.com/jdx/mr-boxington/pull/719))
+- *(build-script)* remove a collected OUT_DIR tree all or nothing ([#712](https://github.com/jdx/mr-boxington/pull/712))
+- *(cli)* answer ConPTY's cursor position request so builds start on Windows ([#709](https://github.com/jdx/mr-boxington/pull/709))
+- *(build-script)* reuse of outputs that embed a canonicalized OUT_DIR ([#711](https://github.com/jdx/mr-boxington/pull/711))
+- *(cc)* stop the C shim recursing when ccache is on PATH ([#707](https://github.com/jdx/mr-boxington/pull/707))
+
 ## [1.24.0](https://github.com/jdx/mr-boxington/compare/v1.23.0...v1.24.0) - 2026-10-13
 
 ### Added

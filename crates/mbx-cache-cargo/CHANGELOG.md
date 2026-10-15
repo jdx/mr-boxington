@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.14](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.3.13...mbx-cache-cargo-v0.3.14) - 2026-10-15
+
+### Other
+
+- updated the following local packages: mbx-cache-core
+
 ## [0.3.13](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.3.12...mbx-cache-cargo-v0.3.13) - 2026-10-13
 
 ### Other

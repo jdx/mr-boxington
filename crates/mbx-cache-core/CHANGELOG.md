@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.2](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.20.1...mbx-cache-core-v0.20.2) - 2026-10-15
+
+### Fixed
+
+- *(rustc)* stop warning and leaking blobs when another checkout already published a key ([#719](https://github.com/jdx/mr-boxington/pull/719))
+
 ## [0.20.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.19.4...mbx-cache-core-v0.20.0) - 2026-10-08
 
 ### Added

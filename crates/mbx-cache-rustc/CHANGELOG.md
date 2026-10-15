@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.2](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.20.1...mbx-cache-rustc-v0.20.2) - 2026-10-15
+
+### Added
+
+- *(cache)* reuse compiled Rust code in PGO builds ([#716](https://github.com/jdx/mr-boxington/pull/716))
+
+### Fixed
+
+- *(cache)* cache rlibs and checks built with -C linker-flavor ([#720](https://github.com/jdx/mr-boxington/pull/720))
+
 ## [0.20.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.20.0...mbx-cache-rustc-v0.20.1) - 2026-10-13
 
 ### Fixed
