@@ -3619,20 +3619,6 @@ fn publish_result<'a>(
     if outputs.files.is_empty() {
         bail!("rustc produced no cacheable outputs");
     }
-    // A key another checkout already published keeps that record. Outputs
-    // that embed the checkout path differ byte for byte between checkouts
-    // under one key, which the store refuses by design; asking first means a
-    // compile that lost the race neither warns, nor leaves its blobs in the
-    // store unreferenced, nor skips refreshing the prediction.
-    if let Some(AgentResponse::ActionResult { result: Some(_) }) =
-        session::request_agent(&[AgentRequest::FindActionResult {
-            action: candidates.publishable().digest.clone(),
-        }])
-        .ok()
-        .and_then(|responses| responses.into_iter().next())
-    {
-        return Ok(candidates.publishable());
-    }
     let staging = staging_directory()?;
     let mut blobs = Vec::new();
     let stdout = staged_bytes(
@@ -3724,6 +3710,24 @@ fn publish_result<'a>(
     let directory = staged_bytes(staging.path(), "directory.json", &directory)?;
     blobs.push(directory.clone());
 
+    let result = RemoteActionResult {
+        action: action.digest.clone(),
+        metadata: Some(metadata.0),
+        output_root: Some(directory.0),
+        version: 1,
+    };
+    // A key another checkout already published keeps that record. Outputs
+    // that embed the checkout path differ byte for byte between checkouts
+    // under one key, which the store refuses by design. Declining before any
+    // blob is sent means the compile that lost the race neither warns nor
+    // leaves its blobs in the store unreferenced, and its prediction is still
+    // recorded. Only a record that can be restored is kept: otherwise the
+    // normal publication below is what repairs it, and an identical result
+    // still goes through it so it is uploaded when remote writes are on.
+    if existing_result_supersedes(&result) {
+        return Ok(action);
+    }
+
     let mut requests = Vec::new();
     let mut published = BTreeSet::new();
     for (digest, source) in blobs {
@@ -3731,14 +3735,7 @@ fn publish_result<'a>(
             requests.push(AgentRequest::StoreBlob { digest, source });
         }
     }
-    requests.push(AgentRequest::StoreActionResult {
-        result: RemoteActionResult {
-            action: action.digest.clone(),
-            metadata: Some(metadata.0),
-            output_root: Some(directory.0),
-            version: 1,
-        },
-    });
+    requests.push(AgentRequest::StoreActionResult { result });
     for response in session::request_agent(&requests)? {
         match response {
             AgentResponse::Stored { .. } | AgentResponse::ActionStored { .. } => {}
@@ -3747,6 +3744,45 @@ fn publish_result<'a>(
         }
     }
     Ok(action)
+}
+
+/// Whether the store already holds a restorable result for this key that
+/// differs from `result`, which the store would refuse to replace.
+fn existing_result_supersedes(result: &RemoteActionResult) -> bool {
+    existing_restorable_result(result).unwrap_or(false)
+}
+
+fn existing_restorable_result(result: &RemoteActionResult) -> Result<bool> {
+    let responses = session::request_agent(&[AgentRequest::FindActionResult {
+        action: result.action.clone(),
+    }])?;
+    let Some(AgentResponse::ActionResult {
+        result: Some(existing),
+    }) = responses.into_iter().next()
+    else {
+        return Ok(false);
+    };
+    if existing == *result || existing.version != 1 || existing.action != result.action {
+        return Ok(false);
+    }
+    let (Some(metadata_digest), Some(output_root_digest)) =
+        (existing.metadata, existing.output_root)
+    else {
+        return Ok(false);
+    };
+    let roots = find_blobs(&[
+        result.action.clone(),
+        metadata_digest.clone(),
+        output_root_digest.clone(),
+    ])?;
+    let metadata: RustcMetadata =
+        read_canonical_blob(&roots[1], &metadata_digest, "rustc metadata")?;
+    let directory: CacheDirectory =
+        read_canonical_blob(&roots[2], &output_root_digest, "output directory")?;
+    let mut digests = vec![metadata.stdout, metadata.stderr];
+    digests.extend(directory.files.into_iter().map(|file| file.digest));
+    find_blobs(&digests)?;
+    Ok(true)
 }
 
 fn staged_bytes(directory: &Path, name: &str, bytes: &[u8]) -> Result<(CacheDigest, PathBuf)> {
