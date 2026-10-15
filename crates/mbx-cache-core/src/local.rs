@@ -298,7 +298,20 @@ impl LocalActionCache {
         if !present(&result.action) || !present(metadata) {
             return false;
         }
-        let Ok(Some(path)) = self.cas.find(output_root) else {
+        self.directory_is_intact(output_root, &mut std::collections::BTreeSet::new())
+    }
+
+    /// Whether `digest` names a directory object whose files and nested
+    /// directories are all present and verified.
+    fn directory_is_intact(
+        &self,
+        digest: &CacheDigest,
+        seen: &mut std::collections::BTreeSet<CacheDigest>,
+    ) -> bool {
+        if !seen.insert(digest.clone()) {
+            return true;
+        }
+        let Ok(Some(path)) = self.cas.find(digest) else {
             return false;
         };
         let Ok(bytes) = fs::read(path) else {
@@ -307,7 +320,14 @@ impl LocalActionCache {
         let Ok(directory) = serde_json::from_slice::<crate::CacheDirectory>(&bytes) else {
             return false;
         };
-        directory.files.iter().all(|file| present(&file.digest))
+        directory
+            .files
+            .iter()
+            .all(|file| matches!(self.cas.find(&file.digest), Ok(Some(_))))
+            && directory
+                .directories
+                .iter()
+                .all(|child| self.directory_is_intact(&child.digest, seen))
     }
 
     /// Atomically publish an action result after validating all referenced objects.
