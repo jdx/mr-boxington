@@ -2,5 +2,12 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "local>jdx/renovate-config"
+  ],
+  "packageRules": [
+    {
+      "description": "The perf-runner image sets the toolchain every perf baseline is measured on; review bumps instead of automerging them.",
+      "matchPackageNames": ["ghcr.io/jdx/perf-runner"],
+      "automerge": false
+    }
   ]
 }
