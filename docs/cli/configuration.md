@@ -336,7 +336,7 @@ Has no effect when `display` is `plain`.
 
 Remote access mode.
 
-Only trusted CI (a push to a protected branch on GitHub Actions or GitLab CI) may write. Everywhere else, including a local shell, `read-write` acts as `read-only` and `write-only` disables the remote.
+Only trusted CI (a push to a protected branch on GitHub Actions or GitLab CI) may write, unless `remote.trust_writes` is set. Everywhere else, including a local shell, `read-write` acts as `read-only` and `write-only` disables the remote.
 
 **Choices:**
 - `read-write`
@@ -423,6 +423,16 @@ An `s3://` remote refuses it. Takes precedence over `remote.token_file` and `rem
 File containing a bearer token for a cache server.
 
 An `s3://` remote refuses it. `remote.token` takes precedence over it, and it takes precedence over `remote.oidc_audience`.
+
+### `remote.trust_writes`
+
+- **Type:** `bool`
+- **Default:** `false`
+- **Set with:** `MBX_REMOTE_TRUST_WRITES`
+
+Skip the CI write policy and use `remote.mode` as configured.
+
+For CI systems mbx does not detect, such as Buildkite or Jenkins. Set it only from the agent or pipeline environment, only for builds you trust, and never from a file that a pull request can change. The write credential should still be limited to those builds.
 
 ### `remote.url`
 

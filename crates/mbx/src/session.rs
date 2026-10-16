@@ -1258,7 +1258,9 @@ async fn action_remote_cache(config: &Config, store: &Path) -> Result<Option<Age
     let Some(client) = crate::remote::remote_client(config).await? else {
         return Ok(None);
     };
-    let Some(mode) = crate::policy::effective_remote_cache_mode(config.remote.mode) else {
+    let Some(mode) =
+        crate::policy::effective_remote_cache_mode(config.remote.mode, config.remote.trust_writes)
+    else {
         return Ok(None);
     };
     Ok(Some(AgentRemoteCache {

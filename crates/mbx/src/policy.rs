@@ -14,16 +14,22 @@ pub(crate) fn is_ci() -> bool {
 
 /// Resolve the remote-cache mode that is actually permitted here.
 ///
-/// Returns `None` when the configured mode leaves nothing to do.
-pub fn effective_remote_cache_mode(configured: RemoteCacheMode) -> Option<RemoteCacheMode> {
-    effective_remote_cache_mode_with(configured, |name| std::env::var(name).ok())
+/// `trust_writes` is the operator's statement that this build is trusted, for CI
+/// systems the policy cannot recognize. Returns `None` when the configured mode
+/// leaves nothing to do.
+pub fn effective_remote_cache_mode(
+    configured: RemoteCacheMode,
+    trust_writes: bool,
+) -> Option<RemoteCacheMode> {
+    effective_remote_cache_mode_with(configured, trust_writes, |name| std::env::var(name).ok())
 }
 
 fn effective_remote_cache_mode_with(
     configured: RemoteCacheMode,
+    trust_writes: bool,
     get_env: impl Fn(&str) -> Option<String>,
 ) -> Option<RemoteCacheMode> {
-    if trusted_cache_writer(&get_env) {
+    if trust_writes || trusted_cache_writer(&get_env) {
         return Some(configured);
     }
     match configured {
@@ -98,11 +104,11 @@ mod tests {
     fn untrusted_contexts_only_read() {
         let local = env(&[]);
         assert_eq!(
-            effective_remote_cache_mode_with(RemoteCacheMode::ReadWrite, &local),
+            effective_remote_cache_mode_with(RemoteCacheMode::ReadWrite, false, &local),
             Some(RemoteCacheMode::ReadOnly)
         );
         assert_eq!(
-            effective_remote_cache_mode_with(RemoteCacheMode::WriteOnly, &local),
+            effective_remote_cache_mode_with(RemoteCacheMode::WriteOnly, false, &local),
             None
         );
     }
@@ -116,7 +122,7 @@ mod tests {
             ("GITHUB_REF_PROTECTED", "true"),
         ]);
         assert_eq!(
-            effective_remote_cache_mode_with(RemoteCacheMode::ReadWrite, &ci),
+            effective_remote_cache_mode_with(RemoteCacheMode::ReadWrite, false, &ci),
             Some(RemoteCacheMode::ReadWrite)
         );
     }
@@ -130,7 +136,7 @@ mod tests {
             ("GITHUB_REF_PROTECTED", "true"),
         ]);
         assert_eq!(
-            effective_remote_cache_mode_with(RemoteCacheMode::ReadWrite, &pull_request),
+            effective_remote_cache_mode_with(RemoteCacheMode::ReadWrite, false, &pull_request),
             Some(RemoteCacheMode::ReadOnly)
         );
     }
@@ -144,7 +150,7 @@ mod tests {
             ("CI_COMMIT_REF_PROTECTED", "true"),
         ]);
         assert_eq!(
-            effective_remote_cache_mode_with(RemoteCacheMode::ReadWrite, &merge_request),
+            effective_remote_cache_mode_with(RemoteCacheMode::ReadWrite, false, &merge_request),
             Some(RemoteCacheMode::ReadOnly)
         );
     }
@@ -159,7 +165,7 @@ mod tests {
             ("GITHUB_REF_PROTECTED", "true"),
         ]);
         assert_eq!(
-            effective_remote_cache_mode_with(RemoteCacheMode::ReadWrite, &release),
+            effective_remote_cache_mode_with(RemoteCacheMode::ReadWrite, false, &release),
             Some(RemoteCacheMode::ReadWrite)
         );
 
@@ -169,9 +175,31 @@ mod tests {
             ("GITHUB_REF_TYPE", "tag"),
         ]);
         assert_eq!(
-            effective_remote_cache_mode_with(RemoteCacheMode::ReadWrite, &tag),
+            effective_remote_cache_mode_with(RemoteCacheMode::ReadWrite, false, &tag),
             Some(RemoteCacheMode::ReadOnly)
         );
+    }
+
+    #[test]
+    fn trust_writes_skips_the_ci_policy() {
+        let pull_request = env(&[
+            ("GITHUB_ACTIONS", "true"),
+            ("GITHUB_EVENT_NAME", "pull_request"),
+        ]);
+        for ci in [&env(&[]), &pull_request] {
+            assert_eq!(
+                effective_remote_cache_mode_with(RemoteCacheMode::ReadWrite, true, ci),
+                Some(RemoteCacheMode::ReadWrite)
+            );
+            assert_eq!(
+                effective_remote_cache_mode_with(RemoteCacheMode::WriteOnly, true, ci),
+                Some(RemoteCacheMode::WriteOnly)
+            );
+            assert_eq!(
+                effective_remote_cache_mode_with(RemoteCacheMode::ReadOnly, true, ci),
+                Some(RemoteCacheMode::ReadOnly)
+            );
+        }
     }
 
     #[test]

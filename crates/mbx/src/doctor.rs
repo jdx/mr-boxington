@@ -619,7 +619,8 @@ fn setup_path() -> Option<PathBuf> {
 }
 
 async fn remote_checks(config: &Config) -> Vec<Check> {
-    let effective_mode = policy::effective_remote_cache_mode(config.remote.mode);
+    let effective_mode =
+        policy::effective_remote_cache_mode(config.remote.mode, config.remote.trust_writes);
     remote_checks_with_policy(config, effective_mode).await
 }
 

@@ -232,6 +232,26 @@ mbx reads the trigger from the CI system's own variables:
 | GitHub Actions | `GITHUB_ACTIONS` | `GITHUB_EVENT_NAME` is `push`, `GITHUB_REF_TYPE` is `branch`, and `GITHUB_REF_PROTECTED` is true |
 | GitLab CI | `GITLAB_CI` | `CI_PIPELINE_SOURCE` is `push`, `CI_COMMIT_REF_PROTECTED` is true, and neither `CI_COMMIT_TAG` nor `CI_MERGE_REQUEST_IID` is set |
 
+### CI systems mbx does not detect
+
+On any other CI system, such as Buildkite or Jenkins, `read-write` acts as
+`read-only`, because mbx cannot tell a trusted build from a pull request. Set
+`remote.trust_writes` (`MBX_REMOTE_TRUST_WRITES=true`) to skip the policy and
+use `remote.mode` as configured:
+
+```sh
+# Buildkite agent environment hook, so a pull request cannot change it
+if [ "$BUILDKITE_BRANCH" = "$BUILDKITE_PIPELINE_DEFAULT_BRANCH" ] \
+  && [ "$BUILDKITE_PULL_REQUEST" = false ]; then
+  export MBX_REMOTE_TRUST_WRITES=true
+fi
+```
+
+`mbx doctor` then reports `configured read-write, effective read-write`. The
+setting turns the policy off entirely, so set it only from the agent or
+pipeline environment, never from a file a pull request can edit, and limit the
+write credential to the same builds.
+
 This policy prevents untrusted code from publishing objects that later builds
 would trust. The server should still authenticate and authorize requests; the
 client-side policy is not an access-control boundary.

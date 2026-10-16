@@ -507,14 +507,23 @@ struct RawRemote {
     /// Remote access mode.
     ///
     /// Only trusted CI (a push to a protected branch on GitHub Actions or GitLab
-    /// CI) may write. Everywhere else, including a local shell, `read-write`
-    /// acts as `read-only` and `write-only` disables the remote.
+    /// CI) may write, unless `remote.trust_writes` is set. Everywhere else,
+    /// including a local shell, `read-write` acts as `read-only` and
+    /// `write-only` disables the remote.
     #[usage(
         env = "MBX_REMOTE_MODE",
         default = "read-write",
         choices("read-write", "read-only", "write-only")
     )]
     mode: String,
+    /// Skip the CI write policy and use `remote.mode` as configured.
+    ///
+    /// For CI systems mbx does not detect, such as Buildkite or Jenkins. Set it
+    /// only from the agent or pipeline environment, only for builds you trust,
+    /// and never from a file that a pull request can change. The write
+    /// credential should still be limited to those builds.
+    #[usage(env = "MBX_REMOTE_TRUST_WRITES", default = false)]
+    trust_writes: bool,
     /// S3 endpoint for a service other than AWS, such as MinIO or R2.
     #[usage(env = "MBX_REMOTE_S3_ENDPOINT", ty = "url")]
     s3_endpoint: Option<String>,
@@ -931,6 +940,7 @@ pub struct RemoteSettings {
     pub token_file: Option<PathBuf>,
     pub oidc_audience: Option<String>,
     pub mode: RemoteCacheMode,
+    pub trust_writes: bool,
     pub s3_endpoint: Option<String>,
     pub s3_region: Option<String>,
     pub s3_force_path_style: Option<bool>,
@@ -1437,6 +1447,7 @@ impl Config {
                 token_file: raw.remote.token_file,
                 oidc_audience: raw.remote.oidc_audience,
                 mode,
+                trust_writes: raw.remote.trust_writes,
                 s3_endpoint: raw.remote.s3_endpoint,
                 s3_region: raw.remote.s3_region,
                 s3_force_path_style: raw.remote.s3_force_path_style,
