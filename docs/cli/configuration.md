@@ -432,7 +432,7 @@ An `s3://` remote refuses it. `remote.token` takes precedence over it, and it ta
 
 Skip the CI write policy and use `remote.mode` as configured.
 
-For CI systems mbx does not detect, such as Buildkite or Jenkins. Set it only from the agent or pipeline environment, only for builds you trust, and never from a file that a pull request can change. The write credential should still be limited to those builds.
+For CI systems mbx does not detect, such as Buildkite or Jenkins. Set it only from the agent or pipeline environment, only for builds you trust, and never from a file that a pull request can change. Workspace `.mbx.toml` refuses it. The write credential should still be limited to those builds.
 
 ### `remote.url`
 

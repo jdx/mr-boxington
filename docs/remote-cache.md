@@ -249,8 +249,8 @@ fi
 
 `mbx doctor` then reports `configured read-write, effective read-write`. The
 setting turns the policy off entirely, so set it only from the agent or
-pipeline environment, never from a file a pull request can edit, and limit the
-write credential to the same builds.
+pipeline environment, never from a file a pull request can edit (workspace
+`.mbx.toml` refuses it), and limit the write credential to the same builds.
 
 This policy prevents untrusted code from publishing objects that later builds
 would trust. The server should still authenticate and authorize requests; the

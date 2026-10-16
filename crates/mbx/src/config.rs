@@ -520,8 +520,9 @@ struct RawRemote {
     ///
     /// For CI systems mbx does not detect, such as Buildkite or Jenkins. Set it
     /// only from the agent or pipeline environment, only for builds you trust,
-    /// and never from a file that a pull request can change. The write
-    /// credential should still be limited to those builds.
+    /// and never from a file that a pull request can change. Workspace
+    /// `.mbx.toml` refuses it. The write credential should still be limited to
+    /// those builds.
     #[usage(env = "MBX_REMOTE_TRUST_WRITES", default = false)]
     trust_writes: bool,
     /// S3 endpoint for a service other than AWS, such as MinIO or R2.
@@ -2836,6 +2837,24 @@ default = "rust-lld"
             config.linker.for_build("dev", None),
             Some("mold@2.42.0".into())
         );
+    }
+
+    #[test]
+    fn workspace_policy_refuses_remote_trust_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join(".mbx.toml"),
+            "[remote]\ntrust_writes = true\n",
+        )
+        .unwrap();
+        let mut config = configured(None, &[]).unwrap();
+
+        let error = config
+            .apply_workspace_policy_with(directory.path(), |_| false)
+            .unwrap_err();
+
+        assert!(format!("{error:?}").contains("unsupported workspace setting \"remote\""));
+        assert!(!config.remote.trust_writes);
     }
 
     #[test]
