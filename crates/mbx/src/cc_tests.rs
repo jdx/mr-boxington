@@ -388,7 +388,7 @@ fn probe_msvc_accepts_the_real_compiler() {
         eprintln!("skipping: cl.exe is not on PATH");
         return;
     };
-    let probe = probe_msvc(&executable).unwrap();
+    let probe = run_msvc_probe(&executable).unwrap();
     assert_eq!(
         mbx_cache_cc::CcCompilerFamily::classify(&probe).unwrap(),
         mbx_cache_cc::CcCompilerFamily::Msvc

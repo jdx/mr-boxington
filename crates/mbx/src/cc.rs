@@ -997,6 +997,18 @@ fn probe_msvc(executable: &Path) -> Result<String> {
     {
         return Ok(String::from_utf8_lossy(&text).into_owned());
     }
+    let text = run_msvc_probe(executable)?;
+    let _ = session::request_agent(&[AgentRequest::StoreExecutableIdentity {
+        executable: executable.to_path_buf(),
+        environment,
+        stdout: text.clone().into_bytes(),
+        pins: Vec::new(),
+    }]);
+    Ok(text)
+}
+
+/// Run the preprocessing probe itself, without consulting the agent's memo.
+fn run_msvc_probe(executable: &Path) -> Result<String> {
     let unavailable = |reason: String| CcBypassReason::CompilerIdentityUnavailable(reason);
     let scratch = tempfile::tempdir().map_err(|error| unavailable(error.to_string()))?;
     let source = scratch.path().join("identity.c");
@@ -1022,12 +1034,6 @@ fn probe_msvc(executable: &Path) -> Result<String> {
                 executable.display()
             ))
         })?;
-    let _ = session::request_agent(&[AgentRequest::StoreExecutableIdentity {
-        executable: executable.to_path_buf(),
-        environment,
-        stdout: text.clone().into_bytes(),
-        pins: Vec::new(),
-    }]);
     Ok(text)
 }
 
