@@ -130,6 +130,14 @@ jobs:
           target_flags=()
           [[ -n "$TARGET" ]] && target_flags+=(--target "$TARGET")
           ./target/mbx-bootstrap/mbx${{ runner.os == 'Windows' && '.exe' || '' }} test --workspace "${target_flags[@]}"
+      # The Linux job lints with a different Rust and compiles out the
+      # `#[cfg(windows)]` code, so Windows-only lints surface only here.
+      - name: Lint on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          ./target/mbx-bootstrap/mbx.exe clippy --workspace --all-features --all-targets -- -D warnings
+          ./target/mbx-bootstrap/mbx.exe clippy --release --workspace --all-features --all-targets -- -D warnings
       - name: Run Bats behavioral tests
         if: runner.os != 'Windows'
         env:
