@@ -570,6 +570,43 @@ pub enum CcCompilerFamily {
     Msvc,
 }
 
+/// Source preprocessed to ask `cl.exe` who it is.
+///
+/// The macros survive unexpanded in any compiler that does not define them, so
+/// the answer does not depend on banner wording or the console locale.
+pub const MSVC_IDENTITY_SOURCE: &str = "mbx_msc_ver _MSC_VER\nmbx_msc_full_ver _MSC_FULL_VER\nmbx_msc_build _MSC_BUILD\nmbx_clang __clang__\n";
+
+/// Leading text of an identity built by [`msvc_identity`].
+pub const MSVC_IDENTITY_PREFIX: &str = "mbx-msvc-identity";
+
+/// Build the identity text for `cl.exe` from its preprocessed
+/// [`MSVC_IDENTITY_SOURCE`], or `None` when the compiler is not MSVC.
+///
+/// `clang-cl` defines `_MSC_VER` too, so `__clang__` rejects it: it is a
+/// different compiler with its own version line.
+pub fn msvc_identity(preprocessed: &str) -> Option<String> {
+    let value = |name: &str| {
+        preprocessed.lines().find_map(|line| {
+            let (key, rest) = line.trim().split_once(' ')?;
+            (key == name).then(|| rest.trim().to_string())
+        })
+    };
+    let defined = |text: &str, macro_name: &str| {
+        !text.is_empty() && text != macro_name && text.bytes().all(|b| b.is_ascii_digit())
+    };
+    let ver = value("mbx_msc_ver").filter(|v| defined(v, "_MSC_VER"))?;
+    let full = value("mbx_msc_full_ver").filter(|v| defined(v, "_MSC_FULL_VER"))?;
+    let build = value("mbx_msc_build")
+        .filter(|v| defined(v, "_MSC_BUILD"))
+        .unwrap_or_default();
+    if value("mbx_clang").is_some_and(|v| v != "__clang__") {
+        return None;
+    }
+    Some(format!(
+        "{MSVC_IDENTITY_PREFIX} _MSC_VER={ver} _MSC_FULL_VER={full} _MSC_BUILD={build}\n"
+    ))
+}
+
 impl CcCompilerFamily {
     /// Stable name recorded in the action key.
     pub fn as_str(self) -> &'static str {
@@ -603,7 +640,7 @@ impl CcCompilerFamily {
     /// Classify a driver from its verbose probe output.
     pub fn classify(probe: &str) -> Result<Self, CcBypassReason> {
         #[cfg(windows)]
-        if probe.contains("Microsoft (R) C/C++ Optimizing Compiler") {
+        if probe.starts_with(MSVC_IDENTITY_PREFIX) {
             return Ok(Self::Msvc);
         }
         if probe.contains("Apple clang version") {

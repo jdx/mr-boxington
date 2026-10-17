@@ -982,9 +982,11 @@ fn compiler_identity(compiler: &OsStr, language: CcLanguage) -> Result<CcCompile
     })
 }
 
-/// MSVC prints its detailed `/Bv` identity before complaining that no source
-/// was supplied. That non-zero exit is a property of the query shape, not a
-/// failed identity probe, so accept it only when the expected banner is there.
+/// Ask `cl.exe` for its `_MSC_VER`, `_MSC_FULL_VER` and `_MSC_BUILD` by
+/// preprocessing a tiny source.
+///
+/// The banner text is localized and reworded between releases, so it is not an
+/// identity. The macros are, and `/EP` prints them without compiling anything.
 fn probe_msvc(executable: &Path) -> Result<String> {
     let environment = BTreeMap::new();
     if let Ok(responses) = session::request_agent(&[AgentRequest::FindExecutableIdentity {
@@ -995,19 +997,23 @@ fn probe_msvc(executable: &Path) -> Result<String> {
     {
         return Ok(String::from_utf8_lossy(&text).into_owned());
     }
+    let unavailable = |reason: String| CcBypassReason::CompilerIdentityUnavailable(reason);
+    let scratch = tempfile::tempdir().map_err(|error| unavailable(error.to_string()))?;
+    let source = scratch.path().join("identity.c");
+    std::fs::write(&source, mbx_cache_cc::MSVC_IDENTITY_SOURCE)
+        .map_err(|error| unavailable(error.to_string()))?;
     let output = Command::new(executable)
-        .arg("/Bv")
+        .args(["/nologo", "/EP"])
+        .arg(&source)
         .output()
-        .map_err(|error| CcBypassReason::CompilerIdentityUnavailable(error.to_string()))?;
-    let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
-    text.push_str(&String::from_utf8_lossy(&output.stdout));
-    if !text.contains("Microsoft (R) C/C++ Optimizing Compiler") {
-        return Err(CcBypassReason::CompilerIdentityUnavailable(format!(
-            "{} did not report an MSVC compiler identity",
-            executable.display()
-        ))
-        .into());
-    }
+        .map_err(|error| unavailable(error.to_string()))?;
+    let text =
+        mbx_cache_cc::msvc_identity(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
+            unavailable(format!(
+                "{} did not report an MSVC compiler identity",
+                executable.display()
+            ))
+        })?;
     let _ = session::request_agent(&[AgentRequest::StoreExecutableIdentity {
         executable: executable.to_path_buf(),
         environment,
