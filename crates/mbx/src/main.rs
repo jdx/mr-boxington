@@ -19,6 +19,9 @@ fn main() -> ExitCode {
     if mbx::session::is_rustc_shim() {
         return mbx::session::run_rustc_shim();
     }
+    if mbx::session::is_configured_as_rustc_wrapper() {
+        return mbx::session::reject_configured_rustc_wrapper();
+    }
     if mbx::session::is_rustdoc_shim() {
         return mbx::session::run_rustdoc_shim();
     }

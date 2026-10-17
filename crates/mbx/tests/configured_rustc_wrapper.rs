@@ -1,11 +1,12 @@
 //! `build.rustc-wrapper = "mbx"` in Cargo configuration makes Cargo run
-//! `mbx <rustc> <args>`. Real Cargo is the oracle that this form compiles.
+//! `mbx <rustc> <args>`. Real Cargo is the oracle that mbx reports the
+//! unsupported setting instead of Cargo's `-Zscript` error.
 #![cfg(unix)]
 
 use std::process::Command;
 
 #[test]
-fn cargo_builds_with_mbx_named_as_the_configured_rustc_wrapper() {
+fn cargo_reports_mbx_configured_as_the_rustc_wrapper() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     std::fs::create_dir_all(root.join("src")).unwrap();
@@ -32,6 +33,7 @@ fn cargo_builds_with_mbx_named_as_the_configured_rustc_wrapper() {
         .unwrap();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "cargo build failed:\n{stderr}");
-    assert!(root.join("target/debug/wrapper-fixture").exists());
+    assert!(!output.status.success(), "build should fail:\n{stderr}");
+    assert!(stderr.contains("Remove that setting"), "{stderr}");
+    assert!(!stderr.contains("-Zscript"), "{stderr}");
 }

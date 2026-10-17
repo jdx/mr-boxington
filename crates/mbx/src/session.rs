@@ -1269,23 +1269,41 @@ async fn action_remote_cache(config: &Config, store: &Path) -> Result<Option<Age
 }
 
 /// Whether this process was invoked as the rustc shim.
-///
-/// Besides the `mbx-rustc` shim, this recognizes `mbx <path-to-rustc> ...`,
-/// the form Cargo uses when `build.rustc-wrapper = "mbx"` is set in Cargo
-/// configuration.
 pub fn is_rustc_shim() -> bool {
+    std::env::args_os()
+        .next()
+        .as_deref()
+        .map(Path::new)
+        .and_then(Path::file_stem)
+        .is_some_and(|stem| stem == OsStr::new(RUSTC_SHIM_STEM))
+}
+
+/// Whether Cargo ran `mbx` itself as a rustc wrapper, which is what
+/// `build.rustc-wrapper = "mbx"` in Cargo configuration produces. mbx exports
+/// its own `RUSTC_WRAPPER` for each session, so the setting is unsupported.
+pub fn is_configured_as_rustc_wrapper() -> bool {
     let arguments = std::env::args_os().take(3).collect::<Vec<_>>();
     let Some((program, rest)) = arguments.split_first() else {
         return false;
     };
     let rest = rest.iter().map(OsString::as_os_str).collect::<Vec<_>>();
-    is_rustc_shim_invocation(program, &rest)
+    is_rustc_wrapper_invocation(program, &rest)
 }
 
-fn is_rustc_shim_invocation(program: &OsStr, arguments: &[&OsStr]) -> bool {
+/// Tell the user to remove `build.rustc-wrapper`, instead of letting Cargo
+/// read the compiler path as a `-Zscript` file.
+pub fn reject_configured_rustc_wrapper() -> ExitCode {
+    eprintln!(
+        "mbx[error]: mbx is configured as Cargo's rustc wrapper (`build.rustc-wrapper`, \
+         `RUSTC_WRAPPER`, or `CARGO_BUILD_RUSTC_WRAPPER`), which it does not support.\n\
+         Remove that setting: mbx sets `RUSTC_WRAPPER` for each build itself."
+    );
+    ExitCode::FAILURE
+}
+
+fn is_rustc_wrapper_invocation(program: &OsStr, arguments: &[&OsStr]) -> bool {
     let file_stem = |path: &OsStr| Path::new(path).file_stem().map(OsStr::to_os_string);
     match file_stem(program) {
-        Some(stem) if stem == OsStr::new(RUSTC_SHIM_STEM) => true,
         Some(stem) if stem == OsStr::new("mbx") => {
             let Some(first) = arguments.first() else {
                 return false;
