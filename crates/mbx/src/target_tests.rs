@@ -652,11 +652,6 @@ fn drops_a_link_left_dangling_by_collection_without_touching_other_links() {
 
     std::fs::remove_dir_all(&managed).unwrap();
     std::fs::remove_file(view_record_path(&config.target.root, &workspace)).unwrap();
-    {
-        let _lease = ViewLease::acquire(&config.target.root, &workspace).unwrap();
-        assert!(!remove_dangling_link(&config.target.root, &workspace).unwrap());
-        assert!(std::fs::symlink_metadata(workspace.join("target")).is_ok());
-    }
     assert!(remove_dangling_link(&config.target.root, &workspace).unwrap());
     assert!(std::fs::symlink_metadata(workspace.join("target")).is_err());
 
@@ -664,6 +659,19 @@ fn drops_a_link_left_dangling_by_collection_without_touching_other_links() {
     symlink_dir(&directory.path().join("missing"), &other.join("target")).unwrap();
     assert!(!remove_dangling_link(&config.target.root, &other).unwrap());
     assert!(std::fs::symlink_metadata(other.join("target")).is_ok());
+}
+
+#[test]
+fn keeps_a_dangling_link_while_a_command_holds_the_view() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    let managed = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    std::fs::remove_dir_all(&managed).unwrap();
+    let _lease = ViewLease::acquire(&config.target.root, &workspace).unwrap();
+
+    assert!(!remove_dangling_link(&config.target.root, &workspace).unwrap());
+    assert!(std::fs::symlink_metadata(workspace.join("target")).is_ok());
 }
 
 #[test]
