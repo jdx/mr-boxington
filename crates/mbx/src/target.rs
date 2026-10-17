@@ -383,7 +383,11 @@ pub fn remove_dangling_link(root: &Path, workspace_root: &Path) -> Result<bool> 
     let Some(_reservation) = try_reserve_view(&directory) else {
         return Ok(false);
     };
-    if directory.try_exists()? {
+    // Re-read under the reservation: only the link this checkout's own view
+    // owns may go, and a placement for another root could have replaced it.
+    if directory.try_exists()?
+        || !std::fs::read_link(&link).is_ok_and(|destination| destination == directory)
+    {
         return Ok(false);
     }
     match remove_link(&link) {
