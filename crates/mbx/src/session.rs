@@ -1274,23 +1274,35 @@ async fn action_remote_cache(config: &Config, store: &Path) -> Result<Option<Age
 /// the form Cargo uses when `build.rustc-wrapper = "mbx"` is set in Cargo
 /// configuration.
 pub fn is_rustc_shim() -> bool {
-    let mut arguments = std::env::args_os();
-    let Some(program) = arguments.next() else {
+    let arguments = std::env::args_os().take(3).collect::<Vec<_>>();
+    let Some((program, rest)) = arguments.split_first() else {
         return false;
     };
-    is_rustc_shim_invocation(&program, arguments.next().as_deref())
+    let rest = rest.iter().map(OsString::as_os_str).collect::<Vec<_>>();
+    is_rustc_shim_invocation(program, &rest)
 }
 
-fn is_rustc_shim_invocation(program: &OsStr, first_argument: Option<&OsStr>) -> bool {
+fn is_rustc_shim_invocation(program: &OsStr, arguments: &[&OsStr]) -> bool {
     let file_stem = |path: &OsStr| Path::new(path).file_stem().map(OsStr::to_os_string);
     match file_stem(program) {
         Some(stem) if stem == OsStr::new(RUSTC_SHIM_STEM) => true,
-        Some(stem) if stem == OsStr::new("mbx") => first_argument.is_some_and(|argument| {
-            // A bare `rustc` word stays a subcommand-like argument; Cargo
-            // passes the resolved compiler path.
-            Path::new(argument).components().count() > 1
-                && file_stem(argument).is_some_and(|stem| stem == OsStr::new("rustc"))
-        }),
+        Some(stem) if stem == OsStr::new("mbx") => {
+            let Some(first) = arguments.first() else {
+                return false;
+            };
+            if Path::new(first).components().count() > 1 {
+                return file_stem(first).is_some_and(|stem| stem == OsStr::new("rustc"));
+            }
+            // Without RUSTC set, Cargo passes a bare `rustc`. That also names
+            // `cargo rustc`, so only Cargo's compiler probes and compilations
+            // qualify: none of these is a valid `cargo rustc` flag.
+            *first == OsStr::new("rustc")
+                && arguments.get(1).is_some_and(|argument| {
+                    ["-vV", "-V", "-", "--version", "--print", "--crate-name"]
+                        .iter()
+                        .any(|probe| *argument == OsStr::new(probe))
+                })
+        }
         _ => false,
     }
 }

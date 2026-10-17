@@ -2071,17 +2071,24 @@ fn routine_bypasses_are_debug_but_failed_cache_paths_are_warnings() {
 
 #[test]
 fn rustc_shim_is_recognized_for_a_configured_rustc_wrapper() {
-    let rustc = OsStr::new("/toolchain/bin/rustc");
-    assert!(is_rustc_shim_invocation(OsStr::new("/bin/mbx-rustc"), None));
-    assert!(is_rustc_shim_invocation(OsStr::new("mbx"), Some(rustc)));
-    assert!(!is_rustc_shim_invocation(OsStr::new("mbx"), None));
-    assert!(!is_rustc_shim_invocation(
-        OsStr::new("mbx"),
-        Some(OsStr::new("rustc"))
+    let os = OsStr::new;
+    let rustc = os("/toolchain/bin/rustc");
+    assert!(is_rustc_shim_invocation(os("/bin/mbx-rustc"), &[]));
+    assert!(is_rustc_shim_invocation(os("mbx"), &[rustc]));
+    assert!(is_rustc_shim_invocation(
+        os("mbx"),
+        &[os("rustc"), os("-vV")]
     ));
-    assert!(!is_rustc_shim_invocation(
-        OsStr::new("mbx"),
-        Some(OsStr::new("build"))
+    assert!(is_rustc_shim_invocation(
+        os("mbx"),
+        &[os("rustc"), os("--crate-name"), os("x")]
     ));
-    assert!(!is_rustc_shim_invocation(OsStr::new("cargo"), Some(rustc)));
+    assert!(!is_rustc_shim_invocation(os("mbx"), &[]));
+    assert!(!is_rustc_shim_invocation(os("mbx"), &[os("rustc")]));
+    assert!(!is_rustc_shim_invocation(
+        os("mbx"),
+        &[os("rustc"), os("--release")]
+    ));
+    assert!(!is_rustc_shim_invocation(os("mbx"), &[os("build")]));
+    assert!(!is_rustc_shim_invocation(os("cargo"), &[rustc]));
 }
