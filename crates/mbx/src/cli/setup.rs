@@ -975,16 +975,16 @@ fn configured_cargo_shim_target(install_dir: &Path) -> Option<PathBuf> {
     use std::os::windows::ffi::OsStringExt as _;
 
     let bytes = std::fs::read(install_dir.join(super::CARGO_SHIM_TARGET_FILE)).ok()?;
-    let mut chunks = bytes.chunks_exact(2);
-    let target = std::ffi::OsString::from_wide(
-        &chunks
-            .by_ref()
-            .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
-            .collect::<Vec<_>>(),
-    );
-    if !chunks.remainder().is_empty() {
+    let (units, remainder) = bytes.as_chunks::<2>();
+    if !remainder.is_empty() {
         return None;
     }
+    let target = std::ffi::OsString::from_wide(
+        &units
+            .iter()
+            .map(|unit| u16::from_le_bytes(*unit))
+            .collect::<Vec<_>>(),
+    );
     let target = PathBuf::from(target);
     target.is_absolute().then_some(target)
 }

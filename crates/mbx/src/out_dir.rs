@@ -751,6 +751,8 @@ fn remove_tree(path: &Path) -> std::io::Result<()> {
                     pending.push(entry.path());
                 } else {
                     let mut permissions = entry.metadata()?.permissions();
+                    // Not Unix, so this clears only the read-only attribute.
+                    #[allow(clippy::permissions_set_readonly_false)]
                     permissions.set_readonly(false);
                     std::fs::set_permissions(entry.path(), permissions)?;
                 }

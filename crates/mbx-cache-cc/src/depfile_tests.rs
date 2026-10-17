@@ -637,11 +637,13 @@ fn parses_msvc_source_dependencies() {
 }
 
 /// A ledger that answers one known identity with a fixed digest.
+#[cfg(unix)]
 struct SentinelLedger {
     known: FileIdentity,
     digest: CacheDigest,
 }
 
+#[cfg(unix)]
 impl FileDigestCache for SentinelLedger {
     fn find(&self, _scope: FileDigestScope, files: &[FileIdentity]) -> Vec<Option<CacheDigest>> {
         files

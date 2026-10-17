@@ -53,10 +53,9 @@ pub use shims::{
     PathShims, ShimLink, install_path_shims, install_shim, install_shim_named, shim_file_name,
 };
 #[cfg(test)]
-use shims::{
-    TargetedCompiler, resolve_in_path, resolve_named_compiler, resolve_on_path, symlink_shim,
-    targeted_compiler_language,
-};
+use shims::{TargetedCompiler, resolve_named_compiler, targeted_compiler_language};
+#[cfg(all(test, unix))]
+use shims::{resolve_in_path, resolve_on_path, symlink_shim};
 use stats::StatsReport;
 pub(crate) use stats::display_stats;
 pub(crate) use stats::session_was_active;

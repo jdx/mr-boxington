@@ -678,7 +678,10 @@ pub(crate) fn make_owner_writable(path: &Path) -> Result<()> {
     Ok(())
 }
 
+// The lint warns that this makes a Unix file world-writable. Windows has no
+// such mode: it clears only the read-only attribute.
 #[cfg(windows)]
+#[allow(clippy::permissions_set_readonly_false)]
 pub(crate) fn make_owner_writable(path: &Path) -> Result<()> {
     let mut permissions = std::fs::metadata(path)?.permissions();
     permissions.set_readonly(false);

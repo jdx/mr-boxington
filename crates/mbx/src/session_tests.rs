@@ -1,7 +1,9 @@
 #[cfg(unix)]
 use super::shims::remove_stranded_binary_shims;
-use super::shims::{ShimLease, binary_identity, installation_identity};
-use super::shims::{first_in_path, is_shim_directory, mark_shim_directory};
+#[cfg(unix)]
+use super::shims::{ShimLease, first_in_path};
+use super::shims::{binary_identity, installation_identity};
+use super::shims::{is_shim_directory, mark_shim_directory};
 use super::*;
 use crate::config::SummaryStyle;
 

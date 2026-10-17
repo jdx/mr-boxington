@@ -1793,10 +1793,12 @@ fn read_test_history_records(path: &Path, binary: &str) -> Vec<TestHistoryRecord
         return Vec::new();
     };
 
-    let mut records: Vec<_> = contents[TEST_HISTORY_HEADER_LEN as usize..]
-        .chunks_exact(TEST_HISTORY_RECORD_LEN as usize)
+    let (record_bytes, _) = contents[TEST_HISTORY_HEADER_LEN as usize..]
+        .as_chunks::<{ TEST_HISTORY_RECORD_LEN as usize }>();
+    let mut records: Vec<_> = record_bytes
+        .iter()
         .take(header.count as usize)
-        .map(decode_test_history_record)
+        .map(|bytes| decode_test_history_record(bytes))
         .collect();
     records.sort_unstable_by_key(|record| record.hash);
     let mut unique: Vec<TestHistoryRecord> = Vec::with_capacity(records.len());

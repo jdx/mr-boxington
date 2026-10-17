@@ -471,6 +471,8 @@ fn set_file_metadata(path: &Path, mode: u32, secs: u64, nanos: u32) -> Result<()
     #[cfg(not(unix))]
     {
         let mut permissions = std::fs::metadata(path)?.permissions();
+        // Not Unix, so this clears only the read-only attribute.
+        #[allow(clippy::permissions_set_readonly_false)]
         permissions.set_readonly(false);
         std::fs::set_permissions(path, permissions.clone())?;
         File::options()

@@ -66,6 +66,7 @@ impl Donor {
 
     /// `path`, inside the donor's managed directory, and the same place
     /// spelled through the checkout's `target` link.
+    #[cfg(unix)]
     fn respellings(&self, path: &Path) -> Vec<PathBuf> {
         let mut spellings = vec![path.to_path_buf()];
         if let Ok(inside) = path.strip_prefix(&self.directory) {
@@ -492,6 +493,8 @@ fn remove_abandoned_staging(profile: &Path) {
 }
 
 /// Where symbolic links in a copied tree may point.
+// Only Unix copies symbolic links; Windows leaves such a unit for the build.
+#[cfg_attr(not(unix), allow(dead_code))]
 struct Links<'a> {
     /// The tree being copied.
     source: &'a Path,
