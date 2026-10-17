@@ -2084,6 +2084,22 @@ fn rustc_shim_is_recognized_for_a_configured_rustc_wrapper() {
         &[os("rustc"), os("--crate-name"), os("x")]
     ));
     assert!(!is_rustc_shim_invocation(os("mbx"), &[]));
+    assert!(is_rustc_shim_invocation(
+        os("mbx"),
+        &[os("rustc"), os("@/tmp/args")]
+    ));
+    assert!(is_rustc_shim_invocation(
+        os("mbx"),
+        &[os("rustc"), os("--print=cfg")]
+    ));
+    assert!(!is_rustc_shim_invocation(
+        os("mbx"),
+        &[os("rustc"), os("--version")]
+    ));
+    assert!(!is_rustc_shim_invocation(
+        os("mbx"),
+        &[os("rustc"), os("-V")]
+    ));
     assert!(!is_rustc_shim_invocation(os("mbx"), &[os("rustc")]));
     assert!(!is_rustc_shim_invocation(
         os("mbx"),

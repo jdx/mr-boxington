@@ -1295,12 +1295,23 @@ fn is_rustc_shim_invocation(program: &OsStr, arguments: &[&OsStr]) -> bool {
             }
             // Without RUSTC set, Cargo passes a bare `rustc`. That also names
             // `cargo rustc`, so only Cargo's compiler probes and compilations
-            // qualify: none of these is a valid `cargo rustc` flag.
+            // qualify: none of these is a `cargo rustc` option. Cargo's own
+            // `-V`/`--version` stay with Cargo.
             *first == OsStr::new("rustc")
                 && arguments.get(1).is_some_and(|argument| {
-                    ["-vV", "-V", "-", "--version", "--print", "--crate-name"]
+                    let argument = argument.to_string_lossy();
+                    argument == "-vV"
+                        || argument == "-"
+                        || argument.starts_with('@')
+                        || [
+                            "--print",
+                            "--crate-name",
+                            "--crate-type",
+                            "--emit",
+                            "--edition",
+                        ]
                         .iter()
-                        .any(|probe| *argument == OsStr::new(probe))
+                        .any(|flag| argument.starts_with(flag))
                 })
         }
         _ => false,
