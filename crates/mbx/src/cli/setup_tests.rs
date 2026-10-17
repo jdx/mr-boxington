@@ -490,6 +490,23 @@ fn cargo_shim_skips_the_mise_mbx_shim_on_path() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn cargo_shim_skips_the_mise_mbx_shim_however_path_spells_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let recorded = directory.path().join("recorded/mbx.exe");
+    std::fs::create_dir_all(recorded.parent().unwrap()).unwrap();
+    std::fs::write(&recorded, b"mbx binary").unwrap();
+    let install = directory.path().join("data/bin");
+    setup_at(&recorded, &install).unwrap();
+    let mise_shims = directory.path().join("Mise/Shims");
+    std::fs::create_dir_all(&mise_shims).unwrap();
+    std::fs::write(mise_shims.join("mbx.exe"), b"mise shim").unwrap();
+
+    let path = std::env::join_paths([&install, &mise_shims]).unwrap();
+    assert_eq!(cargo_shim_target_on(&install, Some(&path)), Some(recorded));
+}
+
 #[cfg(unix)]
 #[test]
 fn setup_status_reports_a_shim_whose_target_was_removed_as_outdated() {

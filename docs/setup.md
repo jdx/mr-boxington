@@ -165,8 +165,9 @@ Outside mise activation, the Cargo shim finds mbx this way:
 - On Unix, it runs the mbx that `mbx setup` recorded while that file exists,
   then resolves the active `mbx` from `PATH` after an upgrade removes it.
 - On Windows, `cargo.exe` resolves the active mbx from `PATH`, with the
-  recorded mbx as a fallback. It skips mise's `mbx.exe` shim, which fails in
-  directories where mise does not enable mbx.
+  recorded mbx as a fallback. It skips mise's `mbx.exe` shim, in mise's data
+  directory or `MISE_SHIMS_DIR`, which fails in directories where mise does
+  not enable mbx.
 
 On Unix, once mise prunes the mbx version that `mbx setup` recorded, as it does
 after `mise upgrade`, the Cargo shim works only where `mbx` is on `PATH`.

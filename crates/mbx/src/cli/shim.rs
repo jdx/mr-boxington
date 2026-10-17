@@ -528,18 +528,44 @@ fn is_mise_cargo_proxy_path(path: &Path) -> bool {
 /// Whether `path` is in mise's shims directory. A mise shim runs its tool only
 /// where mise config enables it and fails everywhere else.
 pub(crate) fn is_mise_shim_path(path: &Path) -> bool {
-    let Some(shims) = path
-        .parent()
-        .filter(|parent| parent.file_name() == Some(OsStr::new("shims")))
-    else {
+    is_mise_shim_path_in(
+        path,
+        std::env::var_os("MISE_SHIMS_DIR").as_deref(),
+        std::env::var_os("MISE_DATA_DIR").as_deref(),
+    )
+}
+
+/// `shims_dir` and `data_dir` are mise's `MISE_SHIMS_DIR` and `MISE_DATA_DIR`.
+/// A `shims_dir` set only in mise's global config is not visible here.
+fn is_mise_shim_path_in(path: &Path, shims_dir: Option<&OsStr>, data_dir: Option<&OsStr>) -> bool {
+    let Some(directory) = path.parent() else {
         return false;
     };
-    let Some(data_dir) = shims.parent() else {
+    if shims_dir.is_some_and(|configured| same_path(directory, Path::new(configured))) {
+        return true;
+    }
+    if !directory
+        .file_name()
+        .is_some_and(|name| file_name_is(name, "shims"))
+    {
+        return false;
+    }
+    let Some(parent) = directory.parent() else {
         return false;
     };
-    data_dir.file_name() == Some(OsStr::new("mise"))
-        || std::env::var_os("MISE_DATA_DIR")
-            .is_some_and(|configured| same_path(data_dir, Path::new(&configured)))
+    parent
+        .file_name()
+        .is_some_and(|name| file_name_is(name, "mise"))
+        || data_dir.is_some_and(|configured| same_path(parent, Path::new(configured)))
+}
+
+/// Windows compares file names without regard to case.
+fn file_name_is(name: &OsStr, expected: &str) -> bool {
+    if cfg!(windows) {
+        name.eq_ignore_ascii_case(expected)
+    } else {
+        name == expected
+    }
 }
 
 fn resolve_real_cargo_from(
@@ -908,5 +934,32 @@ mod tests {
             resolve_real_cargo_from(&shim, None, &path).unwrap(),
             real.into_os_string()
         );
+    }
+
+    #[test]
+    fn mise_shims_are_recognized_in_configured_and_default_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        let custom = directory.path().join("tools/bin");
+        std::fs::create_dir_all(&custom).unwrap();
+        let shim = custom.join("mbx");
+        assert!(!is_mise_shim_path_in(&shim, None, None));
+        assert!(is_mise_shim_path_in(&shim, Some(custom.as_os_str()), None));
+
+        let data = directory.path().join("data");
+        assert!(is_mise_shim_path_in(
+            &data.join("shims/mbx"),
+            None,
+            Some(data.as_os_str())
+        ));
+        assert!(is_mise_shim_path_in(
+            &directory.path().join("mise/shims/mbx"),
+            None,
+            None
+        ));
+        assert!(!is_mise_shim_path_in(
+            &directory.path().join("other/shims/mbx"),
+            None,
+            None
+        ));
     }
 }
