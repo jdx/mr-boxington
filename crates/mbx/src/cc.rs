@@ -1007,6 +1007,14 @@ fn probe_msvc(executable: &Path) -> Result<String> {
         .arg(&source)
         .output()
         .map_err(|error| unavailable(error.to_string()))?;
+    if !output.status.success() {
+        return Err(unavailable(format!(
+            "{} exited with {} while reporting its identity",
+            executable.display(),
+            output.status
+        ))
+        .into());
+    }
     let text =
         mbx_cache_cc::msvc_identity(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
             unavailable(format!(
