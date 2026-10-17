@@ -781,12 +781,12 @@ fn msvc_style_probe_output_selects_the_msvc_adapter() {
 #[test]
 fn msvc_identity_reads_macros_not_banner_text() {
     let identity = msvc_identity(
-        "mbx_msc_ver 1938\r\nmbx_msc_full_ver 193833135\r\nmbx_msc_build 0\r\nmbx_clang __clang__\r\n",
+        "mbx_msc_ver 1938\r\nmbx_msc_full_ver 193833135\r\nmbx_msc_build 0\r\nmbx_clang __clang__\r\nmbx_x64 1\r\nmbx_x86 _M_IX86\r\nmbx_arm64 _M_ARM64\r\n",
     )
     .unwrap();
     assert_eq!(
         identity,
-        "mbx-msvc-identity _MSC_VER=1938 _MSC_FULL_VER=193833135 _MSC_BUILD=0\n"
+        "mbx-msvc-identity _MSC_VER=1938 _MSC_FULL_VER=193833135 _MSC_BUILD=0 ARCH=_M_X64\n"
     );
 }
 
@@ -1429,4 +1429,15 @@ fn active_developer_roots_include_resolved_symlinks() {
     let roots = developer_directory_roots(alias.clone());
     assert!(roots.contains(&alias));
     assert!(roots.contains(&std::fs::canonicalize(real).unwrap()));
+}
+
+#[test]
+fn msvc_identity_distinguishes_target_architectures() {
+    let for_arch = |x64: &str, arm64: &str| {
+        msvc_identity(&format!(
+            "mbx_msc_ver 1938\nmbx_msc_full_ver 193833135\nmbx_msc_build 0\nmbx_clang __clang__\nmbx_x64 {x64}\nmbx_arm64 {arm64}\n"
+        ))
+        .unwrap()
+    };
+    assert_ne!(for_arch("1", "_M_ARM64"), for_arch("_M_X64", "1"));
 }

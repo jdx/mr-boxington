@@ -574,7 +574,7 @@ pub enum CcCompilerFamily {
 ///
 /// The macros survive unexpanded in any compiler that does not define them, so
 /// the answer does not depend on banner wording or the console locale.
-pub const MSVC_IDENTITY_SOURCE: &str = "mbx_msc_ver _MSC_VER\nmbx_msc_full_ver _MSC_FULL_VER\nmbx_msc_build _MSC_BUILD\nmbx_clang __clang__\n";
+pub const MSVC_IDENTITY_SOURCE: &str = "mbx_msc_ver _MSC_VER\nmbx_msc_full_ver _MSC_FULL_VER\nmbx_msc_build _MSC_BUILD\nmbx_clang __clang__\nmbx_x64 _M_X64\nmbx_x86 _M_IX86\nmbx_arm64 _M_ARM64\nmbx_arm64ec _M_ARM64EC\nmbx_arm _M_ARM\n";
 
 /// Leading text of an identity built by [`msvc_identity`].
 pub const MSVC_IDENTITY_PREFIX: &str = "mbx-msvc-identity";
@@ -602,8 +602,22 @@ pub fn msvc_identity(preprocessed: &str) -> Option<String> {
     if value("mbx_clang").is_some_and(|v| v != "__clang__") {
         return None;
     }
+    // The version macros match across the x86, x64 and ARM64 toolset binaries,
+    // so the architecture the compiler targets has to be keyed separately.
+    let architecture = [
+        ("mbx_x64", "_M_X64"),
+        ("mbx_x86", "_M_IX86"),
+        ("mbx_arm64", "_M_ARM64"),
+        ("mbx_arm64ec", "_M_ARM64EC"),
+        ("mbx_arm", "_M_ARM"),
+    ]
+    .iter()
+    .filter(|(key, macro_name)| value(key).is_some_and(|v| v != *macro_name))
+    .map(|(_, macro_name)| *macro_name)
+    .collect::<Vec<_>>()
+    .join(",");
     Some(format!(
-        "{MSVC_IDENTITY_PREFIX} _MSC_VER={ver} _MSC_FULL_VER={full} _MSC_BUILD={build}\n"
+        "{MSVC_IDENTITY_PREFIX} _MSC_VER={ver} _MSC_FULL_VER={full} _MSC_BUILD={build} ARCH={architecture}\n"
     ))
 }
 

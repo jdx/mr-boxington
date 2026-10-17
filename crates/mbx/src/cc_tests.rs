@@ -378,3 +378,19 @@ fn output_scan_matches_logical_macos_mapping_roots() {
         assert!(!portable.outputs_are_clean(&object, &[PathMapping::new(&physical, "target")]));
     }
 }
+
+/// Runs the real `cl.exe` probe, so a change to its command line or output that
+/// the parser rejects fails here instead of silently disabling caching.
+#[cfg(windows)]
+#[test]
+fn probe_msvc_accepts_the_real_compiler() {
+    let Ok(executable) = which::which("cl") else {
+        eprintln!("skipping: cl.exe is not on PATH");
+        return;
+    };
+    let probe = probe_msvc(&executable).unwrap();
+    assert_eq!(
+        mbx_cache_cc::CcCompilerFamily::classify(&probe).unwrap(),
+        mbx_cache_cc::CcCompilerFamily::Msvc
+    );
+}
