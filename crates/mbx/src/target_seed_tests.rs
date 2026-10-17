@@ -301,10 +301,23 @@ fn only_units_the_donors_last_build_read_are_copied() {
             )
             .unwrap();
     }
-    std::fs::File::open(stale.join("fingerprint"))
-        .unwrap()
-        .set_modified(old)
-        .unwrap();
+    // Windows opens a directory only with backup semantics, and setting its
+    // times needs attribute access that a plain open does not ask for.
+    #[cfg(windows)]
+    let fingerprint = {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
+        };
+        std::fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(stale.join("fingerprint"))
+            .unwrap()
+    };
+    #[cfg(not(windows))]
+    let fingerprint = std::fs::File::open(stale.join("fingerprint")).unwrap();
+    fingerprint.set_modified(old).unwrap();
 
     let outcome = seed(
         to.path(),
