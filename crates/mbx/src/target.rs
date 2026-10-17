@@ -374,7 +374,7 @@ fn retire_view(directory: &Path) -> std::io::Result<PathBuf> {
 pub fn remove_dangling_link(root: &Path, workspace_root: &Path) -> Result<bool> {
     let directory = view_dir(root, workspace_root);
     let link = workspace_root.join("target");
-    if directory.exists()
+    if directory.try_exists()?
         || !std::fs::read_link(&link).is_ok_and(|destination| destination == directory)
     {
         return Ok(false);
@@ -383,11 +383,14 @@ pub fn remove_dangling_link(root: &Path, workspace_root: &Path) -> Result<bool> 
     let Some(_reservation) = try_reserve_view(&directory) else {
         return Ok(false);
     };
-    if directory.exists() {
+    if directory.try_exists()? {
         return Ok(false);
     }
-    remove_link(&link)?;
-    Ok(true)
+    match remove_link(&link) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Remove the managed target view owned by exactly one workspace.
