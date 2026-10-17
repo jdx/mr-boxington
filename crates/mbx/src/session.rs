@@ -1269,13 +1269,30 @@ async fn action_remote_cache(config: &Config, store: &Path) -> Result<Option<Age
 }
 
 /// Whether this process was invoked as the rustc shim.
+///
+/// Besides the `mbx-rustc` shim, this recognizes `mbx <path-to-rustc> ...`,
+/// the form Cargo uses when `build.rustc-wrapper = "mbx"` is set in Cargo
+/// configuration.
 pub fn is_rustc_shim() -> bool {
-    std::env::args_os()
-        .next()
-        .as_deref()
-        .map(Path::new)
-        .and_then(Path::file_stem)
-        .is_some_and(|stem| stem == OsStr::new(RUSTC_SHIM_STEM))
+    let mut arguments = std::env::args_os();
+    let Some(program) = arguments.next() else {
+        return false;
+    };
+    is_rustc_shim_invocation(&program, arguments.next().as_deref())
+}
+
+fn is_rustc_shim_invocation(program: &OsStr, first_argument: Option<&OsStr>) -> bool {
+    let file_stem = |path: &OsStr| Path::new(path).file_stem().map(OsStr::to_os_string);
+    match file_stem(program) {
+        Some(stem) if stem == OsStr::new(RUSTC_SHIM_STEM) => true,
+        Some(stem) if stem == OsStr::new("mbx") => first_argument.is_some_and(|argument| {
+            // A bare `rustc` word stays a subcommand-like argument; Cargo
+            // passes the resolved compiler path.
+            Path::new(argument).components().count() > 1
+                && file_stem(argument).is_some_and(|stem| stem == OsStr::new("rustc"))
+        }),
+        _ => false,
+    }
 }
 
 /// Whether this process was invoked as the rustdoc shim.
