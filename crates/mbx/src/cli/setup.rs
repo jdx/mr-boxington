@@ -959,11 +959,18 @@ pub(super) fn same_file_contents(left: &Path, right: &Path) -> Result<bool> {
 
 #[cfg(windows)]
 pub(crate) fn cargo_shim_target(install_dir: &Path) -> Option<PathBuf> {
-    if let Some(target) = std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
+    cargo_shim_target_on(install_dir, std::env::var_os("PATH").as_deref())
+}
+
+#[cfg(windows)]
+pub(super) fn cargo_shim_target_on(install_dir: &Path, path: Option<&OsStr>) -> Option<PathBuf> {
+    // mise's shim fails outside directories whose mise config enables mbx, so
+    // it cannot stand in for the mbx that setup recorded.
+    if let Some(target) = path.and_then(|path| {
+        std::env::split_paths(path)
             .filter(|directory| !same_path(directory, install_dir))
             .map(|directory| directory.join("mbx.exe"))
-            .find(|candidate| candidate.is_file())
+            .find(|candidate| candidate.is_file() && !super::shim::is_mise_shim_path(candidate))
     }) {
         return Some(target);
     }

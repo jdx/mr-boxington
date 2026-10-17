@@ -115,4 +115,43 @@ mbx-probe = "new --vcs none"
             }
         }
     }
+
+    It 'skips the mise mbx shim when the cargo.exe shim forwards' {
+        $mbx = (Get-Command mbx).Source
+        $originalPath = $env:PATH
+        $originalDisable = $env:MBX_DISABLE
+        $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+        $shimDir = Join-Path $localAppData 'mbx\bin'
+        $targetFile = Join-Path $shimDir 'mbx-target'
+        $targetExisted = Test-Path -LiteralPath $targetFile
+        $originalTargetBytes = if ($targetExisted) { [IO.File]::ReadAllBytes($targetFile) } else { $null }
+        try {
+            $output = & $mbx setup 2>&1 | Out-String
+            $LASTEXITCODE | Should -Be 0 -Because $output
+
+            # Outside a directory whose mise config enables mbx, mise's shim
+            # fails. Any executable that is not mbx stands in for it here.
+            $miseShims = Join-Path $script:TestRoot 'mise\shims'
+            New-Item -ItemType Directory -Path $miseShims | Out-Null
+            Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\whoami.exe') -Destination (Join-Path $miseShims 'mbx.exe')
+
+            $env:PATH = "$shimDir;$miseShims;$originalPath"
+            $env:MBX_DISABLE = '1'
+            $version = & cargo.exe --version 2>&1 | Out-String
+            $LASTEXITCODE | Should -Be 0 -Because $version
+            $version | Should -Match '^cargo '
+        } finally {
+            $env:PATH = $originalPath
+            if ($targetExisted) {
+                [IO.File]::WriteAllBytes($targetFile, $originalTargetBytes)
+            } else {
+                Remove-Item -LiteralPath $targetFile -ErrorAction Ignore
+            }
+            if ($null -eq $originalDisable) {
+                Remove-Item Env:MBX_DISABLE -ErrorAction Ignore
+            } else {
+                $env:MBX_DISABLE = $originalDisable
+            }
+        }
+    }
 }

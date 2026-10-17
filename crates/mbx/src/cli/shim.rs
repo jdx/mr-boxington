@@ -522,10 +522,16 @@ fn is_mise_cargo_proxy_path(path: &Path) -> bool {
         return true;
     }
     let name = if cfg!(windows) { "cargo.exe" } else { "cargo" };
-    let Some(shims) = path.parent().filter(|parent| {
-        parent.file_name() == Some(OsStr::new("shims"))
-            && path.file_name() == Some(OsStr::new(name))
-    }) else {
+    path.file_name() == Some(OsStr::new(name)) && is_mise_shim_path(path)
+}
+
+/// Whether `path` is in mise's shims directory. A mise shim runs its tool only
+/// where mise config enables it and fails everywhere else.
+pub(crate) fn is_mise_shim_path(path: &Path) -> bool {
+    let Some(shims) = path
+        .parent()
+        .filter(|parent| parent.file_name() == Some(OsStr::new("shims")))
+    else {
         return false;
     };
     let Some(data_dir) = shims.parent() else {

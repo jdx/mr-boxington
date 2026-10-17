@@ -463,6 +463,33 @@ fn setup_status_detects_and_setup_refreshes_a_replaced_wrapper() {
     assert!(cargo_shim_is_current(&executable, &shim).unwrap());
 }
 
+#[cfg(windows)]
+#[test]
+fn cargo_shim_skips_the_mise_mbx_shim_on_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let recorded = directory.path().join("recorded/mbx.exe");
+    std::fs::create_dir_all(recorded.parent().unwrap()).unwrap();
+    std::fs::write(&recorded, b"mbx binary").unwrap();
+    let install = directory.path().join("data/bin");
+    setup_at(&recorded, &install).unwrap();
+    // mise's shim fails outside directories whose mise config enables mbx.
+    let mise_shims = directory.path().join("mise/shims");
+    std::fs::create_dir_all(&mise_shims).unwrap();
+    std::fs::write(mise_shims.join("mbx.exe"), b"mise shim").unwrap();
+
+    let path = std::env::join_paths([&install, &mise_shims]).unwrap();
+    assert_eq!(cargo_shim_target_on(&install, Some(&path)), Some(recorded));
+
+    let active = directory.path().join("active");
+    std::fs::create_dir_all(&active).unwrap();
+    std::fs::write(active.join("mbx.exe"), b"new mbx binary").unwrap();
+    let path = std::env::join_paths([&install, &mise_shims, &active]).unwrap();
+    assert_eq!(
+        cargo_shim_target_on(&install, Some(&path)),
+        Some(active.join("mbx.exe"))
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn setup_status_reports_a_shim_whose_target_was_removed_as_outdated() {
