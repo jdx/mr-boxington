@@ -362,6 +362,34 @@ fn retire_view(directory: &Path) -> std::io::Result<PathBuf> {
     Ok(aside)
 }
 
+/// Remove the `target` link in a checkout when it points at that checkout's
+/// own managed view and the view is gone.
+///
+/// Collection removes a view but cannot remove the link inside a live
+/// checkout, so the link is left dangling until the next build places the view
+/// again. Cargo cannot create a directory through it, which fails a command
+/// like `cargo clean -p` that has nothing to build. A link to anywhere else, or
+/// to a view that still exists, is left alone. Returns whether a link was
+/// removed.
+pub fn remove_dangling_link(root: &Path, workspace_root: &Path) -> Result<bool> {
+    let directory = view_dir(root, workspace_root);
+    let link = workspace_root.join("target");
+    if directory.exists()
+        || !std::fs::read_link(&link).is_ok_and(|destination| destination == directory)
+    {
+        return Ok(false);
+    }
+    // A running command that holds the view's lease may be placing it again.
+    let Some(_reservation) = try_reserve_view(&directory) else {
+        return Ok(false);
+    };
+    if directory.exists() {
+        return Ok(false);
+    }
+    remove_link(&link)?;
+    Ok(true)
+}
+
 /// Remove the managed target view owned by exactly one workspace.
 ///
 /// A view a running command holds the lease on is left as it is, record and
@@ -373,12 +401,7 @@ pub fn remove_workspace(root: &Path, workspace_root: &Path) -> Result<RemoveOutc
         // link inside a live checkout. Let an explicit clean finish that job
         // once the destination is gone, without deleting an unrecorded view
         // that may still contain outputs.
-        let directory = view_dir(root, workspace_root);
-        let link = workspace_root.join("target");
-        if !directory.exists()
-            && std::fs::read_link(&link).is_ok_and(|destination| destination == directory)
-        {
-            remove_link(&link)?;
+        if remove_dangling_link(root, workspace_root)? {
             return Ok(RemoveOutcome::Removed(0));
         }
         return Ok(RemoveOutcome::Missing);

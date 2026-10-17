@@ -83,6 +83,9 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
     if enclosing_session(std::env::var_os(crate::session::SOCKET_ENV).as_deref())
         || cargo_proxy_passthrough(&arguments)
     {
+        if super::launch::cargo_subcommand(&arguments) == Some("clean") {
+            drop_dangling_managed_link(&real_cargo, &arguments);
+        }
         return run_real_cargo(&real_cargo, &arguments);
     }
     let Ok(string_arguments) = super::strings(&arguments) else {
@@ -113,6 +116,36 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
     unsafe { std::env::set_var("CARGO", &real_cargo) };
     let (config, settings) = Config::load_for_cli()?;
     super::cargo::run_with_roots(&config, &settings, &string_arguments, roots)
+}
+
+/// Collection removes a managed target but leaves the checkout's `target` link
+/// dangling until the next build places it again. Cargo cannot create a
+/// directory through that link, so `cargo clean -p` would fail on a checkout
+/// that has nothing left to clean. Dropping the link first lets Cargo report
+/// the clean it would have done. Best effort: any failure leaves Cargo to run
+/// against the checkout as it is.
+fn drop_dangling_managed_link(real_cargo: &OsStr, arguments: &[OsString]) {
+    let Ok(string_arguments) = super::strings(arguments) else {
+        return;
+    };
+    let target_dir_env = std::env::var_os(CARGO_TARGET_DIR_ENV);
+    let Some(roots) = cargo_roots(real_cargo, &string_arguments, target_dir_env.as_deref()) else {
+        return;
+    };
+    if roots.target_dir != roots.workspace_root.join("target")
+        || !std::fs::symlink_metadata(&roots.target_dir)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return;
+    }
+    let Ok((config, _)) = Config::load_for_cli() else {
+        return;
+    };
+    if let Err(error) =
+        crate::target::remove_dangling_link(&config.target.root, &roots.workspace_root)
+    {
+        log::warn!("could not remove the dangling managed target link: {error:#}");
+    }
 }
 
 fn resolve_active_cargo_shim(
