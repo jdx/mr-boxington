@@ -2099,6 +2099,10 @@ fn configured_rustc_wrapper_is_recognized() {
         os("mbx"),
         &[os("rustc"), os("-V")]
     ));
+    assert!(!is_rustc_wrapper_invocation(
+        os("mbx"),
+        &[os("rustc"), os("--crate-type=cdylib")]
+    ));
     assert!(!is_rustc_wrapper_invocation(os("mbx"), &[os("rustc")]));
     assert!(!is_rustc_wrapper_invocation(
         os("mbx"),
