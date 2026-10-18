@@ -802,9 +802,8 @@ fn a_rendered_caller_depfile_reads_back_and_quotes_like_the_driver() {
     assert_eq!(plain, "out/a\\ b.o: \\\n /src/a.c\n");
 }
 
-#[cfg(unix)]
 #[test]
-fn unchanged_manifests_reuse_enumeration_but_still_charge_the_budget() {
+fn every_manifest_request_enumerates_and_charges_the_budget() {
     use std::cell::Cell;
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("nested")).unwrap();
@@ -820,28 +819,27 @@ fn unchanged_manifests_reuse_enumeration_but_still_charge_the_budget() {
         reads.set(reads.get() + 1);
         std::fs::read_dir(path)
     };
-    let first = include_manifest_with(root.path(), &mut 0, &enumerate).unwrap();
+    let mut budget = 0;
+    let first = include_manifest_with(root.path(), &mut budget, &enumerate).unwrap();
     assert_eq!(reads.get(), 2);
-    // Unsupported timestamp precision deliberately preserves the full walk.
-    if manifest_memo::find(root.path()).is_none() {
-        return;
-    }
+    assert_eq!(budget, 1000);
+    // Unchanged directory metadata must not suppress the second walk: a
+    // header can change within one timestamp tick.
     reads.set(0);
     let mut budget = 0;
     let second = include_manifest_with(root.path(), &mut budget, &enumerate).unwrap();
     assert_eq!(first, second);
-    assert_eq!(reads.get(), 0);
+    assert_eq!(reads.get(), 2);
     assert_eq!(budget, 1000);
     assert!(matches!(
         include_manifest_with(root.path(), &mut (MAX_MANIFEST_ENTRIES - 999), &enumerate),
         Err(CcBypassReason::TooManyInputs)
     ));
-    assert_eq!(reads.get(), 0);
 }
 
 #[cfg(unix)]
 #[test]
-fn memo_detects_nested_header_creation_removal_and_precompiled_headers() {
+fn manifest_detects_nested_header_creation_removal_and_precompiled_headers() {
     let root = tempfile::tempdir().unwrap();
     let nested = root.path().join("nested");
     std::fs::create_dir(&nested).unwrap();
@@ -862,7 +860,7 @@ fn memo_detects_nested_header_creation_removal_and_precompiled_headers() {
 
 #[cfg(unix)]
 #[test]
-fn memo_does_not_mask_directory_replacement_or_missing_roots() {
+fn manifest_does_not_mask_directory_replacement_or_missing_roots() {
     let root = tempfile::tempdir().unwrap();
     let include = root.path().join("include");
     let empty = include_manifest(&include, &mut 0).unwrap();
@@ -876,24 +874,16 @@ fn memo_does_not_mask_directory_replacement_or_missing_roots() {
     assert_ne!(first, include_manifest(&include, &mut 0).unwrap());
 }
 
-#[cfg(unix)]
 #[test]
-fn mutation_during_enumeration_does_not_seed_a_stale_memo() {
-    use std::cell::Cell;
+fn mutation_between_manifest_requests_is_observed() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("a.h"), b"a").unwrap();
-    let mutated = Cell::new(false);
-    let enumerate = |path: &Path| {
-        let entries = std::fs::read_dir(path)?;
-        if !mutated.replace(true) {
-            std::fs::write(path.join("b.h"), b"b")?;
-        }
-        Ok(entries)
-    };
-    include_manifest_with(root.path(), &mut 0, &enumerate).unwrap();
-    assert!(manifest_memo::find(root.path()).is_none());
-    let stable = include_manifest(root.path(), &mut 0).unwrap();
-    assert_eq!(stable, include_manifest(root.path(), &mut 0).unwrap());
+    let before = include_manifest(root.path(), &mut 0).unwrap();
+    std::fs::write(root.path().join("b.h"), b"b").unwrap();
+    let after = include_manifest(root.path(), &mut 0).unwrap();
+    assert_ne!(before, after);
+    std::fs::remove_file(root.path().join("b.h")).unwrap();
+    assert_eq!(before, include_manifest(root.path(), &mut 0).unwrap());
 }
 
 #[cfg(unix)]

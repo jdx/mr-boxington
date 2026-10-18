@@ -700,6 +700,12 @@ fn is_includable(name: &str) -> bool {
 /// so this exists purely to notice a file appearing where it could shadow one
 /// of them. A directory that does not exist has an empty manifest, which is
 /// what makes "the directory was created" a key change rather than an error.
+///
+/// Every call walks the directory afresh. Directory timestamps advance in
+/// coarse ticks on some filesystems, so unchanged metadata cannot prove that no
+/// header appeared or vanished; a cached answer would make the snapshots taken
+/// before and after a compilation agree even when the compiler saw a different
+/// header search result.
 fn include_manifest(directory: &Path, budget: &mut usize) -> Result<CacheDigest, CcBypassReason> {
     include_manifest_with(directory, budget, &|path| std::fs::read_dir(path))
 }
@@ -709,25 +715,9 @@ fn include_manifest_with(
     budget: &mut usize,
     read_dir: &impl Fn(&Path) -> std::io::Result<std::fs::ReadDir>,
 ) -> Result<CacheDigest, CcBypassReason> {
-    #[cfg(unix)]
-    if let Some(memo) = manifest_memo::find(directory) {
-        *budget = budget.saturating_add(memo.entries);
-        if *budget > MAX_MANIFEST_ENTRIES {
-            return Err(CcBypassReason::TooManyInputs);
-        }
-        return Ok(memo.digest);
-    }
-    #[cfg(unix)]
-    let mut directories = Vec::new();
-    #[cfg(unix)]
-    let initial_budget = *budget;
     let mut names = Vec::new();
     let mut pending = vec![(directory.to_path_buf(), String::new())];
     while let Some((current, prefix)) = pending.pop() {
-        // Capture before enumeration and validate again after the complete
-        // walk. A directory changed while being read cannot seed the memo.
-        #[cfg(unix)]
-        directories.push((current.clone(), manifest_memo::Identity::read(&current)));
         let entries = match read_dir(&current) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -774,103 +764,7 @@ fn include_manifest_with(
     }
     names.sort();
     let digest = CacheDigest::blake3(names.join("\n").as_bytes());
-    #[cfg(unix)]
-    manifest_memo::record(directory, &digest, *budget - initial_budget, directories);
     Ok(digest)
-}
-
-// A wrapper checks the same manifests during prediction, discovery, and
-// publication. Reuse their exact name digest while every directory is unchanged.
-// This is process-local: no persisted timestamps can outlive a filesystem mount.
-#[cfg(unix)]
-mod manifest_memo {
-    use super::*;
-    use std::os::unix::fs::MetadataExt;
-    use std::sync::{Mutex, OnceLock};
-
-    const MAX_ROOTS: usize = 32;
-    const MAX_DIRECTORIES: usize = 4096;
-    static MEMOS: OnceLock<Mutex<BTreeMap<PathBuf, Memo>>> = OnceLock::new();
-
-    #[derive(Clone, PartialEq, Eq)]
-    pub(super) struct Identity {
-        device: u64,
-        inode: u64,
-        modified: (i64, i64),
-        changed: (i64, i64),
-        mode: u32,
-    }
-    impl Identity {
-        pub(super) fn read(path: &Path) -> Option<Self> {
-            let metadata = std::fs::metadata(path).ok()?;
-            // Whole-second timestamps cannot distinguish rapid edits. Preserve
-            // enumeration on filesystems that expose only that precision.
-            if !metadata.is_dir() || metadata.mtime_nsec() == 0 || metadata.ctime_nsec() == 0 {
-                return None;
-            }
-            // Reuse the digest ledger's filesystem qualification. In particular,
-            // Linux NFS identities omit ctime and must keep enumerating names.
-            let changed = FileIdentity::for_digest_cache(path, &metadata)
-                .ok()??
-                .changed?;
-            Some(Self {
-                device: metadata.dev(),
-                inode: metadata.ino(),
-                modified: (metadata.mtime(), metadata.mtime_nsec()),
-                changed,
-                mode: metadata.mode(),
-            })
-        }
-    }
-    #[derive(Clone)]
-    pub(super) struct Memo {
-        pub digest: CacheDigest,
-        pub entries: usize,
-        directories: Vec<(PathBuf, Identity)>,
-    }
-    impl Memo {
-        fn valid(&self) -> bool {
-            self.directories
-                .iter()
-                .all(|(path, identity)| Identity::read(path).as_ref() == Some(identity))
-        }
-    }
-    pub(super) fn find(directory: &Path) -> Option<Memo> {
-        let memo = MEMOS.get()?.lock().ok()?.get(directory)?.clone();
-        memo.valid().then_some(memo)
-    }
-    pub(super) fn record(
-        directory: &Path,
-        digest: &CacheDigest,
-        entries: usize,
-        directories: Vec<(PathBuf, Option<Identity>)>,
-    ) {
-        if directories.is_empty() || directories.len() > MAX_DIRECTORIES {
-            return;
-        }
-        let Some(directories) = directories
-            .into_iter()
-            .map(|(path, identity)| Some((path, identity?)))
-            .collect::<Option<Vec<_>>>()
-        else {
-            return;
-        };
-        let memo = Memo {
-            digest: digest.clone(),
-            entries,
-            directories,
-        };
-        if !memo.valid() {
-            return;
-        }
-        let Ok(mut memos) = MEMOS.get_or_init(Default::default).lock() else {
-            return;
-        };
-        if memos.len() >= MAX_ROOTS {
-            memos.clear();
-        }
-        memos.insert(directory.to_path_buf(), memo);
-    }
 }
 
 /// Whether a preprocessor input can make the assembler read another file.
