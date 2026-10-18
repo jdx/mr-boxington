@@ -391,6 +391,12 @@ pub(super) fn rust_analyzer_override_is_installed(path: &Path, shim: &Path) -> R
 /// beside `Cargo.toml` parses and validates but never runs. The override goes
 /// to the user-level file whichever mise scope activation uses.
 fn rust_analyzer_config_path() -> Result<PathBuf> {
+    // Windows locates the configuration directory without consulting the
+    // environment, so tests cannot isolate it the way XDG_CONFIG_HOME does.
+    #[cfg(debug_assertions)]
+    if let Some(path) = std::env::var_os("MBX_TEST_RUST_ANALYZER_CONFIG") {
+        return Ok(path.into());
+    }
     dirs::config_dir()
         .map(|directory| {
             directory
