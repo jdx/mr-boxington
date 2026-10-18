@@ -16,7 +16,7 @@ run = [
 ]
 run_windows = [
   "cargo build --package mbx --target-dir target/mbx-bootstrap-build",
-  "pwsh -NoProfile -File scripts/install-bootstrap.ps1",
+  "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/install-bootstrap.ps1",
 ]
 
 [tasks.build]
