@@ -1757,6 +1757,44 @@ fn models_parallel_frontend_options_in_the_action_key() {
 }
 
 #[test]
+fn models_working_directory_remapping_in_the_action_key() {
+    let invocation = |remap: &[&str]| {
+        let mut arguments = vec![
+            "--crate-name=widget",
+            "--crate-type=lib",
+            "--emit=dep-info,metadata,link",
+        ];
+        arguments.extend_from_slice(remap);
+        arguments.push("src/lib.rs");
+        RustcInvocation::parse(&args(&arguments)).unwrap()
+    };
+    let key = |invocation: RustcInvocation| {
+        invocation
+            .action(context(&[("src/lib.rs", "source")]))
+            .unwrap()
+            .digest
+    };
+    let remapped = invocation(&["-Zremap-cwd-prefix=/src"]);
+    assert_eq!(remapped, invocation(&["-Z", "remap-cwd-prefix=/src"]));
+    assert!(remapped.remaps_working_directory());
+    assert!(!invocation(&[]).remaps_working_directory());
+    assert_ne!(
+        key(remapped),
+        key(invocation(&["-Zremap-cwd-prefix=/build"]))
+    );
+    assert_ne!(
+        key(invocation(&["-Zremap-cwd-prefix=/src"])),
+        key(invocation(&[]))
+    );
+    for spelling in ["-Zremap-cwd-prefix", "-Zremap-cwd-prefix="] {
+        assert_eq!(
+            RustcInvocation::parse(&args(&[spelling, "src/lib.rs"])),
+            Err(BypassReason::MissingValue("-Zremap-cwd-prefix".into()))
+        );
+    }
+}
+
+#[test]
 fn models_embedded_metadata_selection_in_the_action_key() {
     let invocation = |selection: &[&str]| {
         let mut arguments = vec![

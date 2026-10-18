@@ -591,6 +591,20 @@ impl RustcInvocation {
         &self.crate_name
     }
 
+    /// Whether rustc records a virtual directory in place of the working
+    /// directory (`-Zremap-cwd-prefix`).
+    ///
+    /// rustc checks incremental state against its options, the working
+    /// directory included, and ignores state recorded anywhere else. Under this
+    /// flag, with the paths under the working directory named relative to it,
+    /// every checkout presents the same options, so one checkout's state is as
+    /// good as another's.
+    pub fn remaps_working_directory(&self) -> bool {
+        self.arguments.iter().any(|argument| {
+            matches!(argument, Argument::Plain(flag) if flag.starts_with("-Zremap-cwd-prefix="))
+        })
+    }
+
     /// Digest of the inputs this compilation owns: its sources and whatever
     /// they read, but not the artifacts it merely links against.
     ///
@@ -1580,7 +1594,19 @@ impl<'a> Parser<'a> {
                 "threads" | "threads=" => {
                     return Err(BypassReason::MissingValue("-Zthreads".into()));
                 }
+                "remap-cwd-prefix" | "remap-cwd-prefix=" => {
+                    return Err(BypassReason::MissingValue("-Zremap-cwd-prefix".into()));
+                }
                 _ => {}
+            }
+            // Replaces the working directory in every path rustc records, and
+            // in the options its incremental state is checked against. The
+            // value is the virtual directory written in the working
+            // directory's place, kept verbatim like `--remap-path-prefix`'s
+            // destination.
+            if option.starts_with("remap-cwd-prefix=") {
+                self.parsed.push(Argument::Plain(format!("-Z{option}")));
+                return Ok(());
             }
             if option == "share-generics" {
                 return Err(BypassReason::MissingValue("-Zshare-generics".into()));

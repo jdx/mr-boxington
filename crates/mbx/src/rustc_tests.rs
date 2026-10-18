@@ -1794,3 +1794,60 @@ fn cached_clippy_compiles_count_samples_under_their_own_mode() {
     assert!(check.counts_compile_samples());
     assert_ne!(clippy.compile_mode_key(), check.compile_mode_key());
 }
+
+#[test]
+fn paths_under_the_working_directory_become_relative() {
+    let working_dir = Path::new("/work/checkout");
+    let rewrite = |arguments: &[&str]| -> Vec<String> {
+        let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
+        paths_relative_to(&arguments, working_dir)
+            .into_iter()
+            .map(|argument| argument.into_string().unwrap())
+            .collect()
+    };
+
+    assert_eq!(
+        rewrite(&[
+            "--crate-name",
+            "render",
+            "crates/render/src/lib.rs",
+            "-L",
+            "dependency=/work/checkout/target/debug/deps",
+            "-Lnative=/work/checkout/target/debug/build/blake3-0abc/out",
+            "--extern",
+            "bevy=/work/checkout/target/debug/deps/libbevy-0abc.rmeta",
+            "--extern=log=/work/checkout/target/debug/deps/liblog-0abc.rmeta",
+            "--out-dir",
+            "/work/checkout/target/debug/deps",
+            "--remap-path-prefix=/work/checkout/target/debug/build/render-0abc/out=${target}/out",
+            "--remap-path-prefix=/work/checkout=${workspace}",
+            "-Clink-arg=-Wl,-oso_prefix,/work/checkout/target/",
+        ]),
+        [
+            "--crate-name",
+            "render",
+            "crates/render/src/lib.rs",
+            "-L",
+            "dependency=target/debug/deps",
+            "-Lnative=target/debug/build/blake3-0abc/out",
+            "--extern",
+            "bevy=target/debug/deps/libbevy-0abc.rmeta",
+            "--extern=log=target/debug/deps/liblog-0abc.rmeta",
+            "--out-dir",
+            "target/debug/deps",
+            "--remap-path-prefix=target/debug/build/render-0abc/out=${target}/out",
+            "--remap-path-prefix=.=${workspace}",
+            "-Clink-arg=-Wl,-oso_prefix,target/",
+        ]
+    );
+    // Elsewhere, including a path that merely contains the working directory,
+    // or one that only shares its name's prefix, stays as it was.
+    let unrelated = [
+        "-Lnative=/opt/homebrew/lib",
+        "--extern=std=/mnt/work/checkout/libstd.rlib",
+        "-L",
+        "/work/checkout-two/target",
+        "-Zremap-cwd-prefix=/src",
+    ];
+    assert_eq!(rewrite(&unrelated), unrelated);
+}

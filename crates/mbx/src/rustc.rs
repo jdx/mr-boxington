@@ -5,7 +5,7 @@ use crate::materialize::{
     record_action_hit_with_diagnostic, record_verification, replay_bytes, resolve_executable,
     stage_verified_cached_output, staging_directory, validate_file_mode,
 };
-use crate::{session, util::workspace_root};
+use crate::{incremental, session, util::workspace_root};
 use eyre::{Context, Result, bail};
 use mbx_cache_core::{
     ActionDiagnostic, ActionPrediction, AgentRequest, AgentResponse, CacheDigest, CacheDirectory,
@@ -66,10 +66,16 @@ struct LearnedPlan {
 }
 
 impl LearnedPlan {
-    /// Find somewhere to keep the state, for a unit that earned it.
-    fn resolved(mut self, invocation: &CacheDigest, crate_name: &str) -> Self {
+    /// Find somewhere to keep the state, for a unit that earned it. State
+    /// that does not depend on the checkout's location may start from another
+    /// checkout's; see [`incremental::seed`].
+    fn resolved(mut self, invocation: &RustcInvocation, unit: &CacheDigest) -> Self {
         if self.hot {
-            self.directory = incremental_directory(invocation, crate_name);
+            self.directory = incremental_directory(
+                unit,
+                invocation.crate_name(),
+                invocation.remaps_working_directory(),
+            );
         }
         self
     }
@@ -520,7 +526,12 @@ pub(crate) fn compile(
     let compilation_started = SystemTime::now();
     let compiler_timer = Instant::now();
     let mut command = compiler_command(rustc, wrapper_argument);
-    command.args(&arguments).current_dir(&working_dir);
+    if incremental_flag.is_some() && invocation.remaps_working_directory() {
+        command.args(paths_relative_to(&arguments, &working_dir));
+    } else {
+        command.args(&arguments);
+    }
+    command.current_dir(&working_dir);
     let private_outputs = private_inputs || learned.engaged();
     if let Some(flag) = incremental_flag {
         // Keep private incremental state out of cacheability parsing, while
@@ -1255,6 +1266,58 @@ fn compiler_command(rustc: &OsStr, wrapper_argument: Option<&OsStr>) -> Command 
     command
 }
 
+/// The arguments with every path under the working directory named relative
+/// to it.
+///
+/// rustc checks incremental state against its options and records where it
+/// found upstream crates and wrote its outputs; state recorded with other
+/// paths is ignored or mostly recompiled. Each checkout has its own target
+/// directory, so the absolute paths in a compilation -- search paths, extern
+/// crates, the output directory, mbx's own `OUT_DIR` remapping -- differ
+/// between checkouts even where nothing else does. Relative to the working
+/// directory, which `-Zremap-cwd-prefix` keeps out of the state, they are the
+/// same in each, and they still name this checkout's files.
+///
+/// A path is recognised where an argument or a value starts: at the beginning,
+/// or after `=` or `,`. The working directory itself becomes `.`. Only the command that runs changes: the key resolves
+/// relative paths against the working directory too.
+fn paths_relative_to(arguments: &[OsString], working_dir: &Path) -> Vec<OsString> {
+    let Some(root) = working_dir.to_str() else {
+        return arguments.to_vec();
+    };
+    let prefix = format!("{root}{}", std::path::MAIN_SEPARATOR);
+    arguments
+        .iter()
+        .map(|argument| {
+            let Some(text) = argument.to_str() else {
+                return argument.clone();
+            };
+            let mut rewritten = String::with_capacity(text.len());
+            let mut rest = text;
+            let mut at_start = true;
+            while !rest.is_empty() {
+                if at_start {
+                    if let Some(after) = rest.strip_prefix(&prefix) {
+                        rest = after;
+                    } else if let Some(after) = rest.strip_prefix(root)
+                        && (after.is_empty() || after.starts_with(['=', ',']))
+                    {
+                        rewritten.push('.');
+                        rest = after;
+                    }
+                }
+                let Some(next) = rest.chars().next() else {
+                    break;
+                };
+                rewritten.push(next);
+                rest = &rest[next.len_utf8()..];
+                at_start = matches!(next, '=' | ',');
+            }
+            OsString::from(rewritten)
+        })
+        .collect()
+}
+
 /// The executable Cargo will run as a build script, when this compilation
 /// produced one; see [`session::is_cargo_build_script`].
 fn cargo_build_script_executable<'a>(
@@ -1323,11 +1386,27 @@ fn learned_plan(
 /// A session gives it a persistent per-checkout root outside Cargo's target
 /// directory. A standalone shim falls back to its target directory when one is
 /// available, and compiles normally when it has nowhere to put state.
-pub(crate) fn incremental_directory(invocation: &CacheDigest, crate_name: &str) -> Option<PathBuf> {
+///
+/// A `seedable` unit starting without state here takes another checkout's
+/// first, so the checkout's first edit to it compiles incrementally too.
+pub(crate) fn incremental_directory(
+    invocation: &CacheDigest,
+    crate_name: &str,
+    seedable: bool,
+) -> Option<PathBuf> {
     let root = incremental_root()?;
     let key = invocation.key();
     let shard = key.get(..16)?;
     let directory = root.join(shard);
+    if seedable
+        && !directory.exists()
+        && let Err(error) = incremental::seed(&root, shard)
+    {
+        // Compiles from scratch, as it would have without a donor.
+        session::report_shim_warning(&format!(
+            "incremental state for {crate_name} was not seeded: {error:#}"
+        ));
+    }
     match prepare_incremental_directory(&directory, session::learned_incremental_max_size()) {
         Ok(discarded) => {
             if let Some(bytes) = discarded {
@@ -1399,7 +1478,7 @@ pub(crate) fn bypassed_library_incremental_flag(arguments: &[OsString]) -> Optio
         identity.extend_from_slice(argument.as_encoded_bytes());
         identity.push(0);
     }
-    let directory = incremental_directory(&CacheDigest::blake3(&identity), &crate_name)?;
+    let directory = incremental_directory(&CacheDigest::blake3(&identity), &crate_name, false)?;
     Some(private_incremental_flag(&directory))
 }
 
@@ -1484,7 +1563,7 @@ fn plan_learned_reuse(
             record: Some((state_path, sources)),
             ..plan
         }
-        .resolved(&unit, compilation.invocation.crate_name()))
+        .resolved(compilation.invocation, &unit))
     })();
     match planned {
         Ok(plan) => plan,
@@ -1614,7 +1693,7 @@ fn eager_incremental_plan(compilation: &Compilation<'_>) -> LearnedPlan {
                 hot: true,
                 ..LearnedPlan::default()
             }
-            .resolved(&unit, compilation.invocation.crate_name()),
+            .resolved(compilation.invocation, &unit),
         )
     })();
     planned.unwrap_or_else(|error| {
@@ -1680,7 +1759,7 @@ fn reuse_hot_workspace_plan(
             directory: None,
             record: Some((state_path, sources)),
         }
-        .resolved(&unit, compilation.invocation.crate_name()))
+        .resolved(compilation.invocation, &unit))
     })();
     match planned {
         Ok(plan) => plan,

@@ -394,6 +394,111 @@ fn cleanup_lock_dir(locks: &Path) {
     let _ = std::fs::remove_dir(locks);
 }
 
+/// Copy the most recently used other checkout's state for one unit into
+/// `checkout`, under the same unit name. Returns that checkout's workspace
+/// root, or `None` when no other checkout has state for the unit.
+///
+/// Only worth doing for a compilation whose state does not depend on where
+/// the checkout lives (`-Zremap-cwd-prefix`): rustc ignores state recorded
+/// under another working directory. The unit's name is the digest of its
+/// path-normalized invocation, so it is the same in every checkout of the
+/// project, and rustc validates whatever it inherits against the sources it
+/// compiles, as it does after any edit.
+///
+/// The donor holds a lease while it is read, so collection cannot remove it
+/// halfway. A session the donor's compiler is still writing is left out. The
+/// copy is made beside its final name and renamed into place, so an
+/// interrupted copy leaves no partial state; files are cloned where the
+/// filesystem supports it.
+pub(crate) fn seed(checkout: &Path, unit: &str) -> Result<Option<PathBuf>> {
+    let (Some(root), Some(own)) = (checkout.parent(), checkout.file_name()) else {
+        return Ok(None);
+    };
+    let mut donors = Vec::new();
+    for entry in std::fs::read_dir(root)?.flatten() {
+        let name = entry.file_name();
+        if name == own || name == LOCKS_DIR || !entry.path().join(unit).is_dir() {
+            continue;
+        }
+        if let Some(record) = read_record(&entry.path().join(RECORD_FILE)) {
+            donors.push((record.updated_secs, record.workspace_root, name));
+        }
+    }
+    donors.sort_by_key(|donor| std::cmp::Reverse(donor.0));
+    let destination = checkout.join(unit);
+    for (_, workspace_root, name) in donors {
+        let Some(key) = name.to_str() else {
+            continue;
+        };
+        let _lease = acquire_lease(root, key)?;
+        let source = root.join(key).join(unit);
+        if !holds_finished_session(&source) {
+            continue;
+        }
+        let mut staging = destination.clone().into_os_string();
+        staging.push(format!(".seeding-{}", std::process::id()));
+        let staging = PathBuf::from(staging);
+        let copied = destination
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| copy_state(&source, &staging))
+            .and_then(|()| std::fs::rename(&staging, &destination));
+        if let Err(error) = copied {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(error).wrap_err_with(|| {
+                format!(
+                    "failed to copy incremental state from {}",
+                    workspace_root.display()
+                )
+            });
+        }
+        return Ok(Some(workspace_root));
+    }
+    Ok(None)
+}
+
+/// rustc names a session it is still writing `s-<time>-<random>-working`,
+/// and renames it once the compilation finishes.
+fn is_unfinished_session(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.starts_with("s-") && name.ends_with("-working"))
+}
+
+/// Whether a unit's directory holds a session rustc finished:
+/// `<crate>-<hash>/s-...`.
+fn holds_finished_session(unit: &Path) -> bool {
+    let Ok(crates) = std::fs::read_dir(unit) else {
+        return false;
+    };
+    crates.flatten().any(|krate| {
+        std::fs::read_dir(krate.path()).is_ok_and(|sessions| {
+            sessions.flatten().any(|session| {
+                let name = session.file_name();
+                session.path().is_dir()
+                    && name.to_str().is_some_and(|name| name.starts_with("s-"))
+                    && !is_unfinished_session(&name)
+            })
+        })
+    })
+}
+
+fn copy_state(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::create_dir(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let to = destination.join(entry.file_name());
+        if kind.is_dir() {
+            if !is_unfinished_session(&entry.file_name()) {
+                copy_state(&entry.path(), &to)?;
+            }
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), to)?;
+        }
+    }
+    Ok(())
+}
+
 fn read_record(path: &Path) -> Option<CheckoutRecord> {
     let bytes = std::fs::read(path).ok()?;
     let record = serde_json::from_slice::<CheckoutRecord>(&bytes).ok()?;
@@ -672,5 +777,99 @@ mod tests {
         ));
         assert!(!selected_directory.exists());
         assert!(kept_state.directory.exists());
+    }
+
+    /// A checkout last used at `updated_secs`, holding the given rustc session
+    /// directories for one unit.
+    fn checkout_with_sessions(
+        cache: &Path,
+        key: &str,
+        updated_secs: u64,
+        unit: &str,
+        sessions: &[&str],
+    ) -> PathBuf {
+        let directory = cache.join(key);
+        for session in sessions {
+            let session = directory.join(unit).join("widget-0abc").join(session);
+            std::fs::create_dir_all(&session).unwrap();
+            std::fs::write(session.join("dep-graph.bin"), key).unwrap();
+        }
+        std::fs::create_dir_all(&directory).unwrap();
+        let record = CheckoutRecord {
+            version: RECORD_VERSION,
+            workspace_root: PathBuf::from(format!("/work/{key}")),
+            updated_secs,
+        };
+        std::fs::write(
+            directory.join(RECORD_FILE),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        directory
+    }
+
+    #[test]
+    fn seeding_copies_the_newest_finished_state_of_another_checkout() {
+        let cache = tempfile::tempdir().unwrap();
+        let unit = "blake3/0123456789";
+        let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
+        checkout_with_sessions(cache.path(), "older", 10, unit, &["s-1-a-finished"]);
+        checkout_with_sessions(cache.path(), "newer", 20, unit, &["s-2-b-finished"]);
+        // The most recent, but its compiler is still writing its only session.
+        checkout_with_sessions(cache.path(), "busy", 30, unit, &["s-3-c-working"]);
+        checkout_with_sessions(
+            cache.path(),
+            "other",
+            50,
+            "blake3/9876543210",
+            &["s-4-d-done"],
+        );
+
+        let donor = seed(&own, unit).unwrap();
+
+        assert_eq!(donor, Some(PathBuf::from("/work/newer")));
+        let copied = own.join(unit).join("widget-0abc");
+        assert_eq!(
+            std::fs::read_to_string(copied.join("s-2-b-finished/dep-graph.bin")).unwrap(),
+            "newer"
+        );
+        assert_eq!(std::fs::read_dir(&copied).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(own.join("blake3")).unwrap().count(),
+            1,
+            "no staging directory is left behind"
+        );
+    }
+
+    #[test]
+    fn seeding_leaves_unfinished_sessions_and_unknown_units_alone() {
+        let cache = tempfile::tempdir().unwrap();
+        let unit = "blake3/0123456789";
+        let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
+        checkout_with_sessions(
+            cache.path(),
+            "donor",
+            20,
+            unit,
+            &["s-1-a-finished", "s-2-b-working"],
+        );
+
+        assert_eq!(seed(&own, "blake3/9999999999").unwrap(), None);
+        assert!(!own.join("blake3/9999999999").exists());
+
+        seed(&own, unit).unwrap();
+        let copied = own.join(unit).join("widget-0abc");
+        assert!(copied.join("s-1-a-finished").is_dir());
+        assert!(!copied.join("s-2-b-working").exists());
+    }
+
+    #[test]
+    fn a_checkout_never_seeds_from_itself() {
+        let cache = tempfile::tempdir().unwrap();
+        let unit = "blake3/0123456789";
+        let own = checkout_with_sessions(cache.path(), "own", 40, unit, &["s-1-a-finished"]);
+        std::fs::remove_dir_all(own.join(unit)).unwrap();
+
+        assert_eq!(seed(&own, unit).unwrap(), None);
     }
 }

@@ -1421,6 +1421,130 @@ fn eager_incremental_keeps_non_workspace_dependencies_shared() {
     );
 }
 
+/// One checkout's incremental state directory.
+fn incremental_checkout(cache: &Path, workspace: &Path) -> PathBuf {
+    let workspace = workspace.canonicalize().unwrap();
+    incremental_checkouts(cache)
+        .into_iter()
+        .find(|(root, _)| root.canonicalize().is_ok_and(|root| root == workspace))
+        .map(|(_, state)| state)
+        .unwrap_or_else(|| panic!("{} keeps no incremental state", workspace.display()))
+}
+
+/// The checkouts' incremental state directories, keyed by workspace root.
+fn incremental_checkouts(cache: &Path) -> Vec<(PathBuf, PathBuf)> {
+    std::fs::read_dir(cache.join("incremental"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|checkout| {
+            let record: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(checkout.path().join("checkout.json")).ok()?)
+                    .ok()?;
+            let root = PathBuf::from(record["workspace_root"].as_str()?);
+            Some((root, checkout.path()))
+        })
+        .collect()
+}
+
+#[test]
+fn learned_state_seeds_another_checkout_when_rustc_remaps_the_working_directory() {
+    const MARKER: &str = "seeded-from-first";
+    let store = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let unremapped = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let remapped = [
+        ("RUSTC_BOOTSTRAP", "1"),
+        ("RUSTFLAGS", "-Zremap-cwd-prefix=/src"),
+    ];
+    let edit = |project: &Path| {
+        std::fs::write(
+            project.join("base/src/lib.rs"),
+            "#![doc = include_str!(\"../../README.md\")]\npub fn value() -> u32 { 21 }\n",
+        )
+        .unwrap();
+    };
+    for project in [first.path(), second.path(), unremapped.path()] {
+        write_dependent_project(project);
+    }
+
+    build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+        &remapped,
+    );
+    edit(first.path());
+    let edited = build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("first-edit.json"),
+        &remapped,
+    )
+    .0;
+    assert!(compiled_incrementally(&edited) >= 1, "{edited}");
+    // rustc leaves files it does not know about in the state directory alone,
+    // and the seed copies all of it: the marker is how the second checkout's
+    // state can tell where it came from.
+    let first_state = incremental_checkout(store.path(), first.path());
+    let units = find_files(&first_state, |path| {
+        file_name_is(path, |name| name == "query-cache.bin")
+    });
+    assert!(!units.is_empty(), "the edit should leave rustc state");
+    for unit in &units {
+        // <unit>/<crate>-<hash>/<session>/query-cache.bin
+        let unit = unit.ancestors().nth(3).unwrap();
+        std::fs::write(unit.join(MARKER), b"").unwrap();
+    }
+
+    build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+        &remapped,
+    );
+    edit(second.path());
+    let seeded = build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("second-edit.json"),
+        &remapped,
+    )
+    .0;
+    assert!(compiled_incrementally(&seeded) >= 1, "{seeded}");
+    let second_state = incremental_checkout(store.path(), second.path());
+    assert!(
+        !find_files(&second_state, |path| file_name_is(path, |name| name
+            == MARKER))
+        .is_empty(),
+        "the second checkout's first edit should start from the first checkout's state"
+    );
+
+    // Without the flag rustc would ignore another checkout's state, so none
+    // is copied.
+    build_with(
+        unremapped.path(),
+        store.path(),
+        &reports.path().join("unremapped.json"),
+        &[],
+    );
+    edit(unremapped.path());
+    build_with(
+        unremapped.path(),
+        store.path(),
+        &reports.path().join("unremapped-edit.json"),
+        &[],
+    );
+    let unremapped_state = incremental_checkout(store.path(), unremapped.path());
+    assert!(
+        find_files(&unremapped_state, |path| file_name_is(path, |name| name
+            == MARKER))
+        .is_empty()
+    );
+}
+
 #[test]
 fn learned_private_dependents_reuse_state_after_the_target_is_removed() {
     let store = tempfile::tempdir().unwrap();
