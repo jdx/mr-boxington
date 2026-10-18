@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.20.2...mbx-cache-cc-v0.20.3) - 2026-10-18
+
+### Fixed
+
+- *(cc)* identify MSVC from preprocessor macros, not banner text ([#735](https://github.com/jdx/mr-boxington/pull/735))
+
+### Other
+
+- fix clippy findings that only appear on Windows ([#733](https://github.com/jdx/mr-boxington/pull/733))
+
 ## [0.20.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.19.4...mbx-cache-cc-v0.20.0) - 2026-10-08
 
 ### Added

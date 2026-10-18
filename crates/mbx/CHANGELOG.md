@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.25.0](https://github.com/jdx/mr-boxington/compare/v1.24.1...v1.25.0) - 2026-10-18
+
+### Added
+
+- *(cache)* add remote.trust_writes for CI systems mbx does not detect ([#724](https://github.com/jdx/mr-boxington/pull/724))
+
+### Fixed
+
+- *(setup)* skip mise's mbx shim when the Windows cargo.exe shim forwards ([#736](https://github.com/jdx/mr-boxington/pull/736))
+- *(cc)* identify MSVC from preprocessor macros, not banner text ([#735](https://github.com/jdx/mr-boxington/pull/735))
+- *(cli)* let cargo clean -p run when a managed target link dangles ([#732](https://github.com/jdx/mr-boxington/pull/732))
+- *(cli)* report build.rustc-wrapper = "mbx" instead of failing with -Zscript ([#727](https://github.com/jdx/mr-boxington/pull/727))
+- *(scheduler)* prevent starvation across shared container builds ([#721](https://github.com/jdx/mr-boxington/pull/721))
+
+### Other
+
+- fix clippy findings that only appear on Windows ([#733](https://github.com/jdx/mr-boxington/pull/733))
+- *(seed)* run the access-time seeding test on Windows volumes that track access times ([#730](https://github.com/jdx/mr-boxington/pull/730))
+
 ## [1.24.1](https://github.com/jdx/mr-boxington/compare/v1.24.0...v1.24.1) - 2026-10-15
 
 ### Fixed
