@@ -12,15 +12,14 @@ run = [
 ]
 run_windows = [
   "cargo build --package mbx --target-dir target/mbx-bootstrap-build",
-  "New-Item -ItemType Directory -Force target/mbx-bootstrap | Out-Null",
-  "Copy-Item -Force target/mbx-bootstrap-build/debug/mbx.exe target/mbx-bootstrap/mbx.exe",
+  "pwsh -NoProfile -Command \"New-Item -ItemType Directory -Force target/mbx-bootstrap | Out-Null; Copy-Item -Force target/mbx-bootstrap-build/debug/mbx.exe target/mbx-bootstrap/mbx.exe\"",
 ]
 
 [tasks.build]
 alias = "b"
 depends = ["bootstrap"]
 run = "./target/mbx-bootstrap/mbx build --workspace --all-targets"
-run_windows = "./target/mbx-bootstrap/mbx.exe build --workspace --all-targets"
+run_windows = 'target\mbx-bootstrap\mbx.exe build --workspace --all-targets'
 
 [tasks.test]
 alias = "t"
@@ -36,7 +35,7 @@ description = "Run Rust tests"
 # got that far.
 depends = ["build"]
 run = "./target/mbx-bootstrap/mbx test --workspace"
-run_windows = "./target/mbx-bootstrap/mbx.exe test --workspace"
+run_windows = 'target\mbx-bootstrap\mbx.exe test --workspace'
 
 [tasks."test:release-diagnostics"]
 description = "Check publication diagnostics in the release-built wrapper"
@@ -46,13 +45,13 @@ run = "cargo test --release -p mbx --test build cc_publication_failures_are_visi
 description = "Check Cargo's interactive display and terminal handoff"
 depends = ["bootstrap"]
 run = "MBX_BIN=$PWD/target/mbx-bootstrap/mbx python3 scripts/test-cargo-pretty.py"
-run_windows = "Write-Output 'PTY integration coverage runs on Unix; renderer tests run on every platform'"
+run_windows = "pwsh -NoProfile -Command \"Write-Output 'PTY integration coverage runs on Unix; renderer tests run on every platform'\""
 
 [tasks."test:e2e"]
 description = "Run platform behavioral tests"
 depends = ["build"]
 run = "MBX_BIN=$PWD/target/mbx-bootstrap/mbx bats test"
-run_windows = "pwsh e2e-win/run.ps1"
+run_windows = "pwsh -NoProfile e2e-win/run.ps1"
 
 [tasks."test:bats"]
 description = "Run behavioral tests"
@@ -62,7 +61,7 @@ run = "MBX_BIN=$PWD/target/mbx-bootstrap/mbx bats test"
 [tasks.format]
 depends = ["bootstrap"]
 run = "./target/mbx-bootstrap/mbx fmt --all"
-run_windows = "./target/mbx-bootstrap/mbx.exe fmt --all"
+run_windows = 'target\mbx-bootstrap\mbx.exe fmt --all'
 
 [tasks.lint]
 depends = ["bootstrap"]
@@ -72,9 +71,9 @@ run = [
   "./target/mbx-bootstrap/mbx clippy --release --workspace --all-features --all-targets -- -D warnings",
 ]
 run_windows = [
-  "./target/mbx-bootstrap/mbx.exe fmt --all --check",
-  "./target/mbx-bootstrap/mbx.exe clippy --workspace --all-features --all-targets -- -D warnings",
-  "./target/mbx-bootstrap/mbx.exe clippy --release --workspace --all-features --all-targets -- -D warnings",
+  'target\mbx-bootstrap\mbx.exe fmt --all --check',
+  'target\mbx-bootstrap\mbx.exe clippy --workspace --all-features --all-targets -- -D warnings',
+  'target\mbx-bootstrap\mbx.exe clippy --release --workspace --all-features --all-targets -- -D warnings',
 ]
 
 [tasks.lint-fix]
@@ -84,8 +83,8 @@ run = [
   "./target/mbx-bootstrap/mbx clippy --workspace --all-features --all-targets --fix --allow-dirty --allow-staged -- -D warnings",
 ]
 run_windows = [
-  "./target/mbx-bootstrap/mbx.exe fmt --all",
-  "./target/mbx-bootstrap/mbx.exe clippy --workspace --all-features --all-targets --fix --allow-dirty --allow-staged -- -D warnings",
+  'target\mbx-bootstrap\mbx.exe fmt --all',
+  'target\mbx-bootstrap\mbx.exe clippy --workspace --all-features --all-targets --fix --allow-dirty --allow-staged -- -D warnings',
 ]
 
 [tasks.ci]
@@ -123,16 +122,16 @@ run = [
   "sed -i.bak -e 's|(/cli/configuration.md)|(/configuration#settings)|' docs/cli/index.md && rm docs/cli/index.md.bak",
 ]
 run_windows = [
-  "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue docs/cli; ./target/mbx-bootstrap/mbx.exe __usage_spec__ | usage generate markdown --file - --multi --replace-pre-with-code-fences --url-prefix /cli --out-dir docs/cli",
-  "[IO.File]::WriteAllText('docs/cli/configuration.md', ([IO.File]::ReadAllText('docs/cli/configuration.md') -replace '(?m)^## ', '### '))",
-  "[IO.File]::WriteAllText('docs/cli/index.md', ([IO.File]::ReadAllText('docs/cli/index.md') -replace [regex]::Escape('(/cli/configuration.md)'), '(/configuration#settings)'))",
+  "pwsh -NoProfile -Command \"Remove-Item -Recurse -Force -ErrorAction SilentlyContinue docs/cli; ./target/mbx-bootstrap/mbx.exe __usage_spec__ | usage generate markdown --file - --multi --replace-pre-with-code-fences --url-prefix /cli --out-dir docs/cli\"",
+  "pwsh -NoProfile -Command \"[IO.File]::WriteAllText('docs/cli/configuration.md', ([IO.File]::ReadAllText('docs/cli/configuration.md') -replace '(?m)^## ', '### '))\"",
+  "pwsh -NoProfile -Command \"[IO.File]::WriteAllText('docs/cli/index.md', ([IO.File]::ReadAllText('docs/cli/index.md') -replace [regex]::Escape('(/cli/configuration.md)'), '(/configuration#settings)'))\"",
 ]
 
 [tasks."check:docs"]
 description = "Check that generated documentation is current"
 depends = ["render:docs"]
 run = "git diff --exit-code -- docs/cli && test -z \"$(git status --porcelain --untracked-files=all -- docs/cli)\""
-run_windows = "git diff --exit-code -- docs/cli; if (git status --porcelain --untracked-files=all -- docs/cli) { exit 1 }"
+run_windows = "pwsh -NoProfile -Command \"git diff --exit-code -- docs/cli; if (git status --porcelain --untracked-files=all -- docs/cli) { exit 1 }\""
 
 # VitePress validates page links at build time but not #fragments, so a
 # renamed heading rots its inbound anchors silently. --offline keeps external
