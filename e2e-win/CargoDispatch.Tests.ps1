@@ -6,6 +6,8 @@ Describe 'Cargo command dispatch' {
         $script:OriginalTargetDir = [Environment]::GetEnvironmentVariable('CARGO_TARGET_DIR', 'Process')
         $script:OriginalShimDir = [Environment]::GetEnvironmentVariable('MBX_TEST_SHIM_DIR', 'Process')
         $script:OriginalRustAnalyzerConfig = [Environment]::GetEnvironmentVariable('MBX_TEST_RUST_ANALYZER_CONFIG', 'Process')
+        $script:OriginalMiseShell = [Environment]::GetEnvironmentVariable('MISE_SHELL', 'Process')
+        $script:OriginalMiseConfigFile = [Environment]::GetEnvironmentVariable('MISE_CONFIG_FILE', 'Process')
         $script:TestRoot = Join-Path $TestDrive ([System.Guid]::NewGuid().ToString())
         New-Item -ItemType Directory -Path $script:TestRoot | Out-Null
         Set-Location $script:TestRoot
@@ -18,6 +20,10 @@ Describe 'Cargo command dispatch' {
         # locations from these variables instead.
         $env:MBX_TEST_SHIM_DIR = Join-Path $script:TestRoot 'mbx\bin'
         $env:MBX_TEST_RUST_ANALYZER_CONFIG = Join-Path $script:TestRoot 'config\rust-analyzer\rust-analyzer.toml'
+        # In a shell with mise activated, `mbx setup --status` would check the
+        # developer's mise config. The Bats suite clears these for the same reason.
+        Remove-Item Env:MISE_SHELL -ErrorAction Ignore
+        Remove-Item Env:MISE_CONFIG_FILE -ErrorAction Ignore
     }
 
     AfterEach {
@@ -27,7 +33,9 @@ Describe 'Cargo command dispatch' {
             @{ Name = 'MBX_GC_AUTO'; Value = $script:OriginalGcAuto },
             @{ Name = 'CARGO_TARGET_DIR'; Value = $script:OriginalTargetDir },
             @{ Name = 'MBX_TEST_SHIM_DIR'; Value = $script:OriginalShimDir },
-            @{ Name = 'MBX_TEST_RUST_ANALYZER_CONFIG'; Value = $script:OriginalRustAnalyzerConfig }
+            @{ Name = 'MBX_TEST_RUST_ANALYZER_CONFIG'; Value = $script:OriginalRustAnalyzerConfig },
+            @{ Name = 'MISE_SHELL'; Value = $script:OriginalMiseShell },
+            @{ Name = 'MISE_CONFIG_FILE'; Value = $script:OriginalMiseConfigFile }
         )) {
             if ($null -eq $item.Value) {
                 Remove-Item "Env:$($item.Name)" -ErrorAction Ignore

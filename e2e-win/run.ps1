@@ -1,10 +1,11 @@
-# Load Pester before Enter-VsDevShell rewrites the environment: on a profile
-# path with non-ASCII characters it can mangle PSModulePath, after which only
-# the Pester 3 that ships with Windows is found and no test runs.
-#Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.0' }
 param(
     [string]$TestName
 )
+
+# Load Pester before Enter-VsDevShell rewrites the environment: on a profile
+# path with non-ASCII characters it can mangle PSModulePath, after which only
+# the Pester 3 that ships with Windows is found and no test runs.
+Import-Module Pester -MinimumVersion 5.0 -ErrorAction Stop
 
 if (-not (Get-Command cl.exe -ErrorAction Ignore)) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
