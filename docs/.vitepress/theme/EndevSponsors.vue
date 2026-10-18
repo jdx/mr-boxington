@@ -35,8 +35,10 @@ onMounted(async () => {
 <style scoped>
 .EndevSponsors { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin: 0 auto; max-width: 1000px; padding: 24px; }
 .EndevSponsorsTitle { color: var(--vp-c-text-2); font-size: 13px; font-weight: 600; text-transform: uppercase; }
-.EndevSponsorsLogo { align-items: center; border: 1px solid var(--vp-c-divider); border-radius: 8px; display: inline-flex; height: 40px; justify-content: center; padding: 8px 12px; }
-.EndevSponsorsLogo:hover { border-color: var(--vp-c-brand-1); }
+.EndevSponsorsLogo { align-items: center; background: #171717; border: 1px solid var(--vp-c-divider); border-radius: 8px; display: inline-flex; height: 40px; justify-content: center; padding: 8px 12px; }
+.EndevSponsorsLogo:hover { background: #242424; border-color: var(--vp-c-brand-1); }
+.dark .EndevSponsorsLogo { background: var(--vp-c-bg-soft); }
+.dark .EndevSponsorsLogo:hover { background: var(--vp-c-bg-mute); }
 .EndevSponsorsLogo img { display: block; height: 22px; max-width: 120px; object-fit: contain; width: auto; }
 .EndevSponsorsCta { color: var(--vp-c-text-2); font-size: 13px; text-decoration: none; }
 .EndevSponsorsCta:hover { color: var(--vp-c-brand-1); }
