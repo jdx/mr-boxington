@@ -193,10 +193,7 @@ async fn check(config: &Config, toolchain: Option<&str>) -> Vec<Check> {
 /// still rejecting `bind`, so no filesystem-only check can answer this.
 #[cfg(unix)]
 fn session_check() -> Check {
-    let directory = match tempfile::Builder::new()
-        .prefix("mbx-session-probe-")
-        .tempdir()
-    {
+    let directory = match crate::session::create_session_dir("mbx-session-probe-") {
         Ok(directory) => directory,
         Err(error) => {
             return Check::warn(

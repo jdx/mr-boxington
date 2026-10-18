@@ -103,6 +103,29 @@ pub(crate) fn listener_unavailable(_error: &eyre::Report) -> bool {
     false
 }
 
+/// Bytes a Unix-domain socket path may use, excluding the terminating NUL.
+#[cfg(unix)]
+pub(crate) fn socket_path_limit() -> usize {
+    // SAFETY: `sockaddr_un` is plain data, for which all-zero is valid.
+    let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_path.len() - 1
+}
+
+#[cfg(unix)]
+fn check_socket_path_length(socket: &Path) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let limit = socket_path_limit();
+    let length = socket.as_os_str().as_bytes().len();
+    if length > limit {
+        eyre::bail!(
+            "cache session socket path {} is {length} bytes, over the {limit}-byte limit for a Unix-domain socket; set XDG_RUNTIME_DIR or TMPDIR to a shorter directory",
+            socket.display()
+        );
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 pub(super) async fn spawn_server(
     session_dir: &Path,
@@ -113,6 +136,7 @@ pub(super) async fn spawn_server(
     use std::os::unix::fs::PermissionsExt as _;
 
     let socket = session_dir.join("cache-agent.sock");
+    check_socket_path_length(&socket)?;
     let listener = match tokio::net::UnixListener::bind(&socket) {
         Ok(listener) => listener,
         Err(source) => {
@@ -425,6 +449,19 @@ impl Drop for FifoCleanup {
 mod tests {
     use super::*;
     use mbx_cache_core::{AgentRequest, AgentResponse};
+
+    #[test]
+    fn a_socket_path_over_the_limit_is_refused_with_the_path_and_limit() {
+        let limit = socket_path_limit();
+        let long = PathBuf::from(format!("/{}/cache-agent.sock", "d".repeat(limit)));
+        let message = check_socket_path_length(&long).unwrap_err().to_string();
+        assert!(message.contains(long.to_str().unwrap()), "{message}");
+        assert!(
+            message.contains(&format!("{limit}-byte limit")),
+            "{message}"
+        );
+        assert!(check_socket_path_length(Path::new("/run/user/1000/x/cache-agent.sock")).is_ok());
+    }
 
     #[test]
     fn permission_and_platform_rejections_mean_the_listener_is_unavailable() {

@@ -44,6 +44,8 @@ pub(crate) use diagnostics::{
 #[cfg(unix)]
 pub(crate) use server::create_fifo;
 pub(crate) use server::listener_unavailable;
+#[cfg(all(test, unix))]
+pub(crate) use server::socket_path_limit;
 use server::spawn_server;
 pub(crate) use shims::CC_CRATE_ENV;
 #[cfg(all(test, windows))]
@@ -64,6 +66,52 @@ use stats::{
     ci_summary, short_summary, should_display_short_stats, should_display_stats,
     stale_manifest_note,
 };
+
+/// Create the private directory that holds a session's socket.
+///
+/// A Unix-domain socket path must fit in `sun_path` (108 bytes on Linux), and
+/// `$TMPDIR` can be arbitrarily long, so the directory goes under
+/// `$XDG_RUNTIME_DIR` when it is set: the XDG Base Directory
+/// specification's per-user, mode 0700 place for sockets. Otherwise it is the
+/// system temporary directory. Every session user calls this one function.
+pub(crate) fn create_session_dir(prefix: &str) -> std::io::Result<tempfile::TempDir> {
+    create_session_dir_in(
+        prefix,
+        std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+        &std::env::temp_dir(),
+    )
+}
+
+/// Create the session directory under the runtime directory, or under
+/// `fallback` when the runtime directory is unusable or refuses the directory.
+/// A runtime directory inherited across `sudo` or `su` belongs to another user,
+/// so this process cannot create in it even though it exists.
+fn create_session_dir_in(
+    prefix: &str,
+    runtime_dir: Option<&OsStr>,
+    fallback: &Path,
+) -> std::io::Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(prefix);
+    if let Some(runtime_dir) = runtime_session_base(runtime_dir) {
+        match builder.tempdir_in(runtime_dir) {
+            Ok(dir) => return Ok(dir),
+            Err(error) => debug!(
+                "cannot create the session directory in {}: {error}; using {}",
+                runtime_dir.display(),
+                fallback.display()
+            ),
+        }
+    }
+    builder.tempdir_in(fallback)
+}
+
+/// The runtime directory to try first. A relative or missing runtime directory
+/// is ignored, since the specification requires an absolute path that exists.
+fn runtime_session_base(runtime_dir: Option<&OsStr>) -> Option<&Path> {
+    let runtime_dir = Path::new(runtime_dir?);
+    (cfg!(unix) && runtime_dir.is_absolute() && runtime_dir.is_dir()).then_some(runtime_dir)
+}
 
 pub const RUSTC_SHIM_STEM: &str = "mbx-rustc";
 pub const RUSTDOC_SHIM_STEM: &str = "mbx-rustdoc";

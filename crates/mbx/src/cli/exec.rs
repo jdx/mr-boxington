@@ -45,7 +45,7 @@ pub(super) fn run(config: &Config, settings: &CliSettings, args: &ExecArgs) -> R
     }
 
     crate::storage::check_cache(config)?;
-    let session_dir = tempfile::Builder::new().prefix("mbx-session-").tempdir()?;
+    let session_dir = crate::session::create_session_dir("mbx-session-")?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
