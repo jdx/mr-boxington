@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 #MISE description="Generate reference documentation from the usage spec"
 #MISE depends=["bootstrap"]
 """Render docs/cli from the mbx usage spec.
