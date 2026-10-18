@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+#MISE description="Generate reference documentation from the usage spec"
+#MISE depends=["bootstrap"]
+"""Render docs/cli from the mbx usage spec.
+
+One script for every platform: the old `run_windows` copy of these steps
+needed PowerShell one-liners for what `sed` does on Unix.
+"""
+
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+CLI = Path("docs/cli")
+MBX = Path("target/mbx-bootstrap/mbx.exe" if sys.platform == "win32" else "target/mbx-bootstrap/mbx")
+
+
+def rewrite(path, pattern, replacement):
+    # Newline-preserving, so a Windows run leaves the same bytes as a Unix one.
+    with open(path, encoding="utf-8", newline="") as f:
+        text = f.read()
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(re.sub(pattern, replacement, text, flags=re.MULTILINE))
+
+
+shutil.rmtree(CLI, ignore_errors=True)
+spec = subprocess.run([MBX, "__usage_spec__"], check=True, stdout=subprocess.PIPE).stdout
+subprocess.run(
+    [
+        "usage", "generate", "markdown", "--file", "-", "--multi",
+        "--replace-pre-with-code-fences", "--url-prefix", "/cli",
+        "--out-dir", str(CLI),
+    ],
+    input=spec,
+    check=True,
+)
+
+# The configuration reference is not its own page: /configuration embeds it
+# with an @include, so its headings are demoted to sit under that page's
+# "Settings" section and the generated index links there instead.
+rewrite(CLI / "configuration.md", r"^## ", "### ")
+rewrite(CLI / "index.md", re.escape("(/cli/configuration.md)"), "(/configuration#settings)")
