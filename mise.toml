@@ -4,20 +4,19 @@ min_version = "2026.9.7"
 _.path = ["test/bats/bin"]
 
 # The previous bootstrap binary may still be running, for example the
-# `gc --automatic` it starts after a build. Linux refuses to write over it
-# ("Text file busy") and Windows refuses to replace it, so install the new one
-# beside it: Unix renames it into place, and Windows renames the running one
-# aside when the copy fails and removes leftovers once nothing runs them.
+# `gc --automatic` it starts after a build, and Linux refuses to write over it
+# ("Text file busy"). Copy to a file of this run's own and rename it into
+# place. scripts/install-bootstrap.ps1 does the Windows equivalent.
 [tasks.bootstrap]
 hide = true
 run = [
   "cargo build --package mbx --target-dir target/mbx-bootstrap-build",
   "mkdir -p target/mbx-bootstrap",
-  "cp target/mbx-bootstrap-build/debug/mbx target/mbx-bootstrap/mbx.new && mv -f target/mbx-bootstrap/mbx.new target/mbx-bootstrap/mbx",
+  "staged=$(mktemp target/mbx-bootstrap/.mbx.XXXXXX) && { cp -p target/mbx-bootstrap-build/debug/mbx \"$staged\" && mv -f \"$staged\" target/mbx-bootstrap/mbx || { rm -f \"$staged\"; false; }; }",
 ]
 run_windows = [
   "cargo build --package mbx --target-dir target/mbx-bootstrap-build",
-  "pwsh -NoProfile -Command \"New-Item -ItemType Directory -Force target/mbx-bootstrap | Out-Null; Remove-Item -Force -ErrorAction Ignore target/mbx-bootstrap/*.old; try { Copy-Item -Force target/mbx-bootstrap-build/debug/mbx.exe target/mbx-bootstrap/mbx.exe -ErrorAction Stop } catch { Move-Item -Force target/mbx-bootstrap/mbx.exe ('target/mbx-bootstrap/mbx-' + [guid]::NewGuid() + '.old'); Copy-Item -Force target/mbx-bootstrap-build/debug/mbx.exe target/mbx-bootstrap/mbx.exe }\"",
+  "pwsh -NoProfile -File scripts/install-bootstrap.ps1",
 ]
 
 [tasks.build]
