@@ -382,7 +382,34 @@ fn readable_by_owner(mode: u32) -> bool {
 }
 
 /// Give a file the modification time a compiler writing it now would.
+///
+/// On Unix the kernel picks the time (`UTIME_NOW`), so the stamp comes from the
+/// same coarse clock that stamps every later write. An explicit
+/// `SystemTime::now()` reads a finer clock and can land up to one tick ahead of
+/// a write Cargo makes right after the restore, which leaves that newer file
+/// looking older than the restored one and reruns the build script.
 pub(crate) fn set_modified_now(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd as _;
+        let file = std::fs::OpenOptions::new().read(true).open(path)?;
+        let omit = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        };
+        let now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_NOW,
+        };
+        let times = [omit, now];
+        // SAFETY: `file` is an open descriptor and `times` holds the two
+        // timespecs futimens reads (access, then modification).
+        if unsafe { libc::futimens(file.as_raw_fd(), times.as_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
     set_modified(path, std::time::SystemTime::now())
 }
 
@@ -1196,6 +1223,27 @@ mod materialization_tests {
             std::fs::metadata(&theirs).unwrap().permissions().mode() & 0o777,
             0o400
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_restore_stamp_is_never_ahead_of_a_write_that_follows_it() {
+        // Cargo writes `invoked.timestamp` right after a restore and treats a
+        // restored binary newer than it as a rebuilt dependency, so the stamp
+        // must come from the clock the kernel uses for ordinary writes.
+        let root = tempfile::tempdir().unwrap();
+        for i in 0..500 {
+            let restored = root.path().join(format!("restored-{i}"));
+            let written = root.path().join(format!("written-{i}"));
+            std::fs::write(&restored, b"bin").unwrap();
+            set_modified_now(&restored).unwrap();
+            std::fs::write(&written, b"ts").unwrap();
+            assert!(
+                std::fs::metadata(&written).unwrap().modified().unwrap()
+                    >= std::fs::metadata(&restored).unwrap().modified().unwrap(),
+                "iteration {i}: the restore stamp is ahead of a later write"
+            );
+        }
     }
 
     #[test]
