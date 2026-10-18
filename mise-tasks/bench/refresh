@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#MISE description="Refresh published hk and aube benchmarks"
+#MISE depends=["perf:prepare"]
+# What CI runs. Adds the contention batch, repeats every scenario so the site
+# can tell a result from the machine, and rewrites the results file the
+# documentation site reads.
+set -euo pipefail
+
+for subject in hk aube; do
+  results=benchmarks/results.json
+  if [ "$subject" = aube ]; then results=benchmarks/results-aube.json; fi
+  python3 benchmarks/real_world.py \
+    --subject "$subject" \
+    --mbx target/release/mbx \
+    --scenarios warm,worktree,commit,edit,contention \
+    --trials 3 \
+    --output "target/benchmarks/$subject" \
+    --write-results "$results"
+done

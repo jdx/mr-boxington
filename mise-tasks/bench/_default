@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+#MISE description="Compare cargo, mbx, and kache on a pinned real-world project"
+#MISE depends=["perf:prepare"]
+# Real-world comparison against raw cargo and kache, on a pinned third-party
+# project. Long-running by nature: every cell is a full build of somebody
+# else's workspace. See benchmarks/README.md.
+set -euo pipefail
+
+exec python3 benchmarks/real_world.py \
+  --mbx target/release/mbx \
+  --scenarios warm,worktree,commit,edit \
+  --output target/benchmarks
