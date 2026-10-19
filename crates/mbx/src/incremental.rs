@@ -532,14 +532,37 @@ fn lock_session(lock: &Path) -> Option<std::fs::File> {
     Some(lock)
 }
 
+/// Copy one unit's state: `<unit>/<crate>-<hash>/<session>`. Sessions are
+/// only ever directly inside a crate's directory, which is the only level
+/// where they are treated as such: a crate may be named `s`.
 fn copy_state(
-    source: &Path,
+    unit: &Path,
+    destination: &Path,
+    held: &mut Vec<std::fs::File>,
+) -> std::io::Result<()> {
+    std::fs::create_dir(destination)?;
+    for entry in std::fs::read_dir(unit)? {
+        let entry = entry?;
+        let to = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_crate_state(&entry.path(), &to, held)?;
+        } else {
+            copy_file(&entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy a crate's finished sessions, holding each one's lock, and the lock
+/// files of the sessions copied.
+fn copy_crate_state(
+    krate: &Path,
     destination: &Path,
     held: &mut Vec<std::fs::File>,
 ) -> std::io::Result<()> {
     std::fs::create_dir(destination)?;
     let mut entries = Vec::new();
-    for entry in std::fs::read_dir(source)? {
+    for entry in std::fs::read_dir(krate)? {
         let entry = entry?;
         entries.push((entry.file_name(), entry.path(), entry.file_type()?));
     }
@@ -547,8 +570,7 @@ fn copy_state(
     // left out are left out too.
     let mut skipped = HashSet::new();
     for (name, path, kind) in &entries {
-        let session = name.to_str().is_some_and(|name| name.starts_with("s-"));
-        if !kind.is_dir() || !session {
+        if !kind.is_dir() {
             continue;
         }
         let lock_name = session_lock_name(name);
@@ -570,15 +592,38 @@ fn copy_state(
         }
         let to = destination.join(name);
         if kind.is_dir() {
-            copy_state(from, &to, held)?;
+            copy_tree(from, &to)?;
         } else if kind.is_file() {
-            let lock = from
-                .extension()
-                .is_some_and(|extension| extension == "lock");
-            if lock || std::fs::hard_link(from, &to).is_err() {
-                std::fs::copy(from, &to)?;
-            }
+            copy_file(from, &to)?;
         }
+    }
+    Ok(())
+}
+
+/// Copy a finished session's files as they are.
+fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::create_dir(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let to = destination.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &to)?;
+        } else if kind.is_file() {
+            copy_file(&entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Hard-link a state file, or copy it: a lock file, which rustc locks rather
+/// than reads, or one that cannot be linked.
+fn copy_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    let lock = from
+        .extension()
+        .is_some_and(|extension| extension == "lock");
+    if lock || std::fs::hard_link(from, to).is_err() {
+        std::fs::copy(from, to)?;
     }
     Ok(())
 }
@@ -1039,6 +1084,38 @@ mod tests {
             std::fs::read_dir(own.join("blake3")).unwrap().count(),
             1,
             "the abandoned copy is cleaned up"
+        );
+    }
+
+    #[test]
+    fn a_crate_named_s_is_seeded_too() {
+        let cache = tempfile::tempdir().unwrap();
+        let unit = "blake3/0123456789";
+        let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
+        let donor = cache.path().join("donor");
+        let krate = donor.join(unit).join("s-0abc");
+        std::fs::create_dir_all(krate.join("s-1-a-finished")).unwrap();
+        std::fs::write(krate.join("s-1-a-finished/dep-graph.bin"), b"s").unwrap();
+        std::fs::write(krate.join("s-1-a.lock"), b"").unwrap();
+        let record = CheckoutRecord {
+            version: RECORD_VERSION,
+            workspace_root: PathBuf::from("/work/donor"),
+            updated_secs: 20,
+        };
+        std::fs::write(
+            donor.join(RECORD_FILE),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            seed(&own, unit).unwrap(),
+            Some(PathBuf::from("/work/donor"))
+        );
+        assert!(
+            own.join(unit)
+                .join("s-0abc/s-1-a-finished/dep-graph.bin")
+                .is_file()
         );
     }
 
