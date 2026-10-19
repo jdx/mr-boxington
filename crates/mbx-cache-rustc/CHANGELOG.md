@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.20.2...mbx-cache-rustc-v0.20.3) - 2026-10-19
+
+### Added
+
+- seed incremental state ([#754](https://github.com/jdx/mr-boxington/pull/754))
+
 ## [0.20.2](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.20.1...mbx-cache-rustc-v0.20.2) - 2026-10-15
 
 ### Added

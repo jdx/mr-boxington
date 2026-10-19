@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.25.0](https://github.com/jdx/mr-boxington/compare/v1.24.1...v1.25.0) - 2026-10-19
+
+### Added
+
+- seed incremental state ([#754](https://github.com/jdx/mr-boxington/pull/754))
+- *(scheduler)* estimate memory from a calibrated window of recent peaks ([#755](https://github.com/jdx/mr-boxington/pull/755))
+- *(scheduler)* budget CPU and memory separately ([#750](https://github.com/jdx/mr-boxington/pull/750))
+- *(scheduler)* let queued builds share capacity they cannot use yet ([#748](https://github.com/jdx/mr-boxington/pull/748))
+- *(scheduler)* record build identity and reservations in the observation log ([#749](https://github.com/jdx/mr-boxington/pull/749))
+- *(scheduler)* record estimate accuracy and summarize it in mbx stats ([#746](https://github.com/jdx/mr-boxington/pull/746))
+- *(scheduler)* estimate compile memory for each build mode ([#742](https://github.com/jdx/mr-boxington/pull/742))
+- *(cache)* add remote.trust_writes for CI systems mbx does not detect ([#724](https://github.com/jdx/mr-boxington/pull/724))
+
+### Fixed
+
+- *(scheduler)* cap memory estimates at the previous rule until the spread is calibrated ([#756](https://github.com/jdx/mr-boxington/pull/756))
+- *(gc)* cap incremental state at 10% of gc.max_total_size ([#751](https://github.com/jdx/mr-boxington/pull/751))
+- *(gc)* prune incremental state after worktree removal ([#752](https://github.com/jdx/mr-boxington/pull/752))
+- *(materialize)* stop restored build scripts from rerunning on the next unchanged build ([#745](https://github.com/jdx/mr-boxington/pull/745))
+- *(scheduler)* honor an explicit memory budget that fits the local machine ([#741](https://github.com/jdx/mr-boxington/pull/741))
+- *(setup)* skip mise's mbx shim when the Windows cargo.exe shim forwards ([#736](https://github.com/jdx/mr-boxington/pull/736))
+- *(cc)* identify MSVC from preprocessor macros, not banner text ([#735](https://github.com/jdx/mr-boxington/pull/735))
+- *(cli)* let cargo clean -p run when a managed target link dangles ([#732](https://github.com/jdx/mr-boxington/pull/732))
+- *(cli)* report build.rustc-wrapper = "mbx" instead of failing with -Zscript ([#727](https://github.com/jdx/mr-boxington/pull/727))
+- *(scheduler)* prevent starvation across shared container builds ([#721](https://github.com/jdx/mr-boxington/pull/721))
+
+### Other
+
+- *(setup)* keep the Windows end-to-end tests out of the developer's profile ([#737](https://github.com/jdx/mr-boxington/pull/737))
+- fix clippy findings that only appear on Windows ([#733](https://github.com/jdx/mr-boxington/pull/733))
+- *(seed)* run the access-time seeding test on Windows volumes that track access times ([#730](https://github.com/jdx/mr-boxington/pull/730))
+
 ## [1.24.1](https://github.com/jdx/mr-boxington/compare/v1.24.0...v1.24.1) - 2026-10-15
 
 ### Fixed
