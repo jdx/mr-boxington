@@ -1851,3 +1851,25 @@ fn paths_under_the_working_directory_become_relative() {
     ];
     assert_eq!(rewrite(&unrelated), unrelated);
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_paths_under_the_working_directory_become_relative_with_either_separator() {
+    let working_dir = Path::new(r"E:\work\checkout");
+    let arguments: Vec<OsString> = [
+        r"dependency=E:\work\checkout\target\debug\deps",
+        "--extern=log=E:\\work\\checkout/target/debug/deps/liblog.rmeta",
+        r"E:\work\checkout-two\target",
+    ]
+    .iter()
+    .map(OsString::from)
+    .collect();
+    assert_eq!(
+        paths_relative_to(&arguments, working_dir),
+        [
+            OsString::from(r"dependency=target\debug\deps"),
+            OsString::from("--extern=log=target/debug/deps/liblog.rmeta"),
+            OsString::from(r"E:\work\checkout-two\target"),
+        ]
+    );
+}

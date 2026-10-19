@@ -1285,7 +1285,6 @@ fn paths_relative_to(arguments: &[OsString], working_dir: &Path) -> Vec<OsString
     let Some(root) = working_dir.to_str() else {
         return arguments.to_vec();
     };
-    let prefix = format!("{root}{}", std::path::MAIN_SEPARATOR);
     arguments
         .iter()
         .map(|argument| {
@@ -1296,14 +1295,17 @@ fn paths_relative_to(arguments: &[OsString], working_dir: &Path) -> Vec<OsString
             let mut rest = text;
             let mut at_start = true;
             while !rest.is_empty() {
-                if at_start {
-                    if let Some(after) = rest.strip_prefix(&prefix) {
-                        rest = after;
-                    } else if let Some(after) = rest.strip_prefix(root)
-                        && (after.is_empty() || after.starts_with(['=', ',']))
-                    {
-                        rewritten.push('.');
-                        rest = after;
+                if at_start && let Some(after) = rest.strip_prefix(root) {
+                    // Windows accepts either separator, and Cargo can mix them.
+                    match after.chars().next() {
+                        Some(separator) if std::path::is_separator(separator) => {
+                            rest = &after[separator.len_utf8()..];
+                        }
+                        None | Some('=' | ',') => {
+                            rewritten.push('.');
+                            rest = after;
+                        }
+                        Some(_) => {}
                     }
                 }
                 let Some(next) = rest.chars().next() else {
