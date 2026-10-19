@@ -1904,14 +1904,15 @@ fn run_transparent_rustc(
                 .to_str()
                 .is_some_and(|argument| argument.starts_with("--print"))
     });
-    let incremental_flag = bypassed
+    // Holds the unit's use stamp until the compiler has finished with it.
+    let mut incremental = bypassed
         .then(|| crate::rustc::bypassed_library_incremental_flag(described))
         .flatten();
     let demand = crate_name.as_deref().filter(|_| !is_query).map(|name| {
         transparent_compiler_demand(
             name,
             described,
-            incremental_flag.as_deref(),
+            incremental.as_ref().map(|state| state.flag.as_os_str()),
             compiler_runs_through_wrapper(&rustc),
             is_clippy_driver(&rustc),
         )
@@ -1932,9 +1933,6 @@ fn run_transparent_rustc(
         Command::new(&rustc)
     };
     command.args(&arguments);
-    if let Some(flag) = incremental_flag {
-        command.arg(flag);
-    }
     command.env_remove(PREVIOUS_RUSTC_WRAPPER_ENV);
     command.env_remove(PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV);
     #[cfg(unix)]
@@ -1946,6 +1944,13 @@ fn run_transparent_rustc(
             .is_some_and(|name| !name.starts_with("build_script_"));
     #[cfg(unix)]
     let mut action = crate::supervision::prepare(&mut command, eligible);
+    // Right before the compiler starts, after admission, which can take
+    // longer than the session-start grace: mark the compilation as starting
+    // now, or compile without the state.
+    incremental = incremental.and_then(crate::rustc::BypassedIncremental::refreshed);
+    if let Some(state) = &incremental {
+        command.arg(&state.flag);
+    }
 
     #[cfg(unix)]
     {
@@ -1953,8 +1958,10 @@ fn run_transparent_rustc(
 
         // A probe compiles nothing worth timing, so this process can become
         // the compiler. A real compilation is waited for even without a
-        // permit, so that its time is recorded.
-        if demand.is_none() {
+        // permit, so that its time is recorded. Nor can a compilation with
+        // incremental state: exec would close the use stamp's lock, which is
+        // close-on-exec, and leave the state unprotected while it compiles.
+        if demand.is_none() && incremental.is_none() {
             crate::phase_timing::finish();
             let error = command.exec();
             report_shim_error(&format!("the rustc shim failed to execute rustc: {error}"));
@@ -1974,6 +1981,7 @@ fn run_transparent_rustc(
         match waited {
             Ok(status) => {
                 drop(permit);
+                drop(incremental);
                 if let Some(demand) = &demand {
                     crate::scheduler::record_compiler_memory(demand, &status);
                 }
@@ -2012,6 +2020,9 @@ fn run_transparent_rustc(
         match waited {
             Ok((exit_code, status)) => {
                 drop(permit);
+                // Before ExitProcess, which skips destructors: the stamp is
+                // refreshed as the guard drops.
+                drop(incremental);
                 if let Some(demand) = &demand {
                     crate::scheduler::record_compiler_memory(demand, &status);
                 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::incremental::tests as fixtures;
 
 /// Only a toolchain's own compiler is pinned: a proxy or shim has no
 /// `rustc_driver` beside it, and its bytes say nothing about the toolchain
@@ -1503,12 +1504,15 @@ fn oversized_incremental_state_is_left_for_gc() {
     std::fs::create_dir_all(&session).unwrap();
     let graph = session.join("dep-graph.bin");
     std::fs::write(&graph, vec![0_u8; 4096]).unwrap();
-    assert!(!incremental_state_exceeds_backstop(&directory, None));
-    assert!(!incremental_state_exceeds_backstop(&directory, Some(8192)));
-    assert!(incremental_state_exceeds_backstop(&directory, Some(8191)));
-    assert!(incremental_state_exceeds_backstop(&directory, Some(0)));
+    assert!(!crate::incremental::exceeds_backstop(&directory, None));
+    assert!(!crate::incremental::exceeds_backstop(
+        &directory,
+        Some(8192)
+    ));
+    assert!(crate::incremental::exceeds_backstop(&directory, Some(8191)));
+    assert!(crate::incremental::exceeds_backstop(&directory, Some(0)));
     assert!(graph.exists());
-    assert!(!incremental_state_exceeds_backstop(
+    assert!(!crate::incremental::exceeds_backstop(
         &root.path().join("missing"),
         Some(1)
     ));
@@ -1888,5 +1892,309 @@ fn relocatable_incremental_state_needs_rustc_1_98() {
     assert!(
         !release_at_least("commit-hash: 88d9e12ae", (1, 98)),
         "no version line"
+    );
+}
+
+/// A managed checkout, as a session records it, and one unit's digest in it.
+fn managed_checkout() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
+    let cache = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let directory = fixtures::idle_checkout(cache.path(), workspace.path());
+    (cache, workspace, directory)
+}
+
+fn incremental_now() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn unit_digest() -> CacheDigest {
+    CacheDigest::blake3(b"unit")
+}
+
+/// The name of `digest`'s unit under `blake3/`.
+fn unit_name(digest: &CacheDigest) -> String {
+    digest.key()[..16]
+        .strip_prefix("blake3/")
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn incremental_state_holds_its_use_stamp_until_dropped() {
+    let (_cache, _workspace, checkout) = managed_checkout();
+    let state = incremental_directory_in(&checkout, &unit_digest(), "demo", false).unwrap();
+    assert!(state.directory.is_dir());
+    let stamp = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(incremental::use_path(&state.directory))
+        .unwrap();
+    assert!(matches!(
+        stamp.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    drop(state);
+    assert!(
+        fixtures::lock_when_released(&stamp),
+        "the stamp is released once the state is dropped"
+    );
+}
+
+#[test]
+fn a_unit_a_collector_holds_compiles_without_state() {
+    let (_cache, _workspace, checkout) = managed_checkout();
+    let directory = incremental_directory_in(&checkout, &unit_digest(), "demo", false)
+        .unwrap()
+        .directory;
+    let path = incremental::use_path(&directory);
+    let (locked, wait) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let collector = std::thread::spawn(move || {
+        let file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        assert!(
+            fixtures::lock_when_released(&file),
+            "the stamp is released once the state is dropped"
+        );
+        locked.send(()).unwrap();
+        let _ = released.recv();
+    });
+    wait.recv().unwrap();
+    assert!(incremental_directory_in(&checkout, &unit_digest(), "demo", false).is_none());
+    drop(release);
+    collector.join().unwrap();
+}
+
+#[test]
+fn backstop_rejection_never_refreshes_the_stamp_or_prevents_collection() {
+    let (cache, _workspace, checkout) = managed_checkout();
+    let digest = unit_digest();
+    let directory = incremental_directory_in(&checkout, &digest, "demo", false)
+        .unwrap()
+        .directory;
+    // Its 32 bytes of state are over half of the budget.
+    let used_secs = incremental_now() - 7200;
+    let used = std::time::UNIX_EPOCH + std::time::Duration::from_secs(used_secs);
+    fixtures::unit(&checkout, &unit_name(&digest), used_secs);
+    let stamp = incremental::use_path(&directory);
+    fixtures::set_modified(&stamp, used);
+    let budget = Some(32);
+    let churn = directory.with_extension("json");
+    for _ in 0..3 {
+        // A compilation that found its state oversized.
+        let plan = LearnedPlan {
+            hot: true,
+            ..LearnedPlan::default()
+        }
+        .resolve_with(Some(&directory), budget, || {
+            incremental_directory_in(&checkout, &digest, "demo", false)
+        });
+        assert!(plan.backstop_rejected);
+        assert!(!plan.engaged());
+        assert!(plan.held.is_none());
+        drop(plan);
+        assert_eq!(fixtures::modified(&stamp), used);
+        // ...recording its baseline once it completed without that state,
+        // and a cache hit that restored the unit's outputs: both find the
+        // fresh rejection.
+        for _ in 0..2 {
+            incremental::note_use(&churn.with_extension(""), budget);
+            assert_eq!(fixtures::modified(&stamp), used);
+        }
+        fixtures::set_modified(&incremental::backstop_path(&directory), used);
+    }
+    // The cache hits' shared locks may linger for a moment.
+    let probe = std::fs::File::open(&stamp).unwrap();
+    assert!(fixtures::lock_when_released(&probe));
+    drop(probe);
+    let outcome = incremental::collect(cache.path(), Some(0), None, false, true).unwrap();
+    assert_eq!(outcome.removed_units, 1);
+    assert!(!directory.exists());
+}
+
+#[test]
+fn a_first_rejected_compile_keeps_an_aged_units_last_use() {
+    let (_cache, _workspace, checkout) = managed_checkout();
+    let digest = unit_digest();
+    let used_secs = incremental_now() - 7200;
+    let used = std::time::UNIX_EPOCH + std::time::Duration::from_secs(used_secs);
+    let directory = fixtures::unit(&checkout, &unit_name(&digest), used_secs);
+    let stamp = incremental::use_path(&directory);
+    assert!(!stamp.exists());
+    let plan = LearnedPlan {
+        hot: true,
+        ..LearnedPlan::default()
+    }
+    .resolve_with(Some(&directory), Some(32), || {
+        unreachable!("rejected state is never held or seeded")
+    });
+    assert!(plan.backstop_rejected);
+    drop(plan);
+    assert!(!stamp.exists(), "no stamp reads as a use");
+    assert_eq!(
+        fixtures::modified(&directory.join("crate-id/s-session")),
+        used,
+        "the unit keeps its last use"
+    );
+}
+
+#[test]
+fn accepted_state_is_stamped_and_held_with_the_plan() {
+    let (_cache, _workspace, checkout) = managed_checkout();
+    let digest = unit_digest();
+    let directory = checkout.join(&digest.key()[..16]);
+    let plan = LearnedPlan {
+        hot: true,
+        ..LearnedPlan::default()
+    }
+    .resolve_with(Some(&directory), Some(1 << 30), || {
+        incremental_directory_in(&checkout, &digest, "demo", false)
+    });
+    assert!(plan.engaged());
+    let directory = plan.directory.clone().unwrap();
+    let stamp = incremental::use_path(&directory);
+    assert!(fixtures::within_throttled(fixtures::modified(&stamp)));
+    fixtures::set_modified(
+        &stamp,
+        SystemTime::now() - std::time::Duration::from_secs(7200),
+    );
+    drop(plan);
+    assert!(fixtures::within_throttled(fixtures::modified(&stamp)));
+}
+
+#[test]
+fn a_retired_checkout_gives_no_incremental_state() {
+    let (_cache, _workspace, checkout) = managed_checkout();
+    std::fs::remove_file(checkout.join("checkout.json")).unwrap();
+    assert!(incremental_directory_in(&checkout, &unit_digest(), "demo", false).is_none());
+    assert!(!checkout.join("blake3").exists());
+}
+
+#[test]
+fn a_standalone_shim_keeps_incremental_state_in_its_target_directory() {
+    // In a subprocess, so the environment it needs does not race other tests.
+    const CHILD_ENV: &str = "MBX_TEST_STANDALONE_INCREMENTAL";
+    let Some(target) = std::env::var_os(CHILD_ENV) else {
+        let target = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "rustc::tests::a_standalone_shim_keeps_incremental_state_in_its_target_directory",
+                "--exact",
+                "--test-threads=1",
+            ])
+            .env(CHILD_ENV, target.path())
+            .env(session::TARGET_DIR_ENV, target.path())
+            .env_remove(session::INCREMENTAL_ROOT_ENV)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed"),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return;
+    };
+    let root = incremental_root().unwrap();
+    assert_eq!(root, PathBuf::from(&target).join("mbx-incremental"));
+    assert!(!incremental::is_checkout(&root));
+    let state = incremental_directory(&unit_digest(), "demo", true).unwrap();
+    assert!(state.directory.starts_with(&root));
+    assert!(state.directory.is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn state_that_cannot_be_marked_in_use_is_not_used() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (_cache, _workspace, checkout) = managed_checkout();
+    let digest = unit_digest();
+    let directory = incremental_directory_in(&checkout, &digest, "demo", false)
+        .unwrap()
+        .directory;
+    let stamp = incremental::use_path(&directory);
+    let used = SystemTime::now() - std::time::Duration::from_secs(7200);
+    fixtures::set_modified(&stamp, used);
+    // The marker is made inside the unit.
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let restore = fixtures::Restore(directory.clone());
+    let plan = LearnedPlan {
+        hot: true,
+        ..LearnedPlan::default()
+    }
+    .resolve_with(Some(&directory), Some(1 << 30), || {
+        incremental_directory_in(&checkout, &digest, "demo", false)
+    });
+    assert!(!plan.engaged(), "compiles without the state");
+    assert!(plan.held.is_none());
+    drop(plan);
+    drop(restore);
+    assert_eq!(fixtures::modified(&stamp), used, "the stamp is untouched");
+    assert!(incremental::compiling_markers_of(&directory).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn state_that_cannot_be_marked_after_admission_is_not_used() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (_cache, _workspace, checkout) = managed_checkout();
+    let digest = unit_digest();
+    let directory = checkout.join(&digest.key()[..16]);
+    let mut plan = LearnedPlan {
+        hot: true,
+        ..LearnedPlan::default()
+    }
+    .resolve_with(Some(&directory), Some(1 << 30), || {
+        incremental_directory_in(&checkout, &digest, "demo", false)
+    });
+    assert!(plan.engaged());
+    // The marker went missing while the compilation waited, and cannot be
+    // made again.
+    for marker in incremental::compiling_markers_of(&directory) {
+        std::fs::remove_file(marker).unwrap();
+    }
+    // The marker is made inside the unit.
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let restore = fixtures::Restore(directory.clone());
+    assert!(
+        !refresh_before_launch(&mut plan),
+        "the compiler is launched without the incremental flag"
+    );
+    drop(restore);
+    assert!(!plan.engaged(), "compiles without the state");
+    assert!(plan.held.is_none());
+}
+
+#[test]
+fn a_refresh_right_before_launch_keeps_accepted_state_and_marks_it_fresh() {
+    let (_cache, _workspace, checkout) = managed_checkout();
+    let digest = unit_digest();
+    let directory = checkout.join(&digest.key()[..16]);
+    let mut plan = LearnedPlan {
+        hot: true,
+        ..LearnedPlan::default()
+    }
+    .resolve_with(Some(&directory), Some(1 << 30), || {
+        incremental_directory_in(&checkout, &digest, "demo", false)
+    });
+    // The compilation waited for the machine past the grace.
+    let markers = incremental::compiling_markers_of(&directory);
+    assert_eq!(markers.len(), 1);
+    fixtures::set_modified(
+        &markers[0],
+        SystemTime::now() - std::time::Duration::from_secs(600),
+    );
+    assert!(refresh_before_launch(&mut plan));
+    assert!(plan.engaged());
+    assert!(
+        fixtures::within_throttled(fixtures::modified(&markers[0])),
+        "fresh at launch"
     );
 }

@@ -53,7 +53,7 @@ const CHURN_STATE_VERSION: u8 = 1;
 const PRIVATE_ARTIFACT_VERSION: u8 = 1;
 
 /// What a churning unit gets: its own incremental state, and no publication.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 struct LearnedPlan {
     /// Whether this unit has churned often enough to keep incremental state.
     hot: bool,
@@ -62,6 +62,10 @@ struct LearnedPlan {
     streak: u32,
     /// Where that state lives, once somewhere to put it has been resolved.
     directory: Option<PathBuf>,
+    /// The unit's use stamp, held while the state is in use so collection
+    /// leaves it alone, and stamped once the state was accepted. Lives as
+    /// long as the plan: past the compiler and the churn record it writes.
+    held: Option<incremental::UseGuard>,
     /// Where to record what this compilation compiled, and what that was.
     record: Option<(PathBuf, CacheDigest)>,
 }
@@ -70,27 +74,41 @@ impl LearnedPlan {
     /// Find somewhere to keep the state, for a unit that earned it. State
     /// that does not depend on the checkout's location may start from another
     /// checkout's; see [`incremental::seed`].
-    fn resolved(mut self, compilation: &Compilation<'_>, unit: &CacheDigest) -> Self {
-        if self.hot {
-            // Check this checkout's existing state before seeding. A rejected
-            // unit takes the shared path without copying a donor's sessions.
-            let directory = incremental_root().and_then(|root| {
-                let key = unit.key();
-                key.get(..16).map(|shard| root.join(shard))
-            });
-            if directory.as_ref().is_some_and(|directory| {
-                incremental_state_exceeds_backstop(directory, session::incremental_budget())
-            }) {
-                self.backstop_rejected = true;
-                self.hot = false;
-                self.directory = None;
-            } else {
-                self.directory = incremental_directory(
+    fn resolved(self, compilation: &Compilation<'_>, unit: &CacheDigest) -> Self {
+        if !self.hot {
+            return self;
+        }
+        self.resolve_with(
+            unit_directory(unit).as_deref(),
+            session::incremental_budget(),
+            || {
+                incremental_directory(
                     unit,
                     compilation.invocation.crate_name(),
                     shares_incremental_state(compilation.rustc, compilation.invocation),
-                );
-            }
+                )
+            },
+        )
+    }
+
+    /// Check this checkout's existing state at `existing` against the
+    /// backstop before seeding: a rejected unit takes the shared path without
+    /// copying a donor's sessions, and without touching its use stamp, so it
+    /// keeps its last use and stays collectable. Accepted state is held and
+    /// stamped.
+    fn resolve_with(
+        mut self,
+        existing: Option<&Path>,
+        budget: Option<u64>,
+        take: impl FnOnce() -> Option<IncrementalState>,
+    ) -> Self {
+        if existing.is_some_and(|directory| !incremental::backstop_verdict(directory, budget)) {
+            self.backstop_rejected = true;
+            self.hot = false;
+            self.directory = None;
+        } else if let Some(state) = take().and_then(IncrementalState::stamped) {
+            self.directory = Some(state.directory);
+            self.held = Some(state.held);
         }
         self
     }
@@ -543,19 +561,26 @@ pub(crate) fn compile(
     );
     let compilation_started = SystemTime::now();
     let compiler_timer = Instant::now();
-    let mut command = compiler_command(rustc, wrapper_argument);
-    if incremental_flag.is_some() && shares_incremental_state(rustc, &invocation) {
-        command.args(paths_relative_to(&arguments, &working_dir));
-    } else {
-        command.args(&arguments);
-    }
-    command.current_dir(&working_dir);
+    let build_command = |flag: Option<&OsString>| {
+        let mut command = compiler_command(rustc, wrapper_argument);
+        if flag.is_some() && shares_incremental_state(rustc, &invocation) {
+            command.args(paths_relative_to(&arguments, &working_dir));
+        } else {
+            command.args(&arguments);
+        }
+        command.current_dir(&working_dir);
+        if let Some(flag) = flag {
+            // Keep private incremental state out of cacheability parsing,
+            // while admission above still sees the command that actually
+            // runs.
+            command.arg(flag);
+        }
+        command
+    };
+    let mut command = build_command(incremental_flag.as_ref());
+    // Decided before the state may be dropped below: these outputs were
+    // marked private before the compiler started, and stay so.
     let private_outputs = private_inputs || learned.engaged();
-    if let Some(flag) = incremental_flag {
-        // Keep private incremental state out of cacheability parsing, while
-        // admission above still sees the command that actually runs.
-        command.arg(flag);
-    }
     if private_outputs {
         // Before the compiler starts, so that a dependent Cargo pipelines
         // behind this unit's metadata already finds the marker in place.
@@ -588,6 +613,11 @@ pub(crate) fn compile(
             .chain(std::iter::once(&outputs.dep_info))
             .map(PathBuf::as_path),
     );
+    // Admission and the steps since can take longer than the session-start
+    // grace: mark the compilation as starting now, right before rustc runs.
+    if !refresh_before_launch(&mut learned) {
+        command = build_command(None);
+    }
     let output = crate::phase_timing::measure("compiler", || {
         run_compiler(
             &mut command,
@@ -597,7 +627,9 @@ pub(crate) fn compile(
     })
     .wrap_err("failed to execute rustc")?;
     // Released before the outputs are read back and published: hashing and
-    // storing cost I/O, not the CPU and memory the permit stands for.
+    // storing cost I/O, not the CPU and memory the permit stands for. The
+    // unit's use stamp in `learned` is not: it stays held until the churn
+    // record is written, so collection cannot evict the state in between.
     drop(permit);
     crate::scheduler::record_compiler_memory(&demand, &output.status);
     let timing = CompileTiming {
@@ -1447,6 +1479,7 @@ fn learned_plan(
         backstop_rejected: false,
         streak,
         directory: None,
+        held: None,
         record: None,
     }
 }
@@ -1486,18 +1519,84 @@ fn release_at_least(rustc_version: &str, minimum: (u32, u32)) -> bool {
 ///
 /// A `seedable` unit starting without state here takes another checkout's
 /// first, so the checkout's first edit to it compiles incrementally too.
+///
+/// The unit's use stamp is held, unstamped, from before seeding; callers only
+/// ask for state that passed the backstop, and stamp it.
 pub(crate) fn incremental_directory(
     invocation: &CacheDigest,
     crate_name: &str,
     seedable: bool,
-) -> Option<PathBuf> {
+) -> Option<IncrementalState> {
     let root = incremental_root()?;
+    incremental_directory_in(&root, invocation, crate_name, seedable)
+}
+
+/// Where one unit's state lives under this shim's root, whether or not it
+/// exists yet.
+fn unit_directory(unit: &CacheDigest) -> Option<PathBuf> {
+    let root = incremental_root()?;
+    let key = unit.key();
+    key.get(..16).map(|shard| root.join(shard))
+}
+
+/// One unit's incremental state, held against collection.
+pub(crate) struct IncrementalState {
+    pub(crate) directory: PathBuf,
+    pub(crate) held: incremental::UseGuard,
+}
+
+impl IncrementalState {
+    /// Mark the state as used by a compilation that has accepted it, or give
+    /// it up: state that cannot be marked is not used.
+    fn stamped(mut self) -> Option<Self> {
+        match self.held.stamp() {
+            Ok(()) => Some(self),
+            Err(error) => {
+                warn_unmarked(&error);
+                None
+            }
+        }
+    }
+}
+
+fn warn_unmarked(error: &std::io::Error) {
+    session::report_shim_warning(&format!(
+        "incremental state could not be marked in use; compiling without it: {error}"
+    ));
+}
+
+/// [`incremental_directory`] under a given root: a session's checkout, or a
+/// standalone shim's target-local fallback, which is never seeded.
+pub(crate) fn incremental_directory_in(
+    root: &Path,
+    invocation: &CacheDigest,
+    crate_name: &str,
+    seedable: bool,
+) -> Option<IncrementalState> {
     let key = invocation.key();
     let shard = key.get(..16)?;
     let directory = root.join(shard);
+    let held = match incremental::hold_unit(&directory) {
+        Ok(Some(held)) => held,
+        Ok(None) => {
+            session::report_shim_warning(&format!(
+                "incremental state for {crate_name} is being collected; compiling without it"
+            ));
+            return None;
+        }
+        Err(error) => {
+            session::report_shim_warning(&format!(
+                "incremental state was not prepared for {crate_name}: {error:#}"
+            ));
+            return None;
+        }
+    };
+    // Checked under the use stamp, so a collector cannot remove the state
+    // between this check and the compiler.
     if seedable
+        && incremental::is_checkout(root)
         && !directory.exists()
-        && let Err(error) = incremental::seed(&root, shard)
+        && let Err(error) = incremental::seed(root, shard)
     {
         // Compiles from scratch, as it would have without a donor.
         session::report_shim_warning(&format!(
@@ -1505,12 +1604,53 @@ pub(crate) fn incremental_directory(
         ));
     }
     match std::fs::create_dir_all(&directory) {
-        Ok(()) => Some(directory),
+        Ok(()) => Some(IncrementalState { directory, held }),
         Err(error) => {
             session::report_shim_warning(&format!(
                 "incremental state was not prepared for {crate_name}: {error:#}"
             ));
             None
+        }
+    }
+}
+
+/// Mark a compilation with incremental state as starting now, right before
+/// rustc runs, so that an explicit removal still sees it starting. State that
+/// cannot be marked is not used: returns `false` once it has been dropped,
+/// and the compilation goes ahead without it or its flag.
+fn refresh_before_launch(learned: &mut LearnedPlan) -> bool {
+    let Some(held) = learned.held.as_mut() else {
+        return true;
+    };
+    match held.refresh() {
+        Ok(()) => true,
+        Err(error) => {
+            warn_unmarked(&error);
+            learned.held = None;
+            learned.directory = None;
+            false
+        }
+    }
+}
+
+/// The incremental flag for a bypassed library, and the use stamp held for
+/// as long as its compiler runs.
+pub(crate) struct BypassedIncremental {
+    pub(crate) flag: OsString,
+    held: incremental::UseGuard,
+}
+
+impl BypassedIncremental {
+    /// Mark the compilation as starting now, right before rustc runs (see
+    /// [`incremental::UseGuard::refresh`]), or give the state up: the
+    /// compilation then goes ahead without it or its flag.
+    pub(crate) fn refreshed(mut self) -> Option<Self> {
+        match self.held.refresh() {
+            Ok(()) => Some(self),
+            Err(error) => {
+                warn_unmarked(&error);
+                None
+            }
         }
     }
 }
@@ -1533,7 +1673,9 @@ fn private_incremental_flag(directory: &Path) -> OsString {
 /// Keyed on the whole argument list, which names the unit's output directory
 /// and metadata, so another profile, target, or feature set gets its own
 /// directory.
-pub(crate) fn bypassed_library_incremental_flag(arguments: &[OsString]) -> Option<OsString> {
+pub(crate) fn bypassed_library_incremental_flag(
+    arguments: &[OsString],
+) -> Option<BypassedIncremental> {
     if !session::learned_incremental_requested()
         || session::verify_requested()
         || !session::compiles_an_uncacheable_library(arguments)
@@ -1565,38 +1707,18 @@ pub(crate) fn bypassed_library_incremental_flag(arguments: &[OsString]) -> Optio
         identity.extend_from_slice(argument.as_encoded_bytes());
         identity.push(0);
     }
-    let directory = incremental_directory(&CacheDigest::blake3(&identity), &crate_name, false)?;
-    if incremental_state_exceeds_backstop(&directory, session::incremental_budget()) {
+    let unit = CacheDigest::blake3(&identity);
+    // Oversized state is left alone, its use stamp untouched, for collection.
+    if unit_directory(&unit).is_some_and(|directory| {
+        !incremental::backstop_verdict(&directory, session::incremental_budget())
+    }) {
         return None;
     }
-    Some(private_incremental_flag(&directory))
-}
-
-/// Oversized learned state takes the shared compilation path this time.
-/// Leave it intact for collection instead of rewriting it on every edit.
-fn incremental_state_exceeds_backstop(directory: &Path, budget: Option<u64>) -> bool {
-    budget.is_some_and(|budget| directory_bytes(directory) > budget / 2)
-}
-
-fn directory_bytes(directory: &Path) -> u64 {
-    let mut total = 0;
-    let mut pending = vec![directory.to_path_buf()];
-    while let Some(next) = pending.pop() {
-        let Ok(listing) = std::fs::read_dir(&next) else {
-            continue;
-        };
-        for entry in listing.flatten() {
-            let Ok(metadata) = entry.metadata() else {
-                continue;
-            };
-            if metadata.is_dir() {
-                pending.push(entry.path());
-            } else if metadata.is_file() {
-                total += metadata.len();
-            }
-        }
-    }
-    total
+    let state = incremental_directory(&unit, &crate_name, false)?.stamped()?;
+    Some(BypassedIncremental {
+        flag: private_incremental_flag(&state.directory),
+        held: state.held,
+    })
 }
 
 /// Work out the plan for a compilation that is about to miss.
@@ -1832,6 +1954,7 @@ fn reuse_hot_workspace_plan(
             backstop_rejected: false,
             streak,
             directory: None,
+            held: None,
             record: Some((state_path, sources)),
         }
         .resolved(compilation, &unit))
@@ -1911,6 +2034,9 @@ fn source_is_in_workspace(compilation: &Compilation<'_>) -> bool {
 /// Establish the baseline after a first successful compilation, when dep-info
 /// finally supplies the complete set of sources. The next edit can then be
 /// recognized immediately.
+///
+/// Also counts as a use of the unit's incremental state, if it has any within
+/// the backstop.
 fn record_learned_baseline(compilation: &Compilation<'_>, discovered: &DiscoveredInputs) {
     let recorded = (|| {
         let context = base_action_context(
@@ -1922,6 +2048,8 @@ fn record_learned_baseline(compilation: &Compilation<'_>, discovered: &Discovere
         let Some(path) = churn_state_path(&unit) else {
             return Result::<()>::Ok(());
         };
+        // A use of the unit's state too, unless the backstop rejected it.
+        incremental::note_use(&path.with_extension(""), session::incremental_budget());
         let sources = compilation.invocation.source_fingerprint(discovered);
         if read_churn_state(&path)
             .is_some_and(|recorded| recorded.sources == sources.key() && recorded.streak == 0)
@@ -1940,10 +2068,7 @@ fn record_learned_baseline(compilation: &Compilation<'_>, discovered: &Discovere
 /// A sibling of the unit's incremental directory, so the decision and the
 /// state survive or disappear together.
 fn churn_state_path(unit: &CacheDigest) -> Option<PathBuf> {
-    let root = incremental_root()?;
-    let key = unit.key();
-    let shard = key.get(..16)?;
-    Some(root.join(format!("{shard}.json")))
+    unit_directory(unit).map(|directory| directory.with_extension("json"))
 }
 
 /// Persistent per-checkout storage for learned incremental state. Sessions
@@ -1952,14 +2077,11 @@ fn churn_state_path(unit: &CacheDigest) -> Option<PathBuf> {
 /// target-local fallback because they have no configured cache root.
 fn incremental_root() -> Option<PathBuf> {
     std::env::var_os(session::INCREMENTAL_ROOT_ENV)
-        .or_else(|| {
-            std::env::var_os(session::TARGET_DIR_ENV).map(|target| {
-                PathBuf::from(target)
-                    .join("mbx-incremental")
-                    .into_os_string()
-            })
-        })
         .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os(session::TARGET_DIR_ENV)
+                .map(|target| PathBuf::from(target).join("mbx-incremental"))
+        })
 }
 
 /// Where the marker for one output path lives, beside the churn records.
