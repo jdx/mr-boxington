@@ -410,9 +410,12 @@ fn cleanup_lock_dir(locks: &Path) {
 /// compiles, as it does after any edit.
 ///
 /// The donor holds a lease while it is read, so collection cannot remove it
-/// halfway. A session the donor's compiler is still writing is left out. The
-/// copy is made beside its final name and renamed into place, so an
-/// interrupted copy leaves no partial state.
+/// halfway, and each session it copies is locked the way rustc locks it, so
+/// the donor's own compiler cannot remove that either. A session the donor's
+/// compiler is still writing, or may be removing, is left out. The copy is
+/// made beside its final name and renamed into place, so an interrupted copy
+/// leaves no partial state; a donor that cannot be copied gives way to the
+/// next.
 ///
 /// Files are hard-linked. rustc writes a session once, into a directory of
 /// its own, and links what it reuses into the next one rather than changing
@@ -437,6 +440,7 @@ pub(crate) fn seed(checkout: &Path, unit: &str) -> Result<Option<PathBuf>> {
     }
     donors.sort_by_key(|donor| std::cmp::Reverse(donor.0));
     let destination = checkout.join(unit);
+    let mut failure = None;
     for (_, workspace_root, name) in donors {
         let Some(key) = name.to_str() else {
             continue;
@@ -449,23 +453,36 @@ pub(crate) fn seed(checkout: &Path, unit: &str) -> Result<Option<PathBuf>> {
         let mut staging = destination.clone().into_os_string();
         staging.push(format!(".seeding-{}", std::process::id()));
         let staging = PathBuf::from(staging);
+        let mut held = Vec::new();
         let copied = destination
             .parent()
             .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| copy_state(&source, &staging))
-            .and_then(|()| std::fs::rename(&staging, &destination));
-        if let Err(error) = copied {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(error).wrap_err_with(|| {
-                format!(
+            .and_then(|()| copy_state(&source, &staging, &mut held));
+        // Every session the donor's compiler could have been removing was
+        // skipped, so there may be nothing left to start from.
+        let copied = copied.and_then(|()| {
+            if holds_finished_session(&staging) {
+                std::fs::rename(&staging, &destination).map(|()| true)
+            } else {
+                Ok(false)
+            }
+        });
+        drop(held);
+        match copied {
+            Ok(true) => return Ok(Some(workspace_root)),
+            Ok(false) => {
+                let _ = std::fs::remove_dir_all(&staging);
+            }
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                failure = Some(eyre::Report::from(error).wrap_err(format!(
                     "failed to copy incremental state from {}",
                     workspace_root.display()
-                )
-            });
+                )));
+            }
         }
-        return Ok(Some(workspace_root));
     }
-    Ok(None)
+    failure.map_or(Ok(None), Err)
 }
 
 /// rustc names a session it is still writing `s-<time>-<random>-working`,
@@ -493,23 +510,73 @@ fn holds_finished_session(unit: &Path) -> bool {
     })
 }
 
-fn copy_state(source: &Path, destination: &Path) -> std::io::Result<()> {
+/// The name of the lock file rustc keeps beside a session: the session's name
+/// up to its third `-`, `s-<time>-<random>.lock`, the same before and after
+/// rustc finishes the session.
+fn session_lock_name(session: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
+    let name = session.to_str()?;
+    let (end, _) = name.match_indices('-').nth(2)?;
+    Some(format!("{}.lock", &name[..end]).into())
+}
+
+/// Hold a shared lock on a finished session's lock file, as a reader.
+///
+/// rustc removes a superseded session only after it takes that lock
+/// exclusively, so a session locked here cannot disappear while it is being
+/// copied. A session whose lock is taken, or that has no lock file, may be
+/// going away and is left out. rustc locks through the same primitive as
+/// `File::try_lock_shared`.
+fn lock_session(lock: &Path) -> Option<std::fs::File> {
+    let lock = std::fs::File::open(lock).ok()?;
+    lock.try_lock_shared().ok()?;
+    Some(lock)
+}
+
+fn copy_state(
+    source: &Path,
+    destination: &Path,
+    held: &mut Vec<std::fs::File>,
+) -> std::io::Result<()> {
     std::fs::create_dir(destination)?;
+    let mut entries = Vec::new();
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
-        let kind = entry.file_type()?;
-        let to = destination.join(entry.file_name());
-        if kind.is_dir() {
-            if !is_unfinished_session(&entry.file_name()) {
-                copy_state(&entry.path(), &to)?;
+        entries.push((entry.file_name(), entry.path(), entry.file_type()?));
+    }
+    // Lock every finished session first, so the lock files of the sessions
+    // left out are left out too.
+    let mut skipped = HashSet::new();
+    for (name, path, kind) in &entries {
+        let session = name.to_str().is_some_and(|name| name.starts_with("s-"));
+        if !kind.is_dir() || !session {
+            continue;
+        }
+        let lock_name = session_lock_name(name);
+        let lock = lock_name
+            .as_ref()
+            .filter(|_| !is_unfinished_session(name))
+            .and_then(|lock_name| lock_session(&path.with_file_name(lock_name)));
+        match lock {
+            Some(lock) => held.push(lock),
+            None => {
+                skipped.extend(lock_name);
+                skipped.insert(name.clone());
             }
+        }
+    }
+    for (name, from, kind) in &entries {
+        if skipped.contains(name) {
+            continue;
+        }
+        let to = destination.join(name);
+        if kind.is_dir() {
+            copy_state(from, &to, held)?;
         } else if kind.is_file() {
-            let from = entry.path();
             let lock = from
                 .extension()
                 .is_some_and(|extension| extension == "lock");
-            if lock || std::fs::hard_link(&from, &to).is_err() {
-                std::fs::copy(&from, &to)?;
+            if lock || std::fs::hard_link(from, &to).is_err() {
+                std::fs::copy(from, &to)?;
             }
         }
     }
@@ -822,9 +889,8 @@ mod tests {
             let session = directory.join(unit).join("widget-0abc").join(session);
             std::fs::create_dir_all(&session).unwrap();
             std::fs::write(session.join("dep-graph.bin"), key).unwrap();
-            let mut lock = session.into_os_string();
-            lock.push(".lock");
-            std::fs::write(lock, b"").unwrap();
+            let lock = session_lock_name(session.file_name().unwrap()).unwrap();
+            std::fs::write(session.with_file_name(lock), b"").unwrap();
         }
         std::fs::create_dir_all(&directory).unwrap();
         let record = CheckoutRecord {
@@ -878,8 +944,8 @@ mod tests {
                 "state files are shared, not copied"
             );
             assert_ne!(
-                inode(&copied.join("s-2-b-finished.lock")),
-                inode(&donor.join("s-2-b-finished.lock")),
+                inode(&copied.join("s-2-b.lock")),
+                inode(&donor.join("s-2-b.lock")),
                 "lock files are not shared"
             );
         }
@@ -910,6 +976,70 @@ mod tests {
         let copied = own.join(unit).join("widget-0abc");
         assert!(copied.join("s-1-a-finished").is_dir());
         assert!(!copied.join("s-2-b-working").exists());
+    }
+
+    /// Hold `session`'s lock the way rustc does while it removes the session.
+    fn lock_exclusively(checkout: &Path, unit: &str, session: &str) -> std::fs::File {
+        let lock = checkout
+            .join(unit)
+            .join("widget-0abc")
+            .join(session_lock_name(std::ffi::OsStr::new(session)).unwrap());
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock)
+            .unwrap();
+        file.try_lock().unwrap();
+        file
+    }
+
+    #[test]
+    fn seeding_leaves_out_a_session_the_donor_is_removing() {
+        let cache = tempfile::tempdir().unwrap();
+        let unit = "blake3/0123456789";
+        let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
+        let donor = checkout_with_sessions(
+            cache.path(),
+            "donor",
+            20,
+            unit,
+            &["s-1-a-superseded", "s-2-b-current"],
+        );
+        let _removing = lock_exclusively(&donor, unit, "s-1-a-superseded");
+
+        seed(&own, unit).unwrap();
+
+        let copied = own.join(unit).join("widget-0abc");
+        assert!(copied.join("s-2-b-current").is_dir());
+        assert!(copied.join("s-2-b.lock").is_file());
+        assert!(!copied.join("s-1-a-superseded").exists());
+        assert!(!copied.join("s-1-a.lock").exists());
+    }
+
+    #[test]
+    fn seeding_falls_back_to_another_donor_when_one_has_nothing_to_give() {
+        let cache = tempfile::tempdir().unwrap();
+        let unit = "blake3/0123456789";
+        let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
+        checkout_with_sessions(cache.path(), "older", 10, unit, &["s-1-a-finished"]);
+        let busy = checkout_with_sessions(cache.path(), "newer", 20, unit, &["s-2-b-finished"]);
+        let _removing = lock_exclusively(&busy, unit, "s-2-b-finished");
+
+        assert_eq!(
+            seed(&own, unit).unwrap(),
+            Some(PathBuf::from("/work/older"))
+        );
+        assert!(
+            own.join(unit)
+                .join("widget-0abc")
+                .join("s-1-a-finished")
+                .is_dir()
+        );
+        assert_eq!(
+            std::fs::read_dir(own.join("blake3")).unwrap().count(),
+            1,
+            "the abandoned copy is cleaned up"
+        );
     }
 
     #[test]

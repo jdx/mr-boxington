@@ -1459,15 +1459,23 @@ fn learned_state_seeds_another_checkout_when_rustc_remaps_the_working_directory(
         ("RUSTC_BOOTSTRAP", "1"),
         ("RUSTFLAGS", "-Zremap-cwd-prefix=/src"),
     ];
-    let edit = |project: &Path| {
-        std::fs::write(
-            project.join("base/src/lib.rs"),
-            "#![doc = include_str!(\"../../README.md\")]\npub fn value() -> u32 { 21 }\n",
+    // A module the edit never touches compiles to its own codegen units, which
+    // rustc reuses rather than recompiles when it accepts the state.
+    let stable = (0..64)
+        .map(|index| {
+            format!("pub fn f{index}(x: u64) -> u64 {{ x.rotate_left({index}) ^ {index} }}\n")
+        })
+        .collect::<String>();
+    let lib = |value: u32| {
+        format!(
+            "#![doc = include_str!(\"../../README.md\")]\npub mod stable;\npub fn value() -> u32 {{ {value} }}\n"
         )
-        .unwrap();
     };
+    let edit = |project: &Path| std::fs::write(project.join("base/src/lib.rs"), lib(21)).unwrap();
     for project in [first.path(), second.path(), unremapped.path()] {
         write_dependent_project(project);
+        std::fs::write(project.join("base/src/stable.rs"), &stable).unwrap();
+        std::fs::write(project.join("base/src/lib.rs"), lib(0)).unwrap();
     }
 
     build_with(
@@ -1521,6 +1529,48 @@ fn learned_state_seeds_another_checkout_when_rustc_remaps_the_working_directory(
         .is_empty(),
         "the second checkout's first edit should start from the first checkout's state"
     );
+    // Copied is not reused: rustc rejects state recorded with different
+    // options and compiles everything afresh. It links each codegen unit it
+    // reuses from the previous session into the new one, so only reuse leaves
+    // the newest session holding the donor's own object files.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let objects = |directory: &Path| {
+            find_files(directory, |path| {
+                path.extension().is_some_and(|extension| extension == "o")
+            })
+        };
+        let donor = objects(&first_state)
+            .iter()
+            .map(|path| std::fs::metadata(path).unwrap().ino())
+            .collect::<std::collections::HashSet<_>>();
+        let newest = find_files(&second_state, |path| {
+            file_name_is(path, |name| name == "dep-graph.bin")
+        })
+        .into_iter()
+        .filter(|graph| {
+            graph.ancestors().nth(2).is_some_and(|krate| {
+                krate
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("base-"))
+            })
+        })
+        .max_by_key(|graph| std::fs::metadata(graph).unwrap().modified().unwrap())
+        .expect("the second checkout keeps state for base")
+        .parent()
+        .unwrap()
+        .to_path_buf();
+        let reused = objects(&newest)
+            .iter()
+            .filter(|path| donor.contains(&std::fs::metadata(path).unwrap().ino()))
+            .count();
+        assert!(
+            reused > 0,
+            "rustc should reuse the seeded codegen units in {}",
+            newest.display()
+        );
+    }
 
     // Without the flag rustc would ignore another checkout's state, so none
     // is copied.
