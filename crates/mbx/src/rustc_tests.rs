@@ -1819,12 +1819,11 @@ fn paths_under_the_working_directory_become_relative() {
             "--extern=log=/work/checkout/target/debug/deps/liblog-0abc.rmeta",
             "--out-dir",
             "/work/checkout/target/debug/deps",
-            "-Clinker=/work/checkout/tools/clang",
             "--remap-path-prefix=/work/checkout/target/debug/build/render-0abc/out=${target}/out",
             "--remap-path-prefix=/work/checkout=${workspace}",
             "--remap-path-prefix",
             "/work/checkout/vendor=/vendor",
-            "-Clink-arg=-Wl,-oso_prefix,/work/checkout/target/",
+            "--emit=dep-info=/work/checkout/target/debug/deps/render.d",
         ]),
         [
             "--crate-name",
@@ -1838,19 +1837,19 @@ fn paths_under_the_working_directory_become_relative() {
             "--extern=log=./target/debug/deps/liblog-0abc.rmeta",
             "--out-dir",
             "./target/debug/deps",
-            // `./` keeps a shortened program from being looked up on PATH.
-            "-Clinker=./tools/clang",
             "--remap-path-prefix=./target/debug/build/render-0abc/out=${target}/out",
             "--remap-path-prefix=.=${workspace}",
             "--remap-path-prefix",
             "./vendor=/vendor",
-            "-Clink-arg=-Wl,-oso_prefix,./target/",
+            // `./` rather than nothing, so a path never turns into a name.
+            "--emit=dep-info=./target/debug/deps/render.d",
         ]
     );
     // Elsewhere, including a path that merely contains the working directory,
     // one that only shares its name's prefix, a remap destination (the text
-    // recorded in the source's place), and the virtual working directory
-    // itself, stays as it was.
+    // recorded in the source's place), the virtual working directory itself,
+    // and what only the linker reads -- which can embed a path, such as an
+    // rpath, that must stay absolute -- stays as it was.
     let unrelated = [
         "-Lnative=/opt/homebrew/lib",
         "--extern=std=/mnt/work/checkout/libstd.rlib",
@@ -1862,6 +1861,13 @@ fn paths_under_the_working_directory_become_relative() {
         "-Zremap-cwd-prefix=/work/checkout",
         "-Z",
         "remap-cwd-prefix=/work/checkout",
+        "-Clinker=/work/checkout/tools/clang",
+        "-Clink-arg=-Wl,-rpath,/work/checkout/target/debug/lib",
+        "-C",
+        "link-args=-Wl,-rpath=/work/checkout/lib -L/work/checkout/lib",
+        "-C",
+        "linker=/work/checkout/tools/clang",
+        "-Zpre-link-arg=/work/checkout/crt0.o",
     ];
     assert_eq!(rewrite(&unrelated), unrelated);
 }

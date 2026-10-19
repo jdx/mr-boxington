@@ -1301,6 +1301,11 @@ fn paths_relative_to(arguments: &[OsString], working_dir: &Path) -> Vec<OsString
         {
             // The virtual directory written in the working directory's place.
             text.to_owned()
+        } else if is_link_option(text, previous) {
+            // Only the linker reads these, and rustc leaves them out of what
+            // its state is checked against. They can also embed a path in the
+            // output, such as an rpath, which has to stay absolute.
+            text.to_owned()
         } else {
             relative_in(text, root)
         };
@@ -1308,6 +1313,21 @@ fn paths_relative_to(arguments: &[OsString], working_dir: &Path) -> Vec<OsString
         rewritten.push(OsString::from(value));
     }
     rewritten
+}
+
+/// `-C link-arg`, `-C link-args`, `-C linker`, and `-Z pre-link-arg(s)`,
+/// attached or after a separate `-C`/`-Z`.
+fn is_link_option(text: &str, previous: Option<&str>) -> bool {
+    const CODEGEN: [&str; 2] = ["link-arg", "linker"];
+    const UNSTABLE: [&str; 1] = ["pre-link-arg"];
+    let starts = |value: &str, names: &[&str]| names.iter().any(|name| value.starts_with(name));
+    text.strip_prefix("-C")
+        .is_some_and(|value| starts(value, &CODEGEN))
+        || text
+            .strip_prefix("-Z")
+            .is_some_and(|value| starts(value, &UNSTABLE))
+        || (previous == Some("-C") && starts(text, &CODEGEN))
+        || (previous == Some("-Z") && starts(text, &UNSTABLE))
 }
 
 /// A `--remap-path-prefix` value with its source made relative. rustc splits
