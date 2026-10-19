@@ -1278,46 +1278,75 @@ fn compiler_command(rustc: &OsStr, wrapper_argument: Option<&OsStr>) -> Command 
 /// directory, which `-Zremap-cwd-prefix` keeps out of the state, they are the
 /// same in each, and they still name this checkout's files.
 ///
-/// A path is recognised where an argument or a value starts: at the beginning,
-/// or after `=` or `,`. The working directory itself becomes `.`. Only the command that runs changes: the key resolves
-/// relative paths against the working directory too.
+/// Only the command that runs changes: the key resolves relative paths against
+/// the working directory too. See [`relative_in`] for what counts as a path.
 fn paths_relative_to(arguments: &[OsString], working_dir: &Path) -> Vec<OsString> {
     let Some(root) = working_dir.to_str() else {
         return arguments.to_vec();
     };
-    arguments
-        .iter()
-        .map(|argument| {
-            let Some(text) = argument.to_str() else {
-                return argument.clone();
-            };
-            let mut rewritten = String::with_capacity(text.len());
-            let mut rest = text;
-            let mut at_start = true;
-            while !rest.is_empty() {
-                if at_start && let Some(after) = rest.strip_prefix(root) {
-                    // Windows accepts either separator, and Cargo can mix them.
-                    match after.chars().next() {
-                        Some(separator) if std::path::is_separator(separator) => {
-                            rest = &after[separator.len_utf8()..];
-                        }
-                        None | Some('=' | ',') => {
-                            rewritten.push('.');
-                            rest = after;
-                        }
-                        Some(_) => {}
-                    }
-                }
-                let Some(next) = rest.chars().next() else {
-                    break;
-                };
-                rewritten.push(next);
-                rest = &rest[next.len_utf8()..];
-                at_start = matches!(next, '=' | ',');
-            }
-            OsString::from(rewritten)
-        })
-        .collect()
+    let mut rewritten = Vec::with_capacity(arguments.len());
+    let mut previous = None;
+    for argument in arguments {
+        let Some(text) = argument.to_str() else {
+            previous = None;
+            rewritten.push(argument.clone());
+            continue;
+        };
+        let value = if previous == Some("--remap-path-prefix") {
+            remap_relative_in(text, root)
+        } else if let Some(remap) = text.strip_prefix("--remap-path-prefix=") {
+            format!("--remap-path-prefix={}", remap_relative_in(remap, root))
+        } else if text.starts_with("-Zremap-cwd-prefix")
+            || (previous == Some("-Z") && text.starts_with("remap-cwd-prefix"))
+        {
+            // The virtual directory written in the working directory's place.
+            text.to_owned()
+        } else {
+            relative_in(text, root)
+        };
+        previous = Some(text);
+        rewritten.push(OsString::from(value));
+    }
+    rewritten
+}
+
+/// A `--remap-path-prefix` value with its source made relative. rustc splits
+/// it at the last `=`, and the destination is the literal text recorded in the
+/// source's place, not a path to open, so it stays as written.
+fn remap_relative_in(remap: &str, root: &str) -> String {
+    match remap.rsplit_once('=') {
+        Some((from, to)) => format!("{}={to}", relative_in(from, root)),
+        None => remap.to_owned(),
+    }
+}
+
+/// `text` with the working directory written as `.` wherever a path starts:
+/// at the beginning, or after `=` or `,`. `./` rather than nothing keeps a
+/// shortened executable, such as a linker, from being looked up on `PATH`.
+fn relative_in(text: &str, root: &str) -> String {
+    let mut rewritten = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut at_start = true;
+    while !rest.is_empty() {
+        if at_start
+            && let Some(after) = rest.strip_prefix(root)
+            // Windows accepts either separator, and Cargo can mix them.
+            && after
+                .chars()
+                .next()
+                .is_none_or(|next| std::path::is_separator(next) || matches!(next, '=' | ','))
+        {
+            rewritten.push('.');
+            rest = after;
+        }
+        let Some(next) = rest.chars().next() else {
+            break;
+        };
+        rewritten.push(next);
+        rest = &rest[next.len_utf8()..];
+        at_start = matches!(next, '=' | ',');
+    }
+    rewritten
 }
 
 /// The executable Cargo will run as a build script, when this compilation

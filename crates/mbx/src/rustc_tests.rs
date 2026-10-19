@@ -1819,8 +1819,11 @@ fn paths_under_the_working_directory_become_relative() {
             "--extern=log=/work/checkout/target/debug/deps/liblog-0abc.rmeta",
             "--out-dir",
             "/work/checkout/target/debug/deps",
+            "-Clinker=/work/checkout/tools/clang",
             "--remap-path-prefix=/work/checkout/target/debug/build/render-0abc/out=${target}/out",
             "--remap-path-prefix=/work/checkout=${workspace}",
+            "--remap-path-prefix",
+            "/work/checkout/vendor=/vendor",
             "-Clink-arg=-Wl,-oso_prefix,/work/checkout/target/",
         ]),
         [
@@ -1828,26 +1831,37 @@ fn paths_under_the_working_directory_become_relative() {
             "render",
             "crates/render/src/lib.rs",
             "-L",
-            "dependency=target/debug/deps",
-            "-Lnative=target/debug/build/blake3-0abc/out",
+            "dependency=./target/debug/deps",
+            "-Lnative=./target/debug/build/blake3-0abc/out",
             "--extern",
-            "bevy=target/debug/deps/libbevy-0abc.rmeta",
-            "--extern=log=target/debug/deps/liblog-0abc.rmeta",
+            "bevy=./target/debug/deps/libbevy-0abc.rmeta",
+            "--extern=log=./target/debug/deps/liblog-0abc.rmeta",
             "--out-dir",
-            "target/debug/deps",
-            "--remap-path-prefix=target/debug/build/render-0abc/out=${target}/out",
+            "./target/debug/deps",
+            // `./` keeps a shortened program from being looked up on PATH.
+            "-Clinker=./tools/clang",
+            "--remap-path-prefix=./target/debug/build/render-0abc/out=${target}/out",
             "--remap-path-prefix=.=${workspace}",
-            "-Clink-arg=-Wl,-oso_prefix,target/",
+            "--remap-path-prefix",
+            "./vendor=/vendor",
+            "-Clink-arg=-Wl,-oso_prefix,./target/",
         ]
     );
     // Elsewhere, including a path that merely contains the working directory,
-    // or one that only shares its name's prefix, stays as it was.
+    // one that only shares its name's prefix, a remap destination (the text
+    // recorded in the source's place), and the virtual working directory
+    // itself, stays as it was.
     let unrelated = [
         "-Lnative=/opt/homebrew/lib",
         "--extern=std=/mnt/work/checkout/libstd.rlib",
         "-L",
         "/work/checkout-two/target",
-        "-Zremap-cwd-prefix=/src",
+        "--remap-path-prefix=/vendor=/work/checkout/vendor",
+        "--remap-path-prefix",
+        "/vendor=/work/checkout/vendor",
+        "-Zremap-cwd-prefix=/work/checkout",
+        "-Z",
+        "remap-cwd-prefix=/work/checkout",
     ];
     assert_eq!(rewrite(&unrelated), unrelated);
 }
@@ -1867,8 +1881,8 @@ fn windows_paths_under_the_working_directory_become_relative_with_either_separat
     assert_eq!(
         paths_relative_to(&arguments, working_dir),
         [
-            OsString::from(r"dependency=target\debug\deps"),
-            OsString::from("--extern=log=target/debug/deps/liblog.rmeta"),
+            OsString::from(r"dependency=.\target\debug\deps"),
+            OsString::from("--extern=log=./target/debug/deps/liblog.rmeta"),
             OsString::from(r"E:\work\checkout-two\target"),
         ]
     );
