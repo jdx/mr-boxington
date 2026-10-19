@@ -69,12 +69,12 @@ impl LearnedPlan {
     /// Find somewhere to keep the state, for a unit that earned it. State
     /// that does not depend on the checkout's location may start from another
     /// checkout's; see [`incremental::seed`].
-    fn resolved(mut self, invocation: &RustcInvocation, unit: &CacheDigest) -> Self {
+    fn resolved(mut self, compilation: &Compilation<'_>, unit: &CacheDigest) -> Self {
         if self.hot {
             self.directory = incremental_directory(
                 unit,
-                invocation.crate_name(),
-                invocation.remaps_working_directory(),
+                compilation.invocation.crate_name(),
+                shares_incremental_state(compilation.rustc, compilation.invocation),
             );
         }
         self
@@ -526,7 +526,7 @@ pub(crate) fn compile(
     let compilation_started = SystemTime::now();
     let compiler_timer = Instant::now();
     let mut command = compiler_command(rustc, wrapper_argument);
-    if incremental_flag.is_some() && invocation.remaps_working_directory() {
+    if incremental_flag.is_some() && shares_incremental_state(rustc, &invocation) {
         command.args(paths_relative_to(&arguments, &working_dir));
     } else {
         command.args(&arguments);
@@ -1412,6 +1412,33 @@ fn learned_plan(
     }
 }
 
+/// Whether one checkout's incremental state for this compilation is as good as
+/// another's, so that it can be seeded from one and its paths made relative.
+///
+/// That takes `-Zremap-cwd-prefix`, and a rustc that checks its state against
+/// the working directory as the flag presents it, which it first does in 1.98.
+/// Earlier releases compare the real directory and ignore state recorded in
+/// any other checkout, so copying it would only cost time and disk.
+fn shares_incremental_state(rustc: &OsStr, invocation: &RustcInvocation) -> bool {
+    invocation.remaps_working_directory()
+        && compiler_identity(rustc)
+            .is_ok_and(|identity| release_at_least(&identity.rustc_version, (1, 98)))
+}
+
+/// Whether a [`CompilerIdentity::rustc_version`] names `minimum` or later, by
+/// its `rustc <major>.<minor>.<patch>` line.
+fn release_at_least(rustc_version: &str, minimum: (u32, u32)) -> bool {
+    let Some(release) = rustc_version
+        .split(['\n', ';'])
+        .find_map(|line| line.trim().strip_prefix("rustc "))
+    else {
+        return false;
+    };
+    let mut parts = release.split(|c: char| !c.is_ascii_digit());
+    let mut next = || parts.next().and_then(|part| part.parse::<u32>().ok());
+    matches!((next(), next()), (Some(major), Some(minor)) if (major, minor) >= minimum)
+}
+
 /// Where one unit keeps its incremental state.
 ///
 /// A session gives it a persistent per-checkout root outside Cargo's target
@@ -1594,7 +1621,7 @@ fn plan_learned_reuse(
             record: Some((state_path, sources)),
             ..plan
         }
-        .resolved(compilation.invocation, &unit))
+        .resolved(compilation, &unit))
     })();
     match planned {
         Ok(plan) => plan,
@@ -1724,7 +1751,7 @@ fn eager_incremental_plan(compilation: &Compilation<'_>) -> LearnedPlan {
                 hot: true,
                 ..LearnedPlan::default()
             }
-            .resolved(compilation.invocation, &unit),
+            .resolved(compilation, &unit),
         )
     })();
     planned.unwrap_or_else(|error| {
@@ -1790,7 +1817,7 @@ fn reuse_hot_workspace_plan(
             directory: None,
             record: Some((state_path, sources)),
         }
-        .resolved(compilation.invocation, &unit))
+        .resolved(compilation, &unit))
     })();
     match planned {
         Ok(plan) => plan,

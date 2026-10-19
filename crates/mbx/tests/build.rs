@@ -1447,6 +1447,20 @@ fn incremental_checkouts(cache: &Path) -> Vec<(PathBuf, PathBuf)> {
         .collect()
 }
 
+/// Whether the `rustc` these tests build with accepts incremental state
+/// recorded in another checkout under `-Zremap-cwd-prefix` (1.98 and later).
+fn rustc_relocates_incremental_state() -> bool {
+    let output = Command::new("rustc").arg("-vV").output().unwrap();
+    let verbose = String::from_utf8(output.stdout).unwrap();
+    let release = verbose
+        .lines()
+        .find_map(|line| line.strip_prefix("release: "))
+        .expect("rustc -vV names its release");
+    let mut parts = release.split(|c: char| !c.is_ascii_digit());
+    let mut next = || parts.next().unwrap().parse::<u32>().unwrap();
+    (next(), next()) >= (1, 98)
+}
+
 #[test]
 fn learned_state_seeds_another_checkout_when_rustc_remaps_the_working_directory() {
     const MARKER: &str = "seeded-from-first";
@@ -1523,10 +1537,22 @@ fn learned_state_seeds_another_checkout_when_rustc_remaps_the_working_directory(
     .0;
     assert!(compiled_incrementally(&seeded) >= 1, "{seeded}");
     let second_state = incremental_checkout(store.path(), second.path());
+    let seeded_from_first = !find_files(&second_state, |path| {
+        file_name_is(path, |name| name == MARKER)
+    })
+    .is_empty();
+    // Before 1.98, rustc checks incremental state against the real working
+    // directory and ignores another checkout's whatever the flag says, so mbx
+    // copies nothing.
+    if !rustc_relocates_incremental_state() {
+        assert!(
+            !seeded_from_first,
+            "state rustc would ignore should not be copied"
+        );
+        return;
+    }
     assert!(
-        !find_files(&second_state, |path| file_name_is(path, |name| name
-            == MARKER))
-        .is_empty(),
+        seeded_from_first,
         "the second checkout's first edit should start from the first checkout's state"
     );
     // Copied is not reused: rustc rejects state recorded with different

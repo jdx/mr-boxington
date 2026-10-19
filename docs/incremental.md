@@ -44,7 +44,10 @@ rustc the same working directory in every checkout and that state carries over:
 rustflags = ["-Zremap-cwd-prefix=/src"]
 ```
 
-The flag needs a nightly toolchain, or `RUSTC_BOOTSTRAP=1` on a stable one.
+The flag needs a nightly toolchain, or `RUSTC_BOOTSTRAP=1` on a stable one, and
+seeding needs rustc 1.98 or later: earlier releases check incremental state
+against the real working directory and ignore another checkout's, so mbx copies
+nothing for them.
 With it, when a crate first needs private state in a checkout, mbx copies the
 state of the most recently used checkout that has some for the same crate and
 flags, hard-linking its files. rustc validates the copied state against the

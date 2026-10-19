@@ -1887,3 +1887,22 @@ fn windows_paths_under_the_working_directory_become_relative_with_either_separat
         ]
     );
 }
+
+#[test]
+fn relocatable_incremental_state_needs_rustc_1_98() {
+    // As `query_compiler_identity` keeps it: the version lines of `rustc -vV`.
+    let identity = |release: &str| {
+        format!(
+            "rustc {release} (88d9e12ae 2026-08-18); commit-hash: 88d9e12ae; LLVM version: 21.1.0"
+        )
+    };
+    assert!(!release_at_least(&identity("1.94.0"), (1, 98)));
+    assert!(!release_at_least(&identity("1.97.1"), (1, 98)));
+    assert!(release_at_least(&identity("1.98.0"), (1, 98)));
+    assert!(release_at_least(&identity("1.101.0-nightly"), (1, 98)));
+    assert!(release_at_least(&identity("2.0.0"), (1, 98)));
+    assert!(
+        !release_at_least("commit-hash: 88d9e12ae", (1, 98)),
+        "no version line"
+    );
+}
