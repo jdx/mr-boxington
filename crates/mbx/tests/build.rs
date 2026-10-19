@@ -7526,3 +7526,131 @@ exec "$TEST_REAL_RUSTC" "$@"
         }
     }
 }
+
+/// Write a binary-only fixture called `objects` whose `main` depends on
+/// `revision`, so each revision compiles to new code.
+#[cfg(unix)]
+fn write_object_project(directory: &Path, revision: u32) {
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[package]\nname = \"objects\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/main.rs"),
+        format!(
+            "fn helper(value: u32) -> u32 {{\n    value + {revision}\n}}\n\n\
+             fn main() {{\n    println!(\"revision {{}}\", helper(0));\n}}\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// The binary unit's object files: each name with its inode.
+#[cfg(unix)]
+fn object_files(project: &Path) -> std::collections::BTreeMap<String, u64> {
+    use std::os::unix::fs::MetadataExt as _;
+    find_files(&project.join("target/debug/deps"), |path| {
+        file_name_is(path, |name| {
+            name.starts_with("objects-") && name.ends_with(".rcgu.o")
+        })
+    })
+    .iter()
+    .map(|path| {
+        (
+            path.file_name().unwrap().to_string_lossy().into_owned(),
+            std::fs::metadata(path).unwrap().ino(),
+        )
+    })
+    .collect()
+}
+
+/// The object files the linked `binary`'s debug map names, by file name.
+#[cfg(unix)]
+fn debug_map_objects(binary: &Path) -> std::collections::BTreeSet<String> {
+    let map = Command::new("dsymutil")
+        .arg("-dump-debug-map")
+        .arg(binary)
+        .output()
+        .expect("dsymutil should run");
+    assert!(map.status.success());
+    String::from_utf8_lossy(&map.stdout)
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("- filename:"))
+        .map(|path| path.trim().trim_matches('\'').trim_matches('"').to_string())
+        .filter_map(|path| {
+            Path::new(&path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .filter(|name| name.starts_with("objects-") && name.ends_with(".rcgu.o"))
+        .collect()
+}
+
+/// Each compilation of a unit leaves its object files beside the previous
+/// compilation's on macOS. A later successful compilation removes the ones it
+/// made redundant: what the program's debug map names stays, older names of
+/// objects it linked anew go, and a superseded object goes once rustc has
+/// dropped its own link to it. The names stay bounded however often the unit
+/// compiles.
+#[cfg(unix)]
+#[test]
+fn a_compilation_removes_the_object_files_its_predecessors_left() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_object_project(project.path(), 1);
+    generate_lockfile(project.path());
+    let settings = [("MBX_INCREMENTAL", "1")];
+    let binary = project.path().join("target/debug/objects");
+    for revision in 1..=6 {
+        if revision > 1 {
+            // Objects must be older than a compilation by a margin before it
+            // removes them, and a change time cannot be backdated.
+            std::thread::sleep(std::time::Duration::from_millis(2100));
+            write_object_project(project.path(), revision);
+        }
+        build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("{revision}.json")),
+            &settings,
+        );
+        let run = Command::new(&binary).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout),
+            format!("revision {revision}\n")
+        );
+        let objects = object_files(project.path());
+        if cfg!(not(target_os = "macos")) {
+            // Debug info is packed, or kept in the program, and rustc
+            // deletes its objects itself.
+            assert!(objects.is_empty(), "{objects:?}");
+            return;
+        }
+        let named = debug_map_objects(&binary);
+        assert!(!named.is_empty());
+        for name in &named {
+            assert!(objects.contains_key(name), "{name} is in the debug map");
+        }
+        // Each compilation names its objects with a suffix of its own. rustc
+        // keeps the previous incremental session beside the current one and
+        // deletes the older one during the next compilation, which moves the
+        // change time of the objects only that session still linked; those go
+        // one compilation later. So at most three suffixes are left: this
+        // compilation's, and superseded objects of the two before it.
+        let compilations: std::collections::BTreeSet<&str> = objects
+            .keys()
+            .filter_map(|name| name.split('.').nth(2))
+            .collect();
+        assert!(
+            compilations.len() <= 3,
+            "build {revision} left {compilations:?}: {objects:?}"
+        );
+    }
+    assert!(
+        incremental_sessions(project.path()) > 0,
+        "still incremental"
+    );
+}

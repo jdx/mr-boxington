@@ -1958,6 +1958,11 @@ fn run_transparent_rustc(
             .is_some_and(|name| !name.starts_with("build_script_"));
     #[cfg(unix)]
     let mut action = crate::supervision::prepare(&mut command, eligible);
+    // Only a compilation this process waits for can clean up after itself.
+    let objects = demand.as_ref().and_then(|_| {
+        let working_dir = std::env::current_dir().ok()?;
+        crate::object_cleanup::ObjectSnapshot::before_compiling(described, &working_dir)
+    });
 
     #[cfg(unix)]
     {
@@ -1988,6 +1993,9 @@ fn run_transparent_rustc(
                 drop(permit);
                 if let Some(demand) = &demand {
                     crate::scheduler::record_compiler_memory(demand, &status);
+                }
+                if let Some(objects) = objects {
+                    objects.remove_superseded(&status);
                 }
                 record_compiler_invocation(
                     "bypass",
@@ -2026,6 +2034,9 @@ fn run_transparent_rustc(
                 drop(permit);
                 if let Some(demand) = &demand {
                     crate::scheduler::record_compiler_memory(demand, &status);
+                }
+                if let Some(objects) = objects {
+                    objects.remove_superseded(&status);
                 }
                 record_compiler_invocation(
                     "bypass",

@@ -374,6 +374,24 @@ compiles it again. Unused units go before the size budget is weighed, so they
 are removed ahead of whole target directories. `target.max_age = "none"` keeps
 them.
 
+### Object files
+
+On macOS, rustc keeps the object files of each compilation beside the program
+in `deps/`, because the program's debug information points into them
+(`split-debuginfo = "unpacked"`, the macOS default). Each compilation of a unit
+writes a complete new set and leaves the previous ones, so an incremental
+build of a test crate edited all day can leave tens of thousands of them. When
+a compilation through mbx succeeds, it removes that unit's object files that
+are older than the compilation and that the compilation did not write, replace,
+or link again. The set the program's debug information names stays. An object
+file rustc still keeps in its incremental session goes on a later compilation.
+An older name of an object that is still in use goes once a compilation links
+that object under a new name, so a unit keeps the object files of its last few
+compilations at most.
+Nothing is removed after a failed compilation or under `-C save-temps`. On
+Linux and Windows, rustc deletes these files itself unless a project sets
+`split-debuginfo = "unpacked"`.
+
 ### Budgets scale with the disk
 
 All three budgets scale with the disk that holds the data. By default, targets,

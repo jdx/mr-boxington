@@ -63,6 +63,7 @@ mod incremental;
 mod linker;
 mod managed_linker;
 mod materialize;
+mod object_cleanup;
 mod out_dir;
 mod pressure;
 mod rustc;

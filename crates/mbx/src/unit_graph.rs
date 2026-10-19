@@ -26,7 +26,12 @@ pub(crate) fn rustc_unit(
     arguments: &[OsString],
     out_dir: Option<&Path>,
 ) -> (Option<String>, Vec<String>) {
-    let mut unit = None;
+    let unit = codegen_options(arguments)
+        .filter_map(|option| option.strip_prefix("extra-filename="))
+        .map(|value| value.trim_start_matches('-'))
+        .filter(|hash| is_hash(hash))
+        .last()
+        .map(str::to_string);
     let mut out_directory = None;
     let mut dependencies = Vec::new();
     let mut arguments = arguments.iter().filter_map(|argument| argument.to_str());
@@ -37,21 +42,6 @@ pub(crate) fn rustc_unit(
         };
         if let Some(output) = output {
             out_directory = unit_directory_hash(Path::new(output));
-            continue;
-        }
-        let codegen = match argument {
-            "-C" | "--codegen" => arguments.next(),
-            _ => argument
-                .strip_prefix("-C")
-                .or_else(|| argument.strip_prefix("--codegen="))
-                .filter(|option| !option.is_empty()),
-        };
-        if let Some(hash) = codegen
-            .and_then(|option| option.strip_prefix("extra-filename="))
-            .map(|value| value.trim_start_matches('-'))
-            .filter(|hash| is_hash(hash))
-        {
-            unit = Some(hash.to_string());
             continue;
         }
         let external = match argument {
@@ -69,6 +59,33 @@ pub(crate) fn rustc_unit(
     dependencies.sort();
     dependencies.dedup();
     (unit.or(out_directory), dependencies)
+}
+
+/// The codegen options in a rustc command line, `name=value` or `name`,
+/// however each is spelled: `-C option`, `-Coption`, `--codegen option`, or
+/// `--codegen=option`.
+pub(crate) fn codegen_options(arguments: &[OsString]) -> impl Iterator<Item = &str> {
+    let mut arguments = arguments.iter().filter_map(|argument| argument.to_str());
+    std::iter::from_fn(move || {
+        loop {
+            let argument = arguments.next()?;
+            let option = match argument {
+                "-C" | "--codegen" => arguments.next(),
+                _ => argument
+                    .strip_prefix("-C")
+                    .or_else(|| argument.strip_prefix("--codegen="))
+                    .filter(|option| !option.is_empty()),
+            };
+            if option.is_some() {
+                return option;
+            }
+        }
+    })
+}
+
+/// Whether `text` is a hash Cargo names a unit with: 16 hex digits.
+pub(crate) fn is_unit_hash(text: &str) -> bool {
+    text.len() == 16 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// The unit a build-script run produces, and the compilation it runs.

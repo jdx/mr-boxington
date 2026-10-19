@@ -609,6 +609,9 @@ pub(crate) fn compile(
             .chain(std::iter::once(&outputs.dep_info))
             .map(PathBuf::as_path),
     );
+    // The unit's objects from earlier compilations, recorded last so that
+    // everything older than this compilation is in it.
+    let objects = crate::object_cleanup::ObjectSnapshot::before_compiling(&arguments, &working_dir);
     // Bootstrap may be visible to env!/option_env!. Hold notifications too:
     // Cargo must not give dependents metadata that the retry will discard.
     let held = seed_mode == IncrementalSeedMode::Inject { bootstrap: true };
@@ -888,6 +891,9 @@ pub(crate) fn compile(
             }
         }
     }
+    if !compiler_input_invalid && let Some(objects) = objects {
+        objects.remove_superseded(&output.status);
+    }
     session::check_low_disk_after_compile();
     session::record_compiler_invocation_with_diagnostic(
         recorded_outcome,
@@ -1164,10 +1170,14 @@ fn compile_execution_only_build_script(
             .chain(std::iter::once(&outputs.dep_info))
             .map(PathBuf::as_path),
     );
+    let objects = crate::object_cleanup::ObjectSnapshot::before_compiling(arguments, working_dir);
     let output =
         run_compiler(&mut command, forwarded, false).wrap_err("failed to execute rustc")?;
     drop(permit);
     crate::scheduler::record_compiler_memory(&demand, &output.status);
+    if let Some(objects) = objects {
+        objects.remove_superseded(&output.status);
+    }
     session::record_compiler_invocation(
         "bypass",
         Some(invocation.crate_name()),
@@ -1325,7 +1335,7 @@ fn compiler_sysroot(rustc: &OsStr) -> Option<PathBuf> {
 }
 
 /// The value of `--flag=VALUE` or `--flag VALUE`, whichever comes first.
-fn flag_value(arguments: &[OsString], flag: &str) -> Option<String> {
+pub(crate) fn flag_value(arguments: &[OsString], flag: &str) -> Option<String> {
     let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {
         if argument == flag {
