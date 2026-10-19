@@ -48,7 +48,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const VIEWS_DIR: &str = "v1";
 /// Marks a view moved aside for removal; never part of a view's own name,
 /// which is a bare hex digest.
-const REMOVAL_SUFFIX: &str = ".removing-";
+pub(crate) const REMOVAL_SUFFIX: &str = ".removing-";
 const VIEW_RECORD_VERSION: u8 = 1;
 /// How recently a view's record must have been refreshed for collection to
 /// treat a build as having just claimed it. Records carry whole seconds, so a
@@ -1691,7 +1691,7 @@ fn recently_claimed(root: &Path, record: &ViewRecord, updated: u64, now: u64) ->
 }
 
 /// Where a view goes while its files are removed.
-fn removal_path(directory: &Path) -> PathBuf {
+pub(crate) fn removal_path(directory: &Path) -> PathBuf {
     let name = directory
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())

@@ -46,7 +46,10 @@ pub(super) struct GcArgs {
     /// Defaults to `gc.max_size`. Managed targets, learned incremental state,
     /// and generated source trees are still collected to their own budgets.
     /// Incremental units expire individually and are evicted least recently
-    /// used first; active builds and held rustc session locks protect them.
+    /// used first, inside active checkouts too; a unit a running compiler
+    /// holds is never removed, and units of a live checkout used within the
+    /// last hour are kept, unless they have expired or the disk is short of
+    /// `gc.min_free_size`.
     /// With `gc.max_total_size` set, incremental state and generated source
     /// trees default to a cap of 10% of the total, at least 10 GiB but never
     /// above the total; managed targets use what remains after them and the
@@ -63,8 +66,11 @@ pub(super) struct GcArgs {
     /// disk again after each step. To free the cache disk, a real run can also
     /// evict more store objects than the action-store budget requires, and the
     /// preview never lists them.
-    /// A preview does not probe rustc's session locks, so it can list a unit
-    /// a compiler is still writing; a real run keeps such units.
+    /// A preview does not probe the locks compilers hold on incremental
+    /// units, so it can list a unit a compiler is still using; a real run
+    /// keeps such units. A preview keeps unexpired units of a live checkout
+    /// used within the last hour, which a real run on a disk short of
+    /// `gc.min_free_size` removes.
     #[usage(long)]
     pub(super) dry_run: bool,
     /// Run the throttled sweep a build schedules, if one is due. Builds start
@@ -104,6 +110,7 @@ pub(super) fn run(
         incremental_limit.map(|share| share.saturating_sub(generated.remaining_bytes)),
         retention.incremental_max_age,
         dry_run,
+        true,
     ) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -308,6 +315,7 @@ pub(super) fn merged_incremental_report(
             .saturating_add(low_disk.map_or(0, |outcome| outcome.removed_units)),
         remaining_units: last.remaining_units,
         skipped_active_units: last.skipped_active_units,
+        kept_hot_units: last.kept_hot_units,
         removed_directories: initial
             .removed_directories
             .saturating_add(low_disk.map_or(0, |outcome| outcome.removed_directories)),
@@ -452,13 +460,14 @@ fn print_incremental_removals(outcome: &crate::incremental::PruneOutcome, dry_ru
     }
 }
 
-fn incremental_removal_lines(
+pub(super) fn incremental_removal_lines(
     outcome: &crate::incremental::PruneOutcome,
     dry_run: bool,
 ) -> Vec<String> {
     if outcome.removed_directories == 0
         && outcome.removed_units == 0
         && outcome.skipped_active_units == 0
+        && outcome.kept_hot_units == 0
         && outcome.skipped_active_directories == 0
         && outcome.untracked_directories == 0
     {
@@ -477,6 +486,12 @@ fn incremental_removal_lines(
         lines.push(format!(
             "kept {} learned incremental units used by active builds ({} active checkouts)",
             outcome.skipped_active_units, outcome.skipped_active_directories
+        ));
+    }
+    if outcome.kept_hot_units > 0 {
+        lines.push(format!(
+            "kept {} learned incremental units used in the last hour",
+            outcome.kept_hot_units
         ));
     }
     if outcome.untracked_directories > 0 {
@@ -969,6 +984,8 @@ pub(super) fn prune_targets(
         incremental_limit.map(|share| share.saturating_sub(generated.remaining_bytes)),
         retention.incremental_max_age,
         false,
+        // A short disk takes the last hour's units too.
+        low_disk.is_none(),
     );
     let (incremental_bytes, incremental_remaining) = match incremental {
         Ok(outcome) => (outcome.removed_bytes, outcome.remaining_bytes),
@@ -1139,15 +1156,20 @@ fn collect_low_disk_incremental(
         return 0;
     };
     let limit = usage.saturating_sub(shortfall);
-    let outcome =
-        match crate::incremental::collect(&root, Some(limit), retention.incremental_max_age, false)
-        {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                log::warn!("learned incremental state was not collected: {error}");
-                return 0;
-            }
-        };
+    let outcome = match crate::incremental::collect(
+        &root,
+        Some(limit),
+        retention.incremental_max_age,
+        false,
+        // The disk is short: the last hour's units go too.
+        false,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            log::warn!("learned incremental state was not collected: {error}");
+            return 0;
+        }
+    };
     let freed = outcome.removed_bytes;
     collection.freed_target_bytes = collection.freed_target_bytes.saturating_add(freed);
     collection
@@ -1288,6 +1310,7 @@ impl LowDiskCollection {
         total.removed_units = total.removed_units.saturating_add(outcome.removed_units);
         total.remaining_units = outcome.remaining_units;
         total.skipped_active_units = outcome.skipped_active_units;
+        total.kept_hot_units = outcome.kept_hot_units;
         total.remaining_directories = outcome.remaining_directories;
         total.remaining_bytes = outcome.remaining_bytes;
         total.skipped_active_directories = outcome.skipped_active_directories;

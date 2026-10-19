@@ -613,12 +613,23 @@ fn incremental_report_merges_unit_counts_and_serializes_additively() {
         removed_bytes: 30,
         remaining_units: 2,
         skipped_active_units: 1,
+        kept_hot_units: 4,
         ..Default::default()
     };
     let report = serde_json::to_value(merged_incremental_report(&initial, Some(&later))).unwrap();
     assert_eq!(report["removed_units"], 5);
     assert_eq!(report["remaining_units"], 2);
     assert_eq!(report["skipped_active_units"], 1);
+    assert_eq!(report["kept_hot_units"], 4);
+    let alone = serde_json::to_value(merged_incremental_report(&initial, None)).unwrap();
+    assert_eq!(alone["kept_hot_units"], 0);
+    let lines = gc::incremental_removal_lines(&later, false);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "kept 4 learned incremental units used in the last hour"),
+        "{lines:?}"
+    );
     assert_eq!(report["removed_directories"], 1);
     assert_eq!(report["removed_bytes"], 50);
 }
@@ -669,4 +680,52 @@ fn generated_trees_get_a_bounded_first_share_despite_busy_incremental_state() {
             "capped at one tenth of the share"
         );
     }
+}
+
+/// A checkout with one learned incremental unit last used ten minutes ago.
+fn recently_used_unit(config: &Config, workspace: &Path) -> PathBuf {
+    use crate::incremental::tests as fixtures;
+    let checkout = fixtures::idle_checkout(&config.cache_dir.join("incremental"), workspace);
+    let used = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 600;
+    fixtures::unit(&checkout, "unit", used)
+}
+
+#[test]
+fn explicit_gc_keeps_hot_units() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = super::cargo_tests::managed_target_config(directory.path());
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let unit = recently_used_unit(&config, &workspace);
+    let retention = RetentionSettings {
+        incremental_max_bytes: Some(0),
+        min_free: None,
+        ..always_short()
+    };
+    gc::run(&config, config.gc.max_bytes, false, false, &retention).unwrap();
+    assert!(unit.exists(), "used within the hour");
+}
+
+#[test]
+fn low_disk_collection_ignores_the_hot_floor() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = super::cargo_tests::managed_target_config(directory.path());
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let unit = recently_used_unit(&config, &workspace);
+    let unlimited = RetentionSettings {
+        min_free: None,
+        ..always_short()
+    };
+    prune_targets(&config, &unlimited, config.gc.max_bytes);
+    assert!(unit.exists());
+    prune_targets(&config, &always_short(), config.gc.max_bytes);
+    assert!(
+        !unit.exists(),
+        "a short disk takes the last hour's units too"
+    );
 }
