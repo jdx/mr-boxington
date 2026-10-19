@@ -117,7 +117,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
         with:
           cache: false
         env:
@@ -207,14 +207,14 @@ jobs:
 
       - name: Upload measurements
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mbx-real-world-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/benchmarks
           if-no-files-found: error
           retention-days: 90
       - name: Upload refreshed results
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: results-json-${{ github.run_id }}-${{ github.run_attempt }}
           # The rendered table goes into the pull request body.
@@ -248,7 +248,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: results-json-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/refreshed
@@ -339,7 +339,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/mbx-bin"
           cp target/release/mbx "$RUNNER_TEMP/mbx-bin/mbx"
           git rev-parse HEAD > "$RUNNER_TEMP/mbx-bin/source-revision"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gha-small-edit-mbx-binary
           path: ${{ runner.temp }}/mbx-bin
@@ -370,7 +370,7 @@ jobs:
           persist-credentials: false
       - name: Download candidate mbx
         if: inputs.small_edit_mbx_ref != '' && matrix.tool != 'rust-cache'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: gha-small-edit-mbx-binary
           path: ${{ runner.temp }}/mbx-bin
@@ -388,13 +388,13 @@ jobs:
           cache-all-crates: "true"
           cache-workspace-crates: "true"
       - if: matrix.tool == 'mbx'
-        uses: jdx/mr-boxington-action@d0825fbaf3cc36ca2609aa38e71046265a1f1e37 # v1.7.1
+        uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
         with:
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
           save-on-workflow-dispatch: "true"
       - if: startsWith(matrix.tool, 'mbx-registry')
-        uses: jdx/mr-boxington-action@d0825fbaf3cc36ca2609aa38e71046265a1f1e37 # v1.7.1
+        uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
         with:
           backend: local
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
@@ -454,7 +454,7 @@ jobs:
           persist-credentials: false
       - name: Download candidate mbx
         if: inputs.small_edit_mbx_ref != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: gha-small-edit-mbx-binary
           path: ${{ runner.temp }}/mbx-bin
@@ -479,12 +479,12 @@ jobs:
           save-if: "false"
       - if: matrix.tool == 'mbx'
         id: mbx_restore
-        uses: jdx/mr-boxington-action@d0825fbaf3cc36ca2609aa38e71046265a1f1e37 # v1.7.1
+        uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
         with:
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
       - if: startsWith(matrix.tool, 'mbx-registry')
-        uses: jdx/mr-boxington-action@d0825fbaf3cc36ca2609aa38e71046265a1f1e37 # v1.7.1
+        uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
         with:
           backend: local
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
@@ -583,7 +583,7 @@ jobs:
             --argjson import_duration_ns "${IMPORT_DURATION_NS:-null}" \
             '{schema:2,tool:$tool,mbx_version:$version,mbx_ref:$ref,mbx_revision:$revision,trial:$trial,build_duration_ns:$build_duration_ns,restore_and_build_duration_ns:$restore_and_build_duration_ns,restore_duration_ns:$restore_duration_ns,import_duration_ns:$import_duration_ns}' \
             > "$RUNNER_TEMP/small-edit/${TOOL}-${TRIAL}.json"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gha-small-edit-${{ matrix.tool }}-${{ matrix.trial }}
           path: ${{ runner.temp }}/small-edit/*.json
@@ -600,7 +600,7 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: gha-small-edit-*
           path: ${{ runner.temp }}/small-edit
@@ -650,7 +650,7 @@ jobs:
               .[] | "| \(.tool) | \(.trials) | \(.restore_and_build_seconds | seconds) | \(.build_seconds | seconds) | \(.cache_restore_seconds | seconds) | \(.import_seconds | seconds) |"' \
               "$RUNNER_TEMP/small-edit-summary.json"
           } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gha-small-edit-summary
           path: ${{ runner.temp }}/small-edit-summary.json
