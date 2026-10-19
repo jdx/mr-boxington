@@ -5549,10 +5549,14 @@ mod target_views {
         let cas = store.path().join("actions/cas/v1");
         std::fs::remove_dir_all(&cas).unwrap();
         std::fs::write(&cas, b"not a directory").unwrap();
+        // A deleted checkout's incremental state is kept for new checkouts to
+        // start from until it expires; expiry is measured in whole seconds.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
 
         let output = mbx_command()
             .args(["gc", "--max-size", "20GiB"])
             .env("MBX_CACHE_DIR", store.path())
+            .env("MBX_GC_INCREMENTAL_MAX_AGE", "0s")
             .output()
             .expect("mbx should run");
 

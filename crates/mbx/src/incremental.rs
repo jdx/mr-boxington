@@ -120,7 +120,11 @@ pub(crate) fn workspaces(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(workspaces)
 }
 
-/// Collect deleted, expired, and least-recently-used checkout state.
+/// Collect expired and least-recently-used checkout state.
+///
+/// A deleted checkout's state is kept like any other until it expires or the
+/// budget needs the room: it is what the next new checkout starts from (see
+/// [`seed`]), and worktrees are usually removed as soon as their work merges.
 pub(crate) fn collect(
     root: &Path,
     max_bytes: Option<u64>,
@@ -141,7 +145,7 @@ pub(crate) fn collect(
             continue;
         };
         let expired = max_age.is_some_and(|age| now.saturating_sub(updated_secs) > age.as_secs());
-        if entry.live == Some(false) || expired {
+        if expired {
             required.insert(entry.key.clone());
         }
     }
@@ -408,8 +412,15 @@ fn cleanup_lock_dir(locks: &Path) {
 /// The donor holds a lease while it is read, so collection cannot remove it
 /// halfway. A session the donor's compiler is still writing is left out. The
 /// copy is made beside its final name and renamed into place, so an
-/// interrupted copy leaves no partial state; files are cloned where the
-/// filesystem supports it.
+/// interrupted copy leaves no partial state.
+///
+/// Files are hard-linked. rustc writes a session once, into a directory of
+/// its own, and links what it reuses into the next one rather than changing
+/// it, so sharing them is as safe as rustc's own reuse. A clone would be just
+/// as correct, but it is a new file: the donor's pages in the file cache do
+/// not carry over, and the first compilation rereads every object and bitcode
+/// file in the state. Lock files, which rustc locks rather than reads, are
+/// copied, and so is any file that cannot be linked.
 pub(crate) fn seed(checkout: &Path, unit: &str) -> Result<Option<PathBuf>> {
     let (Some(root), Some(own)) = (checkout.parent(), checkout.file_name()) else {
         return Ok(None);
@@ -493,7 +504,13 @@ fn copy_state(source: &Path, destination: &Path) -> std::io::Result<()> {
                 copy_state(&entry.path(), &to)?;
             }
         } else if kind.is_file() {
-            std::fs::copy(entry.path(), to)?;
+            let from = entry.path();
+            let lock = from
+                .extension()
+                .is_some_and(|extension| extension == "lock");
+            if lock || std::fs::hard_link(&from, &to).is_err() {
+                std::fs::copy(&from, &to)?;
+            }
         }
     }
     Ok(())
@@ -596,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn abandoned_checkout_state_is_pruned() {
+    fn abandoned_checkout_state_is_kept_until_it_expires() {
         let cache = tempfile::tempdir().unwrap();
         let parent = tempfile::tempdir().unwrap();
         let checkout_parent = parent.path().join("manager");
@@ -613,8 +630,16 @@ mod tests {
         std::fs::remove_dir(&checkout).unwrap();
         std::fs::remove_dir(&checkout_parent).unwrap();
         assert!(!crate::store::checkout_is_live_on(cache.path(), &checkout));
-        let outcome = collect(cache.path(), None, None, false).unwrap();
+        let kept = collect(cache.path(), None, None, false).unwrap();
+        assert_eq!(
+            kept.removed_directories, 0,
+            "a new checkout may seed from it"
+        );
+        assert!(directory.exists());
 
+        // Expiry is measured in whole seconds.
+        std::thread::sleep(Duration::from_millis(1100));
+        let outcome = collect(cache.path(), None, Some(Duration::ZERO), false).unwrap();
         assert_eq!(outcome.removed_directories, 1);
         assert!(outcome.removed_bytes > 0);
         assert!(!directory.exists());
@@ -670,7 +695,9 @@ mod tests {
         assert!(!lock_dir(cache.path(), &key).exists());
 
         std::fs::remove_dir(&checkout).unwrap();
-        let outcome = collect(cache.path(), None, None, true).unwrap();
+        // Expiry is measured in whole seconds.
+        std::thread::sleep(Duration::from_millis(1100));
+        let outcome = collect(cache.path(), None, Some(Duration::ZERO), true).unwrap();
 
         assert_eq!(outcome.removed_directories, 1);
         assert!(!lock_dir(cache.path(), &key).exists());
@@ -684,6 +711,8 @@ mod tests {
         std::fs::create_dir(&checkout).unwrap();
         let state = touch(cache.path(), &checkout).unwrap();
         std::fs::remove_dir(&checkout).unwrap();
+        // Expiry is measured in whole seconds.
+        std::thread::sleep(Duration::from_millis(1100));
 
         let outcome = collect(cache.path(), Some(0), Some(Duration::ZERO), false).unwrap();
         assert_eq!(outcome.removed_directories, 0);
@@ -793,6 +822,9 @@ mod tests {
             let session = directory.join(unit).join("widget-0abc").join(session);
             std::fs::create_dir_all(&session).unwrap();
             std::fs::write(session.join("dep-graph.bin"), key).unwrap();
+            let mut lock = session.into_os_string();
+            lock.push(".lock");
+            std::fs::write(lock, b"").unwrap();
         }
         std::fs::create_dir_all(&directory).unwrap();
         let record = CheckoutRecord {
@@ -833,7 +865,24 @@ mod tests {
             std::fs::read_to_string(copied.join("s-2-b-finished/dep-graph.bin")).unwrap(),
             "newer"
         );
-        assert_eq!(std::fs::read_dir(&copied).unwrap().count(), 1);
+        // One session, and its lock file.
+        assert_eq!(std::fs::read_dir(&copied).unwrap().count(), 2);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let donor = cache.path().join("newer").join(unit).join("widget-0abc");
+            let inode = |path: &Path| std::fs::metadata(path).unwrap().ino();
+            assert_eq!(
+                inode(&copied.join("s-2-b-finished/dep-graph.bin")),
+                inode(&donor.join("s-2-b-finished/dep-graph.bin")),
+                "state files are shared, not copied"
+            );
+            assert_ne!(
+                inode(&copied.join("s-2-b-finished.lock")),
+                inode(&donor.join("s-2-b-finished.lock")),
+                "lock files are not shared"
+            );
+        }
         assert_eq!(
             std::fs::read_dir(own.join("blake3")).unwrap().count(),
             1,

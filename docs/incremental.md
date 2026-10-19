@@ -47,9 +47,9 @@ rustflags = ["-Zremap-cwd-prefix=/src"]
 The flag needs a nightly toolchain, or `RUSTC_BOOTSTRAP=1` on a stable one.
 With it, when a crate first needs private state in a checkout, mbx copies the
 state of the most recently used checkout that has some for the same crate and
-flags, cloning files where the filesystem supports it. rustc validates the
-copied state against the sources it compiles, as after any edit, so the first
-edit in a new worktree compiles incrementally.
+flags, hard-linking its files. rustc validates the copied state against the
+sources it compiles, as after any edit, so the first edit in a new worktree
+compiles incrementally.
 
 rustc also records the paths of the crates it links and the outputs it writes,
 and each checkout has its own target directory. So that those match too, mbx
@@ -62,8 +62,10 @@ name paths under `/src` instead of the checkout.
 mbx keeps the state and its records under `incremental/` in the cache
 directory, separately for each checkout. `cargo clean` does not remove this
 state. `mbx clean` and `mbx cache remove` remove it for the selected workspace.
-[Collection](/managed-targets#collection) removes it for deleted, expired, or
+[Collection](/managed-targets#collection) removes it for expired or
 least-recently-used checkouts, but never removes state a running build is using.
+A deleted checkout's state stays until then too, so that a new checkout can
+start from it.
 
 ### Bound the storage
 
