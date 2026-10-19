@@ -438,14 +438,16 @@ and starts collection in the background. Collection frees the shortfall from
 private state and shared cache data regardless of the budgets:
 
 1. Learned incremental state and generated source trees, least recently used
-   first.
+   first. Unexpired incremental units of a live checkout used within the last
+   hour, which collection otherwise keeps from the budget, go too.
 2. Managed target directories, least recently used first, with
    `target.evict_first` checkouts ahead of the rest and `target.keep` checkouts
    left alone.
 3. Shared cache objects on the cache disk, after the private state and managed
    targets stop freeing bytes.
 
-Running commands' state and explicitly kept targets stay. The shared action
+Incremental units a running compiler holds, other running commands' state,
+and explicitly kept targets stay. The shared action
 store can go below `gc.max_size` when the cache disk is short, because keeping the build machine usable takes
 precedence over retaining every shared result. If collection cannot free
 enough, mbx logs a warning and leaves the rest to you. The next build reports
@@ -547,7 +549,9 @@ To remove existing managed targets now, use the commands in
 Collection reports **logical bytes**, based on file lengths. Learned
 incremental state counts each distinct file inode once across all checkouts,
 including hard-linked seeded sessions. Removing a unit only counts shared
-bytes as removed when their last reference in the incremental cache is gone. The
+bytes as removed when their last reference in the incremental cache is gone,
+and only once its files are actually deleted: a unit that could not be deleted
+is counted as remaining until a later collection deletes it. The
 `removed_bytes` and `remaining_bytes` fields in `mbx gc --json` use this measure;
 `byte_accounting: "logical"` identifies it explicitly. The lifetime `savings`
 object in `mbx stats --json` also carries that marker. Lifetime savings totals

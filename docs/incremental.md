@@ -68,14 +68,27 @@ state. `mbx clean` and `mbx cache remove` remove it for the selected workspace.
 [Collection](/managed-targets#collection) collects individual compilation units
 across all checkouts. A deleted checkout can still seed a new checkout until
 its units expire or the budget needs their space. Each profile, target kind,
-feature set, or dependency identity can have its own unit. Units age by the
-newest rustc session directory's modification time, falling back to the unit
-directory's modification time when there are no sessions. Building another
-unit in the same checkout does not refresh old units. Active checkout leases
-and held rustc session locks protect state currently in use, including donor
-leases during seeding. New sessions, lock files, and seeding staging
-directories receive a 60-second grace period; stale staging directories can
-be collected like other units.
+feature set, or dependency identity can have its own unit. Each unit has a use
+stamp, which a compilation with its state and a cache hit on it refresh, and
+collection evicts the least recently used units by it, inside the checkout you
+are building in too. A unit's last use is the later of its stamp and its newest
+rustc session directory's modification time, so a newer session counts even
+when the unit has a stamp. A unit with no sessions uses its directory's
+modification time in place of the newest session's. Building another unit in
+the same checkout does not refresh old units, and seeding from a unit does not
+refresh it either.
+
+A unit a running compiler holds is never removed: the compiler holds the
+unit's stamp, and rustc its session lock, until the compilation finishes, and a
+seed holds the donor unit's stamp while it copies. That holds even when the
+build that started them has been killed, and it also keeps `mbx clean` and
+`mbx cache remove` from removing the checkout. They also keep a checkout whose
+compilation started within the last minute and has not finished, even if its
+build was killed before rustc locked anything; once a build has finished, they
+remove the checkout at once. New sessions, lock files, and
+seeding staging directories receive a 60-second grace period; stale staging
+directories can be collected like other units. A build run by an older mbx
+version takes no stamps, so while it runs it protects its whole checkout.
 
 ### Storage and collection
 
@@ -83,6 +96,9 @@ be collected like other units.
 defaults to 5% of the cache disk, between 10 GiB and 100 GiB.
 `gc.incremental_max_age` defaults to 30 days. Collection removes expired units
 first, then remaining units least recently used first until the budget is met.
+Units of a live checkout used within the last hour are kept from the budget,
+though not from expiry, unless the disk is short of `gc.min_free_size`; a
+deleted checkout's units get no such reprieve.
 Shared hard-linked files count once across the whole sweep and in
 `mbx cache stats`. Removing one unit frees those bytes only after the last
 unit or bookkeeping reference in the incremental cache is removed. Counts
