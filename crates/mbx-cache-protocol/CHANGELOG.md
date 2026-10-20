@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.23](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.22...mbx-cache-protocol-v0.5.23) - 2026-10-20
+
+### Fixed
+
+- *(deps)* update rust crates ([#771](https://github.com/jdx/mr-boxington/pull/771))
+
 ## [0.5.22](https://github.com/jdx/mr-boxington/compare/mbx-cache-protocol-v0.5.21...mbx-cache-protocol-v0.5.22) - 2026-10-08
 
 ### Added

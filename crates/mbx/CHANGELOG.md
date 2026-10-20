@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.26.0](https://github.com/jdx/mr-boxington/compare/v1.25.0...v1.26.0) - 2026-10-20
+
+### Added
+
+- *(gc)* collect learned incremental state per unit and drop the newest-checkout exemption ([#753](https://github.com/jdx/mr-boxington/pull/753))
+- *(cache)* seed incremental state across checkouts by default ([#766](https://github.com/jdx/mr-boxington/pull/766))
+- *(scheduler)* log admission decisions and cancelled waits ([#760](https://github.com/jdx/mr-boxington/pull/760))
+- *(scheduler)* estimate unsampled compile modes from their sibling modes' spread ([#758](https://github.com/jdx/mr-boxington/pull/758))
+
+### Fixed
+
+- *(scheduler)* keep memory charges near recent peaks after cold rebuilds ([#767](https://github.com/jdx/mr-boxington/pull/767))
+- *(scheduler)* stop running a compile without a permit when a waiter leaves during a scan ([#764](https://github.com/jdx/mr-boxington/pull/764))
+- *(scheduler)* cap a new mode's sibling estimate at one share for light crates ([#761](https://github.com/jdx/mr-boxington/pull/761))
+
+### Other
+
+- *(scheduler)* wait for worker signals instead of short deadlines ([#765](https://github.com/jdx/mr-boxington/pull/765))
+
 ## [1.25.0](https://github.com/jdx/mr-boxington/compare/v1.24.1...v1.25.0) - 2026-10-19
 
 ### Added
