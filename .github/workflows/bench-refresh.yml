@@ -65,7 +65,7 @@ jobs:
   check:
     name: Check version drift
     if: github.event_name != 'workflow_dispatch' || !inputs.small_edit
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -238,7 +238,7 @@ jobs:
     if: |
       github.ref == 'refs/heads/main'
       && !(github.event_name == 'workflow_dispatch' && (inputs.dry_run || inputs.source))
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: write
@@ -323,7 +323,7 @@ jobs:
   small-edit-build-mbx:
     name: Build candidate mbx
     if: github.event_name == 'workflow_dispatch' && inputs.small_edit && inputs.small_edit_mbx_ref != ''
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -355,7 +355,7 @@ jobs:
       matrix:
         tool: [rust-cache, mbx, mbx-registry, mbx-registry-dir]
         trial: ${{ fromJSON(inputs.small_edit_trials || '[1,2,3,4]') }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       actions: write
@@ -441,7 +441,7 @@ jobs:
       matrix:
         tool: [rust-cache, mbx, mbx-registry, mbx-registry-dir]
         trial: ${{ fromJSON(inputs.small_edit_trials || '[1,2,3,4]') }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       actions: read
@@ -594,7 +594,7 @@ jobs:
     name: Report small-edit comparison
     needs: small-edit-measure
     if: always() && needs.small-edit-measure.result == 'success'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       actions: read
