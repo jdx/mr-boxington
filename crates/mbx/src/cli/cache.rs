@@ -423,6 +423,12 @@ pub(super) struct GcIncrementalReport {
     pub removed_units: u64,
     pub remaining_units: u64,
     pub skipped_active_units: u64,
+    /// Finished rustc sessions removed from units of live checkouts.
+    pub removed_sessions: u64,
+    /// The units of live checkouts those sessions came from.
+    pub session_units: u64,
+    /// Units of live checkouts kept because they were used in the last hour.
+    pub kept_hot_units: u64,
     pub(super) removed_directories: u64,
     pub(super) removed_bytes: u64,
     pub(super) remaining_directories: u64,

@@ -1918,28 +1918,7 @@ pub(crate) fn bypassed_library_incremental_flag(arguments: &[OsString]) -> Optio
 /// Oversized learned state takes the shared compilation path this time.
 /// Leave it intact for collection instead of rewriting it on every edit.
 fn incremental_state_exceeds_backstop(directory: &Path, budget: Option<u64>) -> bool {
-    budget.is_some_and(|budget| directory_bytes(directory) > budget / 2)
-}
-
-fn directory_bytes(directory: &Path) -> u64 {
-    let mut total = 0;
-    let mut pending = vec![directory.to_path_buf()];
-    while let Some(next) = pending.pop() {
-        let Ok(listing) = std::fs::read_dir(&next) else {
-            continue;
-        };
-        for entry in listing.flatten() {
-            let Ok(metadata) = entry.metadata() else {
-                continue;
-            };
-            if metadata.is_dir() {
-                pending.push(entry.path());
-            } else if metadata.is_file() {
-                total += metadata.len();
-            }
-        }
-    }
-    total
+    incremental::exceeds_backstop(directory, budget)
 }
 
 /// Work out the plan for a compilation that is about to miss.

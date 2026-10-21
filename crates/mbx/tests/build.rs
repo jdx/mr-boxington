@@ -2230,6 +2230,108 @@ fn a_workspace_crate_is_incremental_on_its_first_edit_and_mbx_clean_resets_it() 
     );
 }
 
+/// The finished rustc sessions of one checkout's learned units:
+/// `<state>/blake3/<unit>/<crate>/s-...`, without those still being written.
+fn finished_learned_sessions(state: &Path) -> Vec<PathBuf> {
+    let listing = |directory: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| entry.path())
+            .collect()
+    };
+    listing(&state.join("blake3"))
+        .iter()
+        .flat_map(|unit| listing(unit))
+        .flat_map(|krate| listing(&krate))
+        .filter(|session| {
+            file_name_is(session, |name| {
+                name.starts_with("s-") && !name.ends_with("-working")
+            })
+        })
+        .collect()
+}
+
+/// A checkout a build is using keeps its learned units, but under budget
+/// pressure its cold rustc sessions go, and its next edit still builds.
+#[test]
+fn gc_evicts_cold_sessions_from_a_live_checkout_and_the_next_edit_builds() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+    );
+    for revision in 1..=2 {
+        edit_project(project.path(), revision);
+        build(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("edit-{revision}.json")),
+        );
+    }
+    let state = incremental_checkout(store.path(), project.path());
+    assert!(
+        !finished_learned_sessions(&state).is_empty(),
+        "the edits should have left sessions behind"
+    );
+    // Age the sessions past the collector's start grace and the hot floor.
+    let mut pending = vec![store.path().join("incremental")];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                pending.push(entry.path());
+            }
+            filetime::set_file_mtime(entry.path(), filetime::FileTime::from_unix_time(1, 0))
+                .unwrap();
+        }
+    }
+    // Hold the checkout's lease, as a running build does.
+    let locks = store
+        .path()
+        .join("incremental/.locks")
+        .join(state.file_name().unwrap());
+    std::fs::create_dir_all(&locks).unwrap();
+    let lease = std::fs::File::create(locks.join("test.lease")).unwrap();
+    lease.try_lock().unwrap();
+
+    let collected = mbx_command()
+        .args(["gc", "--max-size", "20GiB"])
+        .env("MBX_CACHE_DIR", store.path())
+        .env("MBX_GC_INCREMENTAL_MAX_SIZE", "0B")
+        .env("MBX_GC_MIN_FREE_SIZE", "0B")
+        .output()
+        .unwrap();
+    assert!(collected.status.success(), "{collected:?}");
+    let stdout = String::from_utf8_lossy(&collected.stdout);
+    assert!(
+        stdout.contains("learned incremental units in live checkouts"),
+        "{stdout}"
+    );
+    assert!(finished_learned_sessions(&state).is_empty(), "{stdout}");
+    assert!(
+        std::fs::read_dir(state.join("blake3"))
+            .unwrap()
+            .flatten()
+            .any(|unit| unit.file_type().is_ok_and(|kind| kind.is_dir())),
+        "a live checkout keeps its unit directories"
+    );
+    drop(lease);
+
+    edit_project(project.path(), 3);
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("after-gc.json"),
+    );
+}
+
 /// A native search directory the cache cannot describe, such as a system library
 /// directory whose symlinks lead into other trees, makes a compilation
 /// uncacheable. It says nothing about whether the crate's sources are being

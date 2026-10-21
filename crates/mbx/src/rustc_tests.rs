@@ -1512,6 +1512,12 @@ fn oversized_incremental_state_is_left_for_gc() {
         &root.path().join("missing"),
         Some(1)
     ));
+    // A file a later session links counts once, as collection counts it.
+    let next = directory.join("crate-id/s-next");
+    std::fs::create_dir_all(&next).unwrap();
+    std::fs::hard_link(&graph, next.join("dep-graph.bin")).unwrap();
+    assert!(!incremental_state_exceeds_backstop(&directory, Some(8192)));
+    assert!(incremental_state_exceeds_backstop(&directory, Some(8191)));
 }
 
 /// A bare `--target` is a custom specification when rustc would find a file

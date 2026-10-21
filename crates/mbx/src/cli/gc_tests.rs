@@ -606,6 +606,9 @@ fn incremental_report_merges_unit_counts_and_serializes_additively() {
         removed_directories: 1,
         removed_bytes: 20,
         remaining_units: 5,
+        removed_sessions: 4,
+        session_units: 2,
+        kept_hot_units: 3,
         ..Default::default()
     };
     let later = crate::incremental::PruneOutcome {
@@ -613,6 +616,8 @@ fn incremental_report_merges_unit_counts_and_serializes_additively() {
         removed_bytes: 30,
         remaining_units: 2,
         skipped_active_units: 1,
+        removed_sessions: 1,
+        session_units: 1,
         ..Default::default()
     };
     let report = serde_json::to_value(merged_incremental_report(&initial, Some(&later))).unwrap();
@@ -621,6 +626,20 @@ fn incremental_report_merges_unit_counts_and_serializes_additively() {
     assert_eq!(report["skipped_active_units"], 1);
     assert_eq!(report["removed_directories"], 1);
     assert_eq!(report["removed_bytes"], 50);
+    assert_eq!(report["removed_sessions"], 5);
+    assert_eq!(report["session_units"], 3);
+    assert_eq!(
+        report["kept_hot_units"], 0,
+        "the low-disk pass ignores the floor"
+    );
+    assert_eq!(
+        incremental_removal_lines(&initial, false),
+        [
+            "removed 2 learned incremental units and 1 checkout directories (20 B logical); 5 units (0 B logical) remain",
+            "removed 4 sessions from 2 learned incremental units in live checkouts",
+            "kept 3 learned incremental units used in the last hour",
+        ]
+    );
 }
 
 #[test]
