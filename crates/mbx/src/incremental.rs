@@ -9,6 +9,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SESSION_START_GRACE_SECS: u64 = 60;
 
+/// A unit's last-use stamp, `<unit>.use` beside its directory and churn
+/// record. Its mtime is the unit's last use; its content is empty, or
+/// `r <budget-bytes>` while the compile path's backstop rejects the unit's
+/// state under that budget. Nothing ever locks it.
+const USE_STAMP_EXTENSION: &str = "use";
+/// A cache hit refreshes a stamp at most this often.
+const USE_STAMP_THROTTLE_SECS: u64 = 60;
+
 const RECORD_FILE: &str = "checkout.json";
 const RECORD_VERSION: u8 = 1;
 const LOCKS_DIR: &str = ".locks";
@@ -196,30 +204,42 @@ pub(crate) fn collect(
         };
         if remove_tree(&unit.directory, dry_run) {
             inodes.release(&unit.files);
-            let record_removed = unit.churn_record.as_ref().is_none_or(|record| {
-                if dry_run {
-                    return true;
-                }
-                match std::fs::remove_file(record) {
-                    Ok(()) => true,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-                    Err(error) => {
-                        log::warn!(
-                            "could not remove incremental churn record {}: {error}",
-                            record.display()
-                        );
-                        false
-                    }
-                }
-            });
-            if record_removed {
-                inodes.release(&unit.churn_files);
+            // Not short-circuited: a stamp left behind would outlive its unit.
+            let records_removed = unit
+                .records
+                .iter()
+                .filter(|record| !remove_record(record, dry_run))
+                .count()
+                == 0;
+            if records_removed {
+                inodes.release(&unit.record_files);
             } else {
                 kept_records.insert(index);
             }
             remaining[index] -= 1;
             removed.insert(unit.directory.clone());
             outcome.removed_units += 1;
+        }
+    }
+    // A stamp whose unit is gone is left over from an interrupted removal, or
+    // a hit that raced one. A lease means a build may be recreating its unit.
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.workspace_root.is_some())
+    {
+        if dry_run || entry.orphan_stamps.is_empty() {
+            continue;
+        }
+        match deletion_guard(root, &entry.key, true) {
+            Ok(guard) if !guard.active => {
+                for (stamp, files) in &entry.orphan_stamps {
+                    if remove_record(stamp, false) {
+                        inodes.release(files);
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(error) => log::debug!("incremental checkout could not be reserved: {error}"),
         }
     }
     // Only empty, deleted checkouts lose their bookkeeping. An abandoned
@@ -300,12 +320,30 @@ fn remove_tree(directory: &Path, dry_run: bool) -> bool {
     }
 }
 
+fn remove_record(record: &Path, dry_run: bool) -> bool {
+    if dry_run {
+        return true;
+    }
+    match std::fs::remove_file(record) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => {
+            log::warn!(
+                "could not remove incremental bookkeeping {}: {error}",
+                record.display()
+            );
+            false
+        }
+    }
+}
+
 struct Unit {
     directory: PathBuf,
     files: Vec<FileKey>,
     last_used: u64,
-    churn_record: Option<PathBuf>,
-    churn_files: Vec<FileKey>,
+    /// The churn record and last-use stamp beside the unit, which go with it.
+    records: Vec<PathBuf>,
+    record_files: Vec<FileKey>,
 }
 
 fn nested_entries(directory: &Path) -> Vec<std::fs::DirEntry> {
@@ -335,24 +373,43 @@ fn warn_walk_error(path: &Path, error: &std::io::Error) {
     }
 }
 
-fn units(directory: &Path, inodes: &mut Inodes) -> Vec<Unit> {
-    nested_entries(&directory.join("blake3"))
-        .into_iter()
-        .filter_map(|entry| {
-            if !entry.file_type().ok()?.is_dir() {
-                return None;
-            }
-            measure_unit(entry.path(), inodes)
-        })
-        .collect()
+/// A checkout's units, and the last-use stamps whose unit is gone.
+fn units(directory: &Path, inodes: &mut Inodes) -> (Vec<Unit>, Vec<(PathBuf, Vec<FileKey>)>) {
+    let mut units = Vec::new();
+    let mut orphans = Vec::new();
+    for entry in nested_entries(&directory.join("blake3")) {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if kind.is_dir() {
+            units.extend(measure_unit(path, inodes));
+        } else if kind.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| extension == USE_STAMP_EXTENSION)
+            && !path.with_extension("").exists()
+        {
+            let files = inodes.measure(&path, &HashSet::new());
+            orphans.push((path, files));
+        }
+    }
+    (units, orphans)
 }
 
-fn measure_unit(directory: PathBuf, inodes: &mut Inodes) -> Option<Unit> {
-    let metadata = std::fs::metadata(&directory).ok()?;
+/// When a unit was last used: the newest of its last-use stamp, which a cache
+/// hit refreshes, and its newest rustc session, or the directory's own mtime
+/// when it has no session yet.
+fn last_used(directory: &Path) -> Option<u64> {
+    let metadata = std::fs::metadata(directory).ok()?;
     if !metadata.is_dir() {
         return None;
     }
-    let last_used = std::fs::read_dir(&directory)
+    let stamp = (!is_seeding(directory))
+        .then(|| std::fs::metadata(use_stamp_path(directory)).ok())
+        .flatten()
+        .and_then(|stamp| stamp.modified().ok());
+    let used = std::fs::read_dir(directory)
         .ok()?
         .flatten()
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
@@ -370,22 +427,106 @@ fn measure_unit(directory: PathBuf, inodes: &mut Inodes) -> Option<Unit> {
         })
         .max()
         .or_else(|| metadata.modified().ok())
+        .max(stamp)
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map_or(0, |age| age.as_secs());
+    Some(used)
+}
+
+fn measure_unit(directory: PathBuf, inodes: &mut Inodes) -> Option<Unit> {
+    let last_used = last_used(&directory)?;
     // A staging name has a dot before seeding; with_extension would otherwise
-    // point at the destination unit's churn record.
-    let churn_record = (!is_seeding(&directory)).then(|| directory.with_extension("json"));
+    // point at the destination unit's churn record and stamp.
+    let records = if is_seeding(&directory) {
+        Vec::new()
+    } else {
+        vec![directory.with_extension("json"), use_stamp_path(&directory)]
+    };
     let files = inodes.measure(&directory, &HashSet::new());
-    let churn_files = churn_record
-        .as_ref()
-        .map_or_else(Vec::new, |record| inodes.measure(record, &HashSet::new()));
+    let mut record_files = Vec::new();
+    for record in &records {
+        record_files.extend(inodes.measure(record, &HashSet::new()));
+    }
     Some(Unit {
         files,
         directory,
         last_used,
-        churn_record,
-        churn_files,
+        records,
+        record_files,
     })
+}
+
+fn use_stamp_path(unit: &Path) -> PathBuf {
+    unit.with_extension(USE_STAMP_EXTENSION)
+}
+
+fn rejection(budget: u64) -> Vec<u8> {
+    format!("r {budget}").into_bytes()
+}
+
+/// Set a stamp's content and mtime, creating it if needed.
+fn write_stamp(stamp: &Path, content: &[u8], modified: SystemTime) {
+    let written = std::fs::File::create(stamp).and_then(|mut file| {
+        std::io::Write::write_all(&mut file, content)?;
+        file.set_modified(modified)
+    });
+    if let Err(error) = written {
+        log::debug!(
+            "could not update the incremental use stamp {}: {error}",
+            stamp.display()
+        );
+    }
+}
+
+/// Record a cache hit as a use of `unit`, a unit directory of this checkout,
+/// so collection does not mistake state restored on every build for idle
+/// state. Only a unit with state here gets a stamp. At most one write a
+/// minute, and none while the compile path's backstop rejects the unit's
+/// state under the current `budget`: that state is waiting to be collected.
+pub(crate) fn stamp_use(unit: &Path, budget: Option<u64>) {
+    if !unit.is_dir() {
+        return;
+    }
+    let stamp = use_stamp_path(unit);
+    if let Ok(metadata) = std::fs::metadata(&stamp) {
+        let recent = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+            .is_some_and(|age| age.as_secs() < USE_STAMP_THROTTLE_SECS);
+        if recent
+            || budget.is_some_and(|budget| {
+                metadata.len() > 0
+                    && std::fs::read(&stamp).is_ok_and(|held| held == rejection(budget))
+            })
+        {
+            return;
+        }
+    }
+    write_stamp(&stamp, b"", SystemTime::now());
+}
+
+/// The compile path's backstop rejected `unit`'s state under `budget`. Hits
+/// stop refreshing it until a compile accepts it or the budget changes, so
+/// it ages like unused state. Its last use stays as it was.
+pub(crate) fn mark_rejected(unit: &Path, budget: u64) {
+    let stamp = use_stamp_path(unit);
+    let content = rejection(budget);
+    if std::fs::read(&stamp).is_ok_and(|held| held == content) {
+        return;
+    }
+    let modified = std::fs::metadata(&stamp)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or(UNIX_EPOCH);
+    write_stamp(&stamp, &content, modified);
+}
+
+/// A compile accepted `unit`'s state: clear any earlier rejection.
+pub(crate) fn clear_rejection(unit: &Path) {
+    let stamp = use_stamp_path(unit);
+    if std::fs::metadata(&stamp).is_ok_and(|metadata| metadata.len() > 0) {
+        write_stamp(&stamp, b"", SystemTime::now());
+    }
 }
 
 /// Hold all existing rustc session locks through deletion; a held lock means
@@ -532,6 +673,7 @@ struct Entry {
     key: String,
     directory: PathBuf,
     units: Vec<Unit>,
+    orphan_stamps: Vec<(PathBuf, Vec<FileKey>)>,
     files: Vec<FileKey>,
     workspace_root: Option<PathBuf>,
 }
@@ -564,18 +706,20 @@ fn entries(root: &Path) -> Result<Snapshot> {
         }
         let directory = entry.path();
         let record = read_record(&directory.join(RECORD_FILE));
-        let units = units(&directory, &mut snapshot.inodes);
+        let (units, orphan_stamps) = units(&directory, &mut snapshot.inodes);
         let mut excluded = units
             .iter()
             .map(|unit| unit.directory.clone())
             .collect::<HashSet<_>>();
-        excluded.extend(units.iter().filter_map(|unit| unit.churn_record.clone()));
+        excluded.extend(units.iter().flat_map(|unit| unit.records.iter().cloned()));
+        excluded.extend(orphan_stamps.iter().map(|(stamp, _)| stamp.clone()));
         let files = snapshot.inodes.measure(&directory, &excluded);
         snapshot.entries.push(Entry {
             key: entry.file_name().to_string_lossy().into_owned(),
             workspace_root: record.map(|record| record.workspace_root),
             files,
             units,
+            orphan_stamps,
             directory,
         });
     }
@@ -706,7 +850,7 @@ fn cleanup_lock_dir(locks: &Path) {
     let _ = std::fs::remove_dir(locks);
 }
 
-/// Copy the most recently used other checkout's state for one unit into
+/// Copy the other checkout's state for one unit used most recently into
 /// `checkout`, under the same unit name. Returns that checkout's workspace
 /// root, or `None` when no other checkout has state for the unit.
 ///
@@ -743,9 +887,12 @@ pub(crate) fn seed(checkout: &Path, unit: &str) -> Result<Option<PathBuf>> {
             continue;
         }
         if let Some(record) = read_record(&entry.path().join(RECORD_FILE)) {
-            donors.push((record.updated_secs, record.workspace_root, name));
+            let used = last_used(&entry.path().join(unit)).unwrap_or_default();
+            donors.push((used, record.workspace_root, name));
         }
     }
+    // The donor whose state for this unit was used last is likeliest to be
+    // close to this checkout's sources.
     donors.sort_by_key(|donor| std::cmp::Reverse(donor.0));
     let destination = checkout.join(unit);
     let mut failure = None;
@@ -1403,6 +1550,111 @@ mod tests {
         }
     }
 
+    fn mtime(path: &Path) -> i64 {
+        filetime::FileTime::from_last_modification_time(&std::fs::metadata(path).unwrap())
+            .unix_seconds()
+    }
+
+    fn set_mtime(path: &Path, secs: u64) {
+        filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(secs as i64, 0)).unwrap();
+    }
+
+    #[test]
+    fn a_hit_stamps_a_unit_with_state_at_most_once_a_minute() {
+        let checkout = tempfile::tempdir().unwrap();
+        let missing = checkout.path().join("blake3/missing");
+        stamp_use(&missing, None);
+        assert!(!use_stamp_path(&missing).exists(), "no state, no stamp");
+
+        let directory = unit(checkout.path(), "unit", 0);
+        let stamp = use_stamp_path(&directory);
+        stamp_use(&directory, None);
+        assert!(mtime(&stamp) >= now_secs() as i64 - 5);
+        let recent = now_secs() - 30;
+        set_mtime(&stamp, recent);
+        stamp_use(&directory, None);
+        assert_eq!(mtime(&stamp), recent as i64, "throttled");
+        set_mtime(&stamp, 1000);
+        stamp_use(&directory, None);
+        assert!(mtime(&stamp) >= now_secs() as i64 - 5);
+    }
+
+    #[test]
+    fn a_rejected_unit_is_refreshed_by_hits_only_under_another_budget() {
+        let checkout = tempfile::tempdir().unwrap();
+        let directory = unit(checkout.path(), "unit", 0);
+        let stamp = use_stamp_path(&directory);
+        mark_rejected(&directory, 100);
+        assert_eq!(std::fs::read(&stamp).unwrap(), b"r 100");
+        assert_eq!(mtime(&stamp), 0, "a new rejection is not a use");
+        set_mtime(&stamp, 1000);
+        mark_rejected(&directory, 200);
+        assert_eq!(std::fs::read(&stamp).unwrap(), b"r 200");
+        assert_eq!(mtime(&stamp), 1000, "rejecting keeps the last use");
+
+        stamp_use(&directory, Some(200));
+        assert_eq!(mtime(&stamp), 1000);
+        stamp_use(&directory, Some(300));
+        assert!(mtime(&stamp) >= now_secs() as i64 - 5);
+        assert_eq!(std::fs::read(&stamp).unwrap(), b"");
+
+        mark_rejected(&directory, 300);
+        set_mtime(&stamp, 1000);
+        clear_rejection(&directory);
+        assert_eq!(std::fs::read(&stamp).unwrap(), b"");
+        assert!(mtime(&stamp) >= now_secs() as i64 - 5, "a compile is a use");
+    }
+
+    #[test]
+    fn last_use_is_the_newest_of_stamp_session_and_fallback() {
+        let checkout = tempfile::tempdir().unwrap();
+        let directory = unit(checkout.path(), "unit", 100);
+        assert_eq!(last_used(&directory), Some(100));
+        std::fs::write(use_stamp_path(&directory), b"").unwrap();
+        set_mtime(&use_stamp_path(&directory), 50);
+        assert_eq!(last_used(&directory), Some(100), "an older stamp");
+        set_mtime(&use_stamp_path(&directory), 200);
+        assert_eq!(last_used(&directory), Some(200), "a newer stamp");
+
+        let fallback = checkout.path().join("blake3/fallback");
+        std::fs::create_dir_all(&fallback).unwrap();
+        set_mtime(&fallback, 300);
+        assert_eq!(last_used(&fallback), Some(300));
+        std::fs::write(use_stamp_path(&fallback), b"").unwrap();
+        set_mtime(&use_stamp_path(&fallback), 400);
+        assert_eq!(last_used(&fallback), Some(400));
+    }
+
+    #[test]
+    fn a_stamp_goes_with_its_unit_and_an_orphan_on_its_own() {
+        let cache = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let state = touch(cache.path(), workspace.path()).unwrap();
+        let directory = unit(&state.directory, "unit", 0);
+        let stamp = use_stamp_path(&directory);
+        std::fs::write(&stamp, b"r 1").unwrap();
+        set_mtime(&stamp, 0);
+        let orphan = state.directory.join("blake3/gone.use");
+        std::fs::write(&orphan, b"r 22").unwrap();
+        let before = stats(cache.path()).unwrap();
+        assert_eq!(before.bytes, tree_bytes(&state.directory));
+
+        // A live lease keeps the orphan: its build may be recreating the unit.
+        collect(cache.path(), None, None, false).unwrap();
+        assert!(orphan.exists());
+        drop(state.lease);
+        let preview = collect(cache.path(), Some(0), None, true).unwrap();
+        assert_eq!(preview.removed_bytes, 32 + 3);
+        assert!(stamp.exists() && orphan.exists());
+        let outcome = collect(cache.path(), Some(0), None, false).unwrap();
+        assert_eq!(outcome.removed_units, 1);
+        assert_eq!(outcome.removed_bytes, 32 + 3 + 4);
+        assert_eq!(outcome.remaining_bytes, tree_bytes(&state.directory));
+        assert!(!directory.exists());
+        assert!(!stamp.exists());
+        assert!(!orphan.exists());
+    }
+
     #[test]
     fn active_checkout_lease_protects_all_units() {
         let cache = tempfile::tempdir().unwrap();
@@ -1630,8 +1882,8 @@ mod tests {
         assert!(kept_state.directory.exists());
     }
 
-    /// A checkout last used at `updated_secs`, holding the given rustc session
-    /// directories for one unit.
+    /// A checkout recorded at `updated_secs`, holding the given rustc session
+    /// directories for one unit, last written then too.
     fn checkout_with_sessions(
         cache: &Path,
         key: &str,
@@ -1646,6 +1898,11 @@ mod tests {
             std::fs::write(session.join("dep-graph.bin"), key).unwrap();
             let lock = session_lock_name(session.file_name().unwrap()).unwrap();
             std::fs::write(session.with_file_name(lock), b"").unwrap();
+            filetime::set_file_mtime(
+                &session,
+                filetime::FileTime::from_unix_time(updated_secs as i64, 0),
+            )
+            .unwrap();
         }
         std::fs::create_dir_all(&directory).unwrap();
         let record = CheckoutRecord {
@@ -1709,6 +1966,21 @@ mod tests {
             1,
             "no staging directory is left behind"
         );
+    }
+
+    #[test]
+    fn seeding_prefers_the_donor_whose_unit_was_used_last() {
+        let cache = tempfile::tempdir().unwrap();
+        let unit = "blake3/0123456789";
+        let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
+        // Its checkout record is newer, but its state for this unit is older.
+        checkout_with_sessions(cache.path(), "recorded", 30, unit, &["s-1-a-finished"]);
+        let hit = checkout_with_sessions(cache.path(), "hit", 10, unit, &["s-2-b-finished"]);
+        let stamp = use_stamp_path(&hit.join(unit));
+        std::fs::write(&stamp, b"").unwrap();
+        set_mtime(&stamp, 35);
+
+        assert_eq!(seed(&own, unit).unwrap(), Some(PathBuf::from("/work/hit")));
     }
 
     #[test]

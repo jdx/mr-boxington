@@ -80,9 +80,15 @@ impl LearnedPlan {
             // Check this checkout's existing state before seeding. A rejected
             // unit takes the shared path without copying a donor's sessions.
             let directory = incremental_unit_path(unit);
-            if directory.as_ref().is_some_and(|directory| {
-                incremental_state_exceeds_backstop(directory, session::incremental_budget())
-            }) {
+            let rejected = directory
+                .as_deref()
+                .zip(session::incremental_budget())
+                .filter(|(directory, budget)| {
+                    incremental_state_exceeds_backstop(directory, Some(*budget))
+                });
+            if let Some((directory, budget)) = rejected {
+                // Hits stop refreshing its last use, so it is collected.
+                incremental::mark_rejected(directory, budget);
                 self.backstop_rejected = true;
                 self.hot = false;
                 self.directory = None;
@@ -92,6 +98,9 @@ impl LearnedPlan {
                     compilation.invocation.crate_name(),
                     mode_in_state_directory(mode, directory.as_deref()).shares_state(),
                 );
+                if let Some(directory) = &self.directory {
+                    incremental::clear_rejection(directory);
+                }
             }
         }
         self
@@ -2230,9 +2239,15 @@ fn source_is_in_workspace(compilation: &Compilation<'_>) -> bool {
 /// Establish the baseline after a first successful compilation, when dep-info
 /// finally supplies the complete set of sources. The next edit can then be
 /// recognized immediately.
+///
+/// Also a use of the unit's state, if this checkout has any: a hit restores
+/// it from the cache without running rustc, so no new session shows it.
 fn record_learned_baseline(compilation: &Compilation<'_>, discovered: &DiscoveredInputs) {
     let recorded = (|| {
         let (unit, _) = incremental_unit_identity(compilation)?;
+        if let Some(directory) = incremental_unit_path(&unit) {
+            incremental::stamp_use(&directory, session::incremental_budget());
+        }
         let Some(path) = churn_state_path(&unit) else {
             return Result::<()>::Ok(());
         };
