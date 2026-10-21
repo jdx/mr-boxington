@@ -87,14 +87,33 @@ state. `mbx clean` and `mbx cache remove` remove it for the selected workspace.
 [Collection](/managed-targets#collection) collects individual compilation units
 across all checkouts. A deleted checkout can still seed a new checkout until
 its units expire or the budget needs their space. Each profile, target kind,
-feature set, or dependency identity can have its own unit. Units age by the
-newest rustc session directory's modification time, falling back to the unit
-directory's modification time when there are no sessions. Building another
-unit in the same checkout does not refresh old units. Active checkout leases
-and held rustc session locks protect state currently in use, including donor
-leases during seeding. New sessions, lock files, and seeding staging
-directories receive a 60-second grace period; stale staging directories can
-be collected like other units.
+feature set, or dependency identity can have its own unit. A unit's last use
+is the newest of its last-use stamp, its newest rustc session directory, and,
+when it has no sessions, the unit directory's modification time. The stamp is
+an empty `<unit>.use` file beside the unit, refreshed at most once a minute
+when a build restores the unit from the cache, so a unit served by the cache
+on every build does not look idle. While its state is over the backstop
+described below, cache hits stop refreshing it until a compilation accepts the
+state again or the budget changes. Building another unit in the same checkout
+does not refresh old units. Seeding takes state from the checkout whose unit
+was used last.
+
+A checkout a build is using keeps every unit directory. Collection removes
+only the unit's finished rustc sessions there, each under an exclusive lock on
+the session's own lock file, taken without waiting, the way rustc's own
+session cleanup does. A compiler starting from a session, or a seed copying
+it, holds that lock, and the session stays. Sessions still being written,
+crate directories, churn records, stamps, and seeding staging directories are
+left alone. A compiler that starts while its unit's newest session is being
+removed finds no session and compiles that unit from scratch once. Under the
+size budget, units of such a checkout used within the last hour are kept,
+unless they have expired, their state exceeds half the budget, or the disk is
+short of `gc.min_free_size`. In checkouts no build is using, held rustc
+session locks protect a whole unit, including donor leases during seeding.
+New sessions, lock files, and seeding staging directories receive a 60-second
+grace period; stale staging directories can be collected like other units.
+A preview (`mbx gc --dry-run`) takes no rustc lock, so it can count a session a
+real run keeps.
 
 ### Storage and collection
 
@@ -104,7 +123,9 @@ defaults to 5% of the cache disk, between 10 GiB and 100 GiB.
 first, then remaining units least recently used first until the budget is met.
 Shared hard-linked files count once across the whole sweep and in
 `mbx cache stats`. Removing one unit frees those bytes only after the last
-unit or bookkeeping reference in the incremental cache is removed. Counts
+unit or bookkeeping reference in the incremental cache is removed. Removing a
+session credits only files whose last link it removed: rustc links the files a
+new session reuses from the one before it. Counts
 reflect each sweep's snapshot, so references created by a seed that finishes
 during a sweep are counted at the next one. Live checkouts retain their bookkeeping even when all their units are removed;
 a deleted checkout loses its directory and bookkeeping after its last unit
@@ -124,8 +145,8 @@ still apply. See [Single cache budget](/configuration#single-cache-budget).
 
 The former `learned_incremental_max_size` setting is removed; existing config
 files containing it warn and continue. As an internal backstop, a learned unit
-whose existing state exceeds half the resolved aggregate incremental budget
-takes the shared compilation path for that compile without seeding from a
+whose existing state exceeds half the resolved aggregate incremental budget,
+counting each hard-linked file once as collection does, takes the shared compilation path for that compile without seeding from a
 donor. Otherwise, eligible units can seed before compiling with private
 state. Existing oversized state remains for GC;
 with no aggregate budget, this backstop is disabled.

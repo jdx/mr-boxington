@@ -438,7 +438,8 @@ and starts collection in the background. Collection frees the shortfall from
 private state and shared cache data regardless of the budgets:
 
 1. Learned incremental state and generated source trees, least recently used
-   first.
+   first. Units of checkouts that builds are using lose their finished rustc
+   sessions, including those used in the last hour.
 2. Managed target directories, least recently used first, with
    `target.evict_first` checkouts ahead of the rest and `target.keep` checkouts
    left alone.
@@ -547,7 +548,11 @@ To remove existing managed targets now, use the commands in
 Collection reports **logical bytes**, based on file lengths. Learned
 incremental state counts each distinct file inode once across all checkouts,
 including hard-linked seeded sessions. Removing a unit only counts shared
-bytes as removed when their last reference in the incremental cache is gone. The
+bytes as removed when their last reference in the incremental cache is gone,
+and removing a rustc session from a checkout a build is using counts only the
+files whose last link it removed. `mbx gc --json` reports those sessions as
+`removed_sessions` from `session_units` units, and units of such checkouts
+kept because they were used in the last hour as `kept_hot_units`. The
 `removed_bytes` and `remaining_bytes` fields in `mbx gc --json` use this measure;
 `byte_accounting: "logical"` identifies it explicitly. The lifetime `savings`
 object in `mbx stats --json` also carries that marker. Lifetime savings totals
