@@ -630,8 +630,39 @@ fn measure_unit(directory: PathBuf, inodes: &mut Inodes) -> Option<Unit> {
 /// Whether a unit's state exceeds the backstop: more than half the budget.
 /// The compile path then stops using it, and collection stops keeping it for
 /// recent use.
+///
+/// This runs on every learned compile, so it sums sizes first, one directory
+/// listing per directory. The sum counts a linked file once per link and so
+/// never undercounts; only a sum over the limit is measured again, link-aware,
+/// which on Windows opens every file.
 pub(crate) fn exceeds_backstop(unit: &Path, budget: Option<u64>) -> bool {
-    budget.is_some_and(|budget| tree_bytes(unit) > budget / 2)
+    budget.is_some_and(|budget| {
+        let limit = budget / 2;
+        listed_bytes(unit) > limit && tree_bytes(unit) > limit
+    })
+}
+
+/// The sizes of every file under `root`, each link counted.
+fn listed_bytes(root: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(listing) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in listing.flatten() {
+            // Not followed: a symlink is neither descended into nor counted.
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    total
 }
 
 fn use_stamp_path(unit: &Path) -> PathBuf {
@@ -2231,6 +2262,22 @@ mod tests {
             );
         }
         drop(state);
+    }
+
+    #[test]
+    fn the_backstop_counts_a_linked_file_once_only_when_the_sum_is_over() {
+        let unit = tempfile::tempdir().unwrap();
+        std::fs::write(unit.path().join("a"), vec![0; 20]).unwrap();
+        std::fs::hard_link(unit.path().join("a"), unit.path().join("b")).unwrap();
+        assert_eq!(listed_bytes(unit.path()), 40);
+        assert_eq!(tree_bytes(unit.path()), 20);
+
+        // Under the limit by the sum, the precise measure is never taken.
+        assert!(!exceeds_backstop(unit.path(), Some(80)));
+        // Over by the sum alone: one copy of the data fits.
+        assert!(!exceeds_backstop(unit.path(), Some(40)));
+        assert!(exceeds_backstop(unit.path(), Some(39)));
+        assert!(!exceeds_backstop(unit.path(), None));
     }
 
     #[test]
