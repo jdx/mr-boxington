@@ -258,9 +258,17 @@ pub(crate) fn collect(
                 // inside `evict_session`. A file another owner holds, or that
                 // a compile or seed linked after the snapshot, is still on
                 // disk however many measured owners it has left.
-                if evict_session(session, &mut inodes) == Some(true) {
-                    outcome.removed_sessions += 1;
-                    evicted = true;
+                match evict_session(session, &mut inodes) {
+                    Some(true) => {
+                        outcome.removed_sessions += 1;
+                        evicted = true;
+                    }
+                    // Renamed out of rustc's reach but only partly removed:
+                    // the unit was still trimmed. rustc's own cleanup of
+                    // unfinished sessions, or the unit's removal, takes
+                    // the rest.
+                    Some(false) => evicted = true,
+                    None => {}
                 }
             }
             if evicted {
@@ -2081,6 +2089,41 @@ mod tests {
         assert!(kept.exists(), "its bytes are still on disk");
         assert_eq!(outcome.removed_bytes, 0, "nothing was freed");
         assert_eq!(outcome.remaining_bytes, before);
+        drop(state);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_session_removed_only_in_part_still_counts_its_unit_as_trimmed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let cache = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let state = touch(cache.path(), workspace.path()).unwrap();
+        let directory = unit_with_sessions(&state.directory, "unit", &[("s-1-a-old", 10)]);
+        let session = directory.join("widget-0abc/s-1-a-old");
+        // A file that cannot be removed stops the removal halfway.
+        let stuck = session.join("stuck");
+        std::fs::create_dir(&stuck).unwrap();
+        std::fs::write(stuck.join("held"), b"held").unwrap();
+        set_mtime(&session, 0);
+        std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o500)).unwrap();
+        if std::fs::write(stuck.join("probe"), b"").is_ok() {
+            eprintln!("skipped: permissions are not enforced for this user");
+            return;
+        }
+
+        let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
+        let unfinished = directory.join("widget-0abc/s-1-a-working");
+        std::fs::set_permissions(
+            unfinished.join("stuck"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        assert!(!session.exists(), "out of rustc's reach");
+        assert!(unfinished.join("stuck/held").exists());
+        assert_eq!(outcome.removed_sessions, 0);
+        assert_eq!(outcome.skipped_active_units, 0);
+        assert_eq!(outcome.session_units.len(), 1);
         drop(state);
     }
 
