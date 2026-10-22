@@ -1998,7 +1998,17 @@ mod tests {
         assert!(record.exists() && stamp.exists());
 
         drop(reader);
-        let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
+        // A child process another test forks at this moment shares the open
+        // lock until it execs, so the lock may stay held for an instant
+        // after the drop. Retry briefly rather than race it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let outcome = loop {
+            let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
+            if outcome.removed_sessions > 0 || std::time::Instant::now() >= deadline {
+                break outcome;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
         assert_eq!(outcome.removed_sessions, 1);
         assert!(!krate.join("s-1-a-old").exists());
         assert!(!krate.join("s-1-a.lock").exists());
