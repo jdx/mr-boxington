@@ -611,7 +611,8 @@ pub(crate) fn compile(
     );
     // The unit's objects from earlier compilations, recorded last so that
     // everything older than this compilation is in it.
-    let objects = crate::object_cleanup::ObjectSnapshot::before_compiling(&arguments, &working_dir);
+    let mut objects =
+        crate::object_cleanup::ObjectSnapshot::before_compiling(&arguments, &working_dir);
     // Bootstrap may be visible to env!/option_env!. Hold notifications too:
     // Cargo must not give dependents metadata that the retry will discard.
     let held = seed_mode == IncrementalSeedMode::Inject { bootstrap: true };
@@ -734,6 +735,9 @@ pub(crate) fn compile(
             "build-script inputs were not validated: {error:#}"
         ));
         if verification.is_none() {
+            if let Some(objects) = objects.take() {
+                objects.remove_superseded(&output.status);
+            }
             if !forwarded {
                 replay_bytes(&output.stdout, &output.stderr)?;
             }
@@ -778,6 +782,9 @@ pub(crate) fn compile(
                 &cached.action,
                 &divergence,
             ));
+        }
+        if let Some(objects) = objects.take() {
+            objects.remove_superseded(&output.status);
         }
         if !forwarded {
             let _ = replay_output(&output);
@@ -891,7 +898,7 @@ pub(crate) fn compile(
             }
         }
     }
-    if !compiler_input_invalid && let Some(objects) = objects {
+    if !compiler_input_invalid && let Some(objects) = objects.take() {
         objects.remove_superseded(&output.status);
     }
     session::check_low_disk_after_compile();
