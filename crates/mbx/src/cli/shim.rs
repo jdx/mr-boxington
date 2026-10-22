@@ -16,6 +16,8 @@ pub(super) const CARGO_SHIM_CHAIN_ENV: &str = "MBX_CARGO_SHIM_CHAIN";
 /// far beyond any plausible nesting is.
 const MAX_CARGO_SHIM_DEPTH: usize = 12;
 const CARGO_SHIM_NOTE_ENV: &str = "MBX_CARGO_SHIM_NOTE";
+/// Whether this process chose the loop note path, and so removes the note.
+static OWNS_LOOP_NOTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static PATH_BEFORE_SHIM_EXCLUSION: OnceLock<OsString> = OnceLock::new();
 
 /// Whether this process was installed under Cargo's name by `mbx setup`.
@@ -48,6 +50,17 @@ fn is_cargo_shim_path(path: &OsStr) -> bool {
 
 /// Run an invocation received through the persistent Cargo shim.
 pub fn run_cargo_shim() -> Result<ExitCode> {
+    let result = run_cargo_shim_inner();
+    // Passthrough and early exits never read the note a loop may have left.
+    if OWNS_LOOP_NOTE.load(std::sync::atomic::Ordering::Relaxed)
+        && let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV)
+    {
+        let _ = std::fs::remove_file(path);
+    }
+    result
+}
+
+fn run_cargo_shim_inner() -> Result<ExitCode> {
     let reported_shim = std::env::var_os(CARGO_SHIM_PATH_ENV)
         .map(PathBuf::from)
         .or_else(|| {
@@ -153,11 +166,8 @@ fn record_cargo_selection(real_cargo: &OsStr, configured: Option<&OsStr>) -> Res
         unsafe { std::env::set_var(CARGO_SHIM_CHAIN_ENV, chain) };
     }
     if std::env::var_os(CARGO_SHIM_NOTE_ENV).is_none() {
-        let note = loop_note_path();
-        if let Some(parent) = note.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        unsafe { std::env::set_var(CARGO_SHIM_NOTE_ENV, note) };
+        unsafe { std::env::set_var(CARGO_SHIM_NOTE_ENV, loop_note_path()) };
+        OWNS_LOOP_NOTE.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     Ok(())
 }
@@ -175,6 +185,9 @@ fn leave_loop_note(message: &str) {
     let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV) else {
         return;
     };
+    if let Some(parent) = Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     // `create_new` neither follows a planted link nor replaces a note.
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .write(true)

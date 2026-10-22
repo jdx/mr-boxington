@@ -98,9 +98,12 @@ fn wrapper_that_runs_mbx_again_reports_the_loop() {
 fn wrapper_loop_through_a_plain_launch_still_stops() {
     let root = tempfile::tempdir().unwrap();
     let mbx_path = env!("CARGO_BIN_EXE_mbx");
-    let real = std::env::var_os("PATH")
-        .and_then(|path| {
-            std::env::split_paths(&path)
+    // Cargo sets CARGO for the tests it runs; otherwise search PATH.
+    let real = std::env::var_os("CARGO")
+        .map(std::path::PathBuf::from)
+        .filter(|cargo| cargo.is_file())
+        .or_else(|| {
+            std::env::split_paths(&std::env::var_os("PATH")?)
                 .map(|dir| dir.join("cargo"))
                 // Developer machines put mbx's own shim and mise's wrappers
                 // ahead of the toolchain; neither is a real Cargo.
