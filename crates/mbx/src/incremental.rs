@@ -1191,15 +1191,16 @@ pub(crate) fn seed(checkout: &Path, unit: &str) -> Result<Option<PathBuf>> {
         }
         if let Some(record) = read_record(&entry.path().join(RECORD_FILE)) {
             let used = last_used(&entry.path().join(unit)).unwrap_or_default();
-            donors.push((used, record.workspace_root, name));
+            donors.push((used, record.updated_secs, name, record.workspace_root));
         }
     }
     // The donor whose state for this unit was used last is likeliest to be
-    // close to this checkout's sources.
-    donors.sort_by_key(|donor| std::cmp::Reverse(donor.0));
+    // close to this checkout's sources. Ties, as with coarse timestamps, go
+    // to the checkout built last, then by name, so the choice is stable.
+    donors.sort_by(|a, b| (b.0, b.1, &a.2).cmp(&(a.0, a.1, &b.2)));
     let destination = checkout.join(unit);
     let mut failure = None;
-    for (_, workspace_root, name) in donors {
+    for (_, _, name, workspace_root) in donors {
         let Some(key) = name.to_str() else {
             continue;
         };
@@ -2824,6 +2825,30 @@ mod tests {
         set_mtime(&stamp, 35);
 
         assert_eq!(seed(&own, unit).unwrap(), Some(PathBuf::from("/work/hit")));
+    }
+
+    #[test]
+    fn seeding_breaks_a_tie_in_last_use_by_the_checkout_built_last_then_by_name() {
+        let unit = "blake3/0123456789";
+        let tied = |donors: &[(&str, u64)]| {
+            let cache = tempfile::tempdir().unwrap();
+            let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
+            for (key, updated) in donors {
+                let donor =
+                    checkout_with_sessions(cache.path(), key, *updated, unit, &["s-1-a-finished"]);
+                set_mtime(&donor.join(unit).join("widget-0abc/s-1-a-finished"), 20);
+            }
+            seed(&own, unit).unwrap()
+        };
+
+        assert_eq!(
+            tied(&[("a", 20), ("b", 30)]),
+            Some(PathBuf::from("/work/b"))
+        );
+        assert_eq!(
+            tied(&[("b", 20), ("a", 20)]),
+            Some(PathBuf::from("/work/a"))
+        );
     }
 
     #[test]
