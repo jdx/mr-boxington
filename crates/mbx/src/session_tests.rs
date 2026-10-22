@@ -158,6 +158,7 @@ fn only_a_binary_crate_type_is_a_possible_build_script() {
     assert!(!compiles_only_a_binary(&arguments(&["src/main.rs"])));
 }
 
+#[cfg(windows)]
 #[test]
 fn a_build_script_invoked_without_its_exe_extension_finds_the_preserved_copy() {
     let directory = tempfile::tempdir().unwrap();
