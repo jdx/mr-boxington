@@ -378,7 +378,8 @@ them.
 
 On macOS, rustc keeps the object files of each compilation beside the program
 in `deps/`, because the program's debug information points into them
-(`split-debuginfo = "unpacked"`, the macOS default). Each compilation of a unit
+(`split-debuginfo = "unpacked"`, which Cargo uses on macOS for profiles with
+debug info, such as `dev` and `test`). Each compilation of a unit
 writes a complete new set and leaves the previous ones, so an incremental
 build of a test crate edited all day can leave tens of thousands of them. When
 a compilation through mbx succeeds, it removes that unit's object files that
@@ -389,8 +390,9 @@ An older name of an object that is still in use goes once a compilation links
 that object under a new name, so a unit keeps the object files of its last few
 compilations at most.
 Nothing is removed after a failed compilation or under `-C save-temps`. On
-Linux and Windows, rustc deletes these files itself unless a project sets
-`split-debuginfo = "unpacked"`.
+Linux and Windows, rustc deletes these object files itself. On Linux, a project
+that sets `split-debuginfo = "unpacked"` gets split DWARF files (`.dwo`) beside
+the program instead, one set per compilation; mbx does not remove those.
 
 ### Budgets scale with the disk
 

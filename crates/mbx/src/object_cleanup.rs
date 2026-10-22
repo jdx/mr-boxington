@@ -53,8 +53,9 @@ impl ObjectIdentity {
 ///
 /// rustc writes a complete new set of `.rcgu.o` files on every compilation of
 /// a unit, each name carrying a fresh suffix, and deletes none of the earlier
-/// sets where debug info stays in them (`split-debuginfo=unpacked`, macOS's
-/// default). The linked program's debug map names only the newest set, so the
+/// sets where debug info stays in them (`split-debuginfo=unpacked`, which
+/// Cargo passes on macOS for profiles with debug info). The linked program's
+/// debug map names only the newest set, so the
 /// rest only take space: tens of thousands of files for a test unit compiled
 /// all day.
 #[derive(Debug)]
@@ -168,8 +169,10 @@ fn unit_object_files(directory: &Path, prefix: &str) -> HashMap<PathBuf, ObjectI
 /// every object of its unit has there: `<crate>-<hash>.`. `None` when the
 /// unit has no hash of its own, when `-C save-temps` asks to keep them, or
 /// when the compilation leaves none: it emits neither objects nor a link, or
-/// keeps debug info somewhere other than the objects
-/// (`split-debuginfo=unpacked`, the default only for Apple targets).
+/// keeps debug info somewhere other than the objects, as everything but
+/// `split-debuginfo=unpacked` does. Without the flag, an Apple target is taken
+/// as unpacked; where rustc packs instead, it deletes its objects itself and
+/// the snapshot finds nothing to remove.
 fn unit_objects(arguments: &[OsString], working_dir: &Path) -> Option<(PathBuf, String)> {
     let mut extra_filename = None;
     let mut split_debuginfo = None;
