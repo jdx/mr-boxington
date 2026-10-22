@@ -193,7 +193,8 @@ results and incremental state over older target directories; allocation is not
 based on measured rebuild cost.
 
 The budget is a **logical-byte collection target**, not a physical disk quota.
-Shared blocks can make physical usage smaller, while metadata, session history,
+Hard-linked files count once within learned incremental state and within
+managed targets, but other shared blocks can make physical usage smaller, while metadata, session history,
 and temporary files add overhead outside the budget. Builds can exceed the
 budget between sweeps. Active builds, held incremental session locks, explicitly
 kept targets, and untracked state can also prevent collection from reaching it;

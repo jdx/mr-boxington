@@ -463,8 +463,8 @@ private state and shared cache data regardless of the budgets:
 2. Managed target directories, least recently used first, with
    `target.evict_first` checkouts ahead of the rest and `target.keep` checkouts
    left alone.
-3. Shared cache objects on the cache disk, after the private state and managed
-   targets stop freeing bytes.
+3. Shared cache objects on the cache disk, after collecting private state and
+   managed targets stops removing anything.
 
 Running commands' state and explicitly kept targets stay. The shared action
 store can go below `gc.max_size` when the cache disk is short, because keeping the build machine usable takes
@@ -481,8 +481,12 @@ mbx[gc]: evicted 12 shared cache objects and 3 action results below gc.max_size 
 Restored outputs that share blocks with the store through reflinks or hard
 links free less disk than their logical size. Collection therefore repeats each
 step while the disk is still short, measuring the disk again before each round
-rather than trusting the logical total. The number of rounds is bounded, so
-unrelated files filling the disk cannot make a sweep run forever. Set
+rather than trusting the logical total. A step continues as long as its last
+round removed something, even when that round freed no space: removing target
+directories whose files the store still links frees nothing on disk, but the
+next round reaches other candidates. A step ends when a round removes nothing.
+The number of rounds is bounded, so unrelated files filling the disk cannot
+make a sweep run forever. Set
 `gc.min_free_size` to a size such as `"20GiB"`, or to `"none"` to collect by
 the budgets alone.
 
@@ -580,7 +584,31 @@ object in `mbx stats --json` also carries that marker. Lifetime savings totals
 and cleanup messages use the same measure. Existing `freed_*_bytes` fields in
 the saved lifetime tally retain their names for compatibility.
 
+Managed target directories are counted the same way: a file hard linked into
+several target directories, as [seeding](#start-new-checkouts-from-existing-units)
+does for read-only outputs, counts once in `mbx cache stats` and against
+`target.max_size`. Removing one of those directories frees the shared file
+only when the last directory linking it goes, so a budget sweep weighs each
+directory by what removing it would actually free. Each file is credited once
+it is deleted; a directory whose deletion fails partway keeps what survived in
+the remaining total.
+
 Physical disk space released can differ. Reflinks and hard links may leave data
 referenced by another file; sparse files may occupy fewer blocks than their
 length. Filesystem snapshots and delayed allocation also affect reclamation.
-These counters do not estimate physical space released.
+Apart from the one figure below, these counters do not estimate physical space
+released.
+
+`mbx gc --json` also reports `targets.released_bytes`, the part of the removed
+target bytes whose files had no link left anywhere else, which the disk got
+back. A restored output hard linked to its shared cache object is removed from
+the target but stays on disk, so it counts as removed and not as released. The
+text report adds the released figure when it differs from the logical one:
+
+```text
+mbx[gc]: removed 2 target directories (4.0 GiB logical, 1 abandoned and 1 live); 1.0 GiB logical remain, 1.5 GiB released on disk
+```
+
+Reflinks and clones share blocks without sharing a file, and no filesystem
+interface reports that, so they count as released in full. On APFS and ReFS,
+where restores clone rather than hard link, the two figures usually agree.
