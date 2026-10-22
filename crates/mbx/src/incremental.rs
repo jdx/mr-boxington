@@ -267,12 +267,11 @@ pub(crate) fn collect(
                     evicted = true;
                     continue;
                 }
+                // Bytes are credited only for files whose last link went,
+                // inside `evict_session`. A file another owner holds, or that
+                // a compile or seed linked after the snapshot, is still on
+                // disk however many measured owners it has left.
                 if evict_session(session, &mut inodes) == Some(true) {
-                    // The session no longer owns its files: what another
-                    // owner still holds stays counted, and what went with
-                    // its last link was already forgotten. A file whose
-                    // link count could not be read is freed here.
-                    inodes.release(&session.files);
                     outcome.removed_sessions += 1;
                     evicted = true;
                 }
@@ -290,7 +289,11 @@ pub(crate) fn collect(
             continue;
         };
         if remove_tree(&unit.directory, dry_run, &mut inodes) {
-            inodes.release(&unit.files);
+            // A real removal credited what it freed, link by link; a preview
+            // removes nothing and estimates by ownership.
+            if dry_run {
+                inodes.release(&unit.files);
+            }
             // Not short-circuited: a stamp left behind would outlive its unit.
             let records_removed = unit
                 .records
@@ -299,7 +302,9 @@ pub(crate) fn collect(
                 .count()
                 == 0;
             if records_removed {
-                inodes.release(&unit.record_files);
+                if dry_run {
+                    inodes.release(&unit.record_files);
+                }
             } else {
                 kept_records.insert(index);
             }
@@ -322,7 +327,7 @@ pub(crate) fn collect(
         match deletion_guard(root, &entry.key, !dry_run) {
             Ok(guard) if !guard.active => {
                 for (stamp, files) in &entry.orphan_stamps {
-                    if remove_tree(stamp, dry_run, &mut inodes) {
+                    if remove_tree(stamp, dry_run, &mut inodes) && dry_run {
                         inodes.release(files);
                     }
                 }
@@ -366,7 +371,9 @@ pub(crate) fn collect(
             continue;
         }
         if remove_tree(&entry.directory, dry_run, &mut inodes) {
-            inodes.release(&entry.files);
+            if dry_run {
+                inodes.release(&entry.files);
+            }
             outcome.removed_directories += 1;
             if !dry_run {
                 guard.cleanup();
@@ -2014,6 +2021,31 @@ mod tests {
             ),
             "removable once the sweep let go"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_linked_after_the_snapshot_is_not_credited() {
+        let cache = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let state = touch(cache.path(), workspace.path()).unwrap();
+        let directory = unit_with_sessions(&state.directory, "unit", &[("s-1-a-old", 10)]);
+        let session = directory.join("widget-0abc/s-1-a-old");
+        set_mtime(&session, 0);
+        // A link the snapshot never measured, as when a compile or a seed
+        // links the file after collection listed the unit.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let kept = elsewhere.path().join("still-linked.bin");
+        std::fs::hard_link(session.join("dep-graph.bin"), &kept).unwrap();
+        let before = stats(cache.path()).unwrap().bytes;
+
+        let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
+        assert_eq!(outcome.removed_sessions, 1);
+        assert!(!session.exists());
+        assert!(kept.exists(), "its bytes are still on disk");
+        assert_eq!(outcome.removed_bytes, 0, "nothing was freed");
+        assert_eq!(outcome.remaining_bytes, before);
+        drop(state);
     }
 
     fn lock_shared(lock: &Path) -> std::fs::File {
