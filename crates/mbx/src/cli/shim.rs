@@ -9,8 +9,8 @@ use std::sync::OnceLock;
 const CARGO_SHIM_STEM: &str = "cargo";
 const CARGO_SHIM_MODE_ENV: &str = "MBX_CARGO_SHIM_MODE";
 const CARGO_SHIM_PATH_ENV: &str = "MBX_CARGO_SHIM_PATH";
-const CARGO_SHIM_DEPTH_ENV: &str = "MBX_CARGO_SHIM_DEPTH";
-const CARGO_SHIM_CHAIN_ENV: &str = "MBX_CARGO_SHIM_CHAIN";
+pub(super) const CARGO_SHIM_DEPTH_ENV: &str = "MBX_CARGO_SHIM_DEPTH";
+pub(super) const CARGO_SHIM_CHAIN_ENV: &str = "MBX_CARGO_SHIM_CHAIN";
 /// Build scripts and Cargo subcommands legitimately reach the shim again, so a
 /// repeat is not proof of a cycle. A real wrapper loop never stops, so a depth
 /// far beyond any plausible nesting is.
@@ -161,7 +161,13 @@ fn wrapper_loop_hint(real_cargo: &OsStr) -> Option<String> {
     stderr
         .lines()
         .find(|line| line.contains("re-entered its Cargo shim"))
-        .map(|line| line.trim().trim_start_matches("Error:").trim().to_string())
+        .map(|line| {
+            let line = line.trim();
+            line.strip_prefix("mbx[error]:")
+                .unwrap_or(line)
+                .trim()
+                .to_string()
+        })
 }
 
 /// The depth and chain to export, given those this shim inherited.

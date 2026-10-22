@@ -41,6 +41,16 @@ pub(super) fn plain_launch(cargo: &OsStr, arguments: &[String]) -> Result<ExitCo
     command.args(arguments);
     if let Some(caller) = CALLER.get() {
         command.env_clear().envs(caller);
+        // The caller's snapshot predates this shim entry. Dropping the loop
+        // guard's counters would restart them in every re-entry.
+        for name in [
+            super::shim::CARGO_SHIM_DEPTH_ENV,
+            super::shim::CARGO_SHIM_CHAIN_ENV,
+        ] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
     }
     Ok(super::cargo::exit_code(command.status()?))
 }
