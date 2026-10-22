@@ -318,9 +318,10 @@ pub(super) fn merged_incremental_report(
         removed_sessions: initial
             .removed_sessions
             .saturating_add(low_disk.map_or(0, |outcome| outcome.removed_sessions)),
-        session_units: initial
-            .session_units
-            .saturating_add(low_disk.map_or(0, |outcome| outcome.session_units)),
+        // A unit trimmed by both passes is one unit.
+        session_units: low_disk.map_or(initial.session_units.len(), |outcome| {
+            initial.session_units.union(&outcome.session_units).count()
+        }) as u64,
         kept_hot_units: last.kept_hot_units,
         removed_directories: initial
             .removed_directories
@@ -492,7 +493,8 @@ pub(super) fn incremental_removal_lines(
     if outcome.removed_sessions > 0 {
         lines.push(format!(
             "{verb} {} sessions from {} learned incremental units in live checkouts",
-            outcome.removed_sessions, outcome.session_units
+            outcome.removed_sessions,
+            outcome.session_units.len()
         ));
     }
     if outcome.kept_hot_units > 0 {
@@ -1329,7 +1331,7 @@ impl LowDiskCollection {
         total.removed_sessions = total
             .removed_sessions
             .saturating_add(outcome.removed_sessions);
-        total.session_units = total.session_units.saturating_add(outcome.session_units);
+        total.session_units.extend(outcome.session_units);
         total.kept_hot_units = outcome.kept_hot_units;
         total.remaining_directories = outcome.remaining_directories;
         total.remaining_bytes = outcome.remaining_bytes;

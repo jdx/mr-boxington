@@ -57,8 +57,9 @@ pub(crate) struct PruneOutcome {
     pub untracked_directories: u64,
     /// Finished rustc sessions removed from units of live checkouts.
     pub removed_sessions: u64,
-    /// The units of live checkouts those sessions came from.
-    pub session_units: u64,
+    /// The units of live checkouts those sessions came from, by directory,
+    /// so that passes over the same units count each once.
+    pub session_units: std::collections::BTreeSet<PathBuf>,
     /// Units of live checkouts kept because they were used in the last hour.
     pub kept_hot_units: u64,
 }
@@ -253,7 +254,7 @@ pub(crate) fn collect(
                 }
             }
             if evicted {
-                outcome.session_units += 1;
+                outcome.session_units.insert(unit.directory.clone());
             } else {
                 outcome.skipped_active_units += 1;
             }
@@ -1966,13 +1967,13 @@ mod tests {
 
         let preview = collect(cache.path(), Some(0), None, true, true, Some(0)).unwrap();
         assert_eq!(preview.removed_sessions, 2, "a preview probes no lock");
-        assert_eq!(preview.session_units, 1);
+        assert_eq!(preview.session_units.len(), 1);
         assert_eq!(preview.removed_bytes, 64);
         assert!(krate.join("s-2-b-new").exists());
 
         let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
         assert_eq!(outcome.removed_sessions, 1);
-        assert_eq!(outcome.session_units, 1);
+        assert_eq!(outcome.session_units.len(), 1);
         assert_eq!(outcome.removed_units, 0);
         assert_eq!(outcome.skipped_active_directories, 1);
         assert_eq!(outcome.removed_bytes, 32);
