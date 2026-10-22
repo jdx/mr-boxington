@@ -896,7 +896,16 @@ fn evict_session(session: &Session, inodes: &mut Inodes) -> Option<bool> {
     let mut unfinished = session.lock.with_extension("").into_os_string();
     unfinished.push("-working");
     let unfinished = PathBuf::from(unfinished);
-    if let Err(error) = std::fs::rename(&session.directory, &unfinished) {
+    let mut renamed = std::fs::rename(&session.directory, &unfinished);
+    // An earlier eviction that stopped halfway may have left the name taken.
+    // The lock held here guards that directory too.
+    if renamed.is_err()
+        && std::fs::symlink_metadata(&unfinished).is_ok_and(|metadata| metadata.is_dir())
+        && remove_tree(&unfinished, false, inodes)
+    {
+        renamed = std::fs::rename(&session.directory, &unfinished);
+    }
+    if let Err(error) = renamed {
         warn_walk_error(&session.directory, &error);
         return None;
     }
@@ -2124,6 +2133,24 @@ mod tests {
         assert_eq!(outcome.removed_sessions, 0);
         assert_eq!(outcome.skipped_active_units, 0);
         assert_eq!(outcome.session_units.len(), 1);
+        drop(state);
+    }
+
+    #[test]
+    fn an_unfinished_leftover_under_the_same_name_does_not_block_eviction() {
+        let cache = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let state = touch(cache.path(), workspace.path()).unwrap();
+        let directory = unit_with_sessions(&state.directory, "unit", &[("s-1-a-old", 0)]);
+        // What an eviction that stopped halfway leaves behind.
+        let leftover = directory.join("widget-0abc/s-1-a-working");
+        std::fs::create_dir(&leftover).unwrap();
+        std::fs::write(leftover.join("part.bin"), b"part").unwrap();
+
+        let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
+        assert_eq!(outcome.removed_sessions, 1);
+        assert!(!directory.join("widget-0abc/s-1-a-old").exists());
+        assert!(!leftover.exists());
         drop(state);
     }
 
