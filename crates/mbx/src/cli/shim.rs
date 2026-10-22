@@ -115,9 +115,14 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
         None => match failed_probe(&real_cargo, &arguments, target_dir_env.as_deref()) {
             FailedProbe::Roots(roots) => *roots,
             FailedProbe::Passthrough => return run_real_cargo(&real_cargo, &arguments),
-            FailedProbe::Reject => eyre::bail!(
-                "could not verify Cargo build storage: metadata probing failed; run cargo metadata --no-deps --format-version 1 with the same manifest and configuration options to diagnose it"
-            ),
+            FailedProbe::Reject => {
+                let hint = wrapper_loop_hint(&real_cargo)
+                    .map(|hint| format!(" ({hint})"))
+                    .unwrap_or_default();
+                eyre::bail!(
+                    "could not verify Cargo build storage: metadata probing failed{hint}; run cargo metadata --no-deps --format-version 1 with the same manifest and configuration options to diagnose it"
+                )
+            }
         },
     };
     // Every probe and the final child must name Cargo directly.
@@ -141,6 +146,22 @@ fn record_cargo_selection(real_cargo: &OsStr, configured: Option<&OsStr>) -> Res
         unsafe { std::env::set_var(CARGO_SHIM_CHAIN_ENV, chain) };
     }
     Ok(())
+}
+
+/// The probe discards its child's stderr, so a wrapper loop would surface only
+/// as a failed probe. Ask the selected Cargo for its version, which every shim
+/// entry guards before it passes through, and keep the loop error if it fails.
+fn wrapper_loop_hint(real_cargo: &OsStr) -> Option<String> {
+    let output = Command::new(real_cargo)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    stderr
+        .lines()
+        .find(|line| line.contains("re-entered its Cargo shim"))
+        .map(|line| line.trim().trim_start_matches("Error:").trim().to_string())
 }
 
 /// The depth and chain to export, given those this shim inherited.
