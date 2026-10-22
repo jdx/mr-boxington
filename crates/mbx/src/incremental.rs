@@ -191,6 +191,7 @@ pub(crate) fn collect(
     let mut active = HashSet::new();
     let mut removed = HashSet::new();
     let mut kept_records = HashSet::new();
+    let mut trimming = HashMap::new();
     let expired =
         |unit: &Unit| max_age.is_some_and(|age| now.saturating_sub(unit.last_used) > age.as_secs());
     let mut units = entries
@@ -229,23 +230,11 @@ pub(crate) fn collect(
                 outcome.kept_hot_units += 1;
                 continue;
             }
-            // The build's lease protects the checkout only while the build
-            // runs. Hold one of our own while trimming, so that `mbx clean`
-            // or `mbx cache remove` cannot remove the checkout, and a new
-            // build reseed it under the same session names, in the middle.
-            // Leases are per process, so builds are not held up.
-            let _lease = if dry_run {
-                None
-            } else {
-                match acquire_lease(root, &entry.key) {
-                    Ok(lease) => Some(lease),
-                    Err(error) => {
-                        log::debug!("incremental checkout could not be leased: {error}");
-                        outcome.skipped_active_units += 1;
-                        continue;
-                    }
-                }
-            };
+            if !dry_run && let Err(error) = lease_for_trimming(&mut trimming, root, &entry.key) {
+                log::debug!("incremental checkout could not be leased: {error}");
+                outcome.skipped_active_units += 1;
+                continue;
+            }
             #[cfg(test)]
             tests::trimming(&entry.key);
             let mut evicted = false;
@@ -1053,6 +1042,24 @@ fn acquire_lease(root: &Path, key: &str) -> Result<ActiveLease> {
         path,
         registrar_path,
     })
+}
+
+/// Lease a live checkout the collector trims, once, for the rest of the sweep.
+///
+/// The build's lease protects the checkout only while the build runs. Ours
+/// keeps `mbx clean` or `mbx cache remove` from removing the checkout, and a
+/// new build from reseeding it under the same session names, between or
+/// during the evictions of its units. Leases are per process, so builds are
+/// not held up; later units of the checkout count as live for this sweep.
+fn lease_for_trimming(
+    leases: &mut HashMap<String, ActiveLease>,
+    root: &Path,
+    key: &str,
+) -> Result<()> {
+    if !leases.contains_key(key) {
+        leases.insert(key.to_string(), acquire_lease(root, key)?);
+    }
+    Ok(())
 }
 
 struct DeletionGuard {
@@ -2029,6 +2036,45 @@ mod tests {
                 hook(key);
             }
         });
+    }
+
+    #[test]
+    fn a_trimming_lease_is_taken_once_and_held_until_the_sweep_lets_go() {
+        let cache = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let state = touch(cache.path(), workspace.path()).unwrap();
+        let key = state
+            .directory
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let leases_on_disk = || {
+            std::fs::read_dir(lock_dir(cache.path(), &key))
+                .unwrap()
+                .flatten()
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "lease"))
+                .count()
+        };
+        let mut trimming = HashMap::new();
+        // Two of the checkout's units are trimmed; the build ends between them.
+        lease_for_trimming(&mut trimming, cache.path(), &key).unwrap();
+        drop(state.lease);
+        lease_for_trimming(&mut trimming, cache.path(), &key).unwrap();
+        assert_eq!(leases_on_disk(), 1);
+        assert_eq!(
+            remove_workspace(cache.path(), workspace.path()).unwrap(),
+            RemoveOutcome::Active
+        );
+
+        drop(trimming);
+        assert!(
+            matches!(
+                remove_workspace(cache.path(), workspace.path()).unwrap(),
+                RemoveOutcome::Removed(_)
+            ),
+            "removable once the sweep let go"
+        );
     }
 
     #[test]
