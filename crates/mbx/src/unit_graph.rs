@@ -106,6 +106,22 @@ fn build_script_run(out_dir: &Path) -> Option<String> {
     unit_directory_hash(out_dir).map(|hash| format!("run-{hash}"))
 }
 
+/// Whether `directory` is the output directory a unit owns alone from Cargo
+/// 1.100, `build/<package>/<hash>/out`.
+pub(crate) fn is_unit_out_dir(directory: &Path) -> bool {
+    directory.file_name().is_some_and(|name| name == "out")
+        && directory
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .is_some_and(is_unit_hash)
+        && directory
+            .ancestors()
+            .nth(3)
+            .and_then(Path::file_name)
+            .is_some_and(|build| build == "build")
+}
+
 /// The hash naming a unit's directory, in either layout: `<package>-<hash>`,
 /// or `<package>/<hash>` with its outputs in `out`.
 fn unit_directory_hash(directory: &Path) -> Option<String> {

@@ -203,6 +203,74 @@ mod superseded_objects {
         let custom = unit_arguments(deps.path(), &["-C", "extra-filename=custom"]);
         assert!(ObjectSnapshot::before_compiling(&custom, Path::new("/")).is_none());
     }
+
+    /// From Cargo 1.100 a unit owns `build/<package>/<hash>/out` and is passed
+    /// no `extra-filename`, so its objects carry only the crate name.
+    #[test]
+    fn a_unit_that_owns_its_output_directory_is_cleaned_by_crate_name() {
+        let target = tempfile::tempdir().unwrap();
+        let out = target
+            .path()
+            .join("debug/build/widget/0123456789abcdef/out");
+        std::fs::create_dir_all(&out).unwrap();
+        let old = ["widget.aaaa.1x2y3z.rcgu.o", "widget.bbbb.1x2y3z.rcgu.o"];
+        let others = ["widget", "widget.d", "gadget.aaaa.1x2y3z.rcgu.o"];
+        write(&out, &old);
+        write(&out, &others);
+        let arguments: Vec<OsString> = vec![
+            "--crate-name".into(),
+            "widget".into(),
+            "--out-dir".into(),
+            out.clone().into(),
+            "-C".into(),
+            "split-debuginfo=unpacked".into(),
+        ];
+        let (directory, prefix) = unit_objects(&arguments, Path::new("/")).unwrap();
+        assert_eq!(
+            (directory.as_path(), prefix.as_str()),
+            (out.as_path(), "widget.")
+        );
+        let snapshot = ObjectSnapshot::take(
+            &directory,
+            &prefix,
+            SystemTime::now() + Duration::from_secs(10),
+        );
+        let new = ["widget.aaaa.4u5v6w.rcgu.o"];
+        write(&out, &new);
+
+        assert_eq!(snapshot.remove_superseded(&succeeded()), 2);
+
+        for name in old {
+            assert!(!out.join(name).exists(), "{name} was superseded");
+        }
+        for name in others.iter().chain(&new) {
+            assert!(out.join(name).exists(), "{name} is kept");
+        }
+    }
+
+    #[test]
+    fn a_hashless_unit_outside_a_directory_of_its_own_is_not_cleaned() {
+        let target = tempfile::tempdir().unwrap();
+        for directory in [
+            "debug/build/widget/not-a-hash/out",
+            "debug/build/widget/0123456789abcdef/other",
+            "debug/elsewhere/widget/0123456789abcdef/out",
+        ] {
+            let out = target.path().join(directory);
+            let arguments: Vec<OsString> = vec![
+                "--crate-name".into(),
+                "widget".into(),
+                "--out-dir".into(),
+                out.into(),
+                "-C".into(),
+                "split-debuginfo=unpacked".into(),
+            ];
+            assert!(
+                unit_objects(&arguments, Path::new("/")).is_none(),
+                "{directory}"
+            );
+        }
+    }
 }
 
 #[test]

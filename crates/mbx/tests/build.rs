@@ -7547,14 +7547,23 @@ fn write_object_project(directory: &Path, revision: u32) {
     .unwrap();
 }
 
+/// Whether `name` is an object file of the binary unit: `objects-<hash>.…`
+/// through Cargo 1.99, `objects.…` in the directory the unit owns from 1.100.
+#[cfg(unix)]
+fn is_unit_object(name: &str) -> bool {
+    (name.starts_with("objects-") || name.starts_with("objects.")) && name.ends_with(".rcgu.o")
+}
+
 /// The binary unit's object files: each name with its inode.
 #[cfg(unix)]
 fn object_files(project: &Path) -> std::collections::BTreeMap<String, u64> {
     use std::os::unix::fs::MetadataExt as _;
-    find_files(&project.join("target/debug/deps"), |path| {
-        file_name_is(path, |name| {
-            name.starts_with("objects-") && name.ends_with(".rcgu.o")
-        })
+    // Not `incremental/`: rustc's own sessions are not ours to clean.
+    find_files(&project.join("target/debug"), |path| {
+        !path
+            .components()
+            .any(|part| part.as_os_str() == "incremental")
+            && file_name_is(path, is_unit_object)
     })
     .iter()
     .map(|path| {
@@ -7584,7 +7593,7 @@ fn debug_map_objects(binary: &Path) -> std::collections::BTreeSet<String> {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
         })
-        .filter(|name| name.starts_with("objects-") && name.ends_with(".rcgu.o"))
+        .filter(|name| is_unit_object(name))
         .collect()
 }
 

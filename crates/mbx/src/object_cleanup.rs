@@ -166,8 +166,9 @@ fn unit_object_files(directory: &Path, prefix: &str) -> HashMap<PathBuf, ObjectI
 }
 
 /// The directory a rustc command line writes its objects to, and the prefix
-/// every object of its unit has there: `<crate>-<hash>.`. `None` when the
-/// unit has no hash of its own, when `-C save-temps` asks to keep them, or
+/// every object of its unit has there: `<crate>-<hash>.` in a directory units
+/// share, or `<crate>.` in the one a unit owns from Cargo 1.100. `None` when
+/// the unit is neither, when `-C save-temps` asks to keep them, or
 /// when the compilation leaves none: it emits neither objects nor a link, or
 /// keeps debug info somewhere other than the objects, as everything but
 /// `split-debuginfo=unpacked` does. Without the flag, an Apple target is taken
@@ -196,13 +197,22 @@ fn unit_objects(arguments: &[OsString], working_dir: &Path) -> Option<(PathBuf, 
     if !unpacked || !emits_objects(arguments) {
         return None;
     }
-    let hash = extra_filename?;
-    if !crate::unit_graph::is_unit_hash(hash.strip_prefix('-')?) {
-        return None;
-    }
     let crate_name = crate::session::crate_name_argument(arguments)?;
-    let out_dir = crate::rustc::flag_value(arguments, "--out-dir")?;
-    Some((working_dir.join(out_dir), format!("{crate_name}{hash}.")))
+    let out_dir = working_dir.join(crate::rustc::flag_value(arguments, "--out-dir")?);
+    let prefix = match extra_filename {
+        // Through Cargo 1.99 units share `deps/`; the hash tells them apart.
+        Some(hash) => {
+            if !crate::unit_graph::is_unit_hash(hash.strip_prefix('-')?) {
+                return None;
+            }
+            format!("{crate_name}{hash}.")
+        }
+        // From Cargo 1.100 a unit owns its output directory and its files
+        // carry no hash.
+        None if crate::unit_graph::is_unit_out_dir(&out_dir) => format!("{crate_name}."),
+        None => return None,
+    };
+    Some((out_dir, prefix))
 }
 
 /// Whether a rustc command line writes object files: it emits them or links,
