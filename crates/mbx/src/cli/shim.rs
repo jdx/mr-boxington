@@ -17,7 +17,7 @@ pub(super) const CARGO_SHIM_CHAIN_ENV: &str = "MBX_CARGO_SHIM_CHAIN";
 /// far beyond any plausible nesting is.
 const MAX_CARGO_SHIM_DEPTH: usize = 12;
 /// How long the diagnostic `--version` run may take before it is abandoned.
-const WRAPPER_LOOP_HINT_TIMEOUT: Duration = Duration::from_secs(10);
+const WRAPPER_LOOP_HINT_TIMEOUT: Duration = Duration::from_secs(5);
 static PATH_BEFORE_SHIM_EXCLUSION: OnceLock<OsString> = OnceLock::new();
 
 /// Whether this process was installed under Cargo's name by `mbx setup`.
@@ -163,25 +163,19 @@ fn wrapper_loop_hint(real_cargo: &OsStr) -> Option<String> {
         .spawn()
         .ok()?;
     let mut pipe = child.stderr.take()?;
-    let reader = std::thread::spawn(move || {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut text = String::new();
         let _ = std::io::Read::read_to_string(&mut pipe, &mut text);
-        text
+        let _ = sender.send(text);
     });
-    // A wrapper that hangs must not hide the probe failure it is explaining.
-    let deadline = std::time::Instant::now() + WRAPPER_LOOP_HINT_TIMEOUT;
-    loop {
-        if child.try_wait().ok()?.is_some() {
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let stderr = reader.join().ok()?;
+    // A wrapper that hangs, or leaves a background process holding stderr
+    // open, must not hide the probe failure it is explaining. The reader is
+    // abandoned at the deadline rather than joined.
+    let stderr = receiver.recv_timeout(WRAPPER_LOOP_HINT_TIMEOUT);
+    let _ = child.kill();
+    let _ = child.wait();
+    let stderr = stderr.ok()?;
     stderr
         .lines()
         .find(|line| line.contains("re-entered its Cargo shim"))

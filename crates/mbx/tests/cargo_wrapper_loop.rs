@@ -125,3 +125,25 @@ fn wrapper_loop_through_a_plain_launch_still_stops() {
     assert!(!success, "{output}");
     assert!(output.contains("re-entered its Cargo shim"), "{output}");
 }
+
+/// The diagnostic run is abandoned at its deadline even when a background
+/// process keeps the wrapper's stderr open after the wrapper exits.
+#[test]
+fn diagnostic_does_not_wait_for_a_background_process_holding_stderr() {
+    let root = tempfile::tempdir().unwrap();
+    let wrapper = fixture(
+        root.path(),
+        "#!/bin/sh\ncase \" $* \" in *\" --version \"*) sleep 20 & exit 0;; esac\nexit 1\n",
+    );
+    let mut command = mbx(root.path(), &wrapper);
+    command.args(["build", "--offline"]);
+    let start = Instant::now();
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(60));
+    assert!(!success, "{output}");
+    assert!(output.contains("metadata probing failed"), "{output}");
+    assert!(
+        start.elapsed() < Duration::from_secs(15),
+        "waited for the background process: {:?}",
+        start.elapsed()
+    );
+}
