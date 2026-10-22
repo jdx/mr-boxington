@@ -415,11 +415,25 @@ fn remove_tree(directory: &Path, dry_run: bool, inodes: &mut Inodes) -> bool {
             pending.extend(nested_entries(&path).into_iter().map(|entry| entry.path()));
             continue;
         }
-        let (key, links) = file_identity(&path, &metadata);
-        match std::fs::remove_file(&path) {
+        // A symlink is removed itself, never followed, and frees nothing
+        // measured; Windows removes one to a directory, or a junction, as a
+        // directory.
+        let symlink = metadata.is_symlink();
+        let identity = (!symlink).then(|| file_identity(&path, &metadata));
+        let removed = std::fs::remove_file(&path).or_else(|error| {
+            if symlink {
+                std::fs::remove_dir(&path)
+            } else {
+                Err(error)
+            }
+        });
+        match removed {
             // Another link keeps the data; it frees nothing yet.
-            Ok(()) if links == Some(1) => inodes.forget(&key),
-            Ok(()) => {}
+            Ok(()) => {
+                if let Some((key, Some(1))) = identity {
+                    inodes.forget(&key);
+                }
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 log::warn!(
@@ -2262,6 +2276,28 @@ mod tests {
             );
         }
         drop(state);
+    }
+
+    #[test]
+    fn removing_a_tree_removes_a_directory_symlink_without_following_it() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("kept"), b"kept").unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        let unit = tree.path().join("unit");
+        std::fs::create_dir(&unit).unwrap();
+        std::fs::write(unit.join("state"), b"state").unwrap();
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(outside.path(), unit.join("link"));
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(outside.path(), unit.join("link"));
+        if let Err(error) = linked {
+            eprintln!("skipped: cannot create a directory symlink here: {error}");
+            return;
+        }
+
+        assert!(remove_tree(&unit, false, &mut Inodes::default()));
+        assert!(!unit.exists());
+        assert_eq!(std::fs::read(outside.path().join("kept")).unwrap(), b"kept");
     }
 
     #[test]
