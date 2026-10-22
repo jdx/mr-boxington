@@ -1187,9 +1187,6 @@ fn compile_execution_only_build_script(
         run_compiler(&mut command, forwarded, false).wrap_err("failed to execute rustc")?;
     drop(permit);
     crate::scheduler::record_compiler_memory(&demand, &output.status);
-    if let Some(objects) = objects {
-        objects.remove_superseded(&output.status);
-    }
     session::record_compiler_invocation(
         "bypass",
         Some(invocation.crate_name()),
@@ -1215,6 +1212,10 @@ fn compile_execution_only_build_script(
         session::report_shim_warning(&format!(
             "build-script inputs were not validated: {error:#}"
         ));
+    }
+    // A discarded result returned above, keeping the earlier objects.
+    if let Some(objects) = objects {
+        objects.remove_superseded(&output.status);
     }
     if output.status.success()
         && let Some(executable) = cargo_build_script_executable(outputs, invocation)
