@@ -249,6 +249,11 @@ pub(crate) fn collect(
                     continue;
                 }
                 if evict_session(session, &mut inodes) == Some(true) {
+                    // The session no longer owns its files: what another
+                    // owner still holds stays counted, and what went with
+                    // its last link was already forgotten. A file whose
+                    // link count could not be read is freed here.
+                    inodes.release(&session.files);
                     outcome.removed_sessions += 1;
                     evicted = true;
                 }
