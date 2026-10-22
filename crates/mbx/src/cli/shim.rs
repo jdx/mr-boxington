@@ -130,12 +130,36 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
 /// mbx shim, as a custom wrapper script that execs mbx does. Each shim entry
 /// exports its depth and the Cargo it selected so the next one can see them.
 fn record_cargo_selection(real_cargo: &OsStr, configured: Option<&OsStr>) -> Result<()> {
-    let depth = std::env::var(CARGO_SHIM_DEPTH_ENV)
-        .ok()
+    let depth = std::env::var(CARGO_SHIM_DEPTH_ENV).ok();
+    let chain = std::env::var_os(CARGO_SHIM_CHAIN_ENV);
+    let (depth, chain) =
+        next_cargo_selection(depth.as_deref(), chain.as_deref(), real_cargo, configured)?;
+    // SAFETY: CLI dispatch is single-threaded here, before any child process
+    // or cache session has started.
+    unsafe { std::env::set_var(CARGO_SHIM_DEPTH_ENV, depth.to_string()) };
+    if let Some(chain) = chain {
+        unsafe { std::env::set_var(CARGO_SHIM_CHAIN_ENV, chain) };
+    }
+    Ok(())
+}
+
+/// The depth and chain to export, given those this shim inherited.
+fn next_cargo_selection(
+    depth: Option<&str>,
+    chain: Option<&OsStr>,
+    real_cargo: &OsStr,
+    configured: Option<&OsStr>,
+) -> Result<(usize, Option<OsString>)> {
+    let depth = depth
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
-    let chain = std::env::var_os(CARGO_SHIM_CHAIN_ENV).unwrap_or_default();
-    let mut selected = std::env::split_paths(&chain).collect::<Vec<_>>();
+    let mut selected = chain
+        .map(|chain| {
+            std::env::split_paths(chain)
+                .filter(|path| !path.as_os_str().is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     selected.push(PathBuf::from(real_cargo));
     if depth >= MAX_CARGO_SHIM_DEPTH {
         let source = if configured == Some(real_cargo) {
@@ -153,13 +177,7 @@ fn record_cargo_selection(real_cargo: &OsStr, configured: Option<&OsStr>) -> Res
             Path::new(real_cargo).display()
         );
     }
-    // SAFETY: CLI dispatch is single-threaded here, before any child process
-    // or cache session has started.
-    unsafe { std::env::set_var(CARGO_SHIM_DEPTH_ENV, (depth + 1).to_string()) };
-    if let Ok(chain) = std::env::join_paths(&selected) {
-        unsafe { std::env::set_var(CARGO_SHIM_CHAIN_ENV, chain) };
-    }
-    Ok(())
+    Ok((depth + 1, std::env::join_paths(&selected).ok()))
 }
 
 /// Collection removes a managed target but leaves the checkout's `target` link
@@ -651,28 +669,38 @@ mod tests {
 
     #[test]
     fn repeated_cargo_shim_entry_fails_with_the_selected_cargo() {
-        // SAFETY: the only test that touches these variables.
-        unsafe {
-            std::env::set_var(CARGO_SHIM_DEPTH_ENV, MAX_CARGO_SHIM_DEPTH.to_string());
-            std::env::set_var(CARGO_SHIM_CHAIN_ENV, "/usr/local/bin/cargo");
-        }
-        let error = record_cargo_selection(
-            OsStr::new("/usr/local/bin/cargo"),
-            Some(OsStr::new("/usr/local/bin/cargo")),
+        let cargo = OsStr::new("/usr/local/bin/cargo");
+        let error = next_cargo_selection(
+            Some(&MAX_CARGO_SHIM_DEPTH.to_string()),
+            Some(cargo),
+            cargo,
+            Some(cargo),
         )
         .unwrap_err()
         .to_string();
         assert!(error.contains("CARGO environment variable"), "{error}");
         assert!(error.contains("/usr/local/bin/cargo"), "{error}");
-        unsafe {
-            std::env::set_var(CARGO_SHIM_DEPTH_ENV, "2");
-        }
-        record_cargo_selection(OsStr::new("/usr/bin/cargo"), None).unwrap();
-        assert_eq!(std::env::var(CARGO_SHIM_DEPTH_ENV).unwrap(), "3");
-        unsafe {
-            std::env::remove_var(CARGO_SHIM_DEPTH_ENV);
-            std::env::remove_var(CARGO_SHIM_CHAIN_ENV);
-        }
+
+        let (depth, chain) =
+            next_cargo_selection(Some("2"), None, OsStr::new("/usr/bin/cargo"), None).unwrap();
+        assert_eq!(depth, 3);
+        assert_eq!(chain.as_deref(), Some(OsStr::new("/usr/bin/cargo")));
+    }
+
+    #[test]
+    fn first_cargo_shim_entry_starts_the_chain_without_an_empty_entry() {
+        let error = next_cargo_selection(
+            Some(&MAX_CARGO_SHIM_DEPTH.to_string()),
+            None,
+            OsStr::new("/usr/bin/cargo"),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("Selected so far: /usr/bin/cargo."),
+            "{error}"
+        );
     }
 
     #[test]
