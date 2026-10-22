@@ -90,11 +90,12 @@ its units expire or the budget needs their space. Each profile, target kind,
 feature set, or dependency identity can have its own unit. A unit's last use
 is the newest of its last-use stamp, its newest rustc session directory, and,
 when it has no sessions, the unit directory's modification time. The stamp is
-an empty `<unit>.use` file beside the unit, refreshed at most once a minute
-when a build restores the unit from the cache, so a unit served by the cache
-on every build does not look idle. While its state is over the backstop
-described below, cache hits stop refreshing it until a compilation accepts the
-state again or the budget changes. Building another unit in the same checkout
+a `<unit>.use` file beside the unit, whose modification time is refreshed at
+most once a minute when a build restores the unit from the cache, so a unit
+served by the cache on every build does not look idle. While its state is over
+the backstop described below, the stamp records the budget it was rejected
+under, and cache hits stop refreshing it until a compilation accepts the state
+again or the budget changes. Building another unit in the same checkout
 does not refresh old units. Seeding takes state from the checkout whose unit
 was used last.
 
@@ -122,12 +123,11 @@ defaults to 5% of the cache disk, between 10 GiB and 100 GiB.
 `gc.incremental_max_age` defaults to 30 days. Collection removes expired units
 first, then remaining units least recently used first until the budget is met.
 Shared hard-linked files count once across the whole sweep and in
-`mbx cache stats`. Removing one unit frees those bytes only after the last
-unit or bookkeeping reference in the incremental cache is removed. Removing a
-session credits only files whose last link it removed: rustc links the files a
-new session reuses from the one before it. Counts
-reflect each sweep's snapshot, so references created by a seed that finishes
-during a sweep are counted at the next one. Live checkouts retain their bookkeeping even when all their units are removed;
+`mbx cache stats`. A collection credits a file's bytes as freed only when it
+removes the file's last link, whether it removes a whole unit or a session:
+rustc links the files a new session reuses from the one before it, and a
+compile or seed can link a file after the sweep listed it. Counts reflect each
+sweep's snapshot, so links created during a sweep are counted at the next one. Live checkouts retain their bookkeeping even when all their units are removed;
 a deleted checkout loses its directory and bookkeeping after its last unit
 is collected.
 To change either limit:
