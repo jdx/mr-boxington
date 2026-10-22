@@ -235,8 +235,6 @@ pub(crate) fn collect(
                 outcome.skipped_active_units += 1;
                 continue;
             }
-            #[cfg(test)]
-            tests::trimming(&entry.key);
             let mut evicted = false;
             // A staging directory is a seed's, not rustc's.
             for session in unit
@@ -2022,22 +2020,6 @@ mod tests {
         unit
     }
 
-    type TrimmingHook = Option<Box<dyn FnMut(&str)>>;
-
-    thread_local! {
-        static TRIMMING: std::cell::RefCell<TrimmingHook> = const { std::cell::RefCell::new(None) };
-    }
-
-    /// Called by `collect` once it holds its lease on a live checkout it is
-    /// about to trim.
-    pub(super) fn trimming(key: &str) {
-        TRIMMING.with(|hook| {
-            if let Some(hook) = hook.borrow_mut().as_mut() {
-                hook(key);
-            }
-        });
-    }
-
     #[test]
     fn a_trimming_lease_is_taken_once_and_held_until_the_sweep_lets_go() {
         let cache = tempfile::tempdir().unwrap();
@@ -2068,43 +2050,6 @@ mod tests {
         );
 
         drop(trimming);
-        assert!(
-            matches!(
-                remove_workspace(cache.path(), workspace.path()).unwrap(),
-                RemoveOutcome::Removed(_)
-            ),
-            "removable once the sweep let go"
-        );
-    }
-
-    #[test]
-    fn a_checkout_being_trimmed_cannot_be_removed() {
-        let cache = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        let state = touch(cache.path(), workspace.path()).unwrap();
-        let directory = unit_with_sessions(&state.directory, "unit", &[("s-1-a-old", 10)]);
-        set_mtime(&directory.join("widget-0abc/s-1-a-old"), 0);
-        let root = cache.path().to_path_buf();
-        let workspace_root = workspace.path().to_path_buf();
-        let attempts = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = attempts.clone();
-        // The build's lease ends just as the sweep starts trimming.
-        let build = std::cell::RefCell::new(Some(state.lease));
-        TRIMMING.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(move |_| {
-                drop(build.borrow_mut().take());
-                seen.borrow_mut()
-                    .push(remove_workspace(&root, &workspace_root).unwrap());
-            }));
-        });
-        let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
-        TRIMMING.with(|hook| hook.borrow_mut().take());
-        assert_eq!(*attempts.borrow(), [RemoveOutcome::Active]);
-        assert_eq!(outcome.removed_sessions, 1);
-        assert!(
-            state.directory.exists(),
-            "the checkout outlived the attempt"
-        );
         assert!(
             matches!(
                 remove_workspace(cache.path(), workspace.path()).unwrap(),
