@@ -289,13 +289,15 @@ pub(crate) fn collect(
         .iter()
         .filter(|entry| entry.workspace_root.is_some())
     {
-        if dry_run || entry.orphan_stamps.is_empty() {
+        if entry.orphan_stamps.is_empty() {
             continue;
         }
-        match deletion_guard(root, &entry.key, true) {
+        // A preview probes the lease as a real run does, and counts what it
+        // would remove without removing it.
+        match deletion_guard(root, &entry.key, !dry_run) {
             Ok(guard) if !guard.active => {
                 for (stamp, files) in &entry.orphan_stamps {
-                    if remove_tree(stamp, false, &mut inodes) {
+                    if remove_tree(stamp, dry_run, &mut inodes) {
                         inodes.release(files);
                     }
                 }
@@ -1906,8 +1908,9 @@ mod tests {
         collect(cache.path(), None, None, false, true, None).unwrap();
         assert!(orphan.exists());
         drop(state.lease);
+        // A preview counts the orphan as the real run removes it.
         let preview = collect(cache.path(), Some(0), None, true, true, Some(0)).unwrap();
-        assert_eq!(preview.removed_bytes, 32 + 3);
+        assert_eq!(preview.removed_bytes, 32 + 3 + 4);
         assert!(stamp.exists() && orphan.exists());
         let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
         assert_eq!(outcome.removed_units, 1);
