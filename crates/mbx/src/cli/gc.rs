@@ -109,6 +109,8 @@ pub(super) fn run(
         dry_run,
         // A short disk takes the last hour's units too.
         low_disk.is_none(),
+        // The budget compilers check their state against.
+        retention.incremental_max_bytes,
     ) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -997,6 +999,8 @@ pub(super) fn prune_targets(
         false,
         // A short disk takes the last hour's units too.
         low_disk.is_none(),
+        // The budget compilers check their state against.
+        retention.incremental_max_bytes,
     );
     let (incremental_bytes, incremental_remaining) = match incremental {
         Ok(outcome) => (outcome.removed_bytes, outcome.remaining_bytes),
@@ -1174,6 +1178,7 @@ fn collect_low_disk_incremental(
         retention.incremental_max_age,
         false,
         false,
+        retention.incremental_max_bytes,
     ) {
         Ok(outcome) => outcome,
         Err(error) => {

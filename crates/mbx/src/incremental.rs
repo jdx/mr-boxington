@@ -156,13 +156,17 @@ pub(crate) fn workspaces(root: &Path) -> Result<Vec<PathBuf>> {
 /// A unit of a live checkout keeps its directory: only its finished rustc
 /// sessions go, each under rustc's own lock (see [`evict_session`]). With
 /// `hot_floor`, such a unit used in the last hour is kept, unless it expired
-/// or its state outgrew the backstop.
+/// or its state outgrew the backstop the compiler applies, half of
+/// `backstop_budget`. That is the incremental budget compilers are given,
+/// not `max_bytes`, which generated sources and a combined budget can
+/// narrow: a unit the compiler accepts must not count as oversized here.
 pub(crate) fn collect(
     root: &Path,
     max_bytes: Option<u64>,
     max_age: Option<Duration>,
     dry_run: bool,
     hot_floor: bool,
+    backstop_budget: Option<u64>,
 ) -> Result<PruneOutcome> {
     let now = now_secs();
     let Snapshot {
@@ -219,7 +223,7 @@ pub(crate) fn collect(
             if hot_floor
                 && !expired(unit)
                 && now.saturating_sub(unit.last_used) < HOT_FLOOR_SECS
-                && !exceeds_backstop(&unit.directory, max_bytes)
+                && !exceeds_backstop(&unit.directory, backstop_budget)
             {
                 outcome.kept_hot_units += 1;
                 continue;
@@ -1506,7 +1510,7 @@ mod tests {
         std::fs::remove_dir(&checkout).unwrap();
         std::fs::remove_dir(&checkout_parent).unwrap();
         assert!(!crate::store::checkout_is_live_on(cache.path(), &checkout));
-        let kept = collect(cache.path(), None, None, false, true).unwrap();
+        let kept = collect(cache.path(), None, None, false, true, None).unwrap();
         assert_eq!(
             kept.removed_directories, 0,
             "a new checkout may seed from it"
@@ -1515,7 +1519,7 @@ mod tests {
 
         // Expiry is measured in whole seconds.
         std::thread::sleep(Duration::from_millis(1100));
-        let outcome = collect(cache.path(), None, Some(Duration::ZERO), false, true).unwrap();
+        let outcome = collect(cache.path(), None, Some(Duration::ZERO), false, true, None).unwrap();
         assert_eq!(outcome.removed_directories, 1);
         assert!(outcome.removed_bytes > 0);
         assert!(!directory.exists());
@@ -1553,7 +1557,7 @@ mod tests {
 
         std::fs::remove_dir(&checkout).unwrap();
         std::fs::remove_dir(&checkout_parent).unwrap();
-        let outcome = collect(cache.path(), None, None, false, true).unwrap();
+        let outcome = collect(cache.path(), None, None, false, true, None).unwrap();
 
         assert_eq!(outcome.removed_directories, 0);
         assert!(directory.exists());
@@ -1573,7 +1577,7 @@ mod tests {
         std::fs::remove_dir(&checkout).unwrap();
         // Expiry is measured in whole seconds.
         std::thread::sleep(Duration::from_millis(1100));
-        let outcome = collect(cache.path(), None, Some(Duration::ZERO), true, true).unwrap();
+        let outcome = collect(cache.path(), None, Some(Duration::ZERO), true, true, None).unwrap();
 
         assert_eq!(outcome.removed_directories, 1);
         assert!(!lock_dir(cache.path(), &key).exists());
@@ -1590,7 +1594,15 @@ mod tests {
         // Expiry is measured in whole seconds.
         std::thread::sleep(Duration::from_millis(1100));
 
-        let outcome = collect(cache.path(), Some(0), Some(Duration::ZERO), false, true).unwrap();
+        let outcome = collect(
+            cache.path(),
+            Some(0),
+            Some(Duration::ZERO),
+            false,
+            true,
+            Some(0),
+        )
+        .unwrap();
         assert_eq!(outcome.removed_directories, 0);
         assert_eq!(outcome.skipped_active_directories, 1);
         assert_eq!(
@@ -1623,7 +1635,15 @@ mod tests {
         let older = unit(&second_state.directory, "older", 0);
         drop(second_state.lease);
         let before = stats(cache.path()).unwrap();
-        let outcome = collect(cache.path(), Some(before.bytes - 64), None, false, true).unwrap();
+        let outcome = collect(
+            cache.path(),
+            Some(before.bytes - 64),
+            None,
+            false,
+            true,
+            Some(before.bytes - 64),
+        )
+        .unwrap();
         assert_eq!(outcome.removed_units, 2);
         assert_eq!(outcome.remaining_units, 1);
         assert_eq!(outcome.removed_directories, 0);
@@ -1648,10 +1668,10 @@ mod tests {
         drop(state.lease);
         let before = stats(cache.path()).unwrap();
         assert_eq!(before.bytes, tree_bytes(&state.directory));
-        let preview = collect(cache.path(), Some(0), None, true, true).unwrap();
+        let preview = collect(cache.path(), Some(0), None, true, true, Some(0)).unwrap();
         assert_eq!(preview.removed_bytes, 32 + 5);
         assert!(record.exists());
-        let outcome = collect(cache.path(), Some(0), None, false, true).unwrap();
+        let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
         assert_eq!(outcome.removed_bytes, 32 + 5);
         assert_eq!(outcome.remaining_bytes, tree_bytes(&state.directory));
         assert_eq!(
@@ -1682,7 +1702,7 @@ mod tests {
         std::fs::remove_dir_all(surviving.join("crate-id/s-session")).unwrap();
         assert!(unit_locks(&surviving, false).unwrap().is_some());
         drop(state.lease);
-        let outcome = collect(cache.path(), Some(0), None, false, true).unwrap();
+        let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
         assert_eq!(outcome.removed_units, 1);
         assert!(!surviving.exists());
     }
@@ -1701,6 +1721,7 @@ mod tests {
             Some(Duration::from_secs(60)),
             false,
             true,
+            None,
         )
         .unwrap();
         assert_eq!(outcome.removed_units, 1);
@@ -1727,6 +1748,7 @@ mod tests {
             Some(Duration::from_secs(60)),
             false,
             true,
+            None,
         )
         .unwrap();
         assert_eq!(outcome.removed_units, 0);
@@ -1750,12 +1772,12 @@ mod tests {
         )
         .unwrap();
         drop(state.lease);
-        let preview = collect(cache.path(), Some(0), None, true, true).unwrap();
+        let preview = collect(cache.path(), Some(0), None, true, true, Some(0)).unwrap();
         assert_eq!(preview.removed_units, 2);
         assert_eq!(preview.skipped_active_units, 0);
         assert_eq!(preview.skipped_active_directories, 0);
         assert!(inactive.exists());
-        let outcome = collect(cache.path(), Some(0), None, false, true).unwrap();
+        let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
         assert_eq!(outcome.removed_units, 1);
         assert_eq!(outcome.skipped_active_units, 1);
         assert_eq!(outcome.skipped_active_directories, 1);
@@ -1783,7 +1805,7 @@ mod tests {
             }
             drop(state.lease);
             for dry_run in [true, false] {
-                let outcome = collect(cache.path(), Some(0), None, dry_run, true).unwrap();
+                let outcome = collect(cache.path(), Some(0), None, dry_run, true, Some(0)).unwrap();
                 assert_eq!(outcome.skipped_active_units, 1);
                 assert_eq!(outcome.removed_units, 0);
                 assert!(directory.exists());
@@ -1881,13 +1903,13 @@ mod tests {
         assert_eq!(before.bytes, tree_bytes(&state.directory));
 
         // A live lease keeps the orphan: its build may be recreating the unit.
-        collect(cache.path(), None, None, false, true).unwrap();
+        collect(cache.path(), None, None, false, true, None).unwrap();
         assert!(orphan.exists());
         drop(state.lease);
-        let preview = collect(cache.path(), Some(0), None, true, true).unwrap();
+        let preview = collect(cache.path(), Some(0), None, true, true, Some(0)).unwrap();
         assert_eq!(preview.removed_bytes, 32 + 3);
         assert!(stamp.exists() && orphan.exists());
-        let outcome = collect(cache.path(), Some(0), None, false, true).unwrap();
+        let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
         assert_eq!(outcome.removed_units, 1);
         assert_eq!(outcome.removed_bytes, 32 + 3 + 4);
         assert_eq!(outcome.remaining_bytes, tree_bytes(&state.directory));
@@ -1939,13 +1961,13 @@ mod tests {
         // A starting compiler, or a seed, copying the older session.
         let reader = lock_shared(&krate.join("s-1-a.lock"));
 
-        let preview = collect(cache.path(), Some(0), None, true, true).unwrap();
+        let preview = collect(cache.path(), Some(0), None, true, true, Some(0)).unwrap();
         assert_eq!(preview.removed_sessions, 2, "a preview probes no lock");
         assert_eq!(preview.session_units, 1);
         assert_eq!(preview.removed_bytes, 64);
         assert!(krate.join("s-2-b-new").exists());
 
-        let outcome = collect(cache.path(), Some(0), None, false, true).unwrap();
+        let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
         assert_eq!(outcome.removed_sessions, 1);
         assert_eq!(outcome.session_units, 1);
         assert_eq!(outcome.removed_units, 0);
@@ -1967,7 +1989,7 @@ mod tests {
         assert!(record.exists() && stamp.exists());
 
         drop(reader);
-        let outcome = collect(cache.path(), Some(0), None, false, true).unwrap();
+        let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
         assert_eq!(outcome.removed_sessions, 1);
         assert!(!krate.join("s-1-a-old").exists());
         assert!(!krate.join("s-1-a.lock").exists());
@@ -2001,7 +2023,15 @@ mod tests {
 
         // The older session's file is freed with its second link, in the
         // newer session; the newer one's own file lives on in the working one.
-        let outcome = collect(cache.path(), Some(before - 1), None, false, true).unwrap();
+        let outcome = collect(
+            cache.path(),
+            Some(before - 1),
+            None,
+            false,
+            true,
+            Some(before - 1),
+        )
+        .unwrap();
         assert_eq!(outcome.removed_sessions, 2);
         assert_eq!(outcome.removed_bytes, 32);
         assert_eq!(outcome.remaining_bytes, before - 32);
@@ -2032,7 +2062,7 @@ mod tests {
         let before = stats(cache.path()).unwrap().bytes;
 
         // The live session goes first, then the idle unit.
-        let outcome = collect(cache.path(), Some(0), None, false, true).unwrap();
+        let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
         assert_eq!(outcome.removed_sessions, 1);
         assert_eq!(outcome.removed_units, 1);
         assert_eq!(outcome.removed_bytes, 32, "freed with the second link");
@@ -2069,7 +2099,8 @@ mod tests {
 
         for (budget, oversized) in [(64, false), (63, true)] {
             assert_eq!(exceeds_backstop(&directory, Some(budget)), oversized);
-            let outcome = collect(cache.path(), Some(budget), None, true, true).unwrap();
+            let outcome =
+                collect(cache.path(), Some(budget), None, true, true, Some(budget)).unwrap();
             assert_eq!(
                 outcome.kept_hot_units,
                 u64::from(!oversized),
@@ -2094,7 +2125,8 @@ mod tests {
             // Old by its stamp, so the floor does not decide this.
             std::fs::write(use_stamp_path(&directory), b"").unwrap();
             for dry_run in [true, false] {
-                let outcome = collect(cache.path(), Some(0), None, dry_run, false).unwrap();
+                let outcome =
+                    collect(cache.path(), Some(0), None, dry_run, false, Some(0)).unwrap();
                 assert_eq!(outcome.removed_sessions, 0);
                 assert_eq!(outcome.skipped_active_units, 1);
             }
@@ -2119,7 +2151,7 @@ mod tests {
         set_mtime(&stamp, now_secs() - 120);
 
         for dry_run in [true, false] {
-            let kept = collect(cache.path(), Some(100), None, dry_run, true).unwrap();
+            let kept = collect(cache.path(), Some(100), None, dry_run, true, Some(100)).unwrap();
             assert_eq!(kept.kept_hot_units, 1);
             assert_eq!(kept.removed_sessions, 0);
         }
@@ -2130,14 +2162,21 @@ mod tests {
             Some(Duration::from_secs(60)),
             true,
             true,
+            Some(100),
         )
         .unwrap();
         assert_eq!(expired.kept_hot_units, 0);
         assert_eq!(expired.removed_sessions, 1);
-        let oversized = collect(cache.path(), Some(63), None, true, true).unwrap();
+        let oversized = collect(cache.path(), Some(63), None, true, true, Some(63)).unwrap();
         assert_eq!(oversized.kept_hot_units, 0);
         assert_eq!(oversized.removed_sessions, 1);
-        let low_disk = collect(cache.path(), Some(100), None, false, false).unwrap();
+        // Generated sources or a combined budget can narrow collection's
+        // limit below the budget compilers are given. A unit the compiler
+        // accepts stays protected.
+        let narrowed = collect(cache.path(), Some(63), None, true, true, Some(100)).unwrap();
+        assert_eq!(narrowed.kept_hot_units, 1);
+        assert_eq!(narrowed.removed_sessions, 0);
+        let low_disk = collect(cache.path(), Some(100), None, false, false, Some(100)).unwrap();
         assert_eq!(low_disk.removed_sessions, 1);
         assert!(!session.exists());
         drop(state);
@@ -2152,7 +2191,15 @@ mod tests {
             unit_with_sessions(&state.directory, "older", &[("s-1-a-x", 0), ("s-2-b-x", 1)]);
         let newer = unit_with_sessions(&state.directory, "newer", &[("s-3-c-x", 5)]);
         let before = stats(cache.path()).unwrap().bytes;
-        let outcome = collect(cache.path(), Some(before - 32), None, false, true).unwrap();
+        let outcome = collect(
+            cache.path(),
+            Some(before - 32),
+            None,
+            false,
+            true,
+            Some(before - 32),
+        )
+        .unwrap();
         assert_eq!(outcome.removed_sessions, 1);
         assert_eq!(outcome.remaining_bytes, before - 32);
         assert!(!older.join("widget-0abc/s-1-a-x").exists());
@@ -2168,7 +2215,7 @@ mod tests {
         let state = touch(cache.path(), workspace.path()).unwrap();
         unit(&state.directory, "first", 0);
         unit(&state.directory, "second", 1);
-        let outcome = collect(cache.path(), Some(0), None, false, true).unwrap();
+        let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
         assert_eq!(outcome.removed_units, 0);
         assert_eq!(outcome.skipped_active_units, 2);
         assert_eq!(outcome.skipped_active_directories, 1);
@@ -2184,11 +2231,11 @@ mod tests {
         drop(state.lease);
         workspace.close().unwrap();
         let before = stats(cache.path()).unwrap();
-        let kept = collect(cache.path(), None, None, false, true).unwrap();
+        let kept = collect(cache.path(), None, None, false, true, None).unwrap();
         assert_eq!(kept.removed_units, 0);
         assert_eq!(kept.removed_directories, 0);
         assert!(state.directory.exists());
-        let outcome = collect(cache.path(), Some(0), None, false, true).unwrap();
+        let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
         assert_eq!(outcome.removed_units, 1);
         assert_eq!(outcome.removed_directories, 1);
         assert_eq!(outcome.removed_bytes, before.bytes);
@@ -2225,8 +2272,15 @@ mod tests {
             before.bytes,
             tree_bytes(&first_state.directory) + tree_bytes(&second_state.directory) - 32
         );
-        let within_budget =
-            collect(cache.path(), Some(before.bytes + 16), None, false, true).unwrap();
+        let within_budget = collect(
+            cache.path(),
+            Some(before.bytes + 16),
+            None,
+            false,
+            true,
+            Some(before.bytes + 16),
+        )
+        .unwrap();
         assert_eq!(within_budget.removed_units, 0);
         assert_eq!(within_budget.remaining_bytes, before.bytes);
 
@@ -2236,6 +2290,7 @@ mod tests {
             Some(Duration::from_secs(60)),
             false,
             true,
+            None,
         )
         .unwrap();
         assert_eq!(one_removed.removed_units, 1);
@@ -2253,7 +2308,7 @@ mod tests {
             filetime::FileTime::from_unix_time(0, 0),
         )
         .unwrap();
-        let last_removed = collect(cache.path(), Some(0), None, false, true).unwrap();
+        let last_removed = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
         assert_eq!(last_removed.removed_units, 1);
         assert_eq!(last_removed.removed_bytes, 32);
     }
@@ -2274,7 +2329,7 @@ mod tests {
         drop(state.lease);
         let before = stats(cache.path()).unwrap();
         assert_eq!(before.bytes, tree_bytes(&state.directory));
-        let removed = collect(cache.path(), Some(0), None, false, true).unwrap();
+        let removed = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
         assert_eq!(removed.removed_units, 1);
         assert_eq!(removed.removed_bytes, 0);
         assert_eq!(removed.remaining_bytes, before.bytes);
@@ -2294,7 +2349,15 @@ mod tests {
         drop(gone_state.lease);
         gone.close().unwrap();
         let before = stats(cache.path()).unwrap();
-        let outcome = collect(cache.path(), Some(before.bytes - 32), None, false, true).unwrap();
+        let outcome = collect(
+            cache.path(),
+            Some(before.bytes - 32),
+            None,
+            false,
+            true,
+            Some(before.bytes - 32),
+        )
+        .unwrap();
         assert_eq!(outcome.removed_units, 1);
         assert_eq!(outcome.removed_directories, 0);
         assert!(!oldest.exists());
@@ -2312,7 +2375,7 @@ mod tests {
         workspace.close().unwrap();
         let seeding = acquire_lease(cache.path(), &key).unwrap();
         for dry_run in [true, false] {
-            let outcome = collect(cache.path(), Some(0), None, dry_run, true).unwrap();
+            let outcome = collect(cache.path(), Some(0), None, dry_run, true, Some(0)).unwrap();
             assert_eq!(outcome.removed_units, 0);
             assert_eq!(outcome.skipped_active_units, 1);
             assert_eq!(outcome.skipped_active_directories, 1);
@@ -2320,7 +2383,7 @@ mod tests {
         }
         drop(seeding);
         assert_eq!(
-            collect(cache.path(), Some(0), None, false, true)
+            collect(cache.path(), Some(0), None, false, true, Some(0))
                 .unwrap()
                 .removed_directories,
             1
@@ -2339,13 +2402,13 @@ mod tests {
         std::fs::write(&churn, b"destination churn").unwrap();
         drop(state.lease);
         for dry_run in [true, false] {
-            let outcome = collect(cache.path(), Some(0), None, dry_run, true).unwrap();
+            let outcome = collect(cache.path(), Some(0), None, dry_run, true, Some(0)).unwrap();
             assert_eq!(outcome.removed_units, 0);
             assert_eq!(outcome.skipped_active_units, 1);
             assert!(staging.exists());
         }
         filetime::set_file_mtime(&staging, filetime::FileTime::from_unix_time(0, 0)).unwrap();
-        let outcome = collect(cache.path(), Some(0), None, false, true).unwrap();
+        let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
         assert_eq!(outcome.removed_units, 1);
         assert_eq!(outcome.removed_bytes, 7);
         assert!(!staging.exists());
@@ -2368,7 +2431,7 @@ mod tests {
         assert_eq!(stats.untracked_directories, 1);
         assert_eq!(stats.bytes, 64);
         assert_eq!(stats.units, 1);
-        let outcome = collect(cache.path(), Some(0), None, false, true).unwrap();
+        let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
         assert_eq!(outcome.untracked_directories, 1);
         assert_eq!(outcome.remaining_bytes, 64);
         assert_eq!(outcome.remaining_units, 1);
