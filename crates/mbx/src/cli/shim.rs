@@ -5,7 +5,6 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::sync::OnceLock;
-use std::time::Duration;
 
 const CARGO_SHIM_STEM: &str = "cargo";
 const CARGO_SHIM_MODE_ENV: &str = "MBX_CARGO_SHIM_MODE";
@@ -16,8 +15,7 @@ pub(super) const CARGO_SHIM_CHAIN_ENV: &str = "MBX_CARGO_SHIM_CHAIN";
 /// repeat is not proof of a cycle. A real wrapper loop never stops, so a depth
 /// far beyond any plausible nesting is.
 const MAX_CARGO_SHIM_DEPTH: usize = 12;
-/// How long the diagnostic `--version` run may take before it is abandoned.
-const WRAPPER_LOOP_HINT_TIMEOUT: Duration = Duration::from_secs(5);
+const CARGO_SHIM_NOTE_ENV: &str = "MBX_CARGO_SHIM_NOTE";
 static PATH_BEFORE_SHIM_EXCLUSION: OnceLock<OsString> = OnceLock::new();
 
 /// Whether this process was installed under Cargo's name by `mbx setup`.
@@ -119,7 +117,7 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
             FailedProbe::Roots(roots) => *roots,
             FailedProbe::Passthrough => return run_real_cargo(&real_cargo, &arguments),
             FailedProbe::Reject => {
-                let hint = wrapper_loop_hint(&real_cargo)
+                let hint = take_loop_note()
                     .map(|hint| format!(" ({hint})"))
                     .unwrap_or_default();
                 eyre::bail!(
@@ -141,51 +139,61 @@ fn record_cargo_selection(real_cargo: &OsStr, configured: Option<&OsStr>) -> Res
     let depth = std::env::var(CARGO_SHIM_DEPTH_ENV).ok();
     let chain = std::env::var_os(CARGO_SHIM_CHAIN_ENV);
     let (depth, chain) =
-        next_cargo_selection(depth.as_deref(), chain.as_deref(), real_cargo, configured)?;
+        match next_cargo_selection(depth.as_deref(), chain.as_deref(), real_cargo, configured) {
+            Ok(selection) => selection,
+            Err(error) => {
+                leave_loop_note(&format!("{error}"));
+                return Err(error);
+            }
+        };
     // SAFETY: CLI dispatch is single-threaded here, before any child process
     // or cache session has started.
     unsafe { std::env::set_var(CARGO_SHIM_DEPTH_ENV, depth.to_string()) };
     if let Some(chain) = chain {
         unsafe { std::env::set_var(CARGO_SHIM_CHAIN_ENV, chain) };
     }
+    if std::env::var_os(CARGO_SHIM_NOTE_ENV).is_none() {
+        let note = loop_note_path();
+        if let Some(parent) = note.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        unsafe { std::env::set_var(CARGO_SHIM_NOTE_ENV, note) };
+    }
     Ok(())
 }
 
-/// The probe discards its child's stderr, so a wrapper loop would surface only
-/// as a failed probe. Ask the selected Cargo for its version, which every shim
-/// entry guards before it passes through, and keep the loop error if it fails.
-fn wrapper_loop_hint(real_cargo: &OsStr) -> Option<String> {
-    let mut child = Command::new(real_cargo)
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .ok()?;
-    let mut pipe = child.stderr.take()?;
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = std::io::Read::read_to_string(&mut pipe, &mut text);
-        let _ = sender.send(text);
-    });
-    // A wrapper that hangs, or leaves a background process holding stderr
-    // open, must not hide the probe failure it is explaining. The reader is
-    // abandoned at the deadline rather than joined.
-    let stderr = receiver.recv_timeout(WRAPPER_LOOP_HINT_TIMEOUT);
-    let _ = child.kill();
-    let _ = child.wait();
-    let stderr = stderr.ok()?;
-    stderr
-        .lines()
-        .find(|line| line.contains("re-entered its Cargo shim"))
-        .map(|line| {
-            let line = line.trim();
-            line.strip_prefix("mbx[error]:")
-                .unwrap_or(line)
-                .trim()
-                .to_string()
-        })
+/// Where a re-entered shim leaves its diagnosis for the outermost one. The
+/// roots probe discards its child's stderr, and asking a rejected Cargo to run
+/// again just to read the answer would launch it when nothing was verified.
+fn loop_note_path() -> PathBuf {
+    mbx_cache_cargo::cache_root()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(format!("cargo-shim-loop-{}", std::process::id()))
+}
+
+fn leave_loop_note(message: &str) {
+    let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV) else {
+        return;
+    };
+    // `create_new` neither follows a planted link nor replaces a note.
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        let _ = std::io::Write::write_all(&mut file, message.as_bytes());
+    }
+}
+
+fn take_loop_note() -> Option<String> {
+    let path = PathBuf::from(std::env::var_os(CARGO_SHIM_NOTE_ENV)?);
+    let note = std::fs::read_to_string(&path).ok();
+    let _ = std::fs::remove_file(&path);
+    note.and_then(|note| {
+        note.lines()
+            .find(|line| line.contains("re-entered its Cargo shim"))
+            .map(|line| line.trim().to_string())
+    })
 }
 
 /// The depth and chain to export, given those this shim inherited.
