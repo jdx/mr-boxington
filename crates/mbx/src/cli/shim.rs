@@ -9,6 +9,12 @@ use std::sync::OnceLock;
 const CARGO_SHIM_STEM: &str = "cargo";
 const CARGO_SHIM_MODE_ENV: &str = "MBX_CARGO_SHIM_MODE";
 const CARGO_SHIM_PATH_ENV: &str = "MBX_CARGO_SHIM_PATH";
+const CARGO_SHIM_DEPTH_ENV: &str = "MBX_CARGO_SHIM_DEPTH";
+const CARGO_SHIM_CHAIN_ENV: &str = "MBX_CARGO_SHIM_CHAIN";
+/// Build scripts and Cargo subcommands legitimately reach the shim again, so a
+/// repeat is not proof of a cycle. A real wrapper loop never stops, so a depth
+/// far beyond any plausible nesting is.
+const MAX_CARGO_SHIM_DEPTH: usize = 12;
 static PATH_BEFORE_SHIM_EXCLUSION: OnceLock<OsString> = OnceLock::new();
 
 /// Whether this process was installed under Cargo's name by `mbx setup`.
@@ -65,6 +71,7 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
     let shim_dir = super::setup_install_dir()
         .ok_or_else(|| eyre::eyre!("the platform data directory could not be located"))?;
     let configured_shim = shim_dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
+    let configured_cargo = std::env::var_os("CARGO");
     let real_cargo = if invoked_via_mise_wrapper {
         resolve_real_cargo(&configured_shim)?
     } else {
@@ -76,6 +83,7 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
         exclude_shim_from_path(&shim)?;
         resolve_real_cargo(&shim)?
     };
+    record_cargo_selection(&real_cargo, configured_cargo.as_deref())?;
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     if mbx_disabled() {
         return run_real_cargo(&real_cargo, &arguments);
@@ -116,6 +124,42 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
     unsafe { std::env::set_var("CARGO", &real_cargo) };
     let (config, settings) = Config::load_for_cli()?;
     super::cargo::run_with_roots(&config, &settings, &string_arguments, roots)
+}
+
+/// Fail promptly when the "real" Cargo this shim selected leads back into an
+/// mbx shim, as a custom wrapper script that execs mbx does. Each shim entry
+/// exports its depth and the Cargo it selected so the next one can see them.
+fn record_cargo_selection(real_cargo: &OsStr, configured: Option<&OsStr>) -> Result<()> {
+    let depth = std::env::var(CARGO_SHIM_DEPTH_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let chain = std::env::var_os(CARGO_SHIM_CHAIN_ENV).unwrap_or_default();
+    let mut selected = std::env::split_paths(&chain).collect::<Vec<_>>();
+    selected.push(PathBuf::from(real_cargo));
+    if depth >= MAX_CARGO_SHIM_DEPTH {
+        let source = if configured == Some(real_cargo) {
+            "the CARGO environment variable"
+        } else {
+            "PATH"
+        };
+        let chain = selected
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        eyre::bail!(
+            "mbx re-entered its Cargo shim {depth} times: the Cargo it selected from {source} ({}) runs mbx again. Selected so far: {chain}. Set CARGO in the outer wrapper to the real Cargo, or remove the wrapper that runs mbx from PATH",
+            Path::new(real_cargo).display()
+        );
+    }
+    // SAFETY: CLI dispatch is single-threaded here, before any child process
+    // or cache session has started.
+    unsafe { std::env::set_var(CARGO_SHIM_DEPTH_ENV, (depth + 1).to_string()) };
+    if let Ok(chain) = std::env::join_paths(&selected) {
+        unsafe { std::env::set_var(CARGO_SHIM_CHAIN_ENV, chain) };
+    }
+    Ok(())
 }
 
 /// Collection removes a managed target but leaves the checkout's `target` link
@@ -604,6 +648,32 @@ fn run_real_cargo(cargo: &OsStr, arguments: &[OsString]) -> Result<ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_cargo_shim_entry_fails_with_the_selected_cargo() {
+        // SAFETY: the only test that touches these variables.
+        unsafe {
+            std::env::set_var(CARGO_SHIM_DEPTH_ENV, MAX_CARGO_SHIM_DEPTH.to_string());
+            std::env::set_var(CARGO_SHIM_CHAIN_ENV, "/usr/local/bin/cargo");
+        }
+        let error = record_cargo_selection(
+            OsStr::new("/usr/local/bin/cargo"),
+            Some(OsStr::new("/usr/local/bin/cargo")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("CARGO environment variable"), "{error}");
+        assert!(error.contains("/usr/local/bin/cargo"), "{error}");
+        unsafe {
+            std::env::set_var(CARGO_SHIM_DEPTH_ENV, "2");
+        }
+        record_cargo_selection(OsStr::new("/usr/bin/cargo"), None).unwrap();
+        assert_eq!(std::env::var(CARGO_SHIM_DEPTH_ENV).unwrap(), "3");
+        unsafe {
+            std::env::remove_var(CARGO_SHIM_DEPTH_ENV);
+            std::env::remove_var(CARGO_SHIM_CHAIN_ENV);
+        }
+    }
 
     #[test]
     fn cargo_shim_passthrough_preserves_cargo_namespace_and_toolchains() {
