@@ -137,10 +137,12 @@ fn leftovers_of_an_interrupted_collection_are_reported() {
     let units = crate::target::CollectionOutcome {
         removed_units: 3,
         removed_unit_bytes: 2048,
+        released_bytes: 2048,
         ..Default::default()
     };
     let leftovers = crate::target::CollectionOutcome {
         removed_unit_bytes: 2048,
+        released_bytes: 2048,
         ..Default::default()
     };
 
@@ -319,22 +321,18 @@ fn low_disk_collection_respects_auto_off_and_the_sweep_stamp() {
 fn a_short_disk_collects_live_targets_past_their_budget() {
     let directory = tempfile::tempdir().unwrap();
     let config = super::cargo_tests::managed_target_config(directory.path());
-    let mut views = Vec::new();
-    for (name, updated_secs) in [("older", 1), ("newer", 2)] {
-        let workspace = directory.path().join(name);
-        std::fs::create_dir_all(&workspace).unwrap();
-        let view = crate::target::place(&config, &workspace, &workspace.join("target"), false)
-            .expect("the target is managed");
-        std::fs::write(view.join("artifact"), vec![0_u8; 64]).unwrap();
-        // Long ago, so neither reads as a build that is starting, and in
-        // order, so `newer` is the most recently used.
-        let record = view.with_extension("json");
-        let mut fields: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
-        fields["updated_secs"] = updated_secs.into();
-        std::fs::write(&record, serde_json::to_vec(&fields).unwrap()).unwrap();
-        views.push(view);
-    }
+    // Long ago, so neither reads as a build that is starting, and in order,
+    // so `newer` is the most recently used.
+    let views = [("older", 1), ("newer", 2)].map(|(name, updated_secs)| {
+        low_disk_view(
+            &config,
+            directory.path(),
+            name,
+            updated_secs,
+            &[("artifact", 64)],
+            false,
+        )
+    });
 
     let unlimited = RetentionSettings {
         min_free: None,
@@ -360,20 +358,16 @@ fn a_short_disk_collects_live_targets_past_their_budget() {
 fn json_report_includes_low_disk_target_removals() {
     let directory = tempfile::tempdir().unwrap();
     let config = super::cargo_tests::managed_target_config(directory.path());
-    let mut views = Vec::new();
-    for (name, updated_secs) in [("older", 1), ("newer", 2)] {
-        let workspace = directory.path().join(name);
-        std::fs::create_dir_all(&workspace).unwrap();
-        let view = crate::target::place(&config, &workspace, &workspace.join("target"), false)
-            .expect("the target is managed");
-        std::fs::write(view.join("artifact"), vec![0_u8; 64]).unwrap();
-        let record = view.with_extension("json");
-        let mut fields: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
-        fields["updated_secs"] = updated_secs.into();
-        std::fs::write(&record, serde_json::to_vec(&fields).unwrap()).unwrap();
-        views.push(view);
-    }
+    let views = [("older", 1), ("newer", 2)].map(|(name, updated_secs)| {
+        low_disk_view(
+            &config,
+            directory.path(),
+            name,
+            updated_secs,
+            &[("artifact", 64)],
+            false,
+        )
+    });
 
     let retention = always_short();
     let low_disk = collect_low_disk(&config, &retention);
@@ -470,20 +464,16 @@ fn a_combined_budget_shares_unoccupied_store_capacity() {
             min_free: None,
             ..always_short()
         };
-        let mut views = Vec::new();
-        for (name, updated_secs) in [("older", 1), ("newer", 2)] {
-            let workspace = directory.path().join(name);
-            std::fs::create_dir_all(&workspace).unwrap();
-            let view = crate::target::place(&config, &workspace, &workspace.join("target"), false)
-                .unwrap();
-            std::fs::write(view.join("artifact"), [0_u8; 64]).unwrap();
-            let record = view.with_extension("json");
-            let mut fields: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
-            fields["updated_secs"] = updated_secs.into();
-            std::fs::write(&record, serde_json::to_vec(&fields).unwrap()).unwrap();
-            views.push(view);
-        }
+        let views = [("older", 1), ("newer", 2)].map(|(name, updated_secs)| {
+            low_disk_view(
+                &config,
+                directory.path(),
+                name,
+                updated_secs,
+                &[("artifact", 64)],
+                false,
+            )
+        });
         let collect = || {
             if automatic {
                 sweep_store(&config, &retention);
@@ -692,4 +682,166 @@ fn generated_trees_get_a_bounded_first_share_despite_busy_incremental_state() {
             "capped at one tenth of the share"
         );
     }
+}
+
+#[test]
+fn target_report_carries_what_eviction_released_on_disk() {
+    let initial = crate::target::CollectionOutcome {
+        removed_views: 1,
+        removed_bytes: 2048,
+        released_bytes: 1024,
+        remaining_bytes: 4096,
+        ..Default::default()
+    };
+    let later = crate::target::CollectionOutcome {
+        removed_units: 1,
+        removed_unit_bytes: 512,
+        released_bytes: 512,
+        ..Default::default()
+    };
+    let report = serde_json::to_value(merged_target_report(&initial, Some(&later))).unwrap();
+    assert_eq!(report["removed_bytes"], 2048);
+    assert_eq!(report["released_bytes"], 1536);
+
+    assert_eq!(
+        target_removals(&initial, false),
+        [
+            "removed 1 target directories (2.0 KiB logical, 0 abandoned and 0 live); 4.0 KiB logical remain, 1.0 KiB released on disk"
+        ]
+    );
+    assert_eq!(
+        target_removals(&later, false),
+        ["removed 1 unused build units from live target directories (512 B logical)"],
+        "said only when it differs"
+    );
+}
+
+#[test]
+fn leftovers_of_an_interrupted_view_removal_are_reported() {
+    let outcome = crate::target::CollectionOutcome {
+        removed_bytes: 2048,
+        released_bytes: 2048,
+        ..Default::default()
+    };
+    assert_eq!(
+        target_removals(&outcome, false),
+        ["removed target directories an interrupted collection left (2.0 KiB logical)"]
+    );
+}
+
+/// A managed view for `name`, last used at `updated_secs`, holding `files`.
+/// With `gone`, its checkout no longer exists.
+fn low_disk_view(
+    config: &Config,
+    root: &Path,
+    name: &str,
+    updated_secs: u64,
+    files: &[(&str, usize)],
+    gone: bool,
+) -> PathBuf {
+    let workspace = root.join(name);
+    std::fs::create_dir_all(&workspace).unwrap();
+    let view = crate::target::place(config, &workspace, &workspace.join("target"), false)
+        .expect("the target is managed");
+    for (file, bytes) in files {
+        std::fs::write(view.join(file), vec![0_u8; *bytes]).unwrap();
+    }
+    let record = view.with_extension("json");
+    let mut fields: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    fields["updated_secs"] = updated_secs.into();
+    std::fs::write(&record, serde_json::to_vec(&fields).unwrap()).unwrap();
+    if gone {
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
+    view
+}
+
+#[cfg(unix)]
+#[test]
+fn a_target_round_that_frees_nothing_logical_still_progresses() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = super::cargo_tests::managed_target_config(directory.path());
+    // A view no record this build reads describes is never collected, and
+    // keeps the file the removable view links.
+    let kept = crate::target::view_dir(&config.target.root, Path::new("/elsewhere"));
+    std::fs::create_dir_all(&kept).unwrap();
+    std::fs::write(kept.with_extension("json"), b"{}").unwrap();
+    std::fs::write(kept.join("shared"), vec![0_u8; 64]).unwrap();
+    let view = low_disk_view(&config, directory.path(), "gone", 1, &[], true);
+    std::fs::hard_link(kept.join("shared"), view.join("shared")).unwrap();
+
+    let mut collection = LowDiskCollection::default();
+    assert!(collect_low_disk_targets(
+        &config,
+        &always_short(),
+        u64::MAX,
+        &mut collection
+    ));
+    assert!(!view.exists());
+    let targets = collection.targets.as_ref().unwrap();
+    assert_eq!(
+        targets.freed_bytes(),
+        0,
+        "the kept view still holds the file"
+    );
+    assert_eq!(targets.deleted_files, 1);
+
+    assert!(
+        !collect_low_disk_targets(&config, &always_short(), u64::MAX, &mut collection),
+        "nothing is left to remove"
+    );
+    assert!(kept.join("shared").exists());
+}
+
+#[test]
+fn a_target_round_that_only_finishes_leftovers_progresses() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = super::cargo_tests::managed_target_config(directory.path());
+    let live = low_disk_view(&config, directory.path(), "live", 1, &[], false);
+    let leftover = live.with_file_name(format!("abandoned{}1-x", crate::target::REMOVAL_SUFFIX));
+    std::fs::create_dir_all(leftover.join("debug/deps")).unwrap();
+    std::fs::write(leftover.join("debug/deps/libold.rlib"), b"old").unwrap();
+    // No shortfall leaves the budget at what the views hold, and no age
+    // limit prunes units, so the leftovers are all this round removes.
+    let mut collection = LowDiskCollection::default();
+    assert!(collect_low_disk_targets(
+        &config,
+        &always_short(),
+        0,
+        &mut collection
+    ));
+    assert!(!leftover.exists());
+    assert!(live.exists());
+    let targets = collection.targets.as_ref().unwrap();
+    assert_eq!(targets.removed_views, 0);
+    assert_eq!(targets.removed_units, 0);
+    assert_eq!(targets.deleted_files, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_low_disk_target_line_says_what_was_released_on_disk() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = super::cargo_tests::managed_target_config(directory.path());
+    let view = low_disk_view(&config, directory.path(), "gone", 1, &[("own", 1024)], true);
+    let object = directory.path().join("store-object");
+    std::fs::write(&object, vec![0_u8; 1024]).unwrap();
+    std::fs::hard_link(&object, view.join("restored")).unwrap();
+
+    let collection = collect_low_disk(&config, &always_short());
+
+    assert!(!view.exists());
+    let line = collection
+        .lines
+        .iter()
+        .find(|line| line.contains("target directories"))
+        .expect("a target line");
+    assert!(
+        line.contains("(2.0 KiB logical") && line.ends_with(", 1.0 KiB released on disk"),
+        "{line}"
+    );
+    let report = collection.target_report(&Default::default());
+    assert_eq!(report.removed_bytes, 2048);
+    assert_eq!(report.released_bytes, 1024);
 }

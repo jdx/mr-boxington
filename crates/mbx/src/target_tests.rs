@@ -1386,7 +1386,7 @@ fn a_kept_target_outlives_its_age_but_not_its_checkout() {
 }
 
 #[test]
-fn parallel_tree_sizing_matches_the_serial_walk() {
+fn parallel_tree_sizing_matches_the_single_ledger_measure() {
     let directory = tempfile::tempdir().unwrap();
     let empty = directory.path().join("empty");
     std::fs::create_dir(&empty).unwrap();
@@ -1408,9 +1408,153 @@ fn parallel_tree_sizing_matches_the_serial_walk() {
         // A link is neither followed nor counted, as in the serial walk.
         let linked = directory.path().join("root0").join("link");
         std::os::unix::fs::symlink(directory.path().join("root1"), linked).unwrap();
+        // A hard link across roots is one file, counted once.
+        std::fs::hard_link(
+            directory.path().join("root0/top0"),
+            directory.path().join("root1/shared"),
+        )
+        .unwrap();
     }
-    let serial = roots.iter().map(|root| tree_bytes(root)).sum::<u64>();
-    assert!(serial > 0);
-    assert_eq!(trees_bytes(roots), serial);
+    let mut ledger = crate::disk_usage::Ledger::default();
+    for root in &roots {
+        ledger.measure(root, &HashSet::new());
+    }
+    assert!(ledger.total() > 0);
+    #[cfg(unix)]
+    assert_eq!(
+        roots.iter().map(|root| tree_bytes(root)).sum::<u64>(),
+        ledger.total() + 7,
+        "the walk per root counts the link twice"
+    );
+    assert_eq!(trees_bytes(roots), ledger.total());
     assert_eq!(trees_bytes(Vec::new()), 0);
+}
+
+/// A managed view holding `files`, each `(name, bytes)`, last used at
+/// `updated_secs`.
+fn view_with(
+    root: &Path,
+    config: &Config,
+    name: &str,
+    updated_secs: u64,
+    files: &[(&str, usize)],
+) -> PathBuf {
+    let workspace = checkout(root, name);
+    let view = place(config, &workspace, &workspace.join("target"), false).unwrap();
+    for (file, bytes) in files {
+        std::fs::write(view.join(file), vec![0_u8; *bytes]).unwrap();
+    }
+    age_view(&config.target.root, &workspace, updated_secs);
+    view
+}
+
+#[cfg(unix)]
+#[test]
+fn views_sharing_a_seeded_link_count_it_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let first = view_with(
+        directory.path(),
+        &config,
+        "first",
+        1,
+        &[("own", 5), ("shared", 100)],
+    );
+    let second = view_with(directory.path(), &config, "second", 2, &[("own", 10)]);
+    std::fs::hard_link(first.join("shared"), second.join("shared")).unwrap();
+
+    assert_eq!(stats(&config.target.root).unwrap().bytes, 115);
+
+    // Removing the first view leaves the shared file in the second, so it
+    // frees only what the first held alone, and that meets the budget.
+    let outcome = collect(&config.target.root, Some(110), None, false).unwrap();
+    assert_eq!(outcome.removed_views, 1);
+    assert_eq!(outcome.removed_bytes, 5);
+    assert_eq!(outcome.released_bytes, 5);
+    assert_eq!(outcome.deleted_files, 2);
+    assert_eq!(outcome.remaining_bytes, 110);
+    assert!(!first.exists());
+
+    let outcome = collect(&config.target.root, Some(0), None, false).unwrap();
+    assert_eq!(outcome.removed_bytes, 110, "the last link takes the file");
+    assert_eq!(outcome.released_bytes, 110);
+    assert_eq!(outcome.remaining_bytes, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn old_views_sharing_a_file_do_not_drag_a_newer_one_into_eviction() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let first = view_with(
+        directory.path(),
+        &config,
+        "first",
+        1,
+        &[("own", 1), ("shared", 100)],
+    );
+    let second = view_with(directory.path(), &config, "second", 2, &[("own", 1)]);
+    std::fs::hard_link(first.join("shared"), second.join("shared")).unwrap();
+    let newest = view_with(directory.path(), &config, "newest", 3, &[("own", 50)]);
+
+    let outcome = collect(&config.target.root, Some(60), None, false).unwrap();
+
+    assert_eq!(outcome.removed_views, 2);
+    assert_eq!(outcome.removed_bytes, 102);
+    assert_eq!(outcome.remaining_bytes, 50);
+    assert!(newest.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_view_linked_to_the_store_is_removed_without_releasing_the_link() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let view = view_with(directory.path(), &config, "project", 1, &[("own", 3)]);
+    let object = directory.path().join("store-object");
+    std::fs::write(&object, vec![0_u8; 40]).unwrap();
+    std::fs::hard_link(&object, view.join("restored")).unwrap();
+
+    let outcome = collect(&config.target.root, Some(0), None, false).unwrap();
+
+    assert_eq!(outcome.removed_bytes, 43);
+    assert_eq!(
+        outcome.released_bytes, 3,
+        "the store still holds the object"
+    );
+    assert_eq!(outcome.deleted_files, 2);
+    assert!(!view.exists());
+    assert!(object.exists());
+}
+
+#[test]
+fn a_dry_run_weighs_shared_files_like_a_real_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let first = view_with(directory.path(), &config, "first", 1, &[("own", 5)]);
+    view_with(directory.path(), &config, "second", 2, &[("own", 10)]);
+
+    let outcome = collect(&config.target.root, Some(10), None, true).unwrap();
+
+    assert_eq!(outcome.removed_views, 1);
+    assert_eq!(outcome.removed_bytes, 5);
+    assert_eq!(outcome.remaining_bytes, 10);
+    assert!(first.join("own").exists());
+}
+
+#[test]
+fn leftovers_a_dead_collector_moved_aside_are_credited() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let aside = views_root(&config.target.root).join(format!("abc{REMOVAL_SUFFIX}1-xyz"));
+    std::fs::create_dir_all(aside.join("debug")).unwrap();
+    std::fs::write(aside.join("debug/artifact"), vec![0_u8; 9]).unwrap();
+
+    let outcome = collect(&config.target.root, None, None, false).unwrap();
+
+    assert!(!aside.exists());
+    assert_eq!(outcome.removed_bytes, 9);
+    assert_eq!(outcome.deleted_files, 1);
+    assert_eq!(outcome.removed_views, 0);
+    assert_eq!(outcome.remaining_bytes, 0);
 }

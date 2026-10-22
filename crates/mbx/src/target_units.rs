@@ -21,6 +21,7 @@
 //! has used any of them for the age limit, which is what happens after the
 //! toolchain moves to Cargo 1.100, that whole layout is removed at once.
 
+use crate::disk_usage::{Ledger, Removal, remove_tree_counting_with_keys};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -31,10 +32,12 @@ const REMOVAL_PREFIX: &str = ".mbx-removing-";
 /// `relatime` refreshes an access time once it is a day old.
 const ACCESS_TIME_SLACK: Duration = Duration::from_secs(24 * 60 * 60);
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct UnitOutcome {
     pub removed_units: u64,
-    pub removed_bytes: u64,
+    /// What went, leftovers of an interrupted collection included, with the
+    /// keys the caller's measure of the view must forget.
+    pub removal: Removal,
 }
 
 /// Whether reading a file below `directory` updates its access time.
@@ -63,8 +66,16 @@ pub(crate) fn access_times_tracked(directory: &Path) -> bool {
 /// `max_age`.
 ///
 /// The caller holds Cargo's locks for `view`, so no build reads a unit while
-/// it goes. A dry run reports what would be removed and touches nothing.
-pub(crate) fn prune(view: &Path, max_age: Duration, now: SystemTime, dry_run: bool) -> UnitOutcome {
+/// it goes. A dry run reports what would be removed and touches nothing on
+/// disk. `ledger` holds the caller's measure of `view`; each file is released
+/// from it once it is gone, or as if gone in a dry run.
+pub(crate) fn prune(
+    view: &Path,
+    max_age: Duration,
+    now: SystemTime,
+    dry_run: bool,
+    ledger: &mut Ledger,
+) -> UnitOutcome {
     let mut outcome = UnitOutcome::default();
     let Some(cutoff) = now.checked_sub(max_age.saturating_add(ACCESS_TIME_SLACK)) else {
         return outcome;
@@ -72,24 +83,38 @@ pub(crate) fn prune(view: &Path, max_age: Duration, now: SystemTime, dry_run: bo
     for profile in profiles(view) {
         // Counted, because the caller measured the view before this pass and
         // would otherwise weigh bytes already gone against the budget.
-        outcome.removed_bytes += remove_abandoned_removals(&profile, dry_run);
+        outcome
+            .removal
+            .add(remove_abandoned_removals(&profile, dry_run, ledger));
         let (units, doomed) = unused(&profile, cutoff);
         if doomed.is_empty() {
             continue;
         }
-        let bytes = doomed
-            .iter()
-            .map(|path| crate::target::tree_bytes(path))
-            .sum::<u64>();
-        if !dry_run && let Err(error) = remove(&profile, &doomed) {
-            log::warn!(
-                "could not remove unused build units in {}: {error}",
-                profile.display()
-            );
+        if dry_run {
+            for path in &doomed {
+                outcome
+                    .removal
+                    .add(remove_tree_counting_with_keys(path, ledger, false));
+            }
+            outcome.removed_units += units;
             continue;
         }
-        outcome.removed_units += units;
-        outcome.removed_bytes += bytes;
+        match remove(&profile, &doomed, ledger) {
+            Ok((removal, gone)) => {
+                // Units count as removed once nothing of them is left; files
+                // count as they go.
+                if gone {
+                    outcome.removed_units += units;
+                }
+                outcome.removal.add(removal);
+            }
+            Err(error) => {
+                log::warn!(
+                    "could not remove unused build units in {}: {error}",
+                    profile.display()
+                );
+            }
+        }
     }
     outcome
 }
@@ -217,7 +242,12 @@ fn modified(path: &Path) -> Option<SystemTime> {
 /// A unit is moved whole before any of its files go, so an interrupted
 /// removal never leaves a fingerprint vouching for outputs that are gone. The
 /// next collection finishes whatever an interrupted one left.
-fn remove(profile: &Path, doomed: &[PathBuf]) -> std::io::Result<()> {
+/// Returns what went, and whether all of it did.
+fn remove(
+    profile: &Path,
+    doomed: &[PathBuf],
+    ledger: &mut Ledger,
+) -> std::io::Result<(Removal, bool)> {
     let removal = profile.join(format!("{REMOVAL_PREFIX}{}", std::process::id()));
     std::fs::create_dir_all(&removal)?;
     for (index, path) in doomed.iter().enumerate() {
@@ -229,29 +259,32 @@ fn remove(profile: &Path, doomed: &[PathBuf]) -> std::io::Result<()> {
             let _ = std::fs::remove_dir(package);
         }
     }
-    std::fs::remove_dir_all(&removal)
+    let counted = remove_tree_counting_with_keys(&removal, ledger, true);
+    Ok((counted, !removal.exists()))
 }
 
-/// Finish deleting what an interrupted collection moved aside in `profile`.
-/// Returns the bytes those leftovers held; a dry run only counts them.
-fn remove_abandoned_removals(profile: &Path, dry_run: bool) -> u64 {
+/// Finish deleting what an interrupted collection moved aside in `profile`,
+/// releasing what goes from `ledger`; a dry run only counts it.
+fn remove_abandoned_removals(profile: &Path, dry_run: bool, ledger: &mut Ledger) -> Removal {
+    let mut removal = Removal::default();
     let Ok(listing) = std::fs::read_dir(profile) else {
-        return 0;
+        return removal;
     };
-    let mut bytes = 0;
     for entry in listing.flatten() {
         if entry
             .file_name()
             .to_string_lossy()
             .starts_with(REMOVAL_PREFIX)
         {
-            let size = crate::target::tree_bytes(&entry.path());
-            if dry_run || std::fs::remove_dir_all(entry.path()).is_ok() {
-                bytes += size;
-            }
+            // Inside the view, so the caller's measure covered it.
+            removal.add(remove_tree_counting_with_keys(
+                &entry.path(),
+                ledger,
+                !dry_run,
+            ));
         }
     }
-    bytes
+    removal
 }
 
 fn subdirectories(directory: &Path) -> Vec<PathBuf> {

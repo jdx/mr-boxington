@@ -1,5 +1,6 @@
 use super::*;
 use filetime::FileTime;
+use std::collections::HashSet;
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -26,6 +27,14 @@ fn unit(directory: &Path, files: &[&str], age: Duration) {
         }
         filetime::set_file_times(&next, time, time).unwrap();
     }
+}
+
+/// [`super::prune`] with a ledger that measured `view` first, as collection's
+/// does.
+fn prune(view: &Path, max_age: Duration, now: SystemTime, dry_run: bool) -> UnitOutcome {
+    let mut ledger = Ledger::default();
+    ledger.measure(view, &HashSet::new());
+    super::prune(view, max_age, now, dry_run, &mut ledger)
 }
 
 fn profile(view: &Path) -> PathBuf {
@@ -55,7 +64,7 @@ fn removes_the_units_no_build_used_within_the_age_limit() {
     let outcome = prune(view.path(), 30 * DAY, now(), false);
 
     assert_eq!(outcome.removed_units, 2);
-    assert!(outcome.removed_bytes > 0);
+    assert!(outcome.removal.release.logical > 0);
     assert!(!stale.exists());
     assert!(fresh.join("out/libwidget-0123456789abcdef.rlib").is_file());
     assert!(
@@ -196,7 +205,7 @@ fn a_dry_run_reports_without_removing() {
     let outcome = prune(view.path(), 30 * DAY, now(), true);
 
     assert_eq!(outcome.removed_units, 1);
-    assert!(outcome.removed_bytes > 0);
+    assert!(outcome.removal.release.logical > 0);
     assert!(stale.join("out/libwidget-0123456789abcdef.rlib").is_file());
 }
 
@@ -211,7 +220,7 @@ fn finishes_a_removal_an_interrupted_collection_left() {
 
     assert!(!profile.join(format!("{REMOVAL_PREFIX}1")).exists());
     assert!(
-        outcome.removed_bytes > 0,
+        outcome.removal.release.logical > 0,
         "the leftover's bytes were counted in the view's size, so they count as freed"
     );
 }
@@ -236,7 +245,7 @@ fn finishes_a_pre_1_100_layout_an_interrupted_collection_left() {
 
     let outcome = prune(view.path(), 30 * DAY, now(), false);
 
-    assert!(outcome.removed_bytes > 0);
+    assert!(outcome.removal.release.logical > 0);
     assert!(!profile.join("deps").exists());
     assert!(!profile.join("build/widget-fedcba9876543210").exists());
     assert!(
@@ -269,4 +278,84 @@ fn a_directory_outside_any_profile_is_left_alone() {
         UnitOutcome::default()
     );
     assert!(stray.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_unit_linked_from_outside_the_view_frees_nothing_on_disk() {
+    let store = tempfile::tempdir().unwrap();
+    let view = tempfile::tempdir().unwrap();
+    let profile = profile(view.path());
+    let stale = profile.join("build/widget/0123456789abcdef");
+    unit(&stale, NEW_UNIT, 40 * DAY);
+    let output = stale.join("out/libwidget-0123456789abcdef.rlib");
+    let object = store.path().join("object");
+    std::fs::rename(&output, &object).unwrap();
+    std::fs::hard_link(&object, &output).unwrap();
+    let mut ledger = Ledger::default();
+    ledger.measure(view.path(), &HashSet::new());
+    let before = ledger.total();
+
+    let outcome = super::prune(view.path(), 30 * DAY, now(), false, &mut ledger);
+
+    let linked = std::fs::metadata(&object).unwrap().len();
+    assert_eq!(outcome.removed_units, 1);
+    assert_eq!(outcome.removal.deleted_files, NEW_UNIT.len() as u64);
+    assert_eq!(outcome.removal.release.logical, before - ledger.total());
+    assert_eq!(
+        outcome.removal.release.physical,
+        outcome.removal.release.logical - linked
+    );
+    assert!(object.is_file(), "the store keeps its object");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_unit_removal_that_fails_partway_credits_only_what_went() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let view = tempfile::tempdir().unwrap();
+    let profile = profile(view.path());
+    let stale = profile.join("build/widget/0123456789abcdef");
+    unit(&stale, &[NEW_UNIT, &["out/locked/kept"]].concat(), 40 * DAY);
+    let locked = stale.join("out/locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let mut ledger = Ledger::default();
+    ledger.measure(view.path(), &HashSet::new());
+    let before = ledger.total();
+
+    let outcome = super::prune(view.path(), 30 * DAY, now(), false, &mut ledger);
+
+    let survivors = std::fs::read_dir(&profile)
+        .unwrap()
+        .flatten()
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(REMOVAL_PREFIX)
+        })
+        .expect("what survived stays moved aside")
+        .path();
+    let mut pending = vec![survivors.clone()];
+    while let Some(next) = pending.pop() {
+        if let Ok(listing) = std::fs::read_dir(&next) {
+            for entry in listing.flatten() {
+                let _ =
+                    std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o755));
+                pending.push(entry.path());
+            }
+        }
+    }
+    let left = crate::disk_usage::tree_bytes(&survivors);
+    assert!(left > 0);
+    assert_eq!(outcome.removed_units, 0, "the unit is not gone yet");
+    assert_eq!(outcome.removal.release.logical, before - ledger.total());
+    assert_eq!(
+        ledger.total(),
+        crate::disk_usage::tree_bytes(view.path()),
+        "what survived is still counted"
+    );
 }

@@ -705,7 +705,8 @@ fn a_dry_run_keeps_a_view_whose_lease_it_cannot_check() {
 /// A retired directory whose files could not all be deleted is still partly
 /// on the disk. The view is gone from the path a build can reach, but what is
 /// still there is reported as remaining rather than freed, until the next
-/// collection finishes the job.
+/// collection finishes the job. Each file is credited as it goes, so what
+/// the first collection freed is not credited again by the second.
 #[test]
 #[cfg(unix)]
 fn a_deletion_that_fails_after_the_rename_keeps_its_bytes_in_the_total() {
@@ -765,4 +766,13 @@ fn a_deletion_that_fails_after_the_rename_keeps_its_bytes_in_the_total() {
     // is still on the disk.
     assert_eq!(outcome.remaining_bytes, left);
     assert_eq!(outcome.removed_bytes + outcome.remaining_bytes, 4_096);
+    assert_eq!(outcome.released_bytes, outcome.removed_bytes);
+
+    // The next collection finishes the job, crediting only what survived:
+    // nothing the first one freed is counted again.
+    let survivors = tree_bytes(&aside);
+    let next = collect_expired(&config.target.root);
+    assert!(!aside.exists());
+    assert_eq!(next.removed_bytes, survivors);
+    assert_eq!(next.remaining_bytes, 0);
 }

@@ -353,7 +353,7 @@ fn merged_generated_report(
     }
 }
 
-fn merged_target_report(
+pub(super) fn merged_target_report(
     initial: &target::CollectionOutcome,
     low_disk: Option<&target::CollectionOutcome>,
 ) -> GcTargetReport {
@@ -371,6 +371,9 @@ fn merged_target_report(
         removed_unit_bytes: initial
             .removed_unit_bytes
             .saturating_add(low_disk.map_or(0, |outcome| outcome.removed_unit_bytes)),
+        released_bytes: initial
+            .released_bytes
+            .saturating_add(low_disk.map_or(0, |outcome| outcome.released_bytes)),
         remaining_directories: last.remaining_views,
         remaining_bytes: last.remaining_bytes,
         kept_active_directories: last.kept_active_views,
@@ -574,14 +577,23 @@ pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool
             outcome.removed_live_views,
             ByteSize::b(outcome.remaining_bytes).display().iec(),
         ));
-    } else if outcome.kept_active_views > 0 {
-        // Said on its own when nothing else went, so a collection that could
-        // not free a directory somebody is using does not look like one that
-        // found nothing to do.
-        lines.push(format!(
-            "kept {} target directories in use by running commands",
-            outcome.kept_active_views
-        ));
+    } else {
+        if outcome.removed_bytes > 0 {
+            // Only what an interrupted collection left moved aside.
+            lines.push(format!(
+                "{verb} target directories an interrupted collection left ({} logical)",
+                ByteSize::b(outcome.removed_bytes).display().iec(),
+            ));
+        }
+        if outcome.kept_active_views > 0 {
+            // Said on its own when nothing else went, so a collection that
+            // could not free a directory somebody is using does not look like
+            // one that found nothing to do.
+            lines.push(format!(
+                "kept {} target directories in use by running commands",
+                outcome.kept_active_views
+            ));
+        }
     }
     if outcome.removed_units > 0 {
         lines.push(format!(
@@ -595,6 +607,15 @@ pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool
         lines.push(format!(
             "{verb} build units an interrupted collection left in live target directories ({} logical)",
             ByteSize::b(outcome.removed_unit_bytes).display().iec(),
+        ));
+    }
+    // Files linked from elsewhere, such as the shared store, stay on disk.
+    if outcome.released_bytes != outcome.freed_bytes()
+        && let Some(last) = lines.last_mut()
+    {
+        last.push_str(&format!(
+            ", {} released on disk",
+            ByteSize::b(outcome.released_bytes).display().iec()
         ));
     }
     lines
@@ -1078,10 +1099,10 @@ pub(super) fn prune_targets(
 pub(super) struct LowDiskCollection {
     incremental: Option<crate::incremental::PruneOutcome>,
     generated: Option<crate::out_dir::PruneOutcome>,
-    targets: Option<target::CollectionOutcome>,
+    pub(super) targets: Option<target::CollectionOutcome>,
     store: Option<store::GcOutcome>,
     freed_target_bytes: u64,
-    lines: Vec<String>,
+    pub(super) lines: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -1092,13 +1113,17 @@ enum LowDiskTier {
     Store,
 }
 
-/// Keep collecting the next private tier until it stops making progress.
+/// Keep collecting the next private tier while the disk is short and each
+/// round removes something.
 ///
 /// The disk probe is deliberately between every round. A target restored by
 /// reflink or hardlink can lose a large logical tree while returning only a
 /// few physical blocks, so one logical budget adjustment cannot stand in for
-/// the disk measurement. The shared store is last because every checkout pays
-/// for a miss there.
+/// the disk measurement. For the same reason a round counts as progress when
+/// it deleted anything, not when it freed logical bytes: a round that removed
+/// only files the store still links frees nothing on paper or on disk, and
+/// the next one reaches candidates that do. The shared store is last because
+/// every checkout pays for a miss there.
 pub(super) fn collect_low_disk(
     config: &Config,
     retention: &RetentionSettings,
@@ -1127,7 +1152,7 @@ fn collect_low_disk_tier(
         else {
             return;
         };
-        let freed = match tier {
+        let progressed = match tier {
             LowDiskTier::Incremental => {
                 collect_low_disk_incremental(config, retention, shortfall, collection)
             }
@@ -1139,7 +1164,7 @@ fn collect_low_disk_tier(
             }
             LowDiskTier::Store => collect_low_disk_store(config, shortfall, collection),
         };
-        if freed == 0 {
+        if !progressed {
             return;
         }
     }
@@ -1163,14 +1188,14 @@ fn collect_low_disk_incremental(
     retention: &RetentionSettings,
     shortfall: u64,
     collection: &mut LowDiskCollection,
-) -> u64 {
+) -> bool {
     let root = config.cache_dir.join("incremental");
     let Some(usage) = crate::incremental::stats(&root)
         .ok()
         .map(|stats| stats.bytes)
     else {
         log::warn!("learned incremental state could not be measured during low-disk collection");
-        return 0;
+        return false;
     };
     let limit = usage.saturating_sub(shortfall);
     // The disk is short: the last hour's units go too.
@@ -1185,16 +1210,19 @@ fn collect_low_disk_incremental(
         Ok(outcome) => outcome,
         Err(error) => {
             log::warn!("learned incremental state was not collected: {error}");
-            return 0;
+            return false;
         }
     };
     let freed = outcome.removed_bytes;
+    let progressed = outcome.removed_units > 0
+        || outcome.removed_directories > 0
+        || outcome.removed_sessions > 0;
     collection.freed_target_bytes = collection.freed_target_bytes.saturating_add(freed);
     collection
         .lines
         .extend(incremental_removal_lines(&outcome, false));
     collection.add_incremental(outcome);
-    freed
+    progressed
 }
 
 fn collect_low_disk_generated(
@@ -1202,11 +1230,11 @@ fn collect_low_disk_generated(
     retention: &RetentionSettings,
     shortfall: u64,
     collection: &mut LowDiskCollection,
-) -> u64 {
+) -> bool {
     let root = config.cache_dir.join(crate::out_dir::ROOT);
     let Some(usage) = crate::out_dir::stats(&root).map(|stats| stats.remaining_bytes) else {
         log::warn!("generated source trees could not be measured during low-disk collection");
-        return 0;
+        return false;
     };
     let limit = usage.saturating_sub(shortfall);
     let outcome = match crate::out_dir::collect(&root, Some(limit), retention.target_max_age, false)
@@ -1214,30 +1242,31 @@ fn collect_low_disk_generated(
         Ok(outcome) => outcome,
         Err(error) => {
             log::warn!("generated source trees were not collected: {error}");
-            return 0;
+            return false;
         }
     };
     let freed = outcome.removed_bytes;
+    let progressed = outcome.removed_directories > 0;
     collection.freed_target_bytes = collection.freed_target_bytes.saturating_add(freed);
     collection
         .lines
         .extend(generated_removal_lines(&outcome, false));
     collection.add_generated(outcome);
-    freed
+    progressed
 }
 
-fn collect_low_disk_targets(
+pub(super) fn collect_low_disk_targets(
     config: &Config,
     retention: &RetentionSettings,
     shortfall: u64,
     collection: &mut LowDiskCollection,
-) -> u64 {
+) -> bool {
     let Some(usage) = target::stats(&config.target.root)
         .ok()
         .map(|stats| stats.bytes)
     else {
         log::warn!("managed target directories could not be measured during low-disk collection");
-        return 0;
+        return false;
     };
     let limit = usage.saturating_sub(shortfall);
     let outcome = match target::collect_by(
@@ -1250,37 +1279,41 @@ fn collect_low_disk_targets(
         Ok(outcome) => outcome,
         Err(error) => {
             log::warn!("target directories were not collected: {error}");
-            return 0;
+            return false;
         }
     };
     let freed = outcome.freed_bytes();
+    // A partial deletion, or one of files the store still links, frees
+    // little but still moves the next round on to other candidates.
+    let progressed = outcome.removed_anything();
     collection.freed_target_bytes = collection.freed_target_bytes.saturating_add(freed);
     collection.lines.extend(target_removals(&outcome, false));
     collection.add_targets(outcome);
-    freed
+    progressed
 }
 
 fn collect_low_disk_store(
     config: &Config,
     shortfall: u64,
     collection: &mut LowDiskCollection,
-) -> u64 {
+) -> bool {
     let store = config.store_dir();
     let Some(usage) = store::stats(&store).ok().map(|stats| stats.total_bytes()) else {
         log::warn!("the shared store could not be measured during low-disk collection");
-        return 0;
+        return false;
     };
     let limit = usage.saturating_sub(shortfall);
     let outcome = match store::gc(&store, limit) {
         Ok(outcome) => outcome,
         Err(error) => {
             log::warn!("the store was not swept: {error}");
-            return 0;
+            return false;
         }
     };
     let freed = outcome.removed_bytes;
     let removed_objects = outcome.removed_objects;
     let removed_action_results = outcome.removed_action_results;
+    let progressed = removed_objects + removed_action_results > 0;
     if let Some(total) = &mut collection.store {
         add_gc_outcome(total, outcome);
     } else {
@@ -1294,7 +1327,7 @@ fn collect_low_disk_store(
             ByteSize::b(freed).display().iec(),
         ));
     }
-    freed
+    progressed
 }
 
 fn add_gc_outcome(total: &mut store::GcOutcome, outcome: store::GcOutcome) {
@@ -1366,6 +1399,8 @@ impl LowDiskCollection {
         total.removed_unit_bytes = total
             .removed_unit_bytes
             .saturating_add(outcome.removed_unit_bytes);
+        total.released_bytes = total.released_bytes.saturating_add(outcome.released_bytes);
+        total.deleted_files = total.deleted_files.saturating_add(outcome.deleted_files);
         total.remaining_bytes = outcome.remaining_bytes;
         total.remaining_views = outcome.remaining_views;
         self.targets = Some(total);

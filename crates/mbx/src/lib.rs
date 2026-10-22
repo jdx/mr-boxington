@@ -59,6 +59,7 @@ mod ar;
 mod build_script;
 mod cc;
 mod digest_ledger;
+mod disk_usage;
 mod incremental;
 mod linker;
 mod managed_linker;

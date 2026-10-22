@@ -372,7 +372,8 @@ pub(super) struct CacheStatsReport {
 #[derive(serde::Serialize)]
 pub(super) struct GcReport {
     pub(super) version: u8,
-    /// Byte counts sum file lengths, not physical blocks released.
+    /// Byte counts sum file lengths, not physical blocks released. Learned
+    /// incremental state and managed targets are counted once per inode.
     pub(super) byte_accounting: &'static str,
     pub(super) max_bytes: u64,
     pub(super) max_total_bytes: Option<u64>,
@@ -411,6 +412,10 @@ pub(super) struct GcTargetReport {
     /// Unused build units removed from target directories that were kept.
     pub(super) removed_units: u64,
     pub(super) removed_unit_bytes: u64,
+    /// The part of `removed_bytes` and `removed_unit_bytes` whose files had
+    /// no link left elsewhere, so the disk got it back. A file also linked
+    /// from the shared store stays on disk. Clones are not detected.
+    pub(super) released_bytes: u64,
     pub(super) remaining_directories: u64,
     pub(super) remaining_bytes: u64,
     /// Selected for removal but kept, because a running command was using
