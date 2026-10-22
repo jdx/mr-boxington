@@ -2471,3 +2471,37 @@ fn incremental_seed_response_file_is_removed_after_compiler_failure() {
     drop(file);
     assert!(!path.exists());
 }
+
+/// Cargo moves a long command line into a response file. The unit whose
+/// objects are cleaned up is read from the expanded line.
+#[cfg(unix)]
+#[test]
+fn object_cleanup_reads_the_unit_from_a_response_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let argfile = directory.path().join("rustc.args");
+    std::fs::write(
+        &argfile,
+        format!(
+            "--crate-name\nwidget\n-C\nextra-filename=-0123456789abcdef\n-C\nsplit-debuginfo=unpacked\n--out-dir\n{}\n",
+            directory.path().display()
+        ),
+    )
+    .unwrap();
+    let arguments: Vec<OsString> = vec![
+        format!("@{}", argfile.display()).into(),
+        "src/main.rs".into(),
+    ];
+
+    assert!(
+        crate::object_cleanup::ObjectSnapshot::before_compiling(&arguments, directory.path())
+            .is_none(),
+        "unexpanded, the unit is unknown"
+    );
+    assert!(
+        crate::object_cleanup::ObjectSnapshot::before_compiling(
+            &profile_arguments(&arguments),
+            directory.path()
+        )
+        .is_some()
+    );
+}

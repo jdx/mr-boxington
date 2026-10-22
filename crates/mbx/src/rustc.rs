@@ -611,8 +611,10 @@ pub(crate) fn compile(
     );
     // The unit's objects from earlier compilations, recorded last so that
     // everything older than this compilation is in it.
-    let mut objects =
-        crate::object_cleanup::ObjectSnapshot::before_compiling(&arguments, &working_dir);
+    let mut objects = crate::object_cleanup::ObjectSnapshot::before_compiling(
+        &profile_arguments(&arguments),
+        &working_dir,
+    );
     // Bootstrap may be visible to env!/option_env!. Hold notifications too:
     // Cargo must not give dependents metadata that the retry will discard.
     let held = seed_mode == IncrementalSeedMode::Inject { bootstrap: true };
@@ -1177,7 +1179,10 @@ fn compile_execution_only_build_script(
             .chain(std::iter::once(&outputs.dep_info))
             .map(PathBuf::as_path),
     );
-    let objects = crate::object_cleanup::ObjectSnapshot::before_compiling(arguments, working_dir);
+    let objects = crate::object_cleanup::ObjectSnapshot::before_compiling(
+        &profile_arguments(arguments),
+        working_dir,
+    );
     let output =
         run_compiler(&mut command, forwarded, false).wrap_err("failed to execute rustc")?;
     drop(permit);
