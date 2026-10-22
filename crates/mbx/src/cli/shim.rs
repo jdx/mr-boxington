@@ -5,6 +5,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 const CARGO_SHIM_STEM: &str = "cargo";
 const CARGO_SHIM_MODE_ENV: &str = "MBX_CARGO_SHIM_MODE";
@@ -15,6 +16,8 @@ pub(super) const CARGO_SHIM_CHAIN_ENV: &str = "MBX_CARGO_SHIM_CHAIN";
 /// repeat is not proof of a cycle. A real wrapper loop never stops, so a depth
 /// far beyond any plausible nesting is.
 const MAX_CARGO_SHIM_DEPTH: usize = 12;
+/// How long the diagnostic `--version` run may take before it is abandoned.
+const WRAPPER_LOOP_HINT_TIMEOUT: Duration = Duration::from_secs(10);
 static PATH_BEFORE_SHIM_EXCLUSION: OnceLock<OsString> = OnceLock::new();
 
 /// Whether this process was installed under Cargo's name by `mbx setup`.
@@ -152,12 +155,33 @@ fn record_cargo_selection(real_cargo: &OsStr, configured: Option<&OsStr>) -> Res
 /// as a failed probe. Ask the selected Cargo for its version, which every shim
 /// entry guards before it passes through, and keep the loop error if it fails.
 fn wrapper_loop_hint(real_cargo: &OsStr) -> Option<String> {
-    let output = Command::new(real_cargo)
+    let mut child = Command::new(real_cargo)
         .arg("--version")
         .stdin(std::process::Stdio::null())
-        .output()
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .ok()?;
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut pipe = child.stderr.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = std::io::Read::read_to_string(&mut pipe, &mut text);
+        text
+    });
+    // A wrapper that hangs must not hide the probe failure it is explaining.
+    let deadline = std::time::Instant::now() + WRAPPER_LOOP_HINT_TIMEOUT;
+    loop {
+        if child.try_wait().ok()?.is_some() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let stderr = reader.join().ok()?;
     stderr
         .lines()
         .find(|line| line.contains("re-entered its Cargo shim"))
