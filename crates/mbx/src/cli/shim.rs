@@ -174,10 +174,15 @@ fn next_cargo_selection(
     let depth = depth
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
+    // Diagnostic history, not a search path: a Cargo path may contain the PATH
+    // separator, so entries are newline-separated and kept as display text.
     let mut selected = chain
         .map(|chain| {
-            std::env::split_paths(chain)
-                .filter(|path| !path.as_os_str().is_empty())
+            chain
+                .to_string_lossy()
+                .split('\n')
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -198,7 +203,12 @@ fn next_cargo_selection(
             Path::new(real_cargo).display()
         );
     }
-    Ok((depth + 1, std::env::join_paths(&selected).ok()))
+    let chain = selected
+        .iter()
+        .map(|path| path.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok((depth + 1, Some(OsString::from(chain))))
 }
 
 /// Collection removes a managed target but leaves the checkout's `target` link
@@ -706,6 +716,24 @@ mod tests {
             next_cargo_selection(Some("2"), None, OsStr::new("/usr/bin/cargo"), None).unwrap();
         assert_eq!(depth, 3);
         assert_eq!(chain.as_deref(), Some(OsStr::new("/usr/bin/cargo")));
+    }
+
+    #[test]
+    fn cargo_shim_chain_keeps_paths_containing_the_path_separator() {
+        let first = OsStr::new("/tmp/rust:nightly/cargo");
+        let (_, chain) = next_cargo_selection(None, None, first, None).unwrap();
+        let error = next_cargo_selection(
+            Some(&MAX_CARGO_SHIM_DEPTH.to_string()),
+            chain.as_deref(),
+            OsStr::new("/usr/bin/cargo"),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("/tmp/rust:nightly/cargo -> /usr/bin/cargo"),
+            "{error}"
+        );
     }
 
     #[test]
