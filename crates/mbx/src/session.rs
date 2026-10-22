@@ -1418,6 +1418,17 @@ pub(crate) fn find_build_script_real_path(executable: &Path) -> Option<PathBuf> 
     if direct.is_file() {
         return Some(direct);
     }
+    // Windows resolves `build-script-build` to `build-script-build.exe` itself,
+    // so Cargo's argv[0] can lack the extension the preserved copy was named
+    // with.
+    if executable.extension().is_none() {
+        let mut name = executable.as_os_str().to_os_string();
+        name.push(".exe");
+        let with_extension = build_script_real_path(Path::new(&name));
+        if with_extension.is_file() {
+            return Some(with_extension);
+        }
+    }
     let prefix = format!("{}-", build_script_crate_name(executable)?);
     let parent = executable.parent()?;
     let mut matches = std::fs::read_dir(parent)
