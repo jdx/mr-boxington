@@ -3412,6 +3412,10 @@ fn a_build_script_is_recognized_by_its_crate_name() {
 }
 
 fn width_action(width: Option<&str>, cap_lints: &[&str]) -> RustcAction {
+    width_action_with(width, cap_lints, &[])
+}
+
+fn width_action_with(width: Option<&str>, cap_lints: &[&str], extra: &[&str]) -> RustcAction {
     let mut arguments: Vec<OsString> = vec![
         "--crate-name=widget".into(),
         "--edition=2024".into(),
@@ -3426,6 +3430,7 @@ fn width_action(width: Option<&str>, cap_lints: &[&str]) -> RustcAction {
             .iter()
             .map(|level| OsString::from(format!("--cap-lints={level}"))),
     );
+    arguments.extend(extra.iter().map(OsString::from));
     RustcInvocation::parse(&arguments)
         .unwrap()
         .action(context(&[("src/lib.rs", "source")]))
@@ -3465,4 +3470,18 @@ fn diagnostic_width_follows_the_last_cap_lints() {
         width_action(None, &["warn", "allow"]).digest,
         width_action(Some("120"), &["warn", "allow"]).digest
     );
+}
+
+#[test]
+fn diagnostic_width_is_keyed_under_force_warn_even_when_lints_are_capped() {
+    // `--force-warn` is not lowered by `--cap-lints`, so those warnings still print.
+    for extra in [
+        &["--force-warn=unused_variables"][..],
+        &["--force-warn", "unused_variables"][..],
+    ] {
+        assert_ne!(
+            width_action_with(None, &["allow"], extra).digest,
+            width_action_with(Some("120"), &["allow"], extra).digest
+        );
+    }
 }
