@@ -263,7 +263,8 @@ pub enum RemoveOutcome {
     Active,
 }
 
-/// Held shared by every command using a view; collection needs it exclusive.
+/// Held shared by commands using a view, and exclusively by a command that
+/// replaces the view wholesale or collects it.
 ///
 /// The lock is released when the value is dropped, including when the process
 /// exits for any reason, so a command that crashes leaves nothing to clean up.
@@ -272,11 +273,20 @@ pub(crate) struct ViewLease {
 }
 
 impl ViewLease {
+    /// Reserve a view exclusively without waiting for commands using it.
+    pub(crate) fn reserve(root: &Path, workspace_root: &Path) -> Result<Option<Self>> {
+        Ok(try_reserve_view(&view_dir(root, workspace_root)))
+    }
+
     /// Take a shared lock on `<root>/v1/<digest>.lock`, waiting for it.
     ///
-    /// Commands on one view share it, so they never wait for each other. They
-    /// wait only while a collector holds it exclusively, which lasts as long as
-    /// one rename and the removal of the view's record.
+    /// Commands using a view share this lock. They wait while collection holds
+    /// it exclusively to rename the view and remove its record, or for a whole
+    /// prune pass over a live view. They also wait for `mbx cache import` to
+    /// finish restoring workspace state or standalone `mbx adopt` to finish
+    /// adopting outputs: each holds it exclusively for its whole operation.
+    /// These reservations keep commands from using outputs while they are
+    /// being moved, restored, or removed.
     pub(crate) fn acquire(root: &Path, workspace_root: &Path) -> Result<Self> {
         let path = view_lock_path(&view_dir(root, workspace_root));
         let file =
@@ -284,6 +294,18 @@ impl ViewLease {
         file.lock_shared()
             .wrap_err_with(|| format!("could not lock {}", path.display()))?;
         Ok(Self { _file: file })
+    }
+}
+
+impl Drop for ViewLease {
+    fn drop(&mut self) {
+        // Closing the file would release the lock only if no other descriptor
+        // refers to the same open file. A child this process forks inherits
+        // every descriptor until it execs, and a lock on an inherited one
+        // outlives the drop here. Unlocking explicitly ends the lease now, so
+        // a collector or a replacement does not find the view in use by a
+        // command that has already let it go.
+        let _ = self._file.unlock();
     }
 }
 
@@ -329,7 +351,7 @@ fn open_view_lock(path: &Path) -> std::io::Result<std::fs::File> {
 /// The returned file holds the reservation until it is dropped. `None` means a
 /// command is using the view, or that the lock could not be taken for another
 /// reason; either way the view must be left alone.
-fn try_reserve_view(directory: &Path) -> Option<std::fs::File> {
+fn try_reserve_view(directory: &Path) -> Option<ViewLease> {
     let path = view_lock_path(directory);
     let file = match open_view_lock(&path) {
         Ok(file) => file,
@@ -342,7 +364,7 @@ fn try_reserve_view(directory: &Path) -> Option<std::fs::File> {
         }
     };
     match file.try_lock() {
-        Ok(()) => Some(file),
+        Ok(()) => Some(ViewLease { _file: file }),
         Err(std::fs::TryLockError::WouldBlock) => None,
         Err(std::fs::TryLockError::Error(error)) => {
             log::warn!(
@@ -498,14 +520,15 @@ pub fn can_remove_existing(
 /// The old directory is first renamed into a temporary sibling on the same
 /// filesystem. It is removed only after the managed link and record both
 /// succeed; otherwise it is restored to its original path.
-pub fn migrate_existing(
+pub(crate) fn migrate_existing(
     config: &Config,
     workspace_root: &Path,
     target_dir: &Path,
     requested: bool,
+    lease: &ViewLease,
 ) -> Result<MigrationOutcome> {
     migrate_existing_with(config, workspace_root, target_dir, requested, || {
-        place(config, workspace_root, target_dir, requested)
+        place(config, workspace_root, target_dir, requested, lease)
     })
 }
 
@@ -592,15 +615,21 @@ pub fn can_move_existing(config: &Config, workspace_root: &Path, target_dir: &Pa
 /// it would have made itself. Cargo keeps addressing the outputs through the
 /// `target` link, so nothing recompiles. If placement declines, the directory
 /// goes back where it was.
-pub fn adopt_existing(
+pub(crate) fn adopt_existing(
     config: &Config,
     workspace_root: &Path,
     target_dir: &Path,
     requested: bool,
+    lease: &ViewLease,
 ) -> Result<AdoptionOutcome> {
-    adopt_existing_with(config, workspace_root, target_dir, requested, || {
-        place(config, workspace_root, target_dir, requested)
-    })
+    adopt_existing_with(
+        config,
+        workspace_root,
+        target_dir,
+        requested,
+        || place(config, workspace_root, target_dir, requested, lease),
+        lease,
+    )
 }
 
 fn adopt_existing_with(
@@ -609,6 +638,7 @@ fn adopt_existing_with(
     target_dir: &Path,
     requested: bool,
     place_target: impl FnOnce() -> Option<PathBuf>,
+    _lease: &ViewLease,
 ) -> Result<AdoptionOutcome> {
     if !std::fs::symlink_metadata(target_dir).is_ok_and(|metadata| metadata.is_dir()) {
         eyre::bail!(
@@ -767,11 +797,23 @@ pub(crate) fn placement_candidate(
 /// - `<workspace>/target` is a real directory, which is somebody's build
 ///   outputs. Replacing it with a link would strand them, and deleting it is
 ///   not this function's business.
-pub fn place(
+pub(crate) fn place(
     config: &Config,
     workspace_root: &Path,
     target_dir: &Path,
     requested: bool,
+    lease: &ViewLease,
+) -> Option<PathBuf> {
+    place_with(config, workspace_root, target_dir, requested, lease, || {})
+}
+
+fn place_with(
+    config: &Config,
+    workspace_root: &Path,
+    target_dir: &Path,
+    requested: bool,
+    _lease: &ViewLease,
+    before_prepare: impl FnOnce(),
 ) -> Option<PathBuf> {
     if !config.target.views {
         return None;
@@ -805,7 +847,7 @@ pub fn place(
     // its lease. Hold both across the link swap, or leave the view alone if a
     // command is still using it. Merely changing the link can strand Cargo's
     // resolved diagnostic-output paths.
-    let build_locks = match lock_replaced_view(target_dir, &managed, workspace_root) {
+    let mut build_locks = match lock_replaced_view(target_dir, &managed, workspace_root) {
         Ok(locks) => locks,
         Err(error) => {
             log::debug!("leaving the managed target directory in place: {error:#}");
@@ -859,14 +901,11 @@ pub fn place(
         }
         return None;
     }
-    // The locks proved no command was using the old view and held that answer
-    // across the link swap, which is the step that could strand a build's
-    // resolved paths. Cargo's cannot be held any further: an open handle inside
-    // the old view makes Windows refuse to rename or remove it, and the
-    // relocation below would fail with the link already pointing at a view
-    // that has none of the outputs. The old view's lease goes with them, so
-    // that one release point covers both.
-    drop(build_locks);
+    // Cargo's locks live inside the old view, so their open handles must go
+    // before Windows can rename it. Keep the sibling reservation until the
+    // old view and its record have both been replaced.
+    build_locks.release_cargo();
+    before_prepare();
     // Cargo would create this itself on the way to writing in it. Doing it here
     // keeps the link from dangling in the meantime, which is what someone
     // listing the workspace would see.
@@ -1018,7 +1057,13 @@ struct ReplacedViewLocks {
     /// Cargo's build locks in the old view.
     _cargo: Vec<fslock::LockFile>,
     /// The old view's lease, held exclusively.
-    _reservation: Option<std::fs::File>,
+    _reservation: Option<ViewLease>,
+}
+
+impl ReplacedViewLocks {
+    fn release_cargo(&mut self) {
+        self._cargo.clear();
+    }
 }
 
 /// Lock the outdated view the checkout's link still points at, or fail when
@@ -1040,12 +1085,17 @@ fn lock_replaced_view(
     };
     if existing == managed
         || !replaceable_managed_link(&existing, managed, workspace_root)
-        || !existing.exists()
+        || !existing.parent().is_some_and(Path::exists)
     {
         return Ok(ReplacedViewLocks::default());
     }
-    let Some(cargo) = cargo_locks(&existing)? else {
-        eyre::bail!("Cargo is using {}", existing.display());
+    let cargo = if existing.exists() {
+        let Some(cargo) = cargo_locks(&existing)? else {
+            eyre::bail!("Cargo is using {}", existing.display());
+        };
+        cargo
+    } else {
+        Vec::new()
     };
     let Some(reservation) = try_reserve_view(&existing) else {
         eyre::bail!("a command is using {}", existing.display());
@@ -1122,6 +1172,15 @@ fn is_profile_output_dir(name: &std::ffi::OsStr) -> bool {
 /// privileged or developer-mode process, where the honest answer is to leave
 /// the outputs where cargo would have put them.
 fn link_view(target_dir: &Path, managed: &Path, workspace_root: &Path) -> Result<Link> {
+    link_view_with(target_dir, managed, workspace_root, || {})
+}
+
+fn link_view_with(
+    target_dir: &Path,
+    managed: &Path,
+    workspace_root: &Path,
+    before_link: impl FnOnce(),
+) -> Result<Link> {
     let replaced = match std::fs::read_link(target_dir) {
         // Already pointing where it should. Re-linking would race a concurrent
         // build for no gain.
@@ -1153,7 +1212,13 @@ fn link_view(target_dir: &Path, managed: &Path, workspace_root: &Path) -> Result
         }
         Err(_) => None,
     };
+    before_link();
     if let Err(error) = symlink_dir(managed, target_dir) {
+        if error.kind() == std::io::ErrorKind::AlreadyExists
+            && std::fs::read_link(target_dir).is_ok_and(|destination| destination == managed)
+        {
+            return Ok(Link::Existing);
+        }
         if let Some(previous) = replaced
             && let Err(restore_error) = symlink_dir(&previous, target_dir)
         {

@@ -249,8 +249,14 @@ mod tests {
     }
 
     fn add_target(config: &Config, workspace: &Path) -> PathBuf {
-        let directory = target::place(config, workspace, &workspace.join("target"), false)
-            .expect("target view should be placed");
+        let directory = target::place(
+            config,
+            workspace,
+            &workspace.join("target"),
+            false,
+            &target::ViewLease::acquire(&config.target.root, workspace).unwrap(),
+        )
+        .expect("target view should be placed");
         std::fs::write(directory.join("artifact"), b"managed target").unwrap();
         directory
     }

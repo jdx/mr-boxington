@@ -1135,6 +1135,30 @@ fn a_cache_bundle_restores_cargo_workspace_state() {
     );
     wipe_target(project.path());
 
+    let previous_link = std::fs::read_link(project.path().join("target")).ok();
+    let lease = hold_target_lease(destination_targets.path(), project.path());
+    let busy = mbx_command()
+        .current_dir(project.path())
+        .args(["cache", "import"])
+        .arg(&archive)
+        .env("MBX_CACHE_DIR", destination_store.path())
+        .env("MBX_TARGET_ROOT", destination_targets.path())
+        .output()
+        .unwrap();
+    assert!(!busy.status.success(), "a busy restore must fail");
+    let error = String::from_utf8_lossy(&busy.stderr);
+    assert!(
+        error.contains("another command is using the target directory"),
+        "{error}"
+    );
+    assert!(error.contains(project.path().to_str().unwrap()), "{error}");
+    assert!(error.contains("retry when it finishes"), "{error}");
+    assert_eq!(
+        std::fs::read_link(project.path().join("target")).ok(),
+        previous_link
+    );
+    drop(lease);
+
     let import = mbx_command()
         .current_dir(project.path())
         .args(["cache", "import"])
@@ -7932,4 +7956,101 @@ fn a_compilation_removes_the_object_files_its_predecessors_left() {
         incremental_sessions(project.path()) > 0,
         "still incremental"
     );
+}
+
+struct TargetLease(std::fs::File);
+
+impl Drop for TargetLease {
+    fn drop(&mut self) {
+        // A concurrently forked child can retain the open file description
+        // until it execs. Explicitly unlock so dropping this guard releases
+        // the lease even while that child still has the descriptor.
+        let _ = self.0.unlock();
+    }
+}
+
+/// Hold the existing sibling lock while a CLI process tries to reserve it.
+///
+/// The view is keyed by the workspace root as Cargo reports it, which on
+/// Windows is not what `canonicalize` returns (that adds a `\\?\` prefix), so
+/// ask Cargo for it the way mbx does.
+fn hold_target_lease(root: &Path, workspace: &Path) -> TargetLease {
+    let metadata = Command::new(cargo())
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--offline",
+        ])
+        .current_dir(workspace)
+        .output()
+        .unwrap();
+    assert!(
+        metadata.status.success(),
+        "{}",
+        String::from_utf8_lossy(&metadata.stderr)
+    );
+    let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
+    let workspace = metadata["workspace_root"].as_str().unwrap();
+    let key = mbx_cache_core::CacheDigest::blake3(workspace.as_bytes()).hash;
+    std::fs::create_dir_all(root.join("v1")).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join("v1").join(format!("{key}.lock")))
+        .unwrap();
+    file.lock_shared().unwrap();
+    TargetLease(file)
+}
+
+#[test]
+fn standalone_adopt_refuses_a_busy_target() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let targets = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let target = project.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("artifact"), b"outputs").unwrap();
+    let lease = hold_target_lease(targets.path(), project.path());
+    let output = mbx_command()
+        .current_dir(project.path())
+        .arg("adopt")
+        .env("MBX_CACHE_DIR", store.path())
+        .env("MBX_TARGET_ROOT", targets.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("another command is using the target directory"),
+        "{error}"
+    );
+    assert!(error.contains(project.path().to_str().unwrap()), "{error}");
+    assert!(error.contains("retry when it finishes"), "{error}");
+    assert!(
+        !std::fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read(target.join("artifact")).unwrap(), b"outputs");
+    drop(lease);
+    let output = mbx_command()
+        .current_dir(project.path())
+        .arg("adopt")
+        .env("MBX_CACHE_DIR", store.path())
+        .env("MBX_TARGET_ROOT", targets.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(std::fs::read_link(&target).is_ok());
+    assert_eq!(std::fs::read(target.join("artifact")).unwrap(), b"outputs");
 }

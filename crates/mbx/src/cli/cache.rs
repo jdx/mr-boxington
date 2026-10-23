@@ -211,6 +211,16 @@ pub(super) fn cache_import(config: &Config, archive: &Path) -> Result<()> {
     let restored = if let Some(attachment) = imported.attachments.get(workspace_state::ATTACHMENT) {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         if let Some(roots) = cargo_roots(&cargo, &[], None) {
+            let lease = crate::target::ViewLease::reserve(
+                &config.target.root,
+                &roots.workspace_root,
+            )?
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "another command is using the target directory for {}; retry when it finishes",
+                    roots.workspace_root.display()
+                )
+            })?;
             match workspace_state::restore(
                 config,
                 &store,
@@ -218,6 +228,7 @@ pub(super) fn cache_import(config: &Config, archive: &Path) -> Result<()> {
                 &roots.workspace_root,
                 &roots.target_dir,
                 roots.target_dir_requested,
+                &lease,
             ) {
                 Ok(restored) => restored,
                 Err(error) => {

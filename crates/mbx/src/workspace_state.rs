@@ -187,6 +187,30 @@ pub(crate) fn restore(
     workspace_root: &Path,
     target_dir: &Path,
     target_requested: bool,
+    lease: &crate::target::ViewLease,
+) -> Result<Option<RestoreOutcome>> {
+    restore_with(
+        config,
+        store,
+        attachment,
+        workspace_root,
+        target_dir,
+        target_requested,
+        lease,
+        || {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn restore_with(
+    config: &Config,
+    store: &Path,
+    attachment: &CacheDigest,
+    workspace_root: &Path,
+    target_dir: &Path,
+    target_requested: bool,
+    lease: &crate::target::ViewLease,
+    after_place: impl FnOnce(),
 ) -> Result<Option<RestoreOutcome>> {
     let cas = LocalCas::new(store);
     let bundle_path = cas
@@ -213,8 +237,10 @@ pub(crate) fn restore(
         return Ok(None);
     };
     validate_state(state)?;
-    let destination = crate::target::place(config, workspace_root, target_dir, target_requested)
-        .unwrap_or_else(|| target_dir.to_path_buf());
+    let destination =
+        crate::target::place(config, workspace_root, target_dir, target_requested, lease)
+            .unwrap_or_else(|| target_dir.to_path_buf());
+    after_place();
     if destination.exists() && std::fs::read_dir(&destination)?.next().is_some() {
         log::debug!(
             "leaving the non-empty target directory {} alone",

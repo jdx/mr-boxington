@@ -187,7 +187,14 @@ pub(super) fn adopt_checkout(
             target,
         });
     }
-    let outcome = target::adopt_existing(&config, &roots.workspace_root, &target, false)?;
+    let lease = target::ViewLease::reserve(&config.target.root, &roots.workspace_root)?
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "another command is using the target directory for {}; retry when it finishes",
+                roots.workspace_root.display()
+            )
+        })?;
+    let outcome = target::adopt_existing(&config, &roots.workspace_root, &target, false, &lease)?;
     if outcome.managed.is_none() {
         eyre::bail!("a managed target directory could not be placed for it");
     }

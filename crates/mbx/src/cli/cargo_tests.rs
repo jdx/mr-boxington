@@ -499,7 +499,13 @@ fn rust_analyzer_target_is_a_child_of_the_managed_view() {
         target_dir_requested: true,
     };
 
-    let placement = place_target_view(&config, &roots);
+    let placement = place_target_view(
+        &config,
+        &roots,
+        Some(
+            &crate::target::ViewLease::acquire(&config.target.root, &roots.workspace_root).unwrap(),
+        ),
+    );
 
     let managed = std::fs::read_link(workspace.join("target")).unwrap();
     assert_eq!(
@@ -1000,4 +1006,23 @@ fn a_real_rustc_wrapper_is_kept() {
         config.build.rustc_workspace_wrapper,
         Some(std::path::PathBuf::from("workspace-wrapper"))
     );
+}
+
+#[test]
+fn target_placement_without_a_lease_leaves_cargos_directory_alone() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = managed_target_config(directory.path());
+    let workspace = directory.path().join("project");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let roots = Roots {
+        workspace_root: workspace.clone(),
+        target_dir: workspace.join("target"),
+        build_dir: None,
+        target_dir_requested: false,
+    };
+    let placement = place_target_view(&config, &roots, None);
+    assert!(placement.directory.is_none());
+    assert_eq!(placement.touch_path, roots.target_dir);
+    assert!(std::fs::symlink_metadata(&roots.target_dir).is_err());
+    assert!(!config.target.root.exists());
 }

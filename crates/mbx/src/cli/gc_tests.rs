@@ -741,8 +741,14 @@ fn low_disk_view(
 ) -> PathBuf {
     let workspace = root.join(name);
     std::fs::create_dir_all(&workspace).unwrap();
-    let view = crate::target::place(config, &workspace, &workspace.join("target"), false)
-        .expect("the target is managed");
+    let view = crate::target::place(
+        config,
+        &workspace,
+        &workspace.join("target"),
+        false,
+        &crate::target::ViewLease::acquire(&config.target.root, &workspace).unwrap(),
+    )
+    .expect("the target is managed");
     for (file, bytes) in files {
         std::fs::write(view.join(file), vec![0_u8; *bytes]).unwrap();
     }

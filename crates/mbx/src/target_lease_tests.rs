@@ -120,7 +120,14 @@ fn age_lease_view(root: &Path, workspace_root: &Path, updated_secs: u64) {
 /// usage lease can keep the view.
 fn expired_view(root: &Path, config: &Config, name: &str) -> (PathBuf, PathBuf) {
     let workspace = lease_checkout(root, name);
-    let view = place(config, &workspace, &workspace.join("target"), false).unwrap();
+    let view = place(
+        config,
+        &workspace,
+        &workspace.join("target"),
+        false,
+        &ViewLease::acquire(&config.target.root, &workspace).unwrap(),
+    )
+    .unwrap();
     std::fs::write(view.join("artifact"), vec![0_u8; 4_096]).unwrap();
     age_lease_view(&config.target.root, &workspace, 1);
     (workspace, view)
@@ -493,7 +500,14 @@ fn remove_workspace_keeps_a_view_in_use() {
     let directory = tempfile::tempdir().unwrap();
     let config = lease_test_config(directory.path(), true);
     let workspace = lease_checkout(directory.path(), "project");
-    let view = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    let view = place(
+        &config,
+        &workspace,
+        &workspace.join("target"),
+        false,
+        &ViewLease::acquire(&config.target.root, &workspace).unwrap(),
+    )
+    .unwrap();
     std::fs::write(view.join("artifact"), vec![0_u8; 4_096]).unwrap();
     let record = view_record_path(&config.target.root, &workspace);
     let link = workspace.join("target");
@@ -563,6 +577,8 @@ fn a_dry_run_reports_a_view_in_use_without_creating_its_lock_file() {
     let config = lease_test_config(directory.path(), true);
     let (busy_workspace, busy) = expired_view(directory.path(), &config, "busy");
     let (_idle_workspace, idle) = expired_view(directory.path(), &config, "idle");
+    // Model a view placed by a version that did not yet take leases.
+    std::fs::remove_file(view_lock_path(&idle)).unwrap();
 
     let lease = ViewLease::acquire(&config.target.root, &busy_workspace).unwrap();
     let outcome = collect(
@@ -632,7 +648,14 @@ fn a_command_waiting_on_the_removal_keeps_the_record_it_writes() {
             waiting = Some(std::thread::spawn(move || {
                 started.send(()).unwrap();
                 let _lease = ViewLease::acquire(&root, &workspace).unwrap();
-                place(&config, &workspace, &workspace.join("target"), false).unwrap()
+                place(
+                    &config,
+                    &workspace,
+                    &workspace.join("target"),
+                    false,
+                    &ViewLease::acquire(&config.target.root, &workspace).unwrap(),
+                )
+                .unwrap()
             }));
             ready.recv().unwrap();
         },
@@ -775,4 +798,342 @@ fn a_deletion_that_fails_after_the_rename_keeps_its_bytes_in_the_total() {
     assert!(!aside.exists());
     assert_eq!(next.removed_bytes, survivors);
     assert_eq!(next.remaining_bytes, 0);
+}
+
+/// A separate process either holds or probes a lock and reports before waiting
+/// for its parent. The timeout bounds failures without guessing scheduling.
+struct LockProcess {
+    child: std::process::Child,
+    held: bool,
+}
+
+impl LockProcess {
+    fn start(path: &Path, mode: &str) -> Self {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "target::lease_tests::replacement_lock_process",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("MBX_TEST_REPLACEMENT_LOCK", path)
+            .env("MBX_TEST_REPLACEMENT_MODE", mode)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (send, receive) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let line = line.unwrap();
+                if line == "held" || line == "busy" {
+                    let _ = send.send(line == "held");
+                    return;
+                }
+            }
+        });
+        let held = match receive.recv_timeout(Duration::from_secs(15)) {
+            Ok(held) => held,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("lock helper did not report: {error}");
+            }
+        };
+        Self { child, held }
+    }
+}
+
+impl Drop for LockProcess {
+    fn drop(&mut self) {
+        // Kill also bounds cleanup if the helper stops responding.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn replacement_lock_process() {
+    let Some(path) = std::env::var_os("MBX_TEST_REPLACEMENT_LOCK") else {
+        return;
+    };
+    let mode = std::env::var("MBX_TEST_REPLACEMENT_MODE").unwrap();
+    let file = open_view_lock(Path::new(&path)).unwrap();
+    let held = if mode == "shared" {
+        file.try_lock_shared().is_ok()
+    } else {
+        file.try_lock().is_ok()
+    };
+    let mut output = std::io::stdout();
+    output
+        .write_all(if held { b"\nheld\n" } else { b"\nbusy\n" })
+        .unwrap();
+    output.flush().unwrap();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).unwrap();
+    drop(file);
+}
+
+#[test]
+fn replacement_respects_a_reserved_missing_old_view() {
+    if !in_own_process(
+        module_path!(),
+        "replacement_respects_a_reserved_missing_old_view",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let first = lease_test_config(&directory.path().join("first"), true);
+    let second = lease_test_config(&directory.path().join("second"), true);
+    let workspace = lease_checkout(directory.path(), "project");
+    let old = view_dir(&first.target.root, &workspace);
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    record_view(&first.target.root, &workspace).unwrap();
+    symlink_dir(&old, &workspace.join("target")).unwrap();
+    // The record still identifies a missing view under the previous root.
+    let holder = LockProcess::start(&view_lock_path(&old), "exclusive");
+    assert!(holder.held);
+    let lease = ViewLease::acquire(&second.target.root, &workspace).unwrap();
+    assert!(
+        place(
+            &second,
+            &workspace,
+            &workspace.join("target"),
+            false,
+            &lease
+        )
+        .is_none()
+    );
+    assert_eq!(std::fs::read_link(workspace.join("target")).unwrap(), old);
+    assert!(!view_dir(&second.target.root, &workspace).exists());
+}
+
+#[test]
+fn replacement_keeps_reservation_after_releasing_cargo_locks() {
+    if !in_own_process(
+        module_path!(),
+        "replacement_keeps_reservation_after_releasing_cargo_locks",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let first = lease_test_config(&directory.path().join("first"), true);
+    let second = lease_test_config(&directory.path().join("second"), true);
+    let workspace = lease_checkout(directory.path(), "project");
+    let old = place(
+        &first,
+        &workspace,
+        &workspace.join("target"),
+        false,
+        &ViewLease::acquire(&first.target.root, &workspace).unwrap(),
+    )
+    .unwrap();
+    std::fs::create_dir_all(old.join("debug")).unwrap();
+    let cargo = old.join("debug/.cargo-lock");
+    std::fs::write(&cargo, b"").unwrap();
+    let lease = ViewLease::acquire(&second.target.root, &workspace).unwrap();
+    let new = place_with(
+        &second,
+        &workspace,
+        &workspace.join("target"),
+        false,
+        &lease,
+        || {
+            assert!(
+                !LockProcess::start(&view_lock_path(&old), "exclusive").held,
+                "the old reservation must survive until prepare_view finishes"
+            );
+            assert!(
+                LockProcess::start(&cargo, "exclusive").held,
+                "Cargo's lock must be released before a Windows rename"
+            );
+            assert!(!remove_dangling_link(&first.target.root, &workspace).unwrap());
+            assert_eq!(
+                std::fs::read_link(workspace.join("target")).unwrap(),
+                view_dir(&second.target.root, &workspace)
+            );
+        },
+    )
+    .unwrap();
+    assert!(new.exists());
+    assert!(LockProcess::start(&view_lock_path(&old), "exclusive").held);
+}
+
+#[test]
+fn replacement_of_a_missing_view_keeps_the_old_reservation() {
+    if !in_own_process(
+        module_path!(),
+        "replacement_of_a_missing_view_keeps_the_old_reservation",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let first = lease_test_config(&directory.path().join("first"), true);
+    let second = lease_test_config(&directory.path().join("second"), true);
+    let workspace = lease_checkout(directory.path(), "project");
+    let old = view_dir(&first.target.root, &workspace);
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    record_view(&first.target.root, &workspace).unwrap();
+    symlink_dir(&old, &workspace.join("target")).unwrap();
+    let lease = ViewLease::acquire(&second.target.root, &workspace).unwrap();
+    place_with(
+        &second,
+        &workspace,
+        &workspace.join("target"),
+        false,
+        &lease,
+        || {
+            assert!(!LockProcess::start(&view_lock_path(&old), "exclusive").held);
+            assert!(!remove_dangling_link(&first.target.root, &workspace).unwrap());
+            assert_eq!(
+                std::fs::read_link(workspace.join("target")).unwrap(),
+                view_dir(&second.target.root, &workspace)
+            );
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn wholesale_reservation_refuses_a_command_using_the_target() {
+    if !in_own_process(
+        module_path!(),
+        "wholesale_reservation_refuses_a_command_using_the_target",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let workspace = lease_checkout(directory.path(), "project");
+    let view = view_dir(&config.target.root, &workspace);
+    let holder = LockProcess::start(&view_lock_path(&view), "shared");
+    assert!(holder.held);
+    assert!(
+        ViewLease::reserve(&config.target.root, &workspace)
+            .unwrap()
+            .is_none()
+    );
+    drop(holder);
+    assert!(
+        ViewLease::reserve(&config.target.root, &workspace)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn adoption_reservation_protects_the_record_and_move() {
+    if !in_own_process(
+        module_path!(),
+        "adoption_reservation_protects_the_record_and_move",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let workspace = lease_checkout(directory.path(), "project");
+    let target = workspace.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("artifact"), b"outputs").unwrap();
+    let lease = ViewLease::reserve(&config.target.root, &workspace)
+        .unwrap()
+        .unwrap();
+    let view = view_dir(&config.target.root, &workspace);
+    let outcome = adopt_existing_with(
+        &config,
+        &workspace,
+        &target,
+        false,
+        || {
+            assert!(!LockProcess::start(&view_lock_path(&view), "exclusive").held);
+            assert_eq!(
+                remove_workspace(&config.target.root, &workspace).unwrap(),
+                RemoveOutcome::Active
+            );
+            let placed = place(&config, &workspace, &target, false, &lease);
+            assert!(!remove_dangling_link(&config.target.root, &workspace).unwrap());
+            assert_eq!(
+                remove_workspace(&config.target.root, &workspace).unwrap(),
+                RemoveOutcome::Active
+            );
+            assert_eq!(std::fs::read_link(&target).unwrap(), view);
+            placed
+        },
+        &lease,
+    )
+    .unwrap();
+    assert_eq!(outcome.managed, Some(view.clone()));
+    assert_eq!(std::fs::read(view.join("artifact")).unwrap(), b"outputs");
+}
+
+#[test]
+fn link_view_accepts_a_concurrently_created_matching_link() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = lease_checkout(directory.path(), "project");
+    let managed = view_dir(&directory.path().join("targets"), &workspace);
+    let target = workspace.join("target");
+    let outcome = link_view_with(&target, &managed, &workspace, || {
+        symlink_dir(&managed, &target).unwrap();
+    })
+    .unwrap();
+    assert!(matches!(outcome, Link::Existing));
+    assert_eq!(std::fs::read_link(&target).unwrap(), managed);
+}
+
+#[test]
+fn restore_reservation_protects_placement_and_workspace_state() {
+    if !in_own_process(
+        module_path!(),
+        "restore_reservation_protects_placement_and_workspace_state",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let workspace = lease_checkout(directory.path(), "project");
+    let target = workspace.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("artifact"), b"restored outputs").unwrap();
+    let store = config.store_dir();
+    std::fs::create_dir_all(&store).unwrap();
+    let additions = crate::workspace_state::capture(
+        &store,
+        &[mbx_cache_store::WorkspaceTarget {
+            workspace_root: workspace.clone(),
+            target_dir: target.clone(),
+        }],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&target).unwrap();
+    let lease = ViewLease::reserve(&config.target.root, &workspace)
+        .unwrap()
+        .unwrap();
+    let view = view_dir(&config.target.root, &workspace);
+    let restored = crate::workspace_state::restore_with(
+        &config,
+        &store,
+        &additions.attachments[crate::workspace_state::ATTACHMENT],
+        &workspace,
+        &target,
+        false,
+        &lease,
+        || {
+            assert!(!LockProcess::start(&view_lock_path(&view), "exclusive").held);
+            // Placement has made the link and empty view. Even a missing view
+            // at this point must not let a dangling-link cleaner remove it.
+            std::fs::remove_dir(&view).unwrap();
+            assert!(!remove_dangling_link(&config.target.root, &workspace).unwrap());
+            assert_eq!(
+                remove_workspace(&config.target.root, &workspace).unwrap(),
+                RemoveOutcome::Active
+            );
+            assert_eq!(std::fs::read_link(&target).unwrap(), view);
+        },
+    )
+    .unwrap();
+    assert!(restored.is_some());
+    assert_eq!(
+        std::fs::read(view.join("artifact")).unwrap(),
+        b"restored outputs"
+    );
 }

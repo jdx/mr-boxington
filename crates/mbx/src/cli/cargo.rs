@@ -258,58 +258,73 @@ fn cargo_with_settings_bypass_log_and_roots(
     // Placed before the session starts, because the target directory is what
     // the shim maps out of its cache keys and it has to be the one cargo will
     // actually write to.
-    let (placement, removed_target_bytes, adopted_target_bytes) = match existing_target {
-        Some(ExistingTarget::Adopt) => {
-            match target::adopt_existing(
-                config,
-                &roots.workspace_root,
-                &roots.target_dir,
-                roots.target_dir_requested,
-            ) {
-                Ok(outcome) => {
-                    let adopted = outcome.managed.is_some().then_some(outcome.adopted_bytes);
-                    (
-                        TargetViewPlacement {
-                            directory: outcome.managed,
-                            touch_path: roots.target_dir.clone(),
-                        },
-                        None,
-                        adopted,
-                    )
-                }
-                Err(error) => {
-                    // A move that could not happen is not the build's
-                    // failure, so the build goes on either way.
-                    match adoption_failure(&error, &roots) {
-                        AdoptionFailure::NotMoved => log::debug!("{error:#}"),
-                        AdoptionFailure::LeftInPlace => log::warn!(
-                            "{error:#}; the build continues in the existing target directory"
-                        ),
-                        // The error names where the outputs were retained.
-                        AdoptionFailure::Stranded => log::warn!("{error:#}"),
+    let (placement, removed_target_bytes, adopted_target_bytes) =
+        match existing_target.filter(|_| view_lease.is_some()) {
+            Some(ExistingTarget::Adopt) => {
+                match target::adopt_existing(
+                    config,
+                    &roots.workspace_root,
+                    &roots.target_dir,
+                    roots.target_dir_requested,
+                    view_lease
+                        .as_ref()
+                        .expect("existing target requires a lease"),
+                ) {
+                    Ok(outcome) => {
+                        let adopted = outcome.managed.is_some().then_some(outcome.adopted_bytes);
+                        (
+                            TargetViewPlacement {
+                                directory: outcome.managed,
+                                touch_path: roots.target_dir.clone(),
+                            },
+                            None,
+                            adopted,
+                        )
                     }
-                    (place_target_view(config, &roots), None, None)
+                    Err(error) => {
+                        // A move that could not happen is not the build's
+                        // failure, so the build goes on either way.
+                        match adoption_failure(&error, &roots) {
+                            AdoptionFailure::NotMoved => log::debug!("{error:#}"),
+                            AdoptionFailure::LeftInPlace => log::warn!(
+                                "{error:#}; the build continues in the existing target directory"
+                            ),
+                            // The error names where the outputs were retained.
+                            AdoptionFailure::Stranded => log::warn!("{error:#}"),
+                        }
+                        (
+                            place_target_view(config, &roots, view_lease.as_ref()),
+                            None,
+                            None,
+                        )
+                    }
                 }
             }
-        }
-        Some(ExistingTarget::Remove) => {
-            let outcome = target::migrate_existing(
-                config,
-                &roots.workspace_root,
-                &roots.target_dir,
-                roots.target_dir_requested,
-            )?;
-            (
-                TargetViewPlacement {
-                    directory: outcome.managed,
-                    touch_path: roots.target_dir.clone(),
-                },
-                outcome.removed_bytes,
+            Some(ExistingTarget::Remove) => {
+                let outcome = target::migrate_existing(
+                    config,
+                    &roots.workspace_root,
+                    &roots.target_dir,
+                    roots.target_dir_requested,
+                    view_lease
+                        .as_ref()
+                        .expect("existing target requires a lease"),
+                )?;
+                (
+                    TargetViewPlacement {
+                        directory: outcome.managed,
+                        touch_path: roots.target_dir.clone(),
+                    },
+                    outcome.removed_bytes,
+                    None,
+                )
+            }
+            None => (
+                place_target_view(config, &roots, view_lease.as_ref()),
                 None,
-            )
-        }
-        None => (place_target_view(config, &roots), None, None),
-    };
+                None,
+            ),
+        };
     // Chosen after placement, because it is a directory inside the managed
     // view: a build that could not place `target/` has nowhere to put one.
     let check_lane = check_lane(config, &roots, &placement, &cargo, &working_dir, arguments);
@@ -745,12 +760,25 @@ pub(super) fn build_dir_named_in(arguments: &[String]) -> bool {
 /// an editor-first checkout from creating a real directory that would block
 /// managed targets later. Cargo still writes into the requested child, so its
 /// directory lock remains independent from terminal builds.
-pub(super) fn place_target_view(config: &Config, roots: &Roots) -> TargetViewPlacement {
+pub(super) fn place_target_view(
+    config: &Config,
+    roots: &Roots,
+    lease: Option<&target::ViewLease>,
+) -> TargetViewPlacement {
+    let Some(lease) = lease else {
+        log::debug!(
+            "leaving the target directory where Cargo put it because no view lease is held"
+        );
+        return TargetViewPlacement {
+            directory: None,
+            touch_path: roots.target_dir.clone(),
+        };
+    };
     let default = roots.workspace_root.join("target");
     if roots.target_dir_requested
         && roots.target_dir == roots.workspace_root.join(super::RUST_ANALYZER_TARGET_DIR)
     {
-        let directory = target::place(config, &roots.workspace_root, &default, false)
+        let directory = target::place(config, &roots.workspace_root, &default, false, lease)
             .map(|_| roots.target_dir.clone());
         return TargetViewPlacement {
             directory,
@@ -763,6 +791,7 @@ pub(super) fn place_target_view(config: &Config, roots: &Roots) -> TargetViewPla
             &roots.workspace_root,
             &roots.target_dir,
             roots.target_dir_requested,
+            lease,
         ),
         touch_path: roots.target_dir.clone(),
     }

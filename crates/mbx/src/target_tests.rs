@@ -1649,3 +1649,52 @@ fn a_file_written_after_the_measure_is_not_credited() {
     assert_eq!(outcome.released_bytes, 5);
     assert_eq!(outcome.remaining_bytes, 7);
 }
+
+// Keep fixture leases local: later assertions deliberately collect or replace
+// these views after the command that placed them has finished. Explicitly
+// unlock so a concurrent test re-executing this binary cannot keep a fixture
+// lease through an inherited file description between fork and exec.
+fn place(config: &Config, workspace: &Path, target: &Path, requested: bool) -> Option<PathBuf> {
+    let lease = ViewLease::acquire(&config.target.root, workspace).unwrap();
+    let placed = super::place(config, workspace, target, requested, &lease);
+    lease._file.unlock().unwrap();
+    placed
+}
+
+fn adopt_existing(
+    config: &Config,
+    workspace: &Path,
+    target: &Path,
+    requested: bool,
+) -> Result<AdoptionOutcome> {
+    let lease = ViewLease::acquire(&config.target.root, workspace).unwrap();
+    let adopted = super::adopt_existing(config, workspace, target, requested, &lease);
+    lease._file.unlock().unwrap();
+    adopted
+}
+
+fn adopt_existing_with(
+    config: &Config,
+    workspace: &Path,
+    target: &Path,
+    requested: bool,
+    place_target: impl FnOnce() -> Option<PathBuf>,
+) -> Result<AdoptionOutcome> {
+    let lease = ViewLease::acquire(&config.target.root, workspace).unwrap();
+    let adopted =
+        super::adopt_existing_with(config, workspace, target, requested, place_target, &lease);
+    lease._file.unlock().unwrap();
+    adopted
+}
+
+fn migrate_existing(
+    config: &Config,
+    workspace: &Path,
+    target: &Path,
+    requested: bool,
+) -> Result<MigrationOutcome> {
+    let lease = ViewLease::acquire(&config.target.root, workspace).unwrap();
+    let migrated = super::migrate_existing(config, workspace, target, requested, &lease);
+    lease._file.unlock().unwrap();
+    migrated
+}
