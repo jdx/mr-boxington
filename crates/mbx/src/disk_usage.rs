@@ -384,6 +384,7 @@ struct Walk {
 /// releasing each file only once it is gone. The first failure stops the
 /// removal, leaving what survived counted. Without `delete`, releases the
 /// files as if they had gone and deletes nothing.
+#[cfg(test)]
 pub(crate) fn remove_tree_counting(root: &Path, ledger: &mut Ledger, delete: bool) -> Removal {
     walk_tree(
         root,
@@ -395,8 +396,56 @@ pub(crate) fn remove_tree_counting(root: &Path, ledger: &mut Ledger, delete: boo
     )
 }
 
-/// [`remove_tree_counting`], keeping the released keys so the measure that
-/// covered `root` can [forget](Measured::forget) them.
+/// Delete `root`, which `ledger` measured as `measured`, crediting what that
+/// measure counted rather than whatever the deletion finds: a file written
+/// after the measure was never counted, so removing it frees nothing counted.
+/// Should the deletion stop partway, what survived is measured back in.
+pub(crate) fn remove_measured_tree(
+    root: &Path,
+    ledger: &mut Ledger,
+    measured: &Measured,
+) -> Removal {
+    let removed = remove_tree_reporting(root, identify_file, |(key, _, _)| key.clone());
+    if let Err(error) = &removed.result {
+        log::warn!("could not remove {}: {error}", root.display());
+    }
+    let before = ledger.total();
+    ledger.release(measured);
+    if removed.result.is_err() {
+        ledger.measure(root, &HashSet::new());
+    }
+    let logical = before.saturating_sub(ledger.total());
+    let gone = links_gone(&removed.files, |(key, _, _)| key);
+    let mut freed = HashSet::new();
+    let physical = removed
+        .files
+        .iter()
+        .filter(|(key, _, links)| gone[key] >= *links && freed.insert(key))
+        .map(|(_, len, _)| len)
+        .sum::<u64>();
+    Removal {
+        release: Release {
+            logical,
+            // Part of what was counted: a file written since is not.
+            physical: physical.min(logical),
+        },
+        deleted_files: removed.entries,
+        ..Removal::default()
+    }
+}
+
+/// A file's key, length and link count, for a removal to account for it.
+fn identify_file(path: &Path, metadata: &std::fs::Metadata) -> Option<(FileKey, u64, u64)> {
+    metadata.is_file().then(|| {
+        let (key, links) = file_key(|| path.to_path_buf(), metadata);
+        (key, metadata.len(), links)
+    })
+}
+
+/// Delete `root` and everything under it, which `ledger` measured, crediting
+/// each file once it is gone, and keep the released keys so the measure that
+/// covered `root` can [forget](Measured::forget) them. Without `delete`,
+/// releases the files as if they had gone and deletes nothing.
 pub(crate) fn remove_tree_counting_with_keys(
     root: &Path,
     ledger: &mut Ledger,
@@ -408,12 +457,7 @@ pub(crate) fn remove_tree_counting_with_keys(
 fn walk_tree(root: &Path, ledger: &mut Ledger, walk: Walk) -> Removal {
     let mut removal = Removal::default();
     // Identified before anything goes, while each file can still be opened.
-    let identify = |path: &Path, metadata: &std::fs::Metadata| {
-        metadata.is_file().then(|| {
-            let (key, links) = file_key(|| path.to_path_buf(), metadata);
-            (key, metadata.len(), links)
-        })
-    };
+    let identify = identify_file;
     if walk.delete {
         let removed = remove_tree_reporting(root, identify, |(key, _, _)| key.clone());
         if let Err(error) = removed.result {

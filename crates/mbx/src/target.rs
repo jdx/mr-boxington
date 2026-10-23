@@ -1399,9 +1399,13 @@ fn collect_with(
     } else {
         abandoned_removals(root)
     };
-    for leftover in &abandoned {
-        ledger.measure(leftover, &HashSet::new());
-    }
+    let abandoned = abandoned
+        .into_iter()
+        .map(|leftover| {
+            let measured = ledger.measure(&leftover, &HashSet::new());
+            (leftover, measured)
+        })
+        .collect::<Vec<_>>();
     let mut entries = Vec::new();
     let mut total_views = 0_u64;
     for (record_path, directory) in views(root)? {
@@ -1425,11 +1429,11 @@ fn collect_with(
     // A file a view still links stays counted there; a deletion that stops
     // partway leaves what survived in the remaining total.
     let mut leftovers = Removal::default();
-    for leftover in &abandoned {
-        leftovers.add(crate::disk_usage::remove_tree_counting(
+    for (leftover, measured) in &abandoned {
+        leftovers.add(crate::disk_usage::remove_measured_tree(
             leftover,
             &mut ledger,
-            true,
+            measured,
         ));
     }
     outcome.credit_views(&leftovers);
@@ -1690,7 +1694,7 @@ fn collect_with(
             // from the path a build can reach, and the next collection
             // finishes deleting what was left aside. What is still on the
             // disk until then stays in what remains.
-            let removal = crate::disk_usage::remove_tree_counting(&aside, &mut ledger, true);
+            let removal = crate::disk_usage::remove_measured_tree(&aside, &mut ledger, &files);
             outcome.credit_views(&removal);
         }
     }

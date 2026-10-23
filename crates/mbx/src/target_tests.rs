@@ -1614,3 +1614,38 @@ fn a_leftover_that_survives_in_part_stays_counted() {
     assert_eq!(outcome.removed_bytes, 0);
     assert_eq!(outcome.remaining_bytes, 7);
 }
+
+/// A removed view is credited by what the sweep measured: a file a build
+/// wrote after the measure was never counted, so it frees nothing counted
+/// and leaves nothing to subtract from what remains.
+#[test]
+fn a_file_written_after_the_measure_is_not_credited() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let stale = view_with(directory.path(), &config, "stale", 1, &[("artifact", 5)]);
+    let kept = view_with(directory.path(), &config, "kept", now_secs(), &[("own", 7)]);
+    let late = stale.join("late");
+    let outcome = collect_with(
+        &config.target.root,
+        None,
+        Some(Duration::from_secs(10)),
+        &Precedence::default(),
+        false,
+        now_secs(),
+        || {},
+        |reserved| {
+            if reserved == stale {
+                std::fs::write(&late, vec![0_u8; 100]).unwrap();
+            }
+        },
+        || {},
+    )
+    .unwrap();
+
+    assert!(!stale.exists());
+    assert!(kept.exists());
+    assert_eq!(outcome.removed_views, 1);
+    assert_eq!(outcome.removed_bytes, 5);
+    assert_eq!(outcome.released_bytes, 5);
+    assert_eq!(outcome.remaining_bytes, 7);
+}
