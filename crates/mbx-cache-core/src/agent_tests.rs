@@ -6126,7 +6126,7 @@ fn task_predictions_are_pruned_to_fit_the_serialized_byte_budget() {
             action: CacheDigest::blake3(invocation.hash.as_bytes()),
             invocation,
             adapter: "rustc".into(),
-            payload: "x".repeat(4096),
+            payload: format!("\"{}\"", "x".repeat(4096)),
         }
     };
     // Well under the entry limit, but about 20 MiB serialized.
@@ -6143,7 +6143,29 @@ fn task_predictions_are_pruned_to_fit_the_serialized_byte_budget() {
         task: "a".repeat(64),
         predictions: kept,
     };
+    assert!(manifest.validate());
     assert!(canonical_json(&manifest).unwrap().len() <= crate::MAX_REMOTE_JSON_BYTES as usize);
+}
+
+#[test]
+fn task_predictions_protected_beyond_the_byte_budget_are_refused() {
+    let predictions: Vec<_> = (0..5000usize)
+        .map(|index| {
+            let invocation = CacheDigest::blake3(&index.to_le_bytes());
+            ActionPrediction {
+                action: CacheDigest::blake3(invocation.hash.as_bytes()),
+                invocation,
+                adapter: "rustc".into(),
+                payload: format!("\"{}\"", "x".repeat(4096)),
+            }
+        })
+        .collect();
+    let protected = predictions
+        .iter()
+        .map(|prediction| prediction.invocation.clone())
+        .collect();
+
+    assert!(merge_task_action_predictions(predictions, Vec::new(), &protected).is_err());
 }
 
 #[test]
