@@ -257,14 +257,14 @@ impl Ledger {
             physical: measured.unshared,
         };
         for key in &measured.shared {
-            release.add(self.release_one(key, None));
+            release.add(self.release_one(key));
         }
         release
     }
 
-    /// Release one path to `key`. `links` is the file's link count just
-    /// before that path was unlinked, when it is known.
-    fn release_one(&mut self, key: &FileKey, links: Option<u64>) -> Release {
+    /// Release one path to `key`, estimating whether its data leaves the
+    /// disk from the links the ledger measured.
+    fn release_one(&mut self, key: &FileKey) -> Release {
         let Some(counted) = self.files.get_mut(key) else {
             log::debug!("released a file the disk usage ledger never measured: {key:?}");
             return Release::default();
@@ -278,13 +278,9 @@ impl Ledger {
             return Release::default();
         }
         self.shared_bytes = self.shared_bytes.saturating_sub(counted.len);
-        // Physical bytes are freed when the unlink removed the file's last
-        // link: by the filesystem's count when the unlink was seen, else by
-        // the ledger's.
-        let freed = match links {
-            Some(links) => links <= 1,
-            None => counted.nlink <= counted.seen,
-        };
+        // Freed on disk when every link the file had was measured. Sweeps
+        // measure each root once, so `seen` counts distinct links.
+        let freed = counted.nlink <= counted.seen;
         Release {
             logical: counted.len,
             physical: if freed { counted.len } else { 0 },
@@ -292,27 +288,33 @@ impl Ledger {
     }
 
     /// Release one path a walk reached, by its key when the ledger keeps the
-    /// file and by its length otherwise.
+    /// file and by its length otherwise. `freed` is a real removal's verdict
+    /// on whether the file left the disk; a preview leaves it to the ledger's
+    /// estimate.
     fn release_path(
         &mut self,
         key: FileKey,
         len: u64,
         links: u64,
-        unlinked: bool,
+        freed: Option<bool>,
         removal: &mut Removal,
     ) {
-        if self.files.contains_key(&key) {
-            let release = self.release_one(&key, unlinked.then_some(links));
-            removal.release.add(release);
+        let mut release = if self.files.contains_key(&key) {
+            let release = self.release_one(&key);
             removal.gone.push(key);
+            release
         } else {
             self.unshared_bytes = self.unshared_bytes.saturating_sub(len);
             removal.unshared = removal.unshared.saturating_add(len);
-            removal.release.add(Release {
+            Release {
                 logical: len,
                 physical: if links <= 1 { len } else { 0 },
-            });
+            }
+        };
+        if let Some(freed) = freed {
+            release.physical = if freed { release.logical } else { 0 };
         }
+        removal.release.add(release);
     }
 
     /// Fold in a ledger measured separately, as if one ledger had measured
@@ -412,25 +414,36 @@ fn walk_tree(root: &Path, ledger: &mut Ledger, walk: Walk) -> Removal {
             (key, metadata.len(), links)
         })
     };
-    let files = if walk.delete {
+    if walk.delete {
         let removed = remove_tree_reporting(root, identify, |(key, _, _)| key.clone());
         if let Err(error) = removed.result {
             log::warn!("could not remove {}: {error}", root.display());
         }
         removal.deleted_files = removed.entries;
-        removed.files
+        let gone = links_gone(&removed.files, |(key, _, _)| key);
+        for (key, len, links) in removed.files {
+            let freed = gone.get(&key).is_some_and(|paths| *paths >= links);
+            ledger.release_path(key, len, links, Some(freed), &mut removal);
+        }
     } else {
-        list_tree(root, identify).0
-    };
-    for (key, len, links) in files {
-        // Link counts from before the removal: the ledger, which saw every
-        // measured link, tells whether the last one went.
-        ledger.release_path(key, len, links, false, &mut removal);
+        for (key, len, links) in list_tree(root, identify).0 {
+            ledger.release_path(key, len, links, None, &mut removal);
+        }
     }
     if !walk.keys {
         removal.gone = Vec::new();
     }
     removal
+}
+
+/// How many paths to each file a removal deleted. A file left the disk when
+/// they are at least the links it had just before: none survives anywhere.
+fn links_gone<T>(files: &[T], key: impl Fn(&T) -> &FileKey) -> HashMap<FileKey, u64> {
+    let mut gone = HashMap::new();
+    for file in files {
+        *gone.entry(key(file).clone()).or_default() += 1;
+    }
+    gone
 }
 
 /// What [`remove_tree_reporting`] deleted.

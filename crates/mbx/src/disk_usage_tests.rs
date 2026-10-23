@@ -459,11 +459,15 @@ fn a_file_of_unknown_identity_is_never_released_on_disk() {
     );
     assert_eq!(ledger.total(), 10);
 
+    // A removal deleting its one known path still cannot prove its data left.
+    let gone = links_gone(&[FileKey::Path(path.clone())], |key| key);
+    assert!(gone[&FileKey::Path(path.clone())] < UNKNOWN_LINKS);
+
     let mut removal = Removal::default();
-    ledger.release_path(FileKey::Path(path), 10, UNKNOWN_LINKS, true, &mut removal);
+    ledger.release_path(FileKey::Path(path), 10, UNKNOWN_LINKS, None, &mut removal);
 
     assert_eq!(removal.release.logical, 10);
-    assert_eq!(removal.release.physical, 0);
+    assert_eq!(removal.release.physical, 0, "nor can the ledger's estimate");
     assert_eq!(ledger.total(), 0);
 }
 
@@ -486,4 +490,25 @@ fn a_file_held_open_without_sharing_is_identified() {
 
     assert!(matches!(key, FileKey::Object(..)), "{key:?}");
     assert_eq!(links, 1);
+}
+
+/// A real removal judges by the filesystem, not the ledger's estimate, which
+/// takes every measured path for a distinct link: here the one path is
+/// measured twice while the file's other link lives outside the ledger.
+#[cfg(unix)]
+#[test]
+fn a_removal_releases_on_disk_only_files_that_lost_every_link() {
+    let temp = tempfile::tempdir().unwrap();
+    let tree = temp.path().join("tree");
+    write(&tree.join("a"), 4);
+    std::fs::hard_link(tree.join("a"), temp.path().join("store-object")).unwrap();
+    let mut ledger = Ledger::default();
+    let first = measure(&mut ledger, &tree);
+    measure(&mut ledger, &tree);
+    ledger.release(&first);
+
+    let removal = remove_tree_counting(&tree, &mut ledger, true);
+
+    assert_eq!(removal.release.logical, 4);
+    assert_eq!(removal.release.physical, 0, "the store's link keeps it");
 }
