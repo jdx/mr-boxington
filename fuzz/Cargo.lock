@@ -749,7 +749,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "mbx-cache-cc"
-version = "0.20.0"
+version = "0.20.4"
 dependencies = [
  "mbx-cache-core",
  "memchr",
@@ -761,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-core"
-version = "0.20.0"
+version = "0.20.4"
 dependencies = [
  "async-compression",
  "base64",
@@ -790,7 +790,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-protocol"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "blake3",
  "eyre",
@@ -803,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-rustc"
-version = "0.20.0"
+version = "0.20.4"
 dependencies = [
  "mbx-cache-core",
  "serde",
@@ -1260,9 +1260,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json_canonicalizer"
-version = "0.3.2"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe52319a927259afbfa5180c5157cd8167edfd3e8c254f9558c7fef44c5649f2"
+checksum = "87f7bb64f8c7e9f783fdfe883b5fe93a90bee1597c63705baa91842c5f698620"
 dependencies = [
  "ryu-js",
  "serde",
@@ -1450,9 +1450,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.53.2"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e95f91fcc7a621e8b030f6aa23c71fe9838ae2fb4d8118b75602a328f5144044"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",
