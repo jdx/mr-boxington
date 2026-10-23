@@ -3410,3 +3410,59 @@ fn a_build_script_is_recognized_by_its_crate_name() {
     );
     assert!(!is_build_script_crate_name("build_script_"));
 }
+
+fn width_action(width: Option<&str>, cap_lints: &[&str]) -> RustcAction {
+    let mut arguments: Vec<OsString> = vec![
+        "--crate-name=widget".into(),
+        "--edition=2024".into(),
+        "src/lib.rs".into(),
+        "--crate-type=lib".into(),
+        "--emit=dep-info,metadata,link".into(),
+        format!("--sysroot={}", sysroot().display()).into(),
+    ];
+    arguments.extend(width.map(|width| OsString::from(format!("--diagnostic-width={width}"))));
+    arguments.extend(
+        cap_lints
+            .iter()
+            .map(|level| OsString::from(format!("--cap-lints={level}"))),
+    );
+    RustcInvocation::parse(&arguments)
+        .unwrap()
+        .action(context(&[("src/lib.rs", "source")]))
+        .unwrap()
+}
+
+#[test]
+fn diagnostic_width_is_not_keyed_when_lints_are_capped() {
+    let piped = width_action(None, &["allow"]);
+    assert_eq!(piped.digest, width_action(Some("120"), &["allow"]).digest);
+    assert_eq!(piped.digest, width_action(Some("80"), &["allow"]).digest);
+}
+
+#[test]
+fn diagnostic_width_is_keyed_when_lints_are_not_capped() {
+    let piped = width_action(None, &[]);
+    assert_ne!(piped.digest, width_action(Some("120"), &[]).digest);
+    assert_ne!(
+        width_action(Some("80"), &[]).digest,
+        width_action(Some("120"), &[]).digest
+    );
+    // A cap that still reports warnings leaves the width observable.
+    assert_ne!(
+        width_action(None, &["warn"]).digest,
+        width_action(Some("120"), &["warn"]).digest
+    );
+}
+
+#[test]
+fn diagnostic_width_follows_the_last_cap_lints() {
+    // rustc honors the last `--cap-lints`, so a later `warn` re-exposes the width.
+    assert_ne!(
+        width_action(None, &["allow", "warn"]).digest,
+        width_action(Some("120"), &["allow", "warn"]).digest
+    );
+    assert_eq!(
+        width_action(None, &["warn", "allow"]).digest,
+        width_action(Some("120"), &["warn", "allow"]).digest
+    );
+}
