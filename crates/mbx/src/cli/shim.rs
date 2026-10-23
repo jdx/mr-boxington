@@ -220,17 +220,12 @@ pub(super) fn cargo_proxy_passthrough(arguments: &[OsString]) -> bool {
         return true;
     }
     if command == Some("install") {
-        // Registry/git sources need their own root discovery. Path installs
-        // compile the local workspace and must share its wrapper environment.
+        // Registry and Git installs compile in a scratch directory with no
+        // local manifest, and run in a session of their own (see
+        // `remote_install_roots`). Only the metadata query compiles nothing.
         return cargo_arguments
             .iter()
-            .any(|argument| argument.as_os_str() == "--list")
-            || !cargo_arguments.iter().any(|argument| {
-                argument.as_os_str() == "--path"
-                    || argument
-                        .to_str()
-                        .is_some_and(|value| value.starts_with("--path="))
-            });
+            .any(|argument| argument.as_os_str() == "--list");
     }
     command.is_none()
         || matches!(
@@ -624,7 +619,7 @@ mod tests {
             "clean".into()
         ]));
         assert!(!cargo_proxy_passthrough(&["cache".into(), "stats".into()]));
-        assert!(cargo_proxy_passthrough(&[
+        assert!(!cargo_proxy_passthrough(&[
             "install".into(),
             "ripgrep".into()
         ]));
@@ -671,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_shim_wraps_path_installs_but_not_queries_or_remote_sources() {
+    fn cargo_shim_wraps_every_install_but_not_queries() {
         for args in [
             vec!["install", "--path", "."],
             vec!["install", "--path", ".", "--version", "0.1.0"],
@@ -683,17 +678,19 @@ mod tests {
                 "target",
             ],
             vec!["+stable", "--color", "always", "install", "--path", "foo"],
+            vec!["install", "ripgrep"],
+            vec!["install", "helloworld-rs", "--root", "out", "--force"],
+            vec!["install", "--git", "https://example.com/repo"],
+            vec!["install", "--version", "1.0.0", "ripgrep"],
+            vec!["install", "--", "--path", "."],
         ] {
             let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
             assert!(!cargo_proxy_passthrough(&args), "{args:?}");
         }
         for args in [
-            vec!["install", "ripgrep"],
-            vec!["install", "--git", "https://example.com/repo"],
             vec!["install", "--list"],
             vec!["install", "--path", ".", "--help"],
             vec!["install", "--list", "--path", "."],
-            vec!["install", "--", "--path", "."],
         ] {
             let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
             assert!(cargo_proxy_passthrough(&args), "{args:?}");

@@ -417,25 +417,127 @@ pub fn manifest_in_scope(arguments: &[String], working_dir: &Path) -> bool {
 // and arguments after -- must not make an unrelated command look like one.
 fn path_install_dir(arguments: &[String], working_dir: &Path) -> Option<PathBuf> {
     let arguments = cargo_arguments(arguments);
-    let mut remaining = arguments.iter();
-    while let Some(argument) = remaining.next() {
+    let (_, command) = subcommand(arguments)?;
+    (command == "install")
+        .then(|| {
+            flag_value(arguments, "--path")
+                .map(|path| absolute(&directory_option_dir(arguments, working_dir), path))
+        })
+        .flatten()
+}
+
+// The first word that is neither a toolchain nor the value of a global option.
+fn subcommand(arguments: &[String]) -> Option<(usize, &str)> {
+    let mut remaining = arguments.iter().enumerate();
+    while let Some((index, argument)) = remaining.next() {
         match argument.as_str() {
             "--color" | "--config" | "-Z" | "-C" | "--directory" => {
                 remaining.next()?;
             }
             value if !value.starts_with('-') && !value.starts_with('+') => {
-                return (value == "install")
-                    .then(|| {
-                        flag_value(arguments, "--path").map(|path| {
-                            absolute(&directory_option_dir(arguments, working_dir), path)
-                        })
-                    })
-                    .flatten();
+                return Some((index, value));
             }
             _ => {}
         }
     }
     None
+}
+
+/// Whether the arguments install a package from a registry or Git repository.
+///
+/// Such an install has no local manifest: Cargo downloads the source and
+/// builds it in a scratch directory, so the roots a `cargo metadata` probe
+/// reports describe whatever project the caller happens to stand in, if any.
+/// `--list` only reads the install metadata and compiles nothing.
+pub fn is_remote_install(arguments: &[String]) -> bool {
+    let arguments = cargo_arguments(arguments);
+    subcommand(arguments).is_some_and(|(_, command)| command == "install")
+        && flag_value(arguments, "--path").is_none()
+        && !arguments.iter().any(|argument| argument == "--list")
+}
+
+/// The target directory a remote install was explicitly given, by
+/// `--target-dir` or `CARGO_TARGET_DIR`. Without one Cargo builds in a
+/// directory it creates and deletes, which no cache key can name.
+pub fn remote_install_target_dir(
+    arguments: &[String],
+    working_dir: &Path,
+    target_dir_env: Option<&OsStr>,
+) -> Option<PathBuf> {
+    let invocation = directory_option_dir(cargo_arguments(arguments), working_dir);
+    target_dir_argument(cargo_arguments(arguments))
+        .map(|value| absolute(&invocation, value))
+        .or_else(|| {
+            target_dir_env
+                .filter(|value| !value.is_empty())
+                .map(|value| absolute(&invocation, &value.to_string_lossy()))
+        })
+}
+
+/// A directory name for the package a remote install builds, stable across
+/// repeated installs of it, so their prediction manifest is found again. The
+/// install root, features, and other options do not enter it: predictions are
+/// verified before they are trusted, so sharing one only costs a miss.
+pub fn remote_install_name(arguments: &[String]) -> String {
+    const VALUE_FLAGS: [&str; 24] = [
+        "--version",
+        "--git",
+        "--branch",
+        "--tag",
+        "--rev",
+        "--root",
+        "--registry",
+        "--index",
+        "--features",
+        "-F",
+        "--bin",
+        "--example",
+        "--profile",
+        "--target",
+        "--target-dir",
+        "-j",
+        "--jobs",
+        "--config",
+        "-Z",
+        "--color",
+        "--message-format",
+        "--directory",
+        "-C",
+        "--path",
+    ];
+    let arguments = cargo_arguments(arguments);
+    let start = subcommand(arguments).map_or(arguments.len(), |(index, _)| index + 1);
+    let mut packages = Vec::new();
+    let mut remaining = arguments[start..].iter();
+    while let Some(argument) = remaining.next() {
+        if VALUE_FLAGS.contains(&argument.as_str()) {
+            remaining.next();
+        } else if !argument.starts_with('-') {
+            packages.push(argument.as_str());
+        }
+    }
+    let identity = canonical_json(&(
+        &packages,
+        flag_value(arguments, "--git"),
+        flag_value(arguments, "--version"),
+    ))
+    .unwrap_or_default();
+    let label: String = packages
+        .first()
+        .copied()
+        .unwrap_or("git")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect();
+    let hash = CacheDigest::blake3(&identity).hash;
+    format!("{label}-{}", &hash[..12.min(hash.len())])
 }
 
 // Inline includes use cwd, unlike includes inside a config file. Rewrite the
@@ -1206,6 +1308,107 @@ mod tests {
 
         assert_eq!(resolved.target_dir, configured);
         assert!(resolved.target_dir_requested);
+    }
+
+    #[test]
+    fn remote_installs_are_installs_without_a_path_or_listing() {
+        let remote = |words: &[&str]| {
+            is_remote_install(
+                &words
+                    .iter()
+                    .map(|word| word.to_string())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert!(remote(&["install", "ripgrep"]));
+        assert!(remote(&[
+            "+stable",
+            "install",
+            "--git",
+            "https://example.com/r"
+        ]));
+        assert!(remote(&[
+            "--color",
+            "always",
+            "install",
+            "--version",
+            "1.0.0",
+            "x"
+        ]));
+        assert!(!remote(&["install", "--path", "."]));
+        assert!(!remote(&["install", "--path=."]));
+        assert!(!remote(&["install", "--list"]));
+        assert!(!remote(&["build"]));
+        assert!(!remote(&["-C", "install", "build"]));
+        assert!(!remote(&["run", "--", "install", "x"]));
+    }
+
+    #[test]
+    fn remote_install_target_is_the_one_the_caller_named() {
+        let words = |words: &[&str]| {
+            words
+                .iter()
+                .map(|word| word.to_string())
+                .collect::<Vec<_>>()
+        };
+        let cwd = Path::new("/work");
+        assert_eq!(
+            remote_install_target_dir(&words(&["install", "x"]), cwd, None),
+            None
+        );
+        assert_eq!(
+            remote_install_target_dir(&words(&["install", "x", "--target-dir", "out"]), cwd, None),
+            Some(PathBuf::from("/work/out"))
+        );
+        assert_eq!(
+            remote_install_target_dir(&words(&["install", "x"]), cwd, Some(OsStr::new("/env"))),
+            Some(PathBuf::from("/env"))
+        );
+        assert_eq!(
+            remote_install_target_dir(
+                &words(&["install", "x", "--target-dir=flag"]),
+                cwd,
+                Some(OsStr::new("/env"))
+            ),
+            Some(PathBuf::from("/work/flag"))
+        );
+        assert_eq!(
+            remote_install_target_dir(&words(&["install", "x"]), cwd, Some(OsStr::new(""))),
+            None
+        );
+    }
+
+    #[test]
+    fn remote_install_name_ignores_options_that_do_not_change_the_package() {
+        let name = |words: &[&str]| {
+            remote_install_name(
+                &words
+                    .iter()
+                    .map(|word| word.to_string())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let plain = name(&["install", "helloworld-rs"]);
+        assert!(plain.starts_with("helloworld-rs-"));
+        assert_eq!(
+            plain,
+            name(&[
+                "install",
+                "--root",
+                "out",
+                "--force",
+                "helloworld-rs",
+                "--locked"
+            ])
+        );
+        assert_ne!(plain, name(&["install", "helloworld-rs", "--version", "2"]));
+        assert_ne!(plain, name(&["install", "other"]));
+        assert!(name(&["install", "--git", "https://example.com/r"]).starts_with("git-"));
+        assert_ne!(
+            name(&["install", "--git", "https://example.com/a"]),
+            name(&["install", "--git", "https://example.com/b"])
+        );
+        assert!(!name(&["install", "../evil/x"]).contains('/'));
     }
 
     #[test]

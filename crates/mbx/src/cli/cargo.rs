@@ -127,6 +127,25 @@ fn cargo_with_settings_bypass_log_and_roots(
             }
         }
     };
+    // What Cargo will run, not what was typed: with an alias such as
+    // `nt = "nextest run"`, `-j` belongs to nextest rather than to Cargo.
+    let expanded = super::cargo_invocation::expanded_arguments(&cargo, arguments)
+        .unwrap_or_else(|| arguments.to_vec());
+    // Held until the command ends: Cargo builds in it and it is removed after.
+    let install_scratch = remote_install_scratch(
+        &expanded,
+        &mut roots,
+        &working_dir,
+        std::env::var_os(CARGO_TARGET_DIR_ENV).as_deref(),
+    )?;
+    let scratch_arguments;
+    let arguments = match &install_scratch {
+        Some(scratch) => {
+            scratch_arguments = lane_cargo_arguments(arguments, scratch.path());
+            &scratch_arguments[..]
+        }
+        None => arguments,
+    };
     let mut config = config.clone();
     config.apply_workspace_policy(&roots.workspace_root)?;
     let eager_incremental = config.eager_incremental && !config.verify;
@@ -380,10 +399,6 @@ fn cargo_with_settings_bypass_log_and_roots(
         &roots.workspace_root,
         session_dir.path(),
     )?;
-    // What Cargo will run, not what was typed: with an alias such as
-    // `nt = "nextest run"`, `-j` belongs to nextest rather than to Cargo.
-    let expanded = super::cargo_invocation::expanded_arguments(&cargo, arguments)
-        .unwrap_or_else(|| arguments.to_vec());
     let cargo_jobs = cargo_job_limit(&expanded);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -1249,6 +1264,9 @@ pub(super) fn cargo_roots(
     target_dir_env: Option<&std::ffi::OsStr>,
 ) -> Option<Roots> {
     let working_dir = std::env::current_dir().ok()?;
+    if mbx_cache_cargo::is_remote_install(arguments) {
+        return remote_install_roots(arguments, &working_dir, target_dir_env);
+    }
     let resolved = mbx_cache_cargo::resolve_reported(
         cargo,
         arguments,
@@ -1261,6 +1279,62 @@ pub(super) fn cargo_roots(
         build_dir: resolved.build_dir,
         target_dir_requested: resolved.target_dir_requested,
     })
+}
+
+/// Roots for `cargo install` of a registry or Git package.
+///
+/// There is no workspace to find: the source is downloaded and built in a
+/// directory Cargo creates and deletes. The workspace is a stable, empty
+/// directory under the cache named for the package, which keeps its prediction
+/// manifest and checkout record from one install to the next. The target is
+/// the one the caller chose, or a placeholder that [`remote_install_scratch`]
+/// replaces. Either way it counts as requested, so nothing is placed or moved
+/// in the workspace.
+fn remote_install_roots(
+    arguments: &[String],
+    working_dir: &Path,
+    target_dir_env: Option<&std::ffi::OsStr>,
+) -> Option<Roots> {
+    let workspace_root = mbx_cache_cargo::cache_root()?
+        .join("cargo-install")
+        .join(mbx_cache_cargo::remote_install_name(arguments));
+    std::fs::create_dir_all(&workspace_root).ok()?;
+    let target_dir =
+        mbx_cache_cargo::remote_install_target_dir(arguments, working_dir, target_dir_env)
+            .unwrap_or_else(|| workspace_root.join("target"));
+    Some(Roots {
+        workspace_root,
+        target_dir,
+        build_dir: None,
+        target_dir_requested: true,
+    })
+}
+
+/// A directory for a remote install to build in, unless the caller named one.
+///
+/// Cargo would otherwise pick a fresh temporary directory the shim cannot map
+/// out of its cache keys, so every install would key differently. The flag
+/// outranks `CARGO_BUILD_TARGET_DIR` and `build.target-dir`.
+fn remote_install_scratch(
+    expanded: &[String],
+    roots: &mut Roots,
+    working_dir: &Path,
+    target_dir_env: Option<&std::ffi::OsStr>,
+) -> Result<Option<tempfile::TempDir>> {
+    if !mbx_cache_cargo::is_remote_install(expanded)
+        || mbx_cache_cargo::remote_install_target_dir(expanded, working_dir, target_dir_env)
+            .is_some()
+    {
+        return Ok(None);
+    }
+    let scratch = tempfile::Builder::new().prefix("mbx-install-").tempdir_in(
+        roots
+            .workspace_root
+            .parent()
+            .unwrap_or(&roots.workspace_root),
+    )?;
+    roots.target_dir = scratch.path().to_path_buf();
+    Ok(Some(scratch))
 }
 
 #[cfg(test)]
