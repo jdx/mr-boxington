@@ -1321,10 +1321,15 @@ fn remote_install_scratch(
     working_dir: &Path,
     target_dir_env: Option<&std::ffi::OsStr>,
 ) -> Result<Option<tempfile::TempDir>> {
-    if !mbx_cache_cargo::is_remote_install(expanded)
-        || mbx_cache_cargo::remote_install_target_dir(expanded, working_dir, target_dir_env)
-            .is_some()
-    {
+    if !mbx_cache_cargo::is_remote_install(expanded) {
+        return Ok(None);
+    }
+    // An alias such as `i = "install ripgrep"` reached here with the roots of
+    // whatever project the caller stands in, since only the expansion shows it
+    // is an install.
+    *roots = remote_install_roots(expanded, working_dir, target_dir_env)
+        .ok_or_else(|| eyre::eyre!("the mbx cache directory could not be located"))?;
+    if mbx_cache_cargo::remote_install_target_dir(expanded, working_dir, target_dir_env).is_some() {
         return Ok(None);
     }
     let scratch = tempfile::Builder::new().prefix("mbx-install-").tempdir_in(
