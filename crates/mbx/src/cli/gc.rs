@@ -612,13 +612,22 @@ pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool
         ));
     }
     // Files linked from elsewhere, such as the shared store, stay on disk.
-    if outcome.released_bytes != outcome.freed_bytes()
-        && let Some(last) = lines.last_mut()
-    {
-        last.push_str(&format!(
-            ", {} released on disk",
-            ByteSize::b(outcome.released_bytes).display().iec()
-        ));
+    // The figure covers every removal, so it joins a line only when that
+    // line is the whole of what was removed.
+    if outcome.released_bytes != outcome.freed_bytes() {
+        let released = ByteSize::b(outcome.released_bytes).display().iec();
+        match lines.as_mut_slice() {
+            [] => {}
+            [only] => only.push_str(&format!(", {released} released on disk")),
+            _ => {
+                let freed = ByteSize::b(outcome.freed_bytes()).display().iec();
+                lines.push(if dry_run {
+                    format!("{released} of the {freed} logical to remove would be released on disk")
+                } else {
+                    format!("{released} of the {freed} logical removed was released on disk")
+                });
+            }
+        }
     }
     lines.extend(kept_alone);
     lines

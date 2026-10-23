@@ -883,3 +883,29 @@ fn the_released_figure_never_lands_on_the_line_about_kept_directories() {
         ]
     );
 }
+
+#[test]
+fn the_released_figure_sits_beside_the_total_when_several_removals_print() {
+    let outcome = crate::target::CollectionOutcome {
+        removed_views: 1,
+        removed_bytes: 2048,
+        removed_units: 3,
+        removed_unit_bytes: 1024,
+        released_bytes: 1024,
+        remaining_bytes: 4096,
+        kept_active_views: 1,
+        ..Default::default()
+    };
+    assert_eq!(
+        target_removals(&outcome, false),
+        [
+            "removed 1 target directories (2.0 KiB logical, 0 abandoned and 0 live, 1 kept for running commands or builds that started meanwhile); 4.0 KiB logical remain",
+            "removed 3 unused build units from live target directories (1.0 KiB logical)",
+            "1.0 KiB of the 3.0 KiB logical removed was released on disk",
+        ]
+    );
+    assert_eq!(
+        target_removals(&outcome, true)[2],
+        "1.0 KiB of the 3.0 KiB logical to remove would be released on disk"
+    );
+}

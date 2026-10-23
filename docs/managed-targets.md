@@ -609,6 +609,13 @@ text report adds the released figure when it differs from the logical one:
 mbx[gc]: removed 2 target directories (4.0 GiB logical, 1 abandoned and 1 live); 1.0 GiB logical remain, 1.5 GiB released on disk
 ```
 
+When a collection also removes build units from live target directories, the
+figure covers both, so it gets a line of its own beside the total:
+
+```text
+mbx[gc]: 1.5 GiB of the 4.2 GiB logical removed was released on disk
+```
+
 Reflinks and clones share blocks without sharing a file, and no filesystem
 interface reports that, so they count as released in full. On APFS and ReFS,
 where restores clone rather than hard link, the two figures usually agree.
