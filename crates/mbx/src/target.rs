@@ -1392,9 +1392,15 @@ fn collect_with(
     // One ledger for the sweep, so a file several views link is counted once,
     // and is freed only by removing the last of them.
     let mut ledger = Ledger::default();
-    if !dry_run {
-        let removal = remove_abandoned_removals(root, &mut ledger);
-        outcome.credit_views(&removal);
+    // Leftovers of a collector that died are measured with the views, so a
+    // file both reach counts once, and are removed once everything is.
+    let abandoned = if dry_run {
+        Vec::new()
+    } else {
+        abandoned_removals(root)
+    };
+    for leftover in &abandoned {
+        ledger.measure(leftover, &HashSet::new());
     }
     let mut entries = Vec::new();
     let mut total_views = 0_u64;
@@ -1416,6 +1422,17 @@ fn collect_with(
             precedence.standing(&record.workspace_root),
         ));
     }
+    // A file a view still links stays counted there; a deletion that stops
+    // partway leaves what survived in the remaining total.
+    let mut leftovers = Removal::default();
+    for leftover in &abandoned {
+        leftovers.add(crate::disk_usage::remove_tree_counting(
+            leftover,
+            &mut ledger,
+            true,
+        ));
+    }
+    outcome.credit_views(&leftovers);
     let expired = |updated: u64, standing: Standing| {
         standing != Standing::Keep
             && max_age.is_some_and(|age| now.saturating_sub(updated) > age.as_secs())
@@ -1736,30 +1753,24 @@ fn removal_path(directory: &Path) -> PathBuf {
     ))
 }
 
-/// Finish removing views a collector that died left moved aside.
+/// Views a collector that died left moved aside, for this sweep to finish
+/// removing.
 ///
 /// They have no record, so nothing else lists or protects them; a collector
 /// still deleting one holds no lock either, but the removal is idempotent and
 /// two of them racing only means the files go sooner.
-///
-/// Each file is counted into `ledger` just before it goes, so what they held
-/// counts as freed and what survives as remaining.
-fn remove_abandoned_removals(root: &Path, ledger: &mut Ledger) -> Removal {
-    let mut removal = Removal::default();
+fn abandoned_removals(root: &Path) -> Vec<PathBuf> {
     let Ok(listing) = std::fs::read_dir(views_root(root)) else {
-        return removal;
+        return Vec::new();
     };
-    for entry in listing.flatten() {
-        if entry.file_name().to_string_lossy().contains(REMOVAL_SUFFIX)
-            && entry.file_type().is_ok_and(|kind| kind.is_dir())
-        {
-            removal.add(crate::disk_usage::remove_unmeasured_tree(
-                &entry.path(),
-                ledger,
-            ));
-        }
-    }
-    removal
+    listing
+        .flatten()
+        .filter(|entry| {
+            entry.file_name().to_string_lossy().contains(REMOVAL_SUFFIX)
+                && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        })
+        .map(|entry| entry.path())
+        .collect()
 }
 
 /// Every managed target directory under `root`, as record and directory.

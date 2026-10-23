@@ -356,9 +356,6 @@ impl Removal {
 struct Walk {
     /// Whether to delete, or only release as if deleted.
     delete: bool,
-    /// Whether `ledger` measured the tree; otherwise each file is counted
-    /// just before it goes.
-    measured: bool,
     /// Whether to keep the keys released, for [`Measured::forget`].
     keys: bool,
 }
@@ -373,7 +370,6 @@ pub(crate) fn remove_tree_counting(root: &Path, ledger: &mut Ledger, delete: boo
         ledger,
         Walk {
             delete,
-            measured: true,
             keys: false,
         },
     )
@@ -386,30 +382,7 @@ pub(crate) fn remove_tree_counting_with_keys(
     ledger: &mut Ledger,
     delete: bool,
 ) -> Removal {
-    walk_tree(
-        root,
-        ledger,
-        Walk {
-            delete,
-            measured: true,
-            keys: true,
-        },
-    )
-}
-
-/// Delete `root`, which `ledger` never measured, counting each file just
-/// before it goes: the ledger ends where it started, and the credit comes from
-/// the same stat as the deletion.
-pub(crate) fn remove_unmeasured_tree(root: &Path, ledger: &mut Ledger) -> Removal {
-    walk_tree(
-        root,
-        ledger,
-        Walk {
-            delete: true,
-            measured: false,
-            keys: false,
-        },
-    )
+    walk_tree(root, ledger, Walk { delete, keys: true })
 }
 
 fn walk_tree(root: &Path, ledger: &mut Ledger, walk: Walk) -> Removal {
@@ -489,9 +462,6 @@ fn walk_entry(
         Err(error) => return Err(error),
     };
     let (key, links) = file_key(|| path.to_path_buf(), &metadata);
-    if !walk.measured {
-        ledger.count_key(key.clone(), links, metadata.len());
-    }
     if walk.delete {
         match remove_file(path) {
             Ok(()) => {}

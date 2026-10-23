@@ -225,25 +225,6 @@ fn removing_a_missing_tree_does_nothing() {
     assert_eq!(removal, Removal::default());
 }
 
-#[test]
-fn an_unmeasured_tree_is_credited_and_leaves_the_ledger_as_it_was() {
-    let temp = tempfile::tempdir().unwrap();
-    let tree = temp.path().join("tree");
-    write(&tree.join("a"), 3);
-    write(&tree.join("nested/b"), 5);
-    write(&temp.path().join("kept"), 7);
-    let mut ledger = Ledger::default();
-    measure(&mut ledger, &temp.path().join("kept"));
-
-    let removal = remove_unmeasured_tree(&tree, &mut ledger);
-
-    assert!(!tree.exists());
-    assert_eq!(removal.deleted_files, 2);
-    assert_eq!(removal.release.logical, 8);
-    assert_eq!(removal.release.physical, 8);
-    assert_eq!(ledger.total(), 7);
-}
-
 #[cfg(unix)]
 #[test]
 fn removing_a_store_linked_file_frees_it_logically_only() {

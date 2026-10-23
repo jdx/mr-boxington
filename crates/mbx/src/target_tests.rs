@@ -1558,3 +1558,59 @@ fn leftovers_a_dead_collector_moved_aside_are_credited() {
     assert_eq!(outcome.removed_views, 0);
     assert_eq!(outcome.remaining_bytes, 0);
 }
+
+/// Leftovers are measured with the views before they go: a file linked twice
+/// inside them is credited once, and one a view still links is not credited.
+#[cfg(unix)]
+#[test]
+fn leftovers_credit_each_file_once_and_only_what_no_view_links() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let view = view_with(
+        directory.path(),
+        &config,
+        "kept",
+        now_secs(),
+        &[("own", 10)],
+    );
+    let aside = views_root(&config.target.root).join(format!("abc{REMOVAL_SUFFIX}1-xyz"));
+    std::fs::create_dir_all(aside.join("debug")).unwrap();
+    std::fs::write(aside.join("debug/twice"), vec![0_u8; 9]).unwrap();
+    std::fs::hard_link(aside.join("debug/twice"), aside.join("debug/twice-again")).unwrap();
+    std::fs::write(aside.join("debug/shared"), vec![0_u8; 100]).unwrap();
+    std::fs::hard_link(aside.join("debug/shared"), view.join("shared")).unwrap();
+
+    let outcome = collect(&config.target.root, None, None, false).unwrap();
+
+    assert!(!aside.exists());
+    assert_eq!(outcome.removed_bytes, 9);
+    assert_eq!(outcome.released_bytes, 9);
+    assert_eq!(outcome.deleted_files, 3);
+    assert_eq!(outcome.remaining_bytes, 110);
+    assert!(view.join("shared").exists());
+}
+
+/// A leftover whose deletion stops partway keeps what survived counted.
+#[cfg(unix)]
+#[test]
+fn a_leftover_that_survives_in_part_stays_counted() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let aside = views_root(&config.target.root).join(format!("abc{REMOVAL_SUFFIX}1-xyz"));
+    let stuck = aside.join("stuck");
+    std::fs::create_dir_all(&stuck).unwrap();
+    std::fs::write(stuck.join("held"), vec![0_u8; 7]).unwrap();
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o500)).unwrap();
+    if std::fs::write(stuck.join("probe"), b"").is_ok() {
+        eprintln!("skipped: permissions are not enforced for this user");
+        return;
+    }
+
+    let outcome = collect(&config.target.root, None, None, false).unwrap();
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(stuck.join("held").exists());
+    assert_eq!(outcome.removed_bytes, 0);
+    assert_eq!(outcome.remaining_bytes, 7);
+}
