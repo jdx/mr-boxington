@@ -26,10 +26,10 @@ pub(crate) enum FileKey {
     Path(PathBuf),
 }
 
-/// The link count given a file whose identity could not be read. It is never
-/// one, so such a file is never taken for one no other path reaches: it is
-/// counted by its path, and never reported as released.
-#[cfg(not(unix))]
+/// The link count given a file whose identity could not be read. Such a file
+/// is counted by its length, as one no other path reaches, which survives a
+/// rename where a key by its path would not; but it is never one, so the file
+/// is never reported as released.
 const UNKNOWN_LINKS: u64 = u64::MAX;
 
 /// The file at `path` (built only where the key needs it), and how many links
@@ -118,6 +118,8 @@ impl Release {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct Measured {
     pub unshared: u64,
+    /// The part of `unshared` whose files could not be identified.
+    pub unknown: u64,
     pub shared: Vec<FileKey>,
 }
 
@@ -125,6 +127,7 @@ impl Measured {
     /// Drop what `removal` deleted from this measure, which covered it.
     pub(crate) fn forget(&mut self, removal: &Removal) {
         self.unshared = self.unshared.saturating_sub(removal.unshared);
+        self.unknown = self.unknown.saturating_sub(removal.unknown);
         if removal.gone.is_empty() {
             return;
         }
@@ -210,9 +213,15 @@ impl Ledger {
         path: impl FnOnce() -> PathBuf,
         metadata: &std::fs::Metadata,
     ) {
-        match self.count(path, metadata) {
+        let (key, nlink) = file_key(path, metadata);
+        match self.count_key(key, nlink, metadata.len()) {
             Some(key) => measured.shared.push(key),
-            None => measured.unshared = measured.unshared.saturating_add(metadata.len()),
+            None => {
+                measured.unshared = measured.unshared.saturating_add(metadata.len());
+                if nlink == UNKNOWN_LINKS {
+                    measured.unknown = measured.unknown.saturating_add(metadata.len());
+                }
+            }
         }
     }
 
@@ -229,7 +238,7 @@ impl Ledger {
 
     fn count_key(&mut self, key: FileKey, nlink: u64, len: u64) -> Option<FileKey> {
         // A file already kept stays kept, even if its other links went since.
-        if nlink <= 1 && !self.files.contains_key(&key) {
+        if (nlink <= 1 || nlink == UNKNOWN_LINKS) && !self.files.contains_key(&key) {
             self.unshared_bytes = self.unshared_bytes.saturating_add(len);
             return None;
         }
@@ -254,7 +263,7 @@ impl Ledger {
         self.unshared_bytes = self.unshared_bytes.saturating_sub(measured.unshared);
         let mut release = Release {
             logical: measured.unshared,
-            physical: measured.unshared,
+            physical: measured.unshared.saturating_sub(measured.unknown),
         };
         for key in &measured.shared {
             release.add(self.release_one(key));
@@ -306,6 +315,9 @@ impl Ledger {
         } else {
             self.unshared_bytes = self.unshared_bytes.saturating_sub(len);
             removal.unshared = removal.unshared.saturating_add(len);
+            if links == UNKNOWN_LINKS {
+                removal.unknown = removal.unknown.saturating_add(len);
+            }
             Release {
                 logical: len,
                 physical: if links <= 1 { len } else { 0 },
@@ -358,6 +370,8 @@ pub(crate) struct Removal {
     pub deleted_files: u64,
     /// Bytes of single-link files released.
     pub unshared: u64,
+    /// The part of `unshared` whose files could not be identified.
+    pub unknown: u64,
     /// A key per released path to a file with other links, kept only when
     /// asked for.
     pub gone: Vec<FileKey>,
@@ -368,6 +382,7 @@ impl Removal {
         self.release.add(other.release);
         self.deleted_files += other.deleted_files;
         self.unshared = self.unshared.saturating_add(other.unshared);
+        self.unknown = self.unknown.saturating_add(other.unknown);
         self.gone.extend(other.gone);
     }
 }

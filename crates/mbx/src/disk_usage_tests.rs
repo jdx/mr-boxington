@@ -42,6 +42,7 @@ fn an_unshared_file_never_enters_the_map_and_still_releases() {
         measured,
         Measured {
             unshared: 3,
+            unknown: 0,
             shared: Vec::new()
         }
     );
@@ -337,6 +338,7 @@ fn releasing_an_unknown_file_does_nothing() {
     let files = measure(&mut other, temp.path());
     let unknown = Measured {
         unshared: 0,
+        unknown: 0,
         shared: files.shared.clone(),
     };
     let mut ledger = Ledger::default();
@@ -356,6 +358,7 @@ fn path_keys_count_each_length() {
     assert_eq!(ledger.total(), 8);
     let unknown = Measured {
         unshared: 0,
+        unknown: 0,
         shared: vec![FileKey::Path(temp.path().join("never"))],
     };
     assert_eq!(ledger.release(&unknown), Release::default());
@@ -445,29 +448,33 @@ fn a_counted_removal_never_follows_a_directory_link() {
     assert_eq!(ledger.total(), 4);
 }
 
-/// A file whose identity could not be read is counted by its path and is
-/// never taken for the last link to its data.
+/// A file whose identity could not be read is counted by its length, so a
+/// rename before its removal, as unit pruning does, cannot separate it from
+/// what was counted; and it is never taken for the last link to its data.
 #[cfg(not(unix))]
 #[test]
-fn a_file_of_unknown_identity_is_never_released_on_disk() {
-    let path = PathBuf::from("unknown");
+fn a_file_of_unknown_identity_is_counted_by_length_and_never_released() {
     let mut ledger = Ledger::default();
     assert!(
         ledger
-            .count_key(FileKey::Path(path.clone()), UNKNOWN_LINKS, 10)
-            .is_some()
+            .count_key(FileKey::Path(PathBuf::from("before")), UNKNOWN_LINKS, 10)
+            .is_none()
     );
     assert_eq!(ledger.total(), 10);
 
-    // A removal deleting its one known path still cannot prove its data left.
-    let gone = links_gone(&[FileKey::Path(path.clone())], |key| key);
-    assert!(gone[&FileKey::Path(path.clone())] < UNKNOWN_LINKS);
-
+    // Removed under the name it was moved aside to.
+    let renamed = FileKey::Path(PathBuf::from("aside"));
+    let gone = links_gone(std::slice::from_ref(&renamed), |key| key);
+    assert!(
+        gone[&renamed] < UNKNOWN_LINKS,
+        "a removal cannot prove it left"
+    );
     let mut removal = Removal::default();
-    ledger.release_path(FileKey::Path(path), 10, UNKNOWN_LINKS, None, &mut removal);
+    ledger.release_path(renamed, 10, UNKNOWN_LINKS, Some(false), &mut removal);
 
     assert_eq!(removal.release.logical, 10);
-    assert_eq!(removal.release.physical, 0, "nor can the ledger's estimate");
+    assert_eq!(removal.release.physical, 0);
+    assert_eq!(removal.unknown, 10);
     assert_eq!(ledger.total(), 0);
 }
 
@@ -511,4 +518,18 @@ fn a_removal_releases_on_disk_only_files_that_lost_every_link() {
 
     assert_eq!(removal.release.logical, 4);
     assert_eq!(removal.release.physical, 0, "the store's link keeps it");
+}
+
+/// A preview never reports bytes of unknown identity as released either.
+#[test]
+fn a_release_of_unknown_bytes_frees_nothing_on_disk() {
+    let mut ledger = Ledger::default();
+    let measured = Measured {
+        unshared: 10,
+        unknown: 4,
+        shared: Vec::new(),
+    };
+    let release = ledger.release(&measured);
+    assert_eq!(release.logical, 10);
+    assert_eq!(release.physical, 6);
 }
