@@ -6119,6 +6119,34 @@ fn local_pruning_keeps_the_newest_concurrent_prediction() {
 }
 
 #[test]
+fn task_predictions_are_pruned_to_fit_the_serialized_byte_budget() {
+    let prediction = |index: usize| {
+        let invocation = CacheDigest::blake3(&index.to_le_bytes());
+        ActionPrediction {
+            action: CacheDigest::blake3(invocation.hash.as_bytes()),
+            invocation,
+            adapter: "rustc".into(),
+            payload: "x".repeat(4096),
+        }
+    };
+    // Well under the entry limit, but about 20 MiB serialized.
+    let predictions: Vec<_> = (0..5000).map(prediction).collect();
+    let newest = predictions.last().unwrap().invocation.clone();
+    let protected = BTreeSet::from([newest.clone()]);
+
+    let kept = merge_task_action_predictions(predictions, Vec::new(), &protected).unwrap();
+
+    assert!(kept.len() < 5000);
+    assert_eq!(kept.last().unwrap().invocation, newest);
+    let manifest = TaskActionManifest {
+        version: TASK_ACTION_MANIFEST_VERSION,
+        task: "a".repeat(64),
+        predictions: kept,
+    };
+    assert!(canonical_json(&manifest).unwrap().len() <= crate::MAX_REMOTE_JSON_BYTES as usize);
+}
+
+#[test]
 fn task_prediction_merge_keeps_the_last_value_and_position_for_duplicate_updates() {
     let mut first = seeded_predictions(&["first update"]).remove(0);
     let untouched = seeded_predictions(&["untouched baseline"]).remove(0);

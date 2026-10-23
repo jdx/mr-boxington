@@ -56,6 +56,9 @@ const MAX_EXECUTABLE_IDENTITY_SIZE: usize = 64 * 1024;
 const MAX_EXECUTABLE_IDENTITY_BYTES: usize = 256 * 1024;
 const TASK_ACTION_MANIFEST_VERSION: u8 = 1;
 const MAX_TASK_ACTION_PREDICTIONS: usize = 16 * 1024;
+/// Serialized-size budget for a task manifest, kept under the remote reader's
+/// 16 MiB limit so whatever is published can always be read back.
+const MAX_TASK_MANIFEST_BYTES: usize = 15 * 1024 * 1024;
 const TASK_ACTION_LRU_REFRESH_MARGIN: usize = MAX_TASK_ACTION_PREDICTIONS / 16;
 /// Longest shim diagnostic the agent accepts, in bytes.
 const MAX_DIAGNOSTIC_BYTES: usize = 4 * 1024;

@@ -1,5 +1,5 @@
-use super::{MAX_TASK_ACTION_PREDICTIONS, TASK_ACTION_MANIFEST_VERSION};
-use crate::{ActionPrediction, CacheDigest, TaskActionManifest};
+use super::{MAX_TASK_ACTION_PREDICTIONS, MAX_TASK_MANIFEST_BYTES, TASK_ACTION_MANIFEST_VERSION};
+use crate::{ActionPrediction, CacheDigest, TaskActionManifest, canonical_json};
 use eyre::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -59,6 +59,9 @@ pub fn task_manifest_actions(store: &Path, task: &str) -> Result<Vec<CacheDigest
         .collect())
 }
 
+/// Room for the manifest's version, task identity, and braces around its predictions.
+const TASK_MANIFEST_OVERHEAD_BYTES: usize = 256;
+
 pub(super) fn validate_task_manifest(manifest: &TaskActionManifest, task: &str) -> Result<()> {
     if manifest.task == task && manifest.validate() {
         Ok(())
@@ -83,7 +86,8 @@ pub(super) fn update_task_predictions(
 /// replaces any existing prediction for the same invocation and keeps the
 /// update's position in the supplied order. If `updates` repeats an invocation,
 /// its last value and position win. Invocations in `protected` are not retired;
-/// protecting more entries than the manifest limit returns an error.
+/// protecting more entries than the manifest limit, or than fit in
+/// [`MAX_TASK_MANIFEST_BYTES`], returns an error.
 pub fn update_task_predictions_in_order(
     predictions: Vec<ActionPrediction>,
     mut updates: Vec<ActionPrediction>,
@@ -114,6 +118,29 @@ pub fn update_task_predictions_in_order(
         } else {
             kept.push(prediction);
         }
+    }
+    // The count bound alone does not bound the serialized size, because a
+    // payload is adapter-defined. The remote reader refuses anything over its
+    // own byte limit, so retire the oldest unprotected entries until what is
+    // published fits.
+    let sizes = kept
+        .iter()
+        .map(|prediction| Ok(canonical_json(prediction)?.len() + 1))
+        .collect::<Result<Vec<_>>>()?;
+    let mut total: usize = TASK_MANIFEST_OVERHEAD_BYTES + sizes.iter().sum::<usize>();
+    if total > MAX_TASK_MANIFEST_BYTES {
+        let mut retained = Vec::with_capacity(kept.len());
+        for (prediction, size) in kept.into_iter().zip(sizes) {
+            if total > MAX_TASK_MANIFEST_BYTES && !protected.contains(&prediction.invocation) {
+                total -= size;
+            } else {
+                retained.push(prediction);
+            }
+        }
+        if total > MAX_TASK_MANIFEST_BYTES {
+            bail!("this task run contains too many action predictions");
+        }
+        kept = retained;
     }
     Ok(kept)
 }
