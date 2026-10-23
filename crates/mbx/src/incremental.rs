@@ -589,54 +589,33 @@ fn retired_children(parent: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Remove a tree or a single file. A file whose every link went is forgotten
+/// in the ledger whichever owners still reference it: the data is gone. Other
+/// files are released by their owners as before.
+///
+/// The removal is `std::fs::remove_dir_all`, which never follows a link, even
+/// one swapped in for a directory while it runs; symlinks inside are removed
+/// themselves and free nothing measured.
 fn remove_tree(directory: &Path, dry_run: bool, inodes: &mut Inodes) -> bool {
     if dry_run {
         return true;
     }
-    let mut pending = vec![directory.to_path_buf()];
-    while let Some(path) = pending.pop() {
-        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if metadata.is_dir() {
-            pending.extend(nested_entries(&path).into_iter().map(|entry| entry.path()));
-            continue;
-        }
-        // A symlink is removed itself, never followed, and frees nothing
-        // measured; Windows removes one to a directory, or a junction, as a
-        // directory.
-        let symlink = metadata.is_symlink();
-        let identity = (!symlink).then(|| file_identity(&path, &metadata));
-        let removed = std::fs::remove_file(&path).or_else(|error| {
-            if symlink {
-                std::fs::remove_dir(&path)
-            } else {
-                Err(error)
-            }
-        });
-        match removed {
-            // Another link keeps the data; it frees nothing yet.
-            Ok(()) => {
-                if let Some((key, Some(1))) = identity {
-                    inodes.forget(&key);
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                log::warn!(
-                    "could not remove incremental state {}: {error}",
-                    path.display()
-                );
-                return false;
-            }
+    let (gone, result) = crate::disk_usage::remove_tree_reporting(directory, |path, metadata| {
+        metadata.is_file().then(|| file_identity(path, metadata))
+    });
+    // Link counts are from before the removal, so a file linked twice inside
+    // the tree went only when both links did.
+    let mut removed = HashMap::<FileKey, (u64, Option<u64>)>::new();
+    for (key, links) in gone.into_iter().flatten() {
+        removed.entry(key).or_insert((0, links)).0 += 1;
+    }
+    for (key, (paths, links)) in removed {
+        if links.is_some_and(|links| paths >= links) {
+            inodes.forget(&key);
         }
     }
-    if !std::fs::symlink_metadata(directory).is_ok_and(|metadata| metadata.is_dir()) {
-        return true;
-    }
-    match std::fs::remove_dir_all(directory) {
+    match result {
         Ok(()) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
         Err(error) => {
             log::warn!(
                 "could not remove incremental state {}: {error}",
@@ -2546,6 +2525,29 @@ mod tests {
             );
         }
         drop(state);
+    }
+
+    /// rustc's two sessions of a unit share files: removing the unit removes
+    /// every link, so the file's bytes are freed even though each path saw
+    /// two links before the removal began.
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_tree_frees_a_file_whose_links_were_all_inside_it() {
+        let tree = tempfile::tempdir().unwrap();
+        let unit = tree.path().join("unit");
+        std::fs::create_dir_all(unit.join("s-1")).unwrap();
+        std::fs::create_dir_all(unit.join("s-2")).unwrap();
+        std::fs::write(unit.join("s-1/shared.o"), vec![0; 64]).unwrap();
+        std::fs::hard_link(unit.join("s-1/shared.o"), unit.join("s-2/shared.o")).unwrap();
+        std::fs::write(unit.join("s-2/own.o"), vec![0; 8]).unwrap();
+        let mut inodes = Inodes::default();
+        inodes.measure(&unit, &HashSet::new());
+        assert_eq!(inodes.bytes, 72);
+
+        assert!(remove_tree(&unit, false, &mut inodes));
+
+        assert!(!unit.exists());
+        assert_eq!(inodes.bytes, 0);
     }
 
     #[test]
