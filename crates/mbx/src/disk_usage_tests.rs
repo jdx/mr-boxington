@@ -444,3 +444,46 @@ fn a_counted_removal_never_follows_a_directory_link() {
     assert_eq!(removal.release.logical, 3);
     assert_eq!(ledger.total(), 4);
 }
+
+/// A file whose identity could not be read is counted by its path and is
+/// never taken for the last link to its data.
+#[cfg(not(unix))]
+#[test]
+fn a_file_of_unknown_identity_is_never_released_on_disk() {
+    let path = PathBuf::from("unknown");
+    let mut ledger = Ledger::default();
+    assert!(
+        ledger
+            .count_key(FileKey::Path(path.clone()), UNKNOWN_LINKS, 10)
+            .is_some()
+    );
+    assert_eq!(ledger.total(), 10);
+
+    let mut removal = Removal::default();
+    ledger.release_path(FileKey::Path(path), 10, UNKNOWN_LINKS, true, &mut removal);
+
+    assert_eq!(removal.release.logical, 10);
+    assert_eq!(removal.release.physical, 0);
+    assert_eq!(ledger.total(), 0);
+}
+
+/// A file another process holds open without sharing is still identified.
+#[cfg(windows)]
+#[test]
+fn a_file_held_open_without_sharing_is_identified() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("held");
+    write(&path, 4);
+    let _held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&path)
+        .unwrap();
+    let metadata = std::fs::symlink_metadata(&path).unwrap();
+
+    let (key, links) = file_key(|| path.clone(), &metadata);
+
+    assert!(matches!(key, FileKey::Object(..)), "{key:?}");
+    assert_eq!(links, 1);
+}

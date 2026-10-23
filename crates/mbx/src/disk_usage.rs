@@ -26,6 +26,12 @@ pub(crate) enum FileKey {
     Path(PathBuf),
 }
 
+/// The link count given a file whose identity could not be read. It is never
+/// one, so such a file is never taken for one no other path reaches: it is
+/// counted by its path, and never reported as released.
+#[cfg(not(unix))]
+const UNKNOWN_LINKS: u64 = u64::MAX;
+
 /// The file at `path` (built only where the key needs it), and how many links
 /// it has.
 #[cfg(unix)]
@@ -39,12 +45,24 @@ fn file_key(_path: impl FnOnce() -> PathBuf, metadata: &std::fs::Metadata) -> (F
 
 #[cfg(windows)]
 fn file_key(path: impl FnOnce() -> PathBuf, _metadata: &std::fs::Metadata) -> (FileKey, u64) {
+    use std::os::windows::fs::OpenOptionsExt as _;
     use std::os::windows::io::AsRawHandle as _;
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
     };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
     let path = path();
-    if let Ok(file) = std::fs::File::open(&path) {
+    // No access rights, only attributes: a file another process holds open
+    // without sharing can still be identified.
+    let opened = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&path);
+    if let Ok(file) = opened {
         let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
         // The handle stays open and the output points to a correctly sized buffer.
         if unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) } != 0 {
@@ -58,12 +76,12 @@ fn file_key(path: impl FnOnce() -> PathBuf, _metadata: &std::fs::Metadata) -> (F
             );
         }
     }
-    (FileKey::Path(path), 1)
+    (FileKey::Path(path), UNKNOWN_LINKS)
 }
 
 #[cfg(not(any(unix, windows)))]
 fn file_key(path: impl FnOnce() -> PathBuf, _metadata: &std::fs::Metadata) -> (FileKey, u64) {
-    (FileKey::Path(path()), 1)
+    (FileKey::Path(path()), UNKNOWN_LINKS)
 }
 
 /// A file with more than one link, as the ledger holds it.
