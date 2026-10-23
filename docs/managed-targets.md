@@ -294,12 +294,16 @@ mbx settings set target.seed false
 
 ## Collection
 
-mbx records which checkout each managed target belongs to. Collection runs
-after a build, at most once an hour, and needs no configuration. It normally
-runs in the background after the build has returned, so walking every managed
+mbx records which checkout each managed target belongs to. By default, automatic
+collection is due an hour after the last completed sweep and starts after a
+build. It normally runs in the background after the build has returned, so walking every managed
 target never holds up the build that came due. The next build reports what it
 removed. If mbx cannot start the background collector, the build collects in
 the foreground instead.
+
+The automatic collection interval starts when a sweep finishes. If a sandbox
+kills the background collector when its build exits, the next build can retry
+immediately. A collector that panics still waits the full interval before retrying.
 
 Set `gc.interval` to change how often collection runs. To turn automatic
 collection off, including the collection described in

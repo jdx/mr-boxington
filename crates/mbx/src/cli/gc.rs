@@ -661,29 +661,34 @@ pub(super) struct Sweep {
 /// A sweep that fails is logged and forgotten: the build that scheduled it
 /// is already over, and its exit status is the build's answer, not the
 /// collector's. What it freed is returned so the lifetime totals can count it.
+/// The caller holds the collector lock across the due check, body, and stamp.
+/// Only a returning body records completion: a collector killed when a
+/// sandboxed build exits leaves the next build free to retry.
 pub(super) fn sweep_store(config: &Config, retention: &RetentionSettings) -> Sweep {
     if !config.gc.auto {
         return Sweep::default();
     }
-    match store::claim_sweep(&config.store_dir(), sweep_interval(config, retention)) {
-        Ok(false) => Sweep::default(),
-        Ok(true) => {
-            start_sweep_log(&config.store_dir());
-            run_sweep_body(config, retention)
-        }
-        Err(error) => {
-            log::warn!("the store was not swept: {error}");
-            // The stamp only throttles automatic work. The collector lock is
-            // the mutual exclusion, so a failed claim must still run the
-            // complete sweep while the disk is already under pressure.
-            start_sweep_log(&config.store_dir());
-            run_sweep_body(config, retention)
-        }
+    let store = config.store_dir();
+    if !store::sweep_is_due(&store, sweep_interval(config, retention)) {
+        return Sweep::default();
     }
+    start_sweep_log(&store);
+    let sweep = run_sweep_body(config, retention);
+    if let Err(error) = store::record_sweep(&store) {
+        log::warn!("failed to record the completed sweep: {error}");
+    }
+    sweep
 }
 
 /// Run every collection belonging to one automatic sweep.
 fn run_sweep_body(config: &Config, retention: &RetentionSettings) -> Sweep {
+    #[cfg(test)]
+    if std::env::var_os("MBX_TEST_SWEEP_BODY").is_some() {
+        eprintln!("sweep body entered");
+        let mut command = String::new();
+        std::io::stdin().read_line(&mut command).unwrap();
+        assert_ne!(command.trim(), "panic", "test collector panic");
+    }
     let mut sweep = Sweep::default();
     let pruned = prune_targets(config, retention, config.gc.max_bytes);
     sweep.delta.freed_target_bytes = pruned.freed_bytes;
@@ -751,7 +756,7 @@ fn run_sweep_body(config: &Config, retention: &RetentionSettings) -> Sweep {
     sweep
 }
 
-/// Begin the sweep log again for the collector that claimed this sweep.
+/// Begin the sweep log again for the collector holding the sweep lock.
 ///
 /// The parent opened it for appending so a speculative collector could not
 /// erase an earlier one's warnings; the one that swept owns it from here.
@@ -775,7 +780,7 @@ fn start_sweep_log(store: &Path) {
 /// lifetime totals are updated by the collector itself.
 ///
 /// The due check here is unlocked, so two builds finishing together may both
-/// start a collector; the claim inside the collector lets exactly one sweep.
+/// start a collector; the collector lock lets exactly one sweep.
 /// A collector that cannot be started sweeps in this process instead, as
 /// builds always did, so a machine where spawning fails is still collected.
 pub(super) fn schedule_sweep(config: &Config, retention: &RetentionSettings) {
@@ -798,7 +803,7 @@ pub(super) fn schedule_sweep(config: &Config, retention: &RetentionSettings) {
 ///
 /// The probes and spawner are parameters so the decision stays cheap to test;
 /// the shim supplies the real functions and swallows every failure at its
-/// boundary. The collector claims the sweep stamp again after it starts, so
+/// boundary. The collector checks whether a sweep is due under its lock, so
 /// concurrent shims can race here without sweeping in the foreground.
 pub(crate) fn schedule_low_disk_sweep(
     config: &Config,
@@ -856,7 +861,7 @@ pub(crate) fn spawn_collector_from(executable: &Path, config: &Config) -> Result
     let stderr =
         match std::fs::create_dir_all(log_path.parent().expect("the sweep log has a parent")) {
             Ok(()) => {
-                // Appended, not truncated: a collector that loses the claim must
+                // Appended, not truncated: a collector that loses the lock must
                 // not erase what the one that swept had to say. The winner starts
                 // the log afresh.
                 match std::fs::OpenOptions::new()
@@ -924,9 +929,11 @@ fn detach(command: &mut Command) {
 
 /// The sweep a build scheduled: `mbx gc --automatic`.
 ///
-/// Claims the throttle stamp like the in-process sweep always did, counts what
-/// it freed toward the lifetime totals, and leaves the description for the
-/// next build to print. Its own stderr is the sweep log.
+/// Records the throttle stamp after the sweep returns, counts what it freed
+/// toward the lifetime totals, and leaves the description for the next build.
+/// A panic hook also records the stamp before an abort, so crashes wait their
+/// turn while collectors killed by a sandbox exiting can retry on the next
+/// build. Its own stderr is the sweep log.
 pub(super) fn run_automatic(config: &Config, retention: &RetentionSettings) -> Result<()> {
     let store = config.store_dir();
     let mut collector = collector_lock(&store)?;
@@ -934,7 +941,21 @@ pub(super) fn run_automatic(config: &Config, retention: &RetentionSettings) -> R
         log::debug!("another collector is sweeping the store");
         return Ok(());
     }
+    // A collector that panics records the sweep, so a crash waits its turn
+    // instead of repeating on every build. Release builds abort on a panic and
+    // run no drop guard, but they do run the hook. The previous hook still
+    // prints the panic, and comes back afterwards: when the collector cannot
+    // be spawned, this runs inside the build's own process.
+    let previous: std::sync::Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync> =
+        std::panic::take_hook().into();
+    let chained = std::sync::Arc::clone(&previous);
+    let panic_store = store.clone();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = store::record_sweep(&panic_store);
+        chained(info);
+    }));
     let sweep = sweep_store(config, retention);
+    std::panic::set_hook(Box::new(move |info| previous(info)));
     log::debug!(
         "the automatic sweep freed {} target bytes and {} store bytes: {:?}",
         sweep.delta.freed_target_bytes,

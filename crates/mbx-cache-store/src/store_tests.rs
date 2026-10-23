@@ -2543,3 +2543,27 @@ fn import_repairs_missing_captured_streams_and_can_export_again() {
         }
     }
 }
+
+#[test]
+fn recording_a_sweep_refreshes_the_existing_marker_without_truncating_it() {
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path();
+    let stamp = store.join(SWEEP_STAMP);
+    std::fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+    std::fs::write(&stamp, b"preserved marker contents").unwrap();
+    let opened = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&stamp)
+        .unwrap();
+    opened.set_modified(SystemTime::UNIX_EPOCH).unwrap();
+    assert!(sweep_is_due(store, Duration::from_secs(3600)));
+
+    record_sweep(store).unwrap();
+
+    assert!(!sweep_is_due(store, Duration::from_secs(3600)));
+    assert_eq!(std::fs::read(&stamp).unwrap(), b"preserved marker contents");
+    assert_eq!(
+        opened.metadata().unwrap().modified().unwrap(),
+        std::fs::metadata(stamp).unwrap().modified().unwrap()
+    );
+}

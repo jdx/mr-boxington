@@ -1,5 +1,7 @@
 use super::*;
+use crate::store;
 use mbx_cache_core::{CacheDigest, LocalCas};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 #[test]
@@ -406,7 +408,7 @@ fn a_short_disk_reaches_the_store_after_private_collections() {
 }
 
 #[test]
-fn a_claim_error_still_runs_the_full_automatic_sweep() {
+fn a_stamp_error_still_runs_the_full_automatic_sweep() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = super::cargo_tests::managed_target_config(directory.path());
     config.gc.auto = true;
@@ -424,7 +426,7 @@ fn a_claim_error_still_runs_the_full_automatic_sweep() {
 
     assert!(
         sweep.delta.freed_store_bytes > 0,
-        "a failed stamp claim still reaches store collection"
+        "a failed completion stamp still reaches store collection"
     );
     assert!(
         sweep.lines.iter().any(|line| {
@@ -907,5 +909,183 @@ fn the_released_figure_sits_beside_the_total_when_several_removals_print() {
     assert_eq!(
         target_removals(&outcome, true)[2],
         "1.0 KiB of the 3.0 KiB logical to remove would be released on disk"
+    );
+}
+
+// Re-execute only this test in a child. Pipes synchronize at the start of the
+// real sweep body, after the collector lock and due check, without sleeps.
+#[test]
+fn automatic_collector_subprocess() {
+    let Some(root) = std::env::var_os("MBX_TEST_SWEEP_ROOT") else {
+        return;
+    };
+    let mut config = super::cargo_tests::managed_target_config(Path::new(&root));
+    config.gc.auto = true;
+    config.gc.interval = Duration::from_secs(3600);
+    if std::env::var_os("MBX_TEST_SWEEP_ABORT").is_some() {
+        let store = config.store_dir();
+        std::panic::set_hook(Box::new(move |_| {
+            // The collector's hook must stamp before chaining to this one.
+            if !store::sweep_is_due(&store, Duration::from_secs(3600)) {
+                std::fs::write(store.join("panic-hook-chained"), b"stamped").unwrap();
+            }
+            std::process::abort();
+        }));
+    }
+    run_automatic(&config, &RetentionSettings::default()).unwrap();
+}
+
+struct TestCollector(std::process::Child);
+
+impl TestCollector {
+    fn start(root: &Path, abort: bool) -> Self {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "cli::gc_tests::automatic_collector_subprocess",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("MBX_TEST_SWEEP_ROOT", root)
+            .env("MBX_TEST_SWEEP_BODY", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        if abort {
+            command.env("MBX_TEST_SWEEP_ABORT", "1");
+        }
+        Self(command.spawn().unwrap())
+    }
+
+    /// Wait, at most a minute, for the collector to reach its sweep body.
+    ///
+    /// Bounded so that a collector which deadlocks before the body fails the
+    /// test instead of hanging the suite.
+    fn entered(&mut self) {
+        use std::io::BufRead as _;
+        let stderr = self.0.stderr.take().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let _ = std::io::BufReader::new(stderr).read_line(&mut line);
+            let _ = sender.send(line);
+        });
+        let line = receiver
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the collector should reach its sweep body");
+        assert_eq!(line.trim(), "sweep body entered");
+    }
+
+    /// Wait, at most a minute, for the collector to exit.
+    fn wait(&mut self) -> std::process::ExitStatus {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Some(status) = self.0.try_wait().unwrap() {
+                return status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the collector should exit"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn release(&mut self, command: &[u8]) {
+        use std::io::Write as _;
+        self.0.stdin.take().unwrap().write_all(command).unwrap();
+    }
+}
+
+impl Drop for TestCollector {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn stale_sweep_store(root: &Path) -> PathBuf {
+    let config = super::cargo_tests::managed_target_config(root);
+    let store = config.store_dir();
+    store::record_sweep(&store).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(store.join("gc/v1/last-sweep"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap();
+    store
+}
+
+#[test]
+fn a_killed_automatic_collector_leaves_the_sweep_due() {
+    let root = tempfile::tempdir().unwrap();
+    let store = stale_sweep_store(root.path());
+    let mut collector = TestCollector::start(root.path(), false);
+    collector.entered();
+    assert!(store::sweep_is_due(&store, Duration::from_secs(3600)));
+    collector.0.kill().unwrap();
+    assert!(!collector.wait().success());
+    assert!(store::sweep_is_due(&store, Duration::from_secs(3600)));
+    assert_eq!(
+        std::fs::metadata(store.join("gc/v1/last-sweep"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        std::time::SystemTime::UNIX_EPOCH
+    );
+}
+
+#[test]
+fn a_completed_automatic_collector_records_completion() {
+    let root = tempfile::tempdir().unwrap();
+    let store = stale_sweep_store(root.path());
+    let mut collector = TestCollector::start(root.path(), false);
+    collector.entered();
+    assert!(store::sweep_is_due(&store, Duration::from_secs(3600)));
+    collector.release(b"finish\n");
+    assert!(collector.wait().success());
+    assert!(!store::sweep_is_due(&store, Duration::from_secs(3600)));
+}
+
+#[test]
+fn competing_automatic_collectors_leave_the_stamp_to_the_winner() {
+    let root = tempfile::tempdir().unwrap();
+    let store = stale_sweep_store(root.path());
+    let mut first = TestCollector::start(root.path(), false);
+    first.entered();
+    let mut second = TestCollector::start(root.path(), false);
+    assert!(second.wait().success());
+    use std::io::Read as _;
+    let mut output = String::new();
+    second
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut output)
+        .unwrap();
+    assert!(
+        output.is_empty(),
+        "the second collector never enters the body"
+    );
+    assert!(store::sweep_is_due(&store, Duration::from_secs(3600)));
+    first.release(b"finish\n");
+    assert!(first.wait().success());
+    assert!(!store::sweep_is_due(&store, Duration::from_secs(3600)));
+}
+
+#[test]
+fn a_panicking_automatic_collector_records_before_the_previous_hook_aborts() {
+    let root = tempfile::tempdir().unwrap();
+    let store = stale_sweep_store(root.path());
+    let mut collector = TestCollector::start(root.path(), true);
+    collector.entered();
+    collector.release(b"panic\n");
+    assert!(!collector.wait().success());
+    assert!(!store::sweep_is_due(&store, Duration::from_secs(3600)));
+    assert_eq!(
+        std::fs::read(store.join("panic-hook-chained")).unwrap(),
+        b"stamped"
     );
 }

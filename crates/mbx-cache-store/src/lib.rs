@@ -1966,9 +1966,10 @@ fn prune_sessions(store: &Path, dry_run: bool) -> Result<SessionPrune> {
 
 /// Sweep the store if `interval` has passed since the last attempt.
 ///
-/// The stamp is written before the sweep, not after. Two builds finishing
-/// together should cost one sweep between them, and a sweep that dies partway
-/// should wait its turn like any other rather than retry on every build.
+/// This convenience API claims the interval before running GC, so an
+/// interrupted attempt waits a full interval. The CLI uses its collector lock
+/// and [`record_sweep`] after completion instead: collectors killed when a
+/// sandboxed build exits must leave the next build free to retry.
 pub fn sweep_if_due(store: &Path, max_bytes: u64, interval: Duration) -> Result<Option<GcOutcome>> {
     if !claim_sweep(store, interval)? {
         return Ok(None);
@@ -1976,7 +1977,10 @@ pub fn sweep_if_due(store: &Path, max_bytes: u64, interval: Duration) -> Result<
     gc(store, max_bytes).map(Some)
 }
 
-/// Stamp a due sweep before its callers perform coordinated GC.
+/// Claim a due sweep before doing work, including interrupted attempts.
+///
+/// Callers that hold a collector lock and need to retry killed collectors can
+/// instead check [`sweep_is_due`] under that lock and [`record_sweep`] afterwards.
 ///
 /// The sweep lock serializes claims, so updating the existing marker in place
 /// is enough. In particular, it does not need a temporary file and rename:
@@ -1991,22 +1995,33 @@ pub fn claim_sweep(store: &Path, interval: Duration) -> Result<bool> {
     if sweep_stamp_is_fresh(&stamp, interval) {
         return Ok(false);
     }
+    record_sweep(store)?;
+    Ok(true)
+}
+
+/// Record a finished sweep at the current time.
+///
+/// The caller must serialize collectors and re-check [`sweep_is_due`] under
+/// its lock. Update the marker in place, without truncation or a temporary
+/// file, so an existing marker can still be refreshed on a full disk.
+pub fn record_sweep(store: &Path) -> Result<()> {
+    let path = store.join(SWEEP_STAMP);
+    std::fs::create_dir_all(path.parent().expect("the sweep stamp has a parent"))?;
     let stamp = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
-        .open(&stamp)?;
+        .open(path)?;
     stamp.set_modified(SystemTime::now())?;
-    Ok(true)
+    Ok(())
 }
 
-/// Whether [`claim_sweep`] would stamp a sweep now.
+/// Whether the interval since the last recorded sweep has passed.
 ///
 /// A read of the stamp, no lock and no write: this answers a build that only
 /// wants to know whether to start a collector, and may be answered yes to two
-/// builds at once. The claim itself stays inside the collector, which is where
-/// the lock and the stamp are, so of two collectors started together, one
-/// sweeps and the other finds the stamp fresh and exits.
+/// builds at once. A collector must re-check this under its collector lock
+/// and record completion with [`record_sweep`] before releasing the lock.
 pub fn sweep_is_due(store: &Path, interval: Duration) -> bool {
     !sweep_stamp_is_fresh(&store.join(SWEEP_STAMP), interval)
 }
