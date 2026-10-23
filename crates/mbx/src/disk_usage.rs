@@ -395,19 +395,16 @@ fn walk_tree(root: &Path, ledger: &mut Ledger, walk: Walk) -> Removal {
         })
     };
     let files = if walk.delete {
-        let (gone, result) = remove_tree_reporting(root, identify);
-        if let Err(error) = result {
+        let removed = remove_tree_reporting(root, identify, |(key, _, _)| key.clone());
+        if let Err(error) = removed.result {
             log::warn!("could not remove {}: {error}", root.display());
         }
-        removal.deleted_files = gone.len() as u64;
-        gone
+        removal.deleted_files = removed.entries;
+        removed.files
     } else {
-        list_tree(root, identify)
-            .into_iter()
-            .map(|(_, file)| file)
-            .collect()
+        list_tree(root, identify).0
     };
-    for (key, len, links) in files.into_iter().flatten() {
+    for (key, len, links) in files {
         // Link counts from before the removal: the ledger, which saw every
         // measured link, tells whether the last one went.
         ledger.release_path(key, len, links, false, &mut removal);
@@ -418,19 +415,30 @@ fn walk_tree(root: &Path, ledger: &mut Ledger, walk: Walk) -> Removal {
     removal
 }
 
-/// Delete `root` and everything under it, returning `describe`'s account of
-/// each entry that went, other than directories, and how the removal ended.
+/// What [`remove_tree_reporting`] deleted.
+pub(crate) struct TreeRemoval<T> {
+    /// The account of each file that went, as given before the removal.
+    pub files: Vec<T>,
+    /// Entries other than directories that went: files, and links that hold
+    /// no file of their own.
+    pub entries: u64,
+    pub result: std::io::Result<()>,
+}
+
+/// Delete `root` and everything under it, and report what went.
 ///
 /// The deletion is [`std::fs::remove_dir_all`], which never follows a
 /// symbolic link or junction, even one swapped in for a directory while it
 /// runs; a walk that opens each directory by path could be led outside
-/// `root`. `describe` sees every entry beforehand, while it can still be
-/// identified. A removal that stops partway reports only what is gone.
-pub(crate) fn remove_tree_reporting<T>(
+/// `root`. Each file is identified beforehand, while it can still be opened,
+/// and only that account is kept, not its path. A removal that stops partway
+/// lists what survived and reports the rest, matching files by `key`.
+pub(crate) fn remove_tree_reporting<T, K: Eq + std::hash::Hash>(
     root: &Path,
-    describe: impl FnMut(&Path, &std::fs::Metadata) -> T,
-) -> (Vec<T>, std::io::Result<()>) {
-    let listed = list_tree(root, describe);
+    mut identify: impl FnMut(&Path, &std::fs::Metadata) -> Option<T>,
+    key: impl Fn(&T) -> K,
+) -> TreeRemoval<T> {
+    let (mut files, mut entries) = list_tree(root, &mut identify);
     let result = match std::fs::symlink_metadata(root) {
         Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(root),
         Ok(_) => remove_file(root).or_else(|error| {
@@ -447,49 +455,64 @@ pub(crate) fn remove_tree_reporting<T>(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         result => result,
     };
-    let gone = listed
-        .into_iter()
-        .filter(|(path, _)| {
-            result.is_ok()
-                || std::fs::symlink_metadata(path)
-                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-        })
-        .map(|(_, description)| description)
-        .collect();
-    (gone, result)
+    if result.is_err() {
+        let (survivors, surviving_entries) = list_tree(root, &mut identify);
+        let mut surviving = HashMap::<K, usize>::new();
+        for file in &survivors {
+            *surviving.entry(key(file)).or_default() += 1;
+        }
+        files.retain(|file| match surviving.get_mut(&key(file)) {
+            Some(count) if *count > 0 => {
+                *count -= 1;
+                false
+            }
+            _ => true,
+        });
+        entries = entries.saturating_sub(surviving_entries);
+    }
+    TreeRemoval {
+        files,
+        entries,
+        result,
+    }
 }
 
-/// Every entry under `root` other than a directory, with `describe`'s account
-/// of it. Links are listed, never followed; one swapped in during the listing
-/// can only make it count something it should not.
+/// The account `identify` gives of each file under `root`, and how many
+/// entries other than directories there are. Links are counted, never
+/// followed; one swapped in during the listing can only make it count
+/// something it should not.
 fn list_tree<T>(
     root: &Path,
-    mut describe: impl FnMut(&Path, &std::fs::Metadata) -> T,
-) -> Vec<(PathBuf, T)> {
-    let mut listed = Vec::new();
+    mut identify: impl FnMut(&Path, &std::fs::Metadata) -> Option<T>,
+) -> (Vec<T>, u64) {
+    let mut files = Vec::new();
+    let mut entries = 0;
     let Ok(metadata) = std::fs::symlink_metadata(root) else {
-        return listed;
+        return (files, entries);
     };
     if !metadata.is_dir() {
-        listed.push((root.to_path_buf(), describe(root, &metadata)));
-        return listed;
+        files.extend(identify(root, &metadata));
+        return (files, 1);
     }
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
-        for entry in entries(&directory, warn_walk_error) {
+        for entry in entries_of(&directory) {
             let Ok(kind) = entry.file_type() else {
                 continue;
             };
             if kind.is_dir() {
                 pending.push(entry.path());
             } else if let Ok(metadata) = entry.metadata() {
-                let path = entry.path();
-                let description = describe(&path, &metadata);
-                listed.push((path, description));
+                entries += 1;
+                files.extend(identify(&entry.path(), &metadata));
             }
         }
     }
-    listed
+    (files, entries)
+}
+
+fn entries_of(directory: &Path) -> Vec<std::fs::DirEntry> {
+    entries(directory, warn_walk_error)
 }
 
 /// Delete the file at `path`.

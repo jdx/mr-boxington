@@ -600,13 +600,15 @@ fn remove_tree(directory: &Path, dry_run: bool, inodes: &mut Inodes) -> bool {
     if dry_run {
         return true;
     }
-    let (gone, result) = crate::disk_usage::remove_tree_reporting(directory, |path, metadata| {
-        metadata.is_file().then(|| file_identity(path, metadata))
-    });
+    let removal = crate::disk_usage::remove_tree_reporting(
+        directory,
+        |path, metadata| metadata.is_file().then(|| file_identity(path, metadata)),
+        |(key, _)| key.clone(),
+    );
     // Link counts are from before the removal, so a file linked twice inside
     // the tree went only when both links did.
     let mut removed = HashMap::<FileKey, (u64, Option<u64>)>::new();
-    for (key, links) in gone.into_iter().flatten() {
+    for (key, links) in removal.files {
         removed.entry(key).or_insert((0, links)).0 += 1;
     }
     for (key, (paths, links)) in removed {
@@ -614,7 +616,7 @@ fn remove_tree(directory: &Path, dry_run: bool, inodes: &mut Inodes) -> bool {
             inodes.forget(&key);
         }
     }
-    match result {
+    match removal.result {
         Ok(()) => true,
         Err(error) => {
             log::warn!(
