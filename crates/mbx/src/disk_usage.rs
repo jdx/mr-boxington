@@ -387,21 +387,30 @@ pub(crate) fn remove_tree_counting_with_keys(
 
 fn walk_tree(root: &Path, ledger: &mut Ledger, walk: Walk) -> Removal {
     let mut removal = Removal::default();
-    let result = match std::fs::symlink_metadata(root) {
-        Ok(metadata) if metadata.is_dir() => walk_directory(root, ledger, walk, &mut removal),
-        Ok(metadata) => walk_entry(
-            root,
-            metadata.file_type(),
-            || Ok(metadata),
-            ledger,
-            walk,
-            &mut removal,
-        ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
+    // Identified before anything goes, while each file can still be opened.
+    let identify = |path: &Path, metadata: &std::fs::Metadata| {
+        metadata.is_file().then(|| {
+            let (key, links) = file_key(|| path.to_path_buf(), metadata);
+            (key, metadata.len(), links)
+        })
     };
-    if let Err(error) = result {
-        log::warn!("could not remove {}: {error}", root.display());
+    let files = if walk.delete {
+        let (gone, result) = remove_tree_reporting(root, identify);
+        if let Err(error) = result {
+            log::warn!("could not remove {}: {error}", root.display());
+        }
+        removal.deleted_files = gone.len() as u64;
+        gone
+    } else {
+        list_tree(root, identify)
+            .into_iter()
+            .map(|(_, file)| file)
+            .collect()
+    };
+    for (key, len, links) in files.into_iter().flatten() {
+        // Link counts from before the removal: the ledger, which saw every
+        // measured link, tells whether the last one went.
+        ledger.release_path(key, len, links, false, &mut removal);
     }
     if !walk.keys {
         removal.gone = Vec::new();
@@ -409,69 +418,78 @@ fn walk_tree(root: &Path, ledger: &mut Ledger, walk: Walk) -> Removal {
     removal
 }
 
-fn walk_directory(
-    directory: &Path,
-    ledger: &mut Ledger,
-    walk: Walk,
-    removal: &mut Removal,
-) -> std::io::Result<()> {
-    let listing = match std::fs::read_dir(directory) {
-        Ok(listing) => listing,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
+/// Delete `root` and everything under it, returning `describe`'s account of
+/// each entry that went, other than directories, and how the removal ended.
+///
+/// The deletion is [`std::fs::remove_dir_all`], which never follows a
+/// symbolic link or junction, even one swapped in for a directory while it
+/// runs; a walk that opens each directory by path could be led outside
+/// `root`. `describe` sees every entry beforehand, while it can still be
+/// identified. A removal that stops partway reports only what is gone.
+pub(crate) fn remove_tree_reporting<T>(
+    root: &Path,
+    describe: impl FnMut(&Path, &std::fs::Metadata) -> T,
+) -> (Vec<T>, std::io::Result<()>) {
+    let listed = list_tree(root, describe);
+    let result = match std::fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(root),
+        Ok(_) => remove_file(root).or_else(|error| {
+            // A directory symlink or junction on Windows.
+            if std::fs::remove_dir(root).is_ok() {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }),
+        Err(error) => Err(error),
     };
-    for entry in listing {
-        let entry = entry?;
-        let kind = entry.file_type()?;
-        let path = entry.path();
-        if kind.is_dir() {
-            walk_directory(&path, ledger, walk, removal)?;
-        } else {
-            walk_entry(&path, kind, || entry.metadata(), ledger, walk, removal)?;
-        }
-    }
-    if walk.delete {
-        match std::fs::remove_dir(directory) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
+    let result = match result {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    };
+    let gone = listed
+        .into_iter()
+        .filter(|(path, _)| {
+            result.is_ok()
+                || std::fs::symlink_metadata(path)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        })
+        .map(|(_, description)| description)
+        .collect();
+    (gone, result)
 }
 
-fn walk_entry(
-    path: &Path,
-    kind: std::fs::FileType,
-    metadata: impl FnOnce() -> std::io::Result<std::fs::Metadata>,
-    ledger: &mut Ledger,
-    walk: Walk,
-    removal: &mut Removal,
-) -> std::io::Result<()> {
-    if !kind.is_file() {
-        // A symlink, or something else that holds no file of its own.
-        if walk.delete {
-            remove_link(path)?;
-            removal.deleted_files += 1;
-        }
-        return Ok(());
-    }
-    let metadata = match metadata() {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
+/// Every entry under `root` other than a directory, with `describe`'s account
+/// of it. Links are listed, never followed; one swapped in during the listing
+/// can only make it count something it should not.
+fn list_tree<T>(
+    root: &Path,
+    mut describe: impl FnMut(&Path, &std::fs::Metadata) -> T,
+) -> Vec<(PathBuf, T)> {
+    let mut listed = Vec::new();
+    let Ok(metadata) = std::fs::symlink_metadata(root) else {
+        return listed;
     };
-    let (key, links) = file_key(|| path.to_path_buf(), &metadata);
-    if walk.delete {
-        match remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        removal.deleted_files += 1;
+    if !metadata.is_dir() {
+        listed.push((root.to_path_buf(), describe(root, &metadata)));
+        return listed;
     }
-    ledger.release_path(key, metadata.len(), links, walk.delete, removal);
-    Ok(())
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in entries(&directory, warn_walk_error) {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if let Ok(metadata) = entry.metadata() {
+                let path = entry.path();
+                let description = describe(&path, &metadata);
+                listed.push((path, description));
+            }
+        }
+    }
+    listed
 }
 
 /// Delete the file at `path`.
@@ -538,15 +556,6 @@ fn remove_file_ignoring_read_only(path: &Path) -> std::io::Result<()> {
             std::fs::remove_file(path)
         }
         _ => Err(error),
-    }
-}
-
-fn remove_link(path: &Path) -> std::io::Result<()> {
-    match std::fs::remove_file(path) {
-        // A directory symlink or junction on Windows.
-        #[cfg(windows)]
-        Err(_) if std::fs::remove_dir(path).is_ok() => Ok(()),
-        result => result,
     }
 }
 

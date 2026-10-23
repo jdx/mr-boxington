@@ -388,3 +388,31 @@ fn removing_a_read_only_link_leaves_the_other_link_read_only() {
             .readonly()
     );
 }
+
+#[test]
+fn a_counted_removal_never_follows_a_directory_link() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = temp.path().join("outside");
+    write(&outside.join("kept"), 4);
+    let tree = temp.path().join("tree");
+    write(&tree.join("own"), 3);
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&outside, tree.join("link"));
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_dir(&outside, tree.join("link"));
+    if let Err(error) = linked {
+        eprintln!("skipped: cannot create a directory symlink here: {error}");
+        return;
+    }
+    let mut ledger = Ledger::default();
+    measure(&mut ledger, &tree);
+    measure(&mut ledger, &outside);
+
+    let removal = remove_tree_counting(&tree, &mut ledger, true);
+
+    assert!(!tree.exists());
+    assert!(outside.join("kept").exists());
+    assert_eq!(removal.deleted_files, 2, "the file and the link itself");
+    assert_eq!(removal.release.logical, 3);
+    assert_eq!(ledger.total(), 4);
+}
