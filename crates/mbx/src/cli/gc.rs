@@ -560,6 +560,7 @@ pub(super) fn print_gc_store_outcome(outcome: &store::GcOutcome, dry_run: bool) 
 pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool) -> Vec<String> {
     let verb = if dry_run { "would remove" } else { "removed" };
     let mut lines = Vec::new();
+    let mut kept_alone = None;
     let kept = if outcome.kept_active_views > 0 {
         format!(
             ", {} kept for running commands or builds that started meanwhile",
@@ -588,8 +589,9 @@ pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool
         if outcome.kept_active_views > 0 {
             // Said on its own when nothing else went, so a collection that
             // could not free a directory somebody is using does not look like
-            // one that found nothing to do.
-            lines.push(format!(
+            // one that found nothing to do. It comes last: the released figure
+            // below belongs to a removal.
+            kept_alone = Some(format!(
                 "kept {} target directories in use by running commands",
                 outcome.kept_active_views
             ));
@@ -618,6 +620,7 @@ pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool
             ByteSize::b(outcome.released_bytes).display().iec()
         ));
     }
+    lines.extend(kept_alone);
     lines
 }
 

@@ -866,3 +866,20 @@ fn an_incremental_round_progresses_on_any_deletion() {
     };
     assert!(gc::incremental_progressed(&removed_unit));
 }
+
+#[test]
+fn the_released_figure_never_lands_on_the_line_about_kept_directories() {
+    let outcome = crate::target::CollectionOutcome {
+        removed_bytes: 2048,
+        released_bytes: 1024,
+        kept_active_views: 2,
+        ..Default::default()
+    };
+    assert_eq!(
+        target_removals(&outcome, false),
+        [
+            "removed target directories an interrupted collection left (2.0 KiB logical), 1.0 KiB released on disk",
+            "kept 2 target directories in use by running commands",
+        ]
+    );
+}
