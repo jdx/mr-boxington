@@ -1214,15 +1214,23 @@ fn collect_low_disk_incremental(
         }
     };
     let freed = outcome.removed_bytes;
-    let progressed = outcome.removed_units > 0
-        || outcome.removed_directories > 0
-        || outcome.removed_sessions > 0;
+    let progressed = incremental_progressed(&outcome);
     collection.freed_target_bytes = collection.freed_target_bytes.saturating_add(freed);
     collection
         .lines
         .extend(incremental_removal_lines(&outcome, false));
     collection.add_incremental(outcome);
     progressed
+}
+
+/// Whether a low-disk round over learned incremental state deleted anything.
+/// A session removed only in part still trims its unit, and freed bytes are
+/// progress whatever counted them.
+pub(super) fn incremental_progressed(outcome: &crate::incremental::PruneOutcome) -> bool {
+    outcome.removed_bytes > 0
+        || outcome.removed_units > 0
+        || outcome.removed_directories > 0
+        || !outcome.session_units.is_empty()
 }
 
 fn collect_low_disk_generated(

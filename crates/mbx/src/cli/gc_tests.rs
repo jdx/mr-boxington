@@ -845,3 +845,24 @@ fn the_low_disk_target_line_says_what_was_released_on_disk() {
     assert_eq!(report.removed_bytes, 2048);
     assert_eq!(report.released_bytes, 1024);
 }
+
+#[test]
+fn an_incremental_round_progresses_on_any_deletion() {
+    use crate::incremental::PruneOutcome;
+    assert!(!gc::incremental_progressed(&PruneOutcome::default()));
+    let partly_evicted = PruneOutcome {
+        session_units: [PathBuf::from("unit")].into_iter().collect(),
+        ..PruneOutcome::default()
+    };
+    assert!(gc::incremental_progressed(&partly_evicted));
+    let freed = PruneOutcome {
+        removed_bytes: 1,
+        ..PruneOutcome::default()
+    };
+    assert!(gc::incremental_progressed(&freed));
+    let removed_unit = PruneOutcome {
+        removed_units: 1,
+        ..PruneOutcome::default()
+    };
+    assert!(gc::incremental_progressed(&removed_unit));
+}
