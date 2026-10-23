@@ -441,7 +441,12 @@ pub(crate) fn remove_tree_reporting<T, K: Eq + std::hash::Hash>(
     let (mut files, mut entries) = list_tree(root, &mut identify);
     let result = match std::fs::symlink_metadata(root) {
         Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(root),
-        Ok(_) => remove_file(root).or_else(|error| {
+        // On Windows std deletes a read-only file with the disposition that
+        // ignores the attribute, and never clears it: a seeded output's
+        // surviving link in another view must stay read-only, or the
+        // clean-up before a compile would leave it for rustc to overwrite in
+        // place, corrupting every link to it.
+        Ok(_) => std::fs::remove_file(root).or_else(|error| {
             // A directory symlink or junction on Windows.
             if std::fs::remove_dir(root).is_ok() {
                 Ok(())
@@ -513,73 +518,6 @@ fn list_tree<T>(
 
 fn entries_of(directory: &Path) -> Vec<std::fs::DirEntry> {
     entries(directory, warn_walk_error)
-}
-
-/// Delete the file at `path`.
-///
-/// Windows refuses to delete a read-only file, which outputs restored or
-/// seeded from the store are, so there the file is deleted with the
-/// disposition that ignores the attribute, as [`std::fs::remove_dir_all`]
-/// does. Clearing the attribute first is not an option: it belongs to the
-/// file, not to this link, so a seeded output's surviving link in another view
-/// would turn writable, and the clean-up before a compile, which unlinks only
-/// read-only outputs, would then leave it for rustc to overwrite in place,
-/// corrupting every link to it.
-fn remove_file(path: &Path) -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        remove_file_ignoring_read_only(path)
-    }
-    #[cfg(not(windows))]
-    {
-        std::fs::remove_file(path)
-    }
-}
-
-#[cfg(windows)]
-fn remove_file_ignoring_read_only(path: &Path) -> std::io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt as _;
-    use std::os::windows::io::AsRawHandle as _;
-    use windows_sys::Win32::Foundation::{
-        ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED,
-    };
-    use windows_sys::Win32::Storage::FileSystem::{
-        DELETE, FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
-        FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX,
-        FILE_FLAG_OPEN_REPARSE_POINT, FileDispositionInfoEx, SetFileInformationByHandle,
-    };
-    let file = std::fs::OpenOptions::new()
-        .access_mode(DELETE)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)?;
-    let info = FILE_DISPOSITION_INFO_EX {
-        Flags: FILE_DISPOSITION_FLAG_DELETE
-            | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
-            | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
-    };
-    // The handle stays open and the input points to a correctly sized value.
-    let deleted = unsafe {
-        SetFileInformationByHandle(
-            file.as_raw_handle(),
-            FileDispositionInfoEx,
-            std::ptr::from_ref(&info).cast(),
-            std::mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
-        )
-    } != 0;
-    if deleted {
-        return Ok(());
-    }
-    let error = std::io::Error::last_os_error();
-    drop(file);
-    match error.raw_os_error().map(|code| code as u32) {
-        // Windows before 10 1809, or a filesystem without the extended
-        // disposition: delete the ordinary way, and leave a read-only file
-        // in place rather than touch its attribute.
-        Some(ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED | ERROR_INVALID_FUNCTION) => {
-            std::fs::remove_file(path)
-        }
-        _ => Err(error),
-    }
 }
 
 /// The entries of `directory`, telling `warn` about any it cannot read.

@@ -389,6 +389,34 @@ fn removing_a_read_only_link_leaves_the_other_link_read_only() {
     );
 }
 
+/// Unit pruning removes output files one at a time; outputs restored from
+/// the store are read-only on Windows.
+#[cfg(windows)]
+#[test]
+fn removing_a_read_only_file_leaves_its_other_link_read_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("libwidget.rlib");
+    write(&file, 4);
+    let mut permissions = std::fs::metadata(&file).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&file, permissions).unwrap();
+    let survivor = temp.path().join("survivor");
+    std::fs::hard_link(&file, &survivor).unwrap();
+    let mut ledger = Ledger::default();
+    measure(&mut ledger, &file);
+
+    let removal = remove_tree_counting(&file, &mut ledger, true);
+
+    assert!(!file.exists());
+    assert_eq!(removal.deleted_files, 1);
+    assert!(
+        std::fs::metadata(&survivor)
+            .unwrap()
+            .permissions()
+            .readonly()
+    );
+}
+
 #[test]
 fn a_counted_removal_never_follows_a_directory_link() {
     let temp = tempfile::tempdir().unwrap();
