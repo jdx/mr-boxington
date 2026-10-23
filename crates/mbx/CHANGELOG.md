@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.27.0](https://github.com/jdx/mr-boxington/compare/v1.26.0...v1.27.0) - 2026-10-23
+
+### Added
+
+- *(gc)* evict cold incremental sessions from checkouts in use ([#776](https://github.com/jdx/mr-boxington/pull/776))
+
+### Fixed
+
+- *(rustc)* stop superseded object files piling up in target directories on macOS ([#791](https://github.com/jdx/mr-boxington/pull/791))
+- *(cache)* stop incremental seeding from breaking the donor checkout's next link ([#789](https://github.com/jdx/mr-boxington/pull/789))
+- *(cache)* stop cached build-script output from pointing into another worktree's target ([#790](https://github.com/jdx/mr-boxington/pull/790))
+- *(shim)* fail promptly when the selected Cargo re-enters the shim ([#788](https://github.com/jdx/mr-boxington/pull/788))
+- *(build-script)* find the preserved build script on Windows ([#787](https://github.com/jdx/mr-boxington/pull/787))
+- *(cli)* accept cargo rustc --print through mbx ([#780](https://github.com/jdx/mr-boxington/pull/780))
+
 ## [1.26.0](https://github.com/jdx/mr-boxington/compare/v1.25.0...v1.26.0) - 2026-10-20
 
 ### Added
