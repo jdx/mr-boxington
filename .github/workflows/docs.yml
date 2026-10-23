@@ -50,7 +50,7 @@ jobs:
         with:
           workspaces: ". -> target/mbx-bootstrap-build"
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
+      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
         if: github.ref == 'refs/heads/main'
       # The landing page plays the showreel as an MP4 at 120 or 60 fps, and the
