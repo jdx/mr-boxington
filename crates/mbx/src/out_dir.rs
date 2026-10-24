@@ -24,6 +24,7 @@
 //! through a source the scan cannot see keeps today's checkout-specific key,
 //! which is sound.
 
+use crate::retired::{self, RetiredTree};
 use eyre::{Context, Result};
 use mbx_cache_core::CacheDigest;
 use std::path::{Path, PathBuf};
@@ -535,7 +536,23 @@ pub(crate) fn collect(
     max_age: Option<Duration>,
     dry_run: bool,
 ) -> Result<PruneOutcome> {
+    collect_with(root, max_bytes, max_age, dry_run, retired::sweep, || {})
+}
+
+fn collect_with(
+    root: &Path,
+    max_bytes: Option<u64>,
+    max_age: Option<Duration>,
+    dry_run: bool,
+    sweep_retired: impl FnOnce(&Path) -> retired::SweepOutcome,
+    mut on_retired: impl FnMut(),
+) -> Result<PruneOutcome> {
     let mut outcome = PruneOutcome::default();
+    if !dry_run {
+        let swept = sweep_retired(root);
+        outcome.removed_directories += swept.removed as u64;
+        outcome.removed_bytes += swept.bytes;
+    }
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(outcome),
@@ -558,6 +575,16 @@ pub(crate) fn collect(
         };
         let name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
+        if retired::is_retired_name(&entry.file_name()) {
+            let bytes = tree_bytes(&path);
+            if dry_run && (max_bytes.is_some() || max_age.is_some()) {
+                outcome.removed_directories += 1;
+                outcome.removed_bytes = outcome.removed_bytes.saturating_add(bytes);
+            } else {
+                staging_bytes = staging_bytes.saturating_add(bytes);
+            }
+            continue;
+        }
         let is_dir = match entry.file_type() {
             Ok(kind) => kind.is_dir(),
             Err(_) => {
@@ -610,30 +637,45 @@ pub(crate) fn collect(
         if !expired && !over_budget {
             continue;
         }
-        // Under the registrar from the lease check to the removal, so a
-        // compilation cannot take a lease on a tree halfway gone: it waits,
-        // finds the tree missing, and copies it again. A tree whose leases
+        // Keep the registrar through the lease check and rename, so a
+        // compilation finds either a complete tree or a missing name.
+        // Delete the detached tree after releasing it. A tree whose leases
         // cannot be read is treated as leased. A dry run asks the same
         // question, so what it projects is what a sweep would do.
         let _registrar = registrar(root)?;
         if leased(root, name, !dry_run).unwrap_or(true) {
             continue;
         }
-        let mut leftover = 0_u64;
-        if !dry_run {
-            let _ = std::fs::remove_file(marker_path(root, name));
-            match discard_tree(root, name, path) {
-                Ok(left) => leftover = left,
+        let tree = if !dry_run {
+            let tree = match RetiredTree::retire(path) {
+                Ok(tree) => tree,
                 Err(error) => {
                     log::warn!(
-                        "could not remove the generated source tree {}: {error}",
+                        "could not retire the generated source tree {}: {error}",
                         path.display()
                     );
                     continue;
                 }
-            }
+            };
+            let _ = std::fs::remove_file(marker_path(root, name));
             let _ = std::fs::remove_dir_all(leases_dir(root, name));
             let _ = std::fs::remove_file(publish_lock_path(root, name));
+            tree
+        } else {
+            None
+        };
+        drop(_registrar);
+        let mut leftover = 0_u64;
+        if let Some(tree) = tree {
+            on_retired();
+            let path = tree.path().to_path_buf();
+            if let Err(error) = tree.remove() {
+                log::warn!(
+                    "could not remove retired generated sources {}: {error}",
+                    path.display()
+                );
+                leftover = tree_bytes(&path);
+            }
         }
         kept -= 1;
         // Bytes of a discarded tree whose deletion failed are still on disk.
@@ -683,83 +725,8 @@ fn age_of(path: &Path, now: SystemTime) -> Option<Duration> {
     now.duration_since(modified).ok()
 }
 
-/// Take a published tree out of use, all or nothing.
-///
-/// A tree is reused because its directory exists, so deleting it in place can
-/// leave a half-emptied directory under its name when a file cannot be
-/// removed (on Windows, one another process holds open): every later
-/// compilation would take it for complete and fail on the missing files. The
-/// tree is therefore renamed to a staging name first, which either happens
-/// whole or leaves the tree as it was, and only then deleted. A deletion that
-/// fails after the rename is left for the staging sweep.
-///
-/// Returns the bytes the deletion left on disk, zero when it finished.
-fn discard_tree(root: &Path, name: &str, path: &Path) -> std::io::Result<u64> {
-    // macOS will not rename a directory it cannot write.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
-    }
-    // A name no earlier discard used, so a leftover from a failed deletion is
-    // neither replaced nor removed here and stays counted by the sweep.
-    static DISCARDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let sequence = DISCARDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let doomed = root.join(format!(
-        "{STAGING_PREFIX}discard-{name}-{}-{sequence}",
-        std::process::id()
-    ));
-    if let Err(error) = std::fs::rename(path, &doomed) {
-        let _ = make_directory_read_only(path);
-        return Err(error);
-    }
-    let _ = remove_tree(&doomed);
-    Ok(if doomed.exists() {
-        tree_bytes(&doomed)
-    } else {
-        0
-    })
-}
-
-/// Remove a tree that was made read-only. Unlinking needs a writable parent
-/// on Unix, so the directories are opened up first; Windows refuses to delete
-/// a read-only file, so the attribute comes off the files first there.
 fn remove_tree(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        if !path.is_dir() {
-            return std::fs::remove_dir_all(path);
-        }
-        let mut pending = vec![path.to_path_buf()];
-        while let Some(directory) = pending.pop() {
-            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755))?;
-            for entry in std::fs::read_dir(&directory)?.flatten() {
-                if entry.file_type()?.is_dir() {
-                    pending.push(entry.path());
-                }
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let mut pending = vec![path.to_path_buf()];
-        while let Some(directory) = pending.pop() {
-            for entry in std::fs::read_dir(&directory)?.flatten() {
-                let kind = entry.file_type()?;
-                if kind.is_dir() {
-                    pending.push(entry.path());
-                } else {
-                    let mut permissions = entry.metadata()?.permissions();
-                    // Not Unix, so this clears only the read-only attribute.
-                    #[allow(clippy::permissions_set_readonly_false)]
-                    permissions.set_readonly(false);
-                    std::fs::set_permissions(entry.path(), permissions)?;
-                }
-            }
-        }
-    }
-    std::fs::remove_dir_all(path)
+    retired::remove_tree(path)
 }
 
 fn tree_bytes(directory: &Path) -> u64 {
