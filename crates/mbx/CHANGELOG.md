@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.27.1](https://github.com/jdx/mr-boxington/compare/v1.27.0...v1.27.1) - 2026-10-24
+
+### Fixed
+
+- *(cargo)* run registry and Git installs inside mbx sessions ([#804](https://github.com/jdx/mr-boxington/pull/804))
+- *(gc)* count files shared between managed target directories once ([#793](https://github.com/jdx/mr-boxington/pull/793))
+
 ## [1.27.0](https://github.com/jdx/mr-boxington/compare/v1.26.0...v1.27.0) - 2026-10-23
 
 ### Added

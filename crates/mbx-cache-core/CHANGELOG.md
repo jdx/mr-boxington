@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.6](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.20.5...mbx-cache-core-v0.20.6) - 2026-10-24
+
+### Fixed
+
+- *(cache-core)* bound task action manifests by serialized size ([#798](https://github.com/jdx/mr-boxington/pull/798))
+
 ## [0.20.5](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.20.4...mbx-cache-core-v0.20.5) - 2026-10-23
 
 ### Fixed
