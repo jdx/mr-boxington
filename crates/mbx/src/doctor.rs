@@ -188,12 +188,13 @@ async fn check(config: &Config, toolchain: Option<&str>) -> Vec<Check> {
 
 /// Probe the transport every orchestrated build needs in this environment.
 ///
-/// This uses a fresh temporary directory just like a real session. Sandboxes
+/// This creates its directory just like a real session, so it lands where a
+/// build's would. Sandboxes
 /// can permit both creating the directory and opening an AF_UNIX socket while
 /// still rejecting `bind`, so no filesystem-only check can answer this.
 #[cfg(unix)]
 fn session_check() -> Check {
-    let directory = match crate::session::create_session_dir("mbx-session-probe-") {
+    let directory = match crate::session::create_session_dir(crate::session::SESSION_DIR_PREFIX) {
         Ok(directory) => directory,
         Err(error) => {
             return Check::warn(

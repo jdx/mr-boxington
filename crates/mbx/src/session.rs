@@ -68,6 +68,10 @@ use stats::{
     stale_manifest_note,
 };
 
+/// Prefix of a build session directory's name. `mbx doctor` probes with it too, since
+/// its length decides whether the runtime directory has room for the socket.
+pub(crate) const SESSION_DIR_PREFIX: &str = "mbx-session-";
+
 /// Create the private directory that holds a session's socket.
 ///
 /// A Unix-domain socket path must fit in `sun_path` (108 bytes on Linux), and
