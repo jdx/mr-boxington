@@ -23,10 +23,13 @@ consecutive misses with changed sources. The result never enters the shared
 cache; [the build summary](#incremental-counts-in-the-build-summary) counts the
 compilation as `incremental`.
 
-The trigger is a source change. An unchanged crate in a fresh target or a new
-checkout still compiles and publishes normally when it misses the cache. Later
-edits to a known active workspace crate go directly to its private state,
-without a cache lookup.
+The trigger is a source change. A changed value of an environment variable
+the crate reads with `env!` or `option_env!`, such as one its build script sets
+with `cargo:rustc-env`, counts as one too: rustc tracks those reads as finely
+as file reads, so private state stays useful across them. An unchanged crate in
+a fresh target or a new checkout still compiles and publishes normally when it
+misses the cache. Later edits to a known active workspace crate go directly to
+its private state, without a cache lookup.
 
 Dependents of a crate using private incremental state also keep private state,
 because their inputs contain an artifact other checkouts cannot share. They can
