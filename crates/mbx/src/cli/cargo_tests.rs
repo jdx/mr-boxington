@@ -1001,3 +1001,109 @@ fn a_real_rustc_wrapper_is_kept() {
         Some(std::path::PathBuf::from("workspace-wrapper"))
     );
 }
+
+#[test]
+fn resolves_only_a_rustup_toolchain_cargos_sibling_compiler() {
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("toolchains/custom-toolchain/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let cargo = bin.join(format!("cargo{}", std::env::consts::EXE_SUFFIX));
+    let rustc = bin.join(format!("rustc{}", std::env::consts::EXE_SUFFIX));
+    assert_eq!(toolchain_rustc(&cargo), None);
+    std::fs::write(&rustc, "").unwrap();
+    assert_eq!(toolchain_rustc(&cargo), Some(rustc));
+    assert_eq!(toolchain_rustc(&bin.join("wrapper")), None);
+    assert_eq!(toolchain_rustc(Path::new("cargo")), None);
+    assert_eq!(toolchain_rustc(&directory.path().join("bin/cargo")), None);
+}
+
+#[test]
+fn an_explicit_compiler_or_toolchain_wins_over_cargos_own() {
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("toolchains/custom-toolchain/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let cargo = bin.join(format!("cargo{}", std::env::consts::EXE_SUFFIX));
+    let rustc = bin.join(format!("rustc{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&rustc, "").unwrap();
+    let set = |names: &'static [&'static str]| {
+        move |name: &str| {
+            names
+                .contains(&name)
+                .then(|| std::ffi::OsString::from("set"))
+        }
+    };
+    assert_eq!(compiler_for_cargo(&cargo, set(&[])), Some(rustc));
+    assert_eq!(compiler_for_cargo(&cargo, set(&["RUSTC"])), None);
+    assert_eq!(compiler_for_cargo(&cargo, set(&["RUSTUP_TOOLCHAIN"])), None);
+    assert_eq!(
+        compiler_for_cargo(&cargo, set(&["CARGO_BUILD_RUSTC"])),
+        None
+    );
+    assert_eq!(compiler_for_cargo(&bin.join("wrapper"), set(&[])), None);
+}
+
+#[test]
+fn a_compiler_named_in_cargo_configuration_is_left_to_cargo() {
+    let directory = tempfile::tempdir().unwrap();
+    let arguments = |values: &[&str]| {
+        values
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+    };
+    assert!(!build_rustc_configured(
+        directory.path(),
+        &arguments(&["build"])
+    ));
+    assert!(build_rustc_configured(
+        directory.path(),
+        &arguments(&["--config", "build.rustc='rustc'", "build"])
+    ));
+    assert!(!build_rustc_configured(
+        directory.path(),
+        &arguments(&["--config", "build.rustc-wrapper='sccache'", "build"])
+    ));
+    std::fs::write(directory.path().join("jobs.toml"), "[build]\njobs = 2\n").unwrap();
+    assert!(!build_rustc_configured(
+        directory.path(),
+        &arguments(&["--config=jobs.toml", "build"])
+    ));
+    std::fs::write(
+        directory.path().join("compiler.toml"),
+        "[build]\nrustc = \"rustc\"\n",
+    )
+    .unwrap();
+    assert!(build_rustc_configured(
+        directory.path(),
+        &arguments(&["--config=compiler.toml", "build"])
+    ));
+    std::fs::write(
+        directory.path().join("includes.toml"),
+        "include = [\"compiler.toml\"]\n",
+    )
+    .unwrap();
+    assert!(build_rustc_configured(
+        directory.path(),
+        &arguments(&["--config=includes.toml", "build"])
+    ));
+    std::fs::create_dir_all(directory.path().join("project")).unwrap();
+    std::fs::rename(
+        directory.path().join("compiler.toml"),
+        directory.path().join("project/compiler.toml"),
+    )
+    .unwrap();
+    assert!(build_rustc_configured(
+        directory.path(),
+        &arguments(&["-C", "project", "--config", "compiler.toml", "build"])
+    ));
+    std::fs::create_dir_all(directory.path().join(".cargo")).unwrap();
+    std::fs::write(
+        directory.path().join(".cargo/config.toml"),
+        "[build]\nrustc = \"rustc\"\n",
+    )
+    .unwrap();
+    assert!(build_rustc_configured(
+        directory.path(),
+        &arguments(&["build"])
+    ));
+}

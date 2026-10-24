@@ -81,8 +81,14 @@ fn cargo_with_settings_bypass_log_and_roots(
         settings.summary
     };
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    // Running a toolchain Cargo directly skips rustup's compiler selection.
+    // Select Cargo's own compiler before crate working directories can change
+    // it. An explicit RUSTC wins, as it does for rustup, and so does
+    // RUSTUP_TOOLCHAIN: with it set, rustup sends every compiler invocation to
+    // that one toolchain, so nothing can mix.
+    let rustc = selected_compiler(&cargo, arguments);
     if super::launch::needs_plain_launch(arguments) {
-        return super::launch::plain_launch(&cargo, arguments);
+        return super::launch::plain_launch(&cargo, arguments, rustc.as_deref());
     }
     let os_arguments = arguments
         .iter()
@@ -427,6 +433,9 @@ fn cargo_with_settings_bypass_log_and_roots(
                     ("MBX_DISABLE".into(), "1".into()),
                     (session::SOCKET_ENV.into(), String::new()),
                 ]);
+                if let Some(rustc) = &rustc {
+                    environment.insert("RUSTC".into(), rustc.to_string_lossy().into_owned());
+                }
                 if settings.plain_output {
                     environment.insert("CARGO_TERM_PROGRESS_WHEN".into(), "never".into());
                 }
@@ -438,6 +447,9 @@ fn cargo_with_settings_bypass_log_and_roots(
             Err(error) => return Err(error),
         };
         let mut environment = inherited_environment(|name| std::env::var(name).ok(), &working_dir);
+        if let Some(rustc) = &rustc {
+            environment.insert("RUSTC".into(), rustc.to_string_lossy().into_owned());
+        }
         let _lease = super::launch::lease(session_dir.path(), &mut environment)?;
         if let Some(path) = bypass_log {
             let path = if path.is_absolute() {
@@ -1083,6 +1095,92 @@ pub(super) fn manage_existing_target_with(
         return Ok(Some(ExistingTarget::Adopt));
     }
     Ok(ask_to_remove(&roots.target_dir)?.then_some(ExistingTarget::Remove))
+}
+
+/// The compiler mbx gives `cargo`, if it needs to choose one at all.
+///
+/// Cargo already resolves the right compiler when RUSTC or RUSTUP_TOOLCHAIN is
+/// set; otherwise a Cargo inside a rustup toolchain gets that toolchain's own.
+pub(super) fn compiler_for_cargo(
+    cargo: &Path,
+    get_env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    if ["RUSTC", "CARGO_BUILD_RUSTC", "RUSTUP_TOOLCHAIN"]
+        .iter()
+        .any(|name| get_env(name).is_some())
+    {
+        return None;
+    }
+    toolchain_rustc(cargo)
+}
+
+/// [`compiler_for_cargo`] for this invocation, which also leaves the choice to
+/// a `+toolchain` argument and to a compiler Cargo's configuration names
+/// (`build.rustc`): the injected RUSTC would override either.
+fn selected_compiler(cargo: &std::ffi::OsStr, arguments: &[String]) -> Option<PathBuf> {
+    let before_program = || arguments.iter().take_while(|argument| *argument != "--");
+    if before_program().any(|argument| argument.starts_with('+')) {
+        return None;
+    }
+    let rustc = compiler_for_cargo(Path::new(cargo), |name| std::env::var_os(name))?;
+    (!build_rustc_configured(&std::env::current_dir().ok()?, arguments)).then_some(rustc)
+}
+
+/// Whether Cargo's configuration names a compiler: `build.rustc` set by a
+/// `--config` value, in a file a `--config` names, or in a configuration file.
+/// Other settings, `build.rustc-wrapper` included, do not choose a compiler.
+pub(super) fn build_rustc_configured(working_dir: &Path, arguments: &[String]) -> bool {
+    // An `include` can pull in a file that sets it, so count one as setting it.
+    let sets_rustc = |table: &toml::Table| {
+        table.contains_key("include")
+            || table
+                .get("build")
+                .and_then(toml::Value::as_table)
+                .is_some_and(|build| build.contains_key("rustc"))
+    };
+    let mut remaining = arguments.iter().take_while(|argument| *argument != "--");
+    while let Some(argument) = remaining.next() {
+        let value = match argument.strip_prefix("--config=") {
+            Some(value) => value,
+            None if argument == "--config" => match remaining.next() {
+                Some(value) => value,
+                None => return false,
+            },
+            None => continue,
+        };
+        // Cargo reads a value with `=` as TOML and anything else as a file.
+        let table = if value.contains('=') {
+            value.parse::<toml::Table>().ok()
+        } else {
+            // Relative to where Cargo runs, which `-C` moves.
+            std::fs::read_to_string(invocation_dir(working_dir, arguments).join(value))
+                .ok()
+                .and_then(|text| text.parse::<toml::Table>().ok())
+        };
+        if table.as_ref().is_some_and(sets_rustc) {
+            return true;
+        }
+    }
+    match cargo_config2::Config::load_with_cwd(invocation_dir(working_dir, arguments)) {
+        Ok(config) => config.build.rustc.is_some(),
+        // Cargo will not run with configuration it cannot read either.
+        Err(_) => true,
+    }
+}
+
+/// Recognize rustup's toolchain layout without guessing what a Cargo wrapper
+/// or a system installation runs. The rustup proxy on PATH remains untouched.
+pub(super) fn toolchain_rustc(cargo: &Path) -> Option<PathBuf> {
+    let executable = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+    if !cargo.is_absolute() || cargo.file_name()? != executable {
+        return None;
+    }
+    let bin = cargo.parent()?;
+    if bin.file_name()? != "bin" || bin.parent()?.parent()?.file_name()? != "toolchains" {
+        return None;
+    }
+    let rustc = bin.join(if cfg!(windows) { "rustc.exe" } else { "rustc" });
+    rustc.is_file().then_some(rustc)
 }
 
 pub(super) fn run_cargo(
