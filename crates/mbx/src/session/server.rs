@@ -3,9 +3,7 @@ use eyre::Context;
 use eyre::Result;
 use log::debug;
 use mbx_cache_core::CacheAgent;
-use std::path::Path;
-#[cfg(unix)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -103,6 +101,50 @@ pub(crate) fn listener_unavailable(_error: &eyre::Report) -> bool {
     false
 }
 
+/// Bytes a Unix-domain socket path may use, excluding the terminating NUL.
+#[cfg(unix)]
+pub(crate) fn socket_path_limit() -> usize {
+    // SAFETY: `sockaddr_un` is plain data, for which all-zero is valid.
+    let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_path.len() - 1
+}
+
+/// The socket a session listens on inside its directory.
+pub(crate) fn socket_in(session_dir: &Path) -> PathBuf {
+    session_dir.join("cache-agent.sock")
+}
+
+#[cfg(unix)]
+fn socket_path_length(socket: &Path) -> usize {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    socket.as_os_str().as_bytes().len()
+}
+
+/// Whether `socket` fits a Unix-domain socket path.
+#[cfg(unix)]
+pub(crate) fn socket_path_fits(socket: &Path) -> bool {
+    socket_path_length(socket) <= socket_path_limit()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn socket_path_fits(_socket: &Path) -> bool {
+    true
+}
+
+#[cfg(unix)]
+fn check_socket_path_length(socket: &Path) -> Result<()> {
+    let limit = socket_path_limit();
+    let length = socket_path_length(socket);
+    if length > limit {
+        eyre::bail!(
+            "cache session socket path {} is {length} bytes, over the {limit}-byte limit for a Unix-domain socket; set XDG_RUNTIME_DIR or TMPDIR to a shorter directory",
+            socket.display()
+        );
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 pub(super) async fn spawn_server(
     session_dir: &Path,
@@ -112,7 +154,8 @@ pub(super) async fn spawn_server(
 ) -> Result<(String, JoinHandle<Result<()>>)> {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let socket = session_dir.join("cache-agent.sock");
+    let socket = socket_in(session_dir);
+    check_socket_path_length(&socket)?;
     let listener = match tokio::net::UnixListener::bind(&socket) {
         Ok(listener) => listener,
         Err(source) => {
@@ -425,6 +468,19 @@ impl Drop for FifoCleanup {
 mod tests {
     use super::*;
     use mbx_cache_core::{AgentRequest, AgentResponse};
+
+    #[test]
+    fn a_socket_path_over_the_limit_is_refused_with_the_path_and_limit() {
+        let limit = socket_path_limit();
+        let long = PathBuf::from(format!("/{}/cache-agent.sock", "d".repeat(limit)));
+        let message = check_socket_path_length(&long).unwrap_err().to_string();
+        assert!(message.contains(long.to_str().unwrap()), "{message}");
+        assert!(
+            message.contains(&format!("{limit}-byte limit")),
+            "{message}"
+        );
+        assert!(check_socket_path_length(Path::new("/run/user/1000/x/cache-agent.sock")).is_ok());
+    }
 
     #[test]
     fn permission_and_platform_rejections_mean_the_listener_is_unavailable() {

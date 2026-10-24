@@ -2244,3 +2244,73 @@ fn seed_incremental_shim_does_not_read_the_user_override() {
         (name == "MBX_SEED_INCREMENTAL").then(|| OsString::from("0"))
     }));
 }
+
+#[cfg(unix)]
+#[test]
+fn session_directory_prefers_an_existing_absolute_runtime_directory() {
+    let runtime = tempfile::tempdir().unwrap();
+    let fallback = tempfile::tempdir().unwrap();
+    let session =
+        create_session_dir_in("s", Some(runtime.path().as_os_str()), fallback.path()).unwrap();
+    assert_eq!(session.path().parent(), Some(runtime.path()));
+    for unusable in [
+        Some(OsStr::new("")),
+        Some(OsStr::new("relative/run")),
+        Some(OsStr::new("/nonexistent/run/user")),
+        None,
+    ] {
+        let session = create_session_dir_in("s", unusable, fallback.path()).unwrap();
+        assert_eq!(session.path().parent(), Some(fallback.path()));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn session_directory_falls_back_when_the_runtime_directory_refuses_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let runtime = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let fallback = tempfile::tempdir().unwrap();
+    let session = create_session_dir_in("s", Some(runtime.path().as_os_str()), fallback.path());
+    std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(session.unwrap().path().parent(), Some(fallback.path()));
+}
+
+#[cfg(unix)]
+#[test]
+fn session_directory_falls_back_when_the_runtime_directory_is_too_long_for_the_socket() {
+    let base = tempfile::tempdir().unwrap();
+    let runtime = base
+        .path()
+        .join("d".repeat(crate::session::socket_path_limit()));
+    std::fs::create_dir(&runtime).unwrap();
+    let fallback = tempfile::tempdir().unwrap();
+    let session = create_session_dir_in("s", Some(runtime.as_os_str()), fallback.path()).unwrap();
+    assert_eq!(session.path().parent(), Some(fallback.path()));
+    assert_eq!(std::fs::read_dir(&runtime).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_session_under_a_socket_path_over_the_limit_names_the_path_and_limit() {
+    let cache = tempfile::tempdir().unwrap();
+    let private = tempfile::tempdir().unwrap();
+    let mut config = test_config(cache.path());
+    config.shims_dir = private.path().join("shims");
+    let limit = crate::session::socket_path_limit();
+    let base = tempfile::tempdir().unwrap();
+    let session_dir = base.path().join("d".repeat(limit));
+    std::fs::create_dir(&session_dir).unwrap();
+    let message = match CacheSession::start(&session_dir, &config).await {
+        Ok(_) => panic!("a session started with an unbindable socket path"),
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(
+        message.contains(&format!("{limit}-byte limit")),
+        "{message}"
+    );
+    assert!(message.contains(session_dir.to_str().unwrap()), "{message}");
+}

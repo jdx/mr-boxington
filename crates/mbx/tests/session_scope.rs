@@ -827,3 +827,34 @@ rustc-wrapper = ""
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// `$TMPDIR` longer than a Unix-domain socket path may be must not stop a
+/// build: the session directory lives under `$XDG_RUNTIME_DIR` instead.
+#[cfg(unix)]
+#[test]
+fn a_long_tmpdir_does_not_stop_the_cache_session() {
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let project_path = root_path.join("project");
+    project(&project_path, "fn main() {}\n");
+    let mut long_tmp = root_path.join("tmp");
+    while long_tmp.as_os_str().len() < 130 {
+        long_tmp.push("long-temporary-directory-name");
+    }
+    std::fs::create_dir_all(&long_tmp).unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+
+    let output = mbx(&project_path)
+        .arg("build")
+        .env("TMPDIR", &long_tmp)
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("SUN_LEN"), "{stderr}");
+}
