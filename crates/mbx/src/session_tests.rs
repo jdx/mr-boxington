@@ -2280,6 +2280,20 @@ fn session_directory_falls_back_when_the_runtime_directory_refuses_it() {
 }
 
 #[cfg(unix)]
+#[test]
+fn session_directory_falls_back_when_the_runtime_directory_is_too_long_for_the_socket() {
+    let base = tempfile::tempdir().unwrap();
+    let runtime = base
+        .path()
+        .join("d".repeat(crate::session::socket_path_limit()));
+    std::fs::create_dir(&runtime).unwrap();
+    let fallback = tempfile::tempdir().unwrap();
+    let session = create_session_dir_in("s", Some(runtime.as_os_str()), fallback.path()).unwrap();
+    assert_eq!(session.path().parent(), Some(fallback.path()));
+    assert_eq!(std::fs::read_dir(&runtime).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn a_session_under_a_socket_path_over_the_limit_names_the_path_and_limit() {
     let cache = tempfile::tempdir().unwrap();

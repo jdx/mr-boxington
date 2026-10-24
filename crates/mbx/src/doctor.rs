@@ -204,7 +204,7 @@ fn session_check() -> Check {
             );
         }
     };
-    let socket = directory.path().join("cache-agent.sock");
+    let socket = crate::session::socket_in(directory.path());
     let socket_probe = std::os::unix::net::UnixListener::bind(&socket).map(drop);
     session_check_from(socket_probe, || {
         crate::session::create_fifo(&directory.path().join("cache-agent.fifo"))

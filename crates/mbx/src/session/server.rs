@@ -3,9 +3,7 @@ use eyre::Context;
 use eyre::Result;
 use log::debug;
 use mbx_cache_core::CacheAgent;
-use std::path::Path;
-#[cfg(unix)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -111,12 +109,33 @@ pub(crate) fn socket_path_limit() -> usize {
     address.sun_path.len() - 1
 }
 
+/// The socket a session listens on inside its directory.
+pub(crate) fn socket_in(session_dir: &Path) -> PathBuf {
+    session_dir.join("cache-agent.sock")
+}
+
 #[cfg(unix)]
-fn check_socket_path_length(socket: &Path) -> Result<()> {
+fn socket_path_length(socket: &Path) -> usize {
     use std::os::unix::ffi::OsStrExt as _;
 
+    socket.as_os_str().as_bytes().len()
+}
+
+/// Whether `socket` fits a Unix-domain socket path.
+#[cfg(unix)]
+pub(crate) fn socket_path_fits(socket: &Path) -> bool {
+    socket_path_length(socket) <= socket_path_limit()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn socket_path_fits(_socket: &Path) -> bool {
+    true
+}
+
+#[cfg(unix)]
+fn check_socket_path_length(socket: &Path) -> Result<()> {
     let limit = socket_path_limit();
-    let length = socket.as_os_str().as_bytes().len();
+    let length = socket_path_length(socket);
     if length > limit {
         eyre::bail!(
             "cache session socket path {} is {length} bytes, over the {limit}-byte limit for a Unix-domain socket; set XDG_RUNTIME_DIR or TMPDIR to a shorter directory",
@@ -135,7 +154,7 @@ pub(super) async fn spawn_server(
 ) -> Result<(String, JoinHandle<Result<()>>)> {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let socket = session_dir.join("cache-agent.sock");
+    let socket = socket_in(session_dir);
     check_socket_path_length(&socket)?;
     let listener = match tokio::net::UnixListener::bind(&socket) {
         Ok(listener) => listener,

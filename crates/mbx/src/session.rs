@@ -44,9 +44,10 @@ pub(crate) use diagnostics::{
 #[cfg(unix)]
 pub(crate) use server::create_fifo;
 pub(crate) use server::listener_unavailable;
+pub(crate) use server::socket_in;
 #[cfg(all(test, unix))]
 pub(crate) use server::socket_path_limit;
-use server::spawn_server;
+use server::{socket_path_fits, spawn_server};
 pub(crate) use shims::CC_CRATE_ENV;
 #[cfg(all(test, windows))]
 use shims::link_path_shim;
@@ -83,9 +84,10 @@ pub(crate) fn create_session_dir(prefix: &str) -> std::io::Result<tempfile::Temp
 }
 
 /// Create the session directory under the runtime directory, or under
-/// `fallback` when the runtime directory is unusable or refuses the directory.
-/// A runtime directory inherited across `sudo` or `su` belongs to another user,
-/// so this process cannot create in it even though it exists.
+/// `fallback` when the runtime directory is unusable, refuses the directory, or
+/// is too long for the session socket. A runtime directory inherited across
+/// `sudo` or `su` belongs to another user, so this process cannot create in it
+/// even though it exists.
 fn create_session_dir_in(
     prefix: &str,
     runtime_dir: Option<&OsStr>,
@@ -95,7 +97,12 @@ fn create_session_dir_in(
     builder.prefix(prefix);
     if let Some(runtime_dir) = runtime_session_base(runtime_dir) {
         match builder.tempdir_in(runtime_dir) {
-            Ok(dir) => return Ok(dir),
+            Ok(dir) if socket_path_fits(&socket_in(dir.path())) => return Ok(dir),
+            Ok(dir) => debug!(
+                "the session socket in {} is too long; using {}",
+                dir.path().display(),
+                fallback.display()
+            ),
             Err(error) => debug!(
                 "cannot create the session directory in {}: {error}; using {}",
                 runtime_dir.display(),
