@@ -310,14 +310,13 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn an_engine_that_cannot_start_leaves_the_build_to_cargo() {
         let root = tempfile::tempdir().unwrap();
-        // Executable, but no program the kernel can load.
+        // Gone between the lookup and the start: every platform refuses to
+        // start it, where what an unloadable file does differs (macOS starts
+        // a file of zeros and reports the failure as its exit).
         let engine = root.path().join(ENGINE);
-        std::fs::write(&engine, [0u8; 16]).unwrap();
-        executable(&engine);
         assert!(
             run(
                 &engine,
