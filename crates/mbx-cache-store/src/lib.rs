@@ -1618,7 +1618,7 @@ pub fn verify(store: &Path) -> Result<VerifyOutcome> {
         };
         outcome.checked_action_results += 1;
         if !matches!(action_cache.find(&digest), Ok(Some(_)))
-            || action_result_is_dangling(&cas, &entry.path, &virtually_removed)?
+            || action_result_is_dangling(&cas, &entry.path, &virtually_removed, true)?
         {
             outcome.problems.push(entry.path);
         }
@@ -1776,9 +1776,14 @@ fn gc_with_mode(store: &Path, max_bytes: u64, dry_run: bool) -> Result<GcOutcome
     // it rather than leave the index pointing at nothing. This runs whether or
     // not this call evicted anything, since another process may have, and a
     // store that is over budget on results alone still needs the sweep.
+    //
+    // Walking each result's output tree costs a read per tree blob and a stat
+    // per file, so it is done only when this sweep evicted something. That is
+    // the moment a tree can have lost a file while its own object survived.
+    let walk_trees = outcome.removed_objects > 0 || !virtually_removed.is_empty();
     let cas = LocalCas::new(store);
     for entry in &results {
-        if action_result_is_dangling(&cas, &entry.path, &virtually_removed)? {
+        if action_result_is_dangling(&cas, &entry.path, &virtually_removed, walk_trees)? {
             match if dry_run {
                 Removal::Removed
             } else {
@@ -2409,12 +2414,17 @@ fn evict_objects(
 /// keeps its result and turns into a miss on restore, and both CAS write paths
 /// republish over a corrupt blob rather than trusting it.
 ///
-/// Only the top-level objects are checked; a result whose output tree lost a
-/// nested object still restores as a miss, which is safe.
+/// With `walk_tree`, every directory and file the output tree lists is checked
+/// too. Eviction removes individual objects, so it can take a file out of a tree
+/// whose own object survives; the result would then stay listed and fail its
+/// next restore with a missing blob until a rebuild replaced it. Without it
+/// only the top-level objects are checked, which keeps a sweep that evicted
+/// nothing to a directory walk and one read per result.
 fn action_result_is_dangling(
     cas: &LocalCas,
     path: &Path,
     virtually_removed: &HashSet<PathBuf>,
+    walk_tree: bool,
 ) -> Result<bool> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -2427,6 +2437,11 @@ fn action_result_is_dangling(
     let Ok(result) = serde_json::from_slice::<RemoteActionResult>(&bytes) else {
         return Ok(false);
     };
+    let missing = |digest: &CacheDigest| match cas.path_for(digest) {
+        Ok(path) => virtually_removed.contains(&path) || !path.exists(),
+        // A digest the CAS cannot even address is not one it can hold.
+        Err(_) => true,
+    };
     for digest in [
         Some(&result.action),
         result.metadata.as_ref(),
@@ -2435,14 +2450,30 @@ fn action_result_is_dangling(
     .into_iter()
     .flatten()
     {
-        match cas.path_for(digest) {
-            Ok(path) => {
-                if virtually_removed.contains(&path) || !path.exists() {
+        if missing(digest) {
+            return Ok(true);
+        }
+    }
+    if walk_tree && let Some(output_root) = &result.output_root {
+        let mut visited = BTreeSet::new();
+        let mut pending = vec![output_root.clone()];
+        while let Some(digest) = pending.pop() {
+            if !visited.insert(digest.clone()) {
+                continue;
+            }
+            // Present but unreadable is left to the restore, as for any blob.
+            let Some(directory) = read_directory(cas, &digest) else {
+                continue;
+            };
+            if directory.files.iter().any(|file| missing(&file.digest)) {
+                return Ok(true);
+            }
+            for child in &directory.directories {
+                if missing(&child.digest) {
                     return Ok(true);
                 }
+                pending.push(child.digest.clone());
             }
-            // A digest the CAS cannot even address is not one it can hold.
-            Err(_) => return Ok(true),
         }
     }
     Ok(false)
