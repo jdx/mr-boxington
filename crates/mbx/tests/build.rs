@@ -3489,7 +3489,10 @@ fn build_script_restores_a_wide_nested_out_dir() {
         std::fs::write(project.join("src/lib.rs"), "").unwrap();
         generate_lockfile(project);
     }
-    let settings = [("MBX_BUILD_SCRIPT_EXECUTION", "1"), ("MBX_CACHE_LINKS", "0")];
+    let settings = [
+        ("MBX_BUILD_SCRIPT_EXECUTION", "1"),
+        ("MBX_CACHE_LINKS", "0"),
+    ];
     build_with(
         first.path(),
         store.path(),

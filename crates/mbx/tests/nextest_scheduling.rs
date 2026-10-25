@@ -769,7 +769,9 @@ pub fn observe(name: &str, heavy: bool) {
             let max_peak = read_history_u64(&bytes[16..24]);
             let max_cores = read_history_u64(&bytes[24..32]);
             let records: Vec<_> = bytes[32..]
-                .chunks_exact(24)
+                .as_chunks::<24>()
+                .0
+                .iter()
                 .map(|record| HistoryRecord {
                     hash: read_history_u64(&record[..8]),
                     peak: read_history_u64(&record[8..16]),

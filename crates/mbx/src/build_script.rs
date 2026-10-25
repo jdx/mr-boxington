@@ -1724,15 +1724,20 @@ fn restore_directory(root: &CacheDigest, destination: &Path) -> Result<(u64, u64
     let sources = if files.is_empty() {
         Vec::new()
     } else {
-        find_blobs(&files.iter().map(|(node, _)| node.digest.clone()).collect::<Vec<_>>())?
+        find_blobs(
+            &files
+                .iter()
+                .map(|(node, _)| node.digest.clone())
+                .collect::<Vec<_>>(),
+        )?
     };
     copy_restored_files(&files, &sources)?;
     for (target, link) in symlinks {
         restore_symlink(&target, &link)?;
     }
-    let bytes = files
-        .iter()
-        .fold(0_u64, |bytes, (node, _)| bytes.saturating_add(node.digest.size));
+    let bytes = files.iter().fold(0_u64, |bytes, (node, _)| {
+        bytes.saturating_add(node.digest.size)
+    });
     Ok((files.len() as u64, bytes))
 }
 
@@ -1756,12 +1761,12 @@ fn copy_restored_files(files: &[(CacheFileNode, PathBuf)], sources: &[PathBuf]) 
         return copy();
     }
     std::thread::scope(|scope| {
-        let handles = (0..workers)
-            .map(|_| scope.spawn(copy))
-            .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .try_for_each(|handle| handle.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
+        let handles = (0..workers).map(|_| scope.spawn(copy)).collect::<Vec<_>>();
+        handles.into_iter().try_for_each(|handle| {
+            handle
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        })
     })
 }
 

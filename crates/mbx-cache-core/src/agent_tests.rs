@@ -481,7 +481,11 @@ async fn a_wide_blob_lookup_answers_in_request_order() {
         other => panic!("unexpected response {other:?}"),
     }
     let remembered = agent.verified_blobs.lock().unwrap();
-    assert!(stored.iter().all(|(digest, _)| remembered.contains_key(digest)));
+    assert!(
+        stored
+            .iter()
+            .all(|(digest, _)| remembered.contains_key(digest))
+    );
     assert!(!remembered.contains_key(&absent));
 }
 

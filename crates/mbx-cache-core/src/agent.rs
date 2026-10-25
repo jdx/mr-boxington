@@ -2288,7 +2288,10 @@ impl CacheAgent {
     /// Verify a blob this session has not read yet off the async workers, so
     /// a slow read holds up neither other connections nor the rest of its own
     /// request.
-    async fn verify_cold_blob(&self, digest: CacheDigest) -> Result<(CacheDigest, Option<PathBuf>)> {
+    async fn verify_cold_blob(
+        &self,
+        digest: CacheDigest,
+    ) -> Result<(CacheDigest, Option<PathBuf>)> {
         let _permit = self.blob_verification_permits.acquire().await?;
         let cas = self.cas.clone();
         let lookup = digest.clone();
