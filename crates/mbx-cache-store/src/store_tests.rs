@@ -2544,6 +2544,256 @@ fn import_repairs_missing_captured_streams_and_can_export_again() {
     }
 }
 
+mod action_record_locking {
+    use super::*;
+    use std::io::{self, BufRead, Write};
+    use std::process::{Child, Command, Stdio};
+    use std::sync::mpsc::{self, Receiver};
+    struct Holder {
+        child: Child,
+        events: Receiver<String>,
+    }
+
+    impl Holder {
+        fn start(path: &Path, replacement: &Path) -> Self {
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "tests::action_record_locking::record_lock_helper",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env("MBX_ACTION_SLOT_TEST_PATH", path)
+                .env("MBX_ACTION_SLOT_TEST_REPLACEMENT", replacement)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let stderr = child.stderr.take().unwrap();
+            let (tx, events) = mpsc::channel();
+            std::thread::spawn(move || {
+                for line in io::BufReader::new(stderr).lines() {
+                    if tx.send(line.unwrap()).is_err() {
+                        break;
+                    }
+                }
+            });
+            let holder = Self { child, events };
+            holder.expect("locked");
+            holder
+        }
+
+        fn expect(&self, event: &str) {
+            assert_eq!(
+                self.events.recv_timeout(Duration::from_secs(20)).unwrap(),
+                event
+            );
+        }
+
+        fn command(&mut self, command: &str) {
+            writeln!(self.child.stdin.as_mut().unwrap(), "{command}").unwrap();
+        }
+    }
+
+    impl Drop for Holder {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    #[test]
+    fn record_lock_helper() {
+        let Some(path) = std::env::var_os("MBX_ACTION_SLOT_TEST_PATH") else {
+            return;
+        };
+        let mut slot = Some(ActionSlot::claim(&path).unwrap());
+        eprintln!("locked");
+        for command in io::stdin().lock().lines() {
+            match command.unwrap().as_str() {
+                "replace" => {
+                    let replacement = std::env::var_os("MBX_ACTION_SLOT_TEST_REPLACEMENT").unwrap();
+                    let mut temporary =
+                        tempfile::NamedTempFile::new_in(Path::new(&path).parent().unwrap())
+                            .unwrap();
+                    temporary
+                        .write_all(&std::fs::read(replacement).unwrap())
+                        .unwrap();
+                    slot.take().unwrap().replace(temporary).unwrap();
+                    slot = Some(ActionSlot::claim(&path).unwrap());
+                    eprintln!("replaced");
+                }
+                "release" => {
+                    drop(slot.take());
+                    eprintln!("released");
+                    return;
+                }
+                other => panic!("unexpected command: {other}"),
+            }
+        }
+    }
+
+    // Windows mandatory locks prevent the initial read under this artificial
+    // holder; production GC never claims an intact record.
+    #[cfg(unix)]
+    #[test]
+    fn gc_does_not_claim_an_intact_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path();
+        let action = store_object(store, b"action");
+        let result = RemoteActionResult {
+            version: 1,
+            action,
+            metadata: None,
+            output_root: None,
+        };
+        let path = LocalActionCache::new(store).store(&result).unwrap();
+        let mut holder = Holder::start(&path, &path);
+        ACTION_RECORD_CLAIMS.with(|count| count.set(0));
+        let swept = gc(store, u64::MAX).unwrap();
+        assert_eq!(swept.removed_action_results, 0);
+        // No claim means this record did not take the Blocked branch either.
+        ACTION_RECORD_CLAIMS.with(|count| assert_eq!(count.get(), 0));
+        holder.command("release");
+        holder.expect("released");
+        assert_eq!(
+            LocalActionCache::new(store).find(&result.action).unwrap(),
+            Some(result)
+        );
+    }
+
+    /// A writer can repair a record between collection's lock-free read, which
+    /// found it dangling, and collection's claim. The check repeated under the
+    /// lock must see the repair and keep the record.
+    #[test]
+    fn gc_keeps_a_record_repaired_after_it_was_found_dangling() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path();
+        let action = store_object(store, b"action");
+        let dangling = RemoteActionResult {
+            version: 1,
+            action: action.clone(),
+            metadata: Some(CacheDigest::blake3(b"missing metadata")),
+            output_root: None,
+        };
+        let intact = RemoteActionResult {
+            metadata: None,
+            ..dangling.clone()
+        };
+        let path = LocalActionCache::new(store).path_for(&action).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, mbx_cache_core::canonical_json(&dangling).unwrap()).unwrap();
+        let repaired = mbx_cache_core::canonical_json(&intact).unwrap();
+        AFTER_DANGLING_READ.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |found: &Path| {
+                let mut temporary =
+                    tempfile::NamedTempFile::new_in(found.parent().unwrap()).unwrap();
+                temporary.write_all(&repaired).unwrap();
+                temporary.persist(found).unwrap();
+            }));
+        });
+        let swept = gc(store, u64::MAX);
+        AFTER_DANGLING_READ.with(|hook| *hook.borrow_mut() = None);
+        assert_eq!(swept.unwrap().removed_action_results, 0);
+        assert_eq!(
+            LocalActionCache::new(store).find(&action).unwrap(),
+            Some(intact)
+        );
+    }
+
+    #[test]
+    fn gc_keeps_a_record_whose_missing_tree_file_was_restored_after_the_filter() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path();
+        let contents = [7_u8; 4096];
+        let file = store_object(store, &contents);
+        let action = store_result(store, "repaired tree", std::slice::from_ref(&file));
+        age(store, &file, Duration::from_secs(3600));
+        let cache = LocalActionCache::new(store);
+        let record = cache.path_for(&action).unwrap();
+        let before = stats(store).unwrap();
+        let cas = LocalCas::new(store);
+        let missing_path = cas.path_for(&file).unwrap();
+        let repaired = std::rc::Rc::new(std::cell::Cell::new(false));
+        let repaired_in_hook = repaired.clone();
+        AFTER_DANGLING_READ.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |found: &Path| {
+                assert_eq!(found, record);
+                assert!(!missing_path.exists());
+                cas.store_bytes(&file, &contents).unwrap();
+                repaired_in_hook.set(true);
+            }));
+        });
+        let swept = gc(store, before.total_bytes() - 4096);
+        AFTER_DANGLING_READ.with(|hook| *hook.borrow_mut() = None);
+        assert!(repaired.get());
+        let swept = swept.unwrap();
+        assert_eq!(swept.removed_objects, 1);
+        assert_eq!(swept.removed_action_results, 0);
+        assert!(cache.find(&action).unwrap().is_some());
+    }
+
+    #[test]
+    fn gc_skips_a_record_under_repair_and_keeps_its_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path();
+        let action = store_object(store, b"action");
+        let missing = CacheDigest::blake3(b"missing metadata");
+        let dangling = RemoteActionResult {
+            version: 1,
+            action: action.clone(),
+            metadata: Some(missing),
+            output_root: None,
+        };
+        let intact = RemoteActionResult {
+            metadata: None,
+            ..dangling.clone()
+        };
+        let path = LocalActionCache::new(store).path_for(&action).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, mbx_cache_core::canonical_json(&dangling).unwrap()).unwrap();
+        let replacement = store.join("replacement");
+        std::fs::write(
+            &replacement,
+            mbx_cache_core::canonical_json(&intact).unwrap(),
+        )
+        .unwrap();
+
+        let mut holder = Holder::start(&path, &replacement);
+        assert!(ActionSlot::try_claim(&path).unwrap().is_none());
+        let (swept_tx, swept_rx) = mpsc::channel();
+        let sweep_store = store.to_path_buf();
+        let sweep = std::thread::spawn(move || {
+            swept_tx.send(gc(&sweep_store, u64::MAX)).unwrap();
+        });
+        let swept = swept_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("GC waited for the record lock")
+            .unwrap();
+        sweep.join().unwrap();
+        assert_eq!(swept.removed_action_results, 0);
+        assert!(path.exists());
+        holder.command("replace");
+        holder.expect("replaced");
+        holder.command("release");
+        holder.expect("released");
+        let swept = gc(store, u64::MAX).unwrap();
+        assert_eq!(swept.removed_action_results, 0);
+        assert_eq!(
+            LocalActionCache::new(store).find(&action).unwrap(),
+            Some(intact)
+        );
+
+        std::fs::write(&path, mbx_cache_core::canonical_json(&dangling).unwrap()).unwrap();
+        let preview = gc_dry_run(store, u64::MAX).unwrap();
+        assert_eq!(preview.removed_action_results, 1);
+        assert!(path.exists());
+        let swept = gc(store, u64::MAX).unwrap();
+        assert_eq!(swept.removed_action_results, 1);
+        assert!(!path.exists());
+    }
+}
+
 #[test]
 fn drops_an_action_result_whose_output_tree_lost_a_file() {
     let directory = tempfile::tempdir().unwrap();

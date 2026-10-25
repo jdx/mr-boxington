@@ -36,7 +36,14 @@ pub fn remember_caller() {
     });
 }
 
-pub(super) fn plain_launch(cargo: &OsStr, arguments: &[String]) -> Result<ExitCode> {
+/// `rustc` is the compiler of the toolchain `cargo` belongs to, when mbx found
+/// one; see [`super::cargo::toolchain_rustc`]. A plain launch still builds, so
+/// it needs the same compiler a managed build gets.
+pub(super) fn plain_launch(
+    cargo: &OsStr,
+    arguments: &[String],
+    rustc: Option<&std::path::Path>,
+) -> Result<ExitCode> {
     let mut command = Command::new(cargo);
     command.args(arguments);
     if let Some(caller) = CALLER.get() {
@@ -51,6 +58,27 @@ pub(super) fn plain_launch(cargo: &OsStr, arguments: &[String]) -> Result<ExitCo
                 command.env(name, value);
             }
         }
+    }
+    // A `+toolchain` argument asks rustup for another toolchain, and the
+    // caller's RUSTC or RUSTUP_TOOLCHAIN already settles which compiler runs;
+    // any of them wins over Cargo's own.
+    let toolchain_argument = arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--")
+        .any(|argument| argument.starts_with('+'));
+    let caller_chose = ["RUSTC", "CARGO_BUILD_RUSTC", "RUSTUP_TOOLCHAIN"]
+        .iter()
+        .any(|name| {
+            CALLER.get().map_or_else(
+                || std::env::var_os(name).is_some(),
+                |caller| caller.contains_key(OsStr::new(name)),
+            )
+        });
+    if let Some(rustc) = rustc
+        && !toolchain_argument
+        && !caller_chose
+    {
+        command.env("RUSTC", rustc);
     }
     Ok(super::cargo::exit_code(command.status()?))
 }

@@ -36,6 +36,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use url::Url;
 
+pub mod action_slot;
 mod agent;
 mod client;
 mod imds;
@@ -46,6 +47,7 @@ mod remote_s3;
 mod sigv4;
 mod uploads;
 
+pub use action_slot::ActionSlot;
 pub use agent::{
     AGENT_PROTOCOL_VERSION, ActionDiagnostic, AgentEvent, AgentEventObserver, AgentRemoteCache,
     AgentRequest, AgentResponse, AgentStats, CacheAgent, CompilerStats, FileDigestCache,
@@ -56,7 +58,7 @@ pub use agent::{
 };
 pub use client::BlockingAgentClient;
 pub use imds::{InstanceRoleCredentials, TemporaryCredentials};
-pub use local::{ActionStoreOutcome, LocalActionCache, LocalCas};
+pub use local::{ACTION_CONFLICT_MESSAGE, ActionStoreOutcome, LocalActionCache, LocalCas};
 pub use mbx_cache_protocol::{
     ACTION_PROMISE_MEDIA_TYPE, ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE,
     ActionPrediction, ActionPromiseCompletion, ActionPromiseJoin, ActionPromiseState,

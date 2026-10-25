@@ -13,8 +13,9 @@ mod events;
 
 use eyre::{Context, Result};
 use mbx_cache_core::{
-    ActionPrediction, CacheDigest, CacheDirectory, LocalCas, RemoteActionResult, RustcMetadata,
-    TaskActionManifest, is_task_identity, merge_task_action_predictions, task_manifest_actions,
+    ActionPrediction, ActionSlot, CacheDigest, CacheDirectory, LocalCas, RemoteActionResult,
+    RustcMetadata, TaskActionManifest, is_task_identity, merge_task_action_predictions,
+    task_manifest_actions,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -1715,6 +1716,17 @@ pub fn gc_dry_run(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
     gc_with_mode(store, max_bytes, true, HashSet::new())
 }
 
+#[cfg(test)]
+type DanglingReadHook = Box<dyn FnMut(&Path)>;
+
+#[cfg(test)]
+thread_local! {
+    static ACTION_RECORD_CLAIMS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Runs after collection finds a record dangling and before it claims it.
+    static AFTER_DANGLING_READ: std::cell::RefCell<Option<DanglingReadHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// `already_removed` names paths an earlier dry-run pass planned to delete;
 /// they are treated as gone, so the two plans describe one collection.
 fn gc_with_mode(
@@ -1798,26 +1810,92 @@ fn gc_with_mode(
     let cas = LocalCas::new(store);
     let mut trees = HashMap::new();
     for entry in &results {
-        if action_result_is_dangling(
+        match action_result_is_dangling(
             &cas,
             &entry.path,
             &virtually_removed,
             walk_trees,
             &mut trees,
-        )? {
-            match if dry_run {
-                Removal::Removed
-            } else {
-                remove(&entry.path)?
-            } {
-                Removal::Removed => {
-                    live_bytes = live_bytes.saturating_sub(entry.size);
-                    outcome.removed_action_results += 1;
-                    outcome.removed_bytes += entry.size;
-                }
-                Removal::Missing => live_bytes = live_bytes.saturating_sub(entry.size),
-                Removal::Blocked => {}
+        ) {
+            Ok(false) => continue,
+            Ok(true) => {}
+            // Windows readers can encounter another repair's mandatory lock.
+            Err(error)
+                if error
+                    .chain()
+                    .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+                    .any(held_by_another_process) =>
+            {
+                log::debug!(
+                    "could not inspect {} for eviction: {error}",
+                    entry.path.display()
+                );
+                continue;
             }
+            Err(error) => return Err(error),
+        }
+        let removal = if dry_run {
+            Removal::Removed
+        } else {
+            #[cfg(test)]
+            AFTER_DANGLING_READ.with(|hook| {
+                if let Some(hook) = hook.borrow_mut().as_mut() {
+                    hook(&entry.path);
+                }
+            });
+            #[cfg(test)]
+            ACTION_RECORD_CLAIMS.with(|count| count.set(count.get() + 1));
+            match ActionSlot::try_claim(&entry.path) {
+                Err(error) if held_by_another_process(&error) => {
+                    log::debug!(
+                        "could not claim {} for eviction: {error}",
+                        entry.path.display()
+                    );
+                    Removal::Blocked
+                }
+                Err(error) => return Err(error.into()),
+                Ok(None) => Removal::Blocked,
+                Ok(Some(slot)) => match slot.read()? {
+                    None => Removal::Missing,
+                    Some(bytes) => {
+                        // A repair may have restored a missing blob since the filter
+                        // ran, so do not reuse its cached tree verdicts.
+                        if !action_result_bytes_are_dangling(
+                            &cas,
+                            &bytes,
+                            &virtually_removed,
+                            walk_trees,
+                            &mut HashMap::new(),
+                        )? {
+                            continue;
+                        }
+                        match slot.remove() {
+                            Ok(true) => Removal::Removed,
+                            Ok(false) => Removal::Missing,
+                            // Open files may prevent deletion on Windows, just
+                            // as they do in the other eviction paths.
+                            Err(error) if held_by_another_process(&error) => {
+                                log::debug!("could not evict {}: {error}", entry.path.display());
+                                Removal::Blocked
+                            }
+                            Err(error) => {
+                                return Err(error).wrap_err_with(|| {
+                                    format!("failed to evict {}", entry.path.display())
+                                });
+                            }
+                        }
+                    }
+                },
+            }
+        };
+        match removal {
+            Removal::Removed => {
+                live_bytes = live_bytes.saturating_sub(entry.size);
+                outcome.removed_action_results += 1;
+                outcome.removed_bytes += entry.size;
+            }
+            Removal::Missing => live_bytes = live_bytes.saturating_sub(entry.size),
+            Removal::Blocked => {}
         }
     }
 
@@ -2617,8 +2695,29 @@ fn action_result_is_dangling(
             return Err(error).wrap_err_with(|| format!("failed to read {}", path.display()));
         }
     };
+    action_result_bytes_are_dangling(cas, &bytes, virtually_removed, walk_tree, trees)
+}
+
+/// Whether an I/O error means another process holds the file.
+///
+/// Windows reports a read of a range another process has locked as
+/// ERROR_LOCK_VIOLATION (33), and an open the other handle's sharing mode
+/// refuses as ERROR_SHARING_VIOLATION (32); neither maps to a portable error
+/// kind. Elsewhere this is a permission error.
+fn held_by_another_process(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::PermissionDenied
+        || (cfg!(windows) && matches!(error.raw_os_error(), Some(32 | 33)))
+}
+
+fn action_result_bytes_are_dangling(
+    cas: &LocalCas,
+    bytes: &[u8],
+    virtually_removed: &HashSet<PathBuf>,
+    walk_tree: bool,
+    trees: &mut HashMap<CacheDigest, bool>,
+) -> Result<bool> {
     // An unparseable result is already useless; the cache rejects it on read.
-    let Ok(result) = serde_json::from_slice::<RemoteActionResult>(&bytes) else {
+    let Ok(result) = serde_json::from_slice::<RemoteActionResult>(bytes) else {
         return Ok(false);
     };
     let missing = |digest: &CacheDigest| match cas.path_for(digest) {

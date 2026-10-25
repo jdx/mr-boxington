@@ -32,6 +32,17 @@ pub(crate) fn report_shim_warning(message: &str) {
     report_shim_diagnostic(Severity::Warning, message);
 }
 
+/// Report a shim diagnostic that only matters when debugging.
+///
+/// For expected situations that cost at most one uncached compile. Dropped
+/// when the session cannot take it, since nothing depends on it being seen.
+pub(crate) fn report_shim_debug(message: &str) {
+    let _ = request_agent(&[AgentRequest::RecordDebug {
+        target: module_path!().into(),
+        message: diagnostic_message(message),
+    }]);
+}
+
 /// Report a fatal shim diagnostic without losing it when transport fails.
 ///
 /// The session retains the error's severity when it displays and emits it.

@@ -4,6 +4,9 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// Why [`LocalActionCache::store`] refuses to replace an intact result.
+pub const ACTION_CONFLICT_MESSAGE: &str = "local action key already has a different result";
+
 /// A validated, content-addressed store on the local filesystem.
 #[derive(Debug, Clone)]
 pub struct LocalCas {
@@ -294,11 +297,15 @@ impl LocalActionCache {
             return Ok(None);
         }
         let bytes = fs::read(&path)?;
-        let result: RemoteActionResult = serde_json::from_slice(&bytes)?;
+        Ok(Some(Self::parse_record(&bytes, action)?))
+    }
+
+    fn parse_record(bytes: &[u8], action: &CacheDigest) -> Result<RemoteActionResult> {
+        let result: RemoteActionResult = serde_json::from_slice(bytes)?;
         if result.version != 1 || result.action != *action || canonical_json(&result)? != bytes {
-            bail!("local action result is invalid: {}", path.display());
+            bail!("local action result is invalid");
         }
-        Ok(Some(result))
+        Ok(result)
     }
 
     /// Whether the objects `result` names that this index can see are all
@@ -381,71 +388,183 @@ impl LocalActionCache {
             }
         }
         let destination = self.path_for(&result.action)?;
-        let replace_invalid = match self.find(&result.action) {
-            Ok(Some(existing)) => {
-                if existing == *result {
-                    return Ok(ActionStoreOutcome::Unchanged);
-                }
-                // A different record is kept so a key never changes under a
-                // reader, unless its objects are gone or torn: then it can
-                // never be restored, and this result is the repair.
-                if self.is_intact(&existing) {
-                    if !keep_existing {
-                        bail!("local action key already has a different result");
-                    }
-                    if is_restorable(&existing) {
-                        return Ok(ActionStoreOutcome::KeptExisting);
-                    }
-                }
-                true
-            }
-            Ok(None) => false,
-            Err(_) => true,
-        };
         let parent = destination
             .parent()
             .expect("action-result path has a parent");
         fs::create_dir_all(parent)?;
-        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-        temporary.write_all(&canonical_json(result)?)?;
-        temporary.flush()?;
-        if replace_invalid {
-            temporary
-                .persist(&destination)
-                .map_err(|error| error.error)?;
-            return Ok(ActionStoreOutcome::Stored);
-        }
-        match temporary.persist_noclobber(&destination) {
-            Ok(_) => Ok(ActionStoreOutcome::Stored),
-            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                match self.find(&result.action) {
-                    Ok(Some(existing)) if existing == *result => Ok(ActionStoreOutcome::Unchanged),
-                    Ok(Some(existing))
-                        if keep_existing
-                            && self.is_intact(&existing)
-                            && is_restorable(&existing) =>
-                    {
-                        Ok(ActionStoreOutcome::KeptExisting)
-                    }
-                    _ if keep_existing => {
-                        error
-                            .file
-                            .persist(&destination)
-                            .map_err(|error| error.error)?;
-                        Ok(ActionStoreOutcome::Stored)
-                    }
-                    Err(error) => Err(error),
-                    _ => bail!("concurrent action write was invalid or conflicting"),
+        // These outcomes do not mutate the record and need no slot lock.
+        let decide = |existing: &RemoteActionResult| -> Result<Option<ActionStoreOutcome>> {
+            if existing == result {
+                return Ok(Some(ActionStoreOutcome::Unchanged));
+            }
+            // A different intact record keeps the first-writer rule unless
+            // the caller establishes that it cannot be restored.
+            if self.is_intact(existing) {
+                if !keep_existing {
+                    bail!("{ACTION_CONFLICT_MESSAGE}");
+                }
+                if is_restorable(existing) {
+                    return Ok(Some(ActionStoreOutcome::KeptExisting));
                 }
             }
-            Err(error) => Err(error.error.into()),
+            Ok(None)
+        };
+        let mut pending = None;
+        for _ in 0..8 {
+            if let Ok(Some(existing)) = self.find(&result.action)
+                && let Some(outcome) = decide(&existing)?
+            {
+                return Ok(outcome);
+            }
+            let slot = crate::ActionSlot::claim(&destination)?;
+            // A writer may have repaired the record since our lock-free read.
+            if let Some(bytes) = slot.read()?
+                && let Ok(existing) = Self::parse_record(&bytes, &result.action)
+                && let Some(outcome) = decide(&existing)?
+            {
+                return Ok(outcome);
+            }
+            let temporary = if let Some(temporary) = pending.take() {
+                temporary
+            } else {
+                let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+                temporary.write_all(&canonical_json(result)?)?;
+                temporary.flush()?;
+                temporary
+            };
+            if slot.is_vacant() {
+                match slot.publish(temporary)? {
+                    crate::action_slot::Publish::Stored => return Ok(ActionStoreOutcome::Stored),
+                    crate::action_slot::Publish::Taken(temporary) => pending = Some(temporary),
+                }
+            } else {
+                slot.replace(temporary)?;
+                return Ok(ActionStoreOutcome::Stored);
+            }
         }
+        bail!("action record kept changing while publishing")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_repair_keeps_the_winning_record() {
+        use crate::action_slot::tests::Holder;
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let directory = tempfile::tempdir().unwrap();
+        let cas = LocalCas::new(directory.path());
+        let actions = LocalActionCache::new(directory.path());
+        let action = CacheDigest::blake3(b"action");
+        cas.store_bytes(&action, b"action").unwrap();
+        let metadata = CacheDigest::blake3(b"metadata");
+        cas.store_bytes(&metadata, b"metadata").unwrap();
+        let first = RemoteActionResult {
+            version: 1,
+            action: action.clone(),
+            metadata: None,
+            output_root: None,
+        };
+        let second = RemoteActionResult {
+            metadata: Some(metadata),
+            ..first.clone()
+        };
+        let path = actions.path_for(&action).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"damaged").unwrap();
+        let replacement = directory.path().join("replacement");
+        fs::write(&replacement, canonical_json(&first).unwrap()).unwrap();
+        let mut holder = Holder::start(&path, &replacement);
+        let writer = actions.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            crate::action_slot::tests::observe_claims(move || {
+                let _ = started_tx.send(());
+            });
+            done_tx
+                .send(writer.store_unless_restorable(&second, |_| true))
+                .unwrap();
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("writer must open the incumbent for its repair claim");
+        // A bounded receive checks that repair respects the other process's lock.
+        // The replacement and release themselves are ordered by pipe messages.
+        assert!(
+            matches!(
+                done_rx.recv_timeout(Duration::from_secs(1)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "repair completed while another process held the damaged incumbent"
+        );
+        holder.command("replace");
+        holder.expect("replaced");
+        holder.command("release");
+        holder.expect("released");
+        assert_eq!(
+            done_rx
+                .recv_timeout(Duration::from_secs(20))
+                .unwrap()
+                .unwrap(),
+            ActionStoreOutcome::KeptExisting
+        );
+        thread.join().unwrap();
+        assert_eq!(actions.find(&action).unwrap(), Some(first));
+    }
+
+    // An artificial holder makes even intact reads fail on Windows, where
+    // record locks are mandatory. Production callers never claim intact records.
+    #[cfg(unix)]
+    #[test]
+    fn intact_stores_do_not_claim_the_record() {
+        use crate::action_slot::tests::Holder;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().unwrap();
+        let cas = LocalCas::new(directory.path());
+        let actions = LocalActionCache::new(directory.path());
+        let action = CacheDigest::blake3(b"action");
+        cas.store_bytes(&action, b"action").unwrap();
+        let metadata = CacheDigest::blake3(b"metadata");
+        cas.store_bytes(&metadata, b"metadata").unwrap();
+        let first = RemoteActionResult {
+            version: 1,
+            action,
+            metadata: None,
+            output_root: None,
+        };
+        let path = actions.store(&first).unwrap();
+        let mut holder = Holder::start(&path, &path);
+        let (done_tx, done_rx) = mpsc::channel();
+        let expected = path.clone();
+        let thread = std::thread::spawn(move || {
+            crate::action_slot::tests::observe_claims(|| panic!("intact store claimed a slot"));
+            assert_eq!(actions.store(&first).unwrap(), expected);
+            assert_eq!(
+                actions.store_unless_restorable(&first, |_| true).unwrap(),
+                ActionStoreOutcome::Unchanged
+            );
+            let second = RemoteActionResult {
+                metadata: Some(metadata),
+                ..first
+            };
+            assert_eq!(
+                actions.store_unless_restorable(&second, |_| true).unwrap(),
+                ActionStoreOutcome::KeptExisting
+            );
+            assert!(actions.store(&second).is_err());
+            done_tx.send(()).unwrap();
+        });
+        done_rx.recv_timeout(Duration::from_secs(20)).unwrap();
+        holder.command("release");
+        holder.expect("released");
+        thread.join().unwrap();
+    }
 
     #[test]
     fn stores_and_validates_blobs_atomically() {
@@ -734,7 +853,7 @@ mod tests {
             ActionStoreOutcome::KeptExisting
         );
         let error = actions.store(&second).unwrap_err();
-        assert!(error.to_string().contains("different result"));
+        assert_eq!(error.to_string(), ACTION_CONFLICT_MESSAGE);
         assert_eq!(actions.find(&action).unwrap(), Some(first));
 
         fs::remove_file(cas.path_for(&file).unwrap()).unwrap();

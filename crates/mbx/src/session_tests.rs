@@ -2058,8 +2058,14 @@ fn routine_bypasses_are_debug_but_failed_cache_paths_are_warnings() {
     assert!(super::expected_rustc_bypass(Some(
         &mbx_cache_rustc::BypassReason::BuildScriptInputOverlapsOutputs(".".into())
     )));
+    assert!(super::expected_rustc_bypass(Some(
+        &mbx_cache_rustc::BypassReason::BuildScriptDeclarationsPending(".".into())
+    )));
     assert!(super::expected_cc_bypass(Some(
         &mbx_cache_cc::CcBypassReason::NotACompile
+    )));
+    assert!(super::expected_cc_bypass(Some(
+        &mbx_cache_cc::CcBypassReason::MissingOutput
     )));
     assert!(!super::expected_rustc_bypass(Some(
         &mbx_cache_rustc::BypassReason::InputRead {
@@ -2161,40 +2167,114 @@ fn only_a_compiler_run_through_another_program_is_wrapped() {
     let rustc = OsStr::new("/toolchain/bin/rustc");
     let clippy = OsStr::new("/toolchain/bin/clippy-driver");
     let other = OsStr::new("/usr/bin/cache-wrapper");
-    let env = |cache: Option<&OsStr>, workspace: Option<&OsStr>| {
+    let env = |cache: Option<&OsStr>, workspace: Option<&OsStr>, runtime: Option<&OsStr>| {
         let cache = cache.map(OsStr::to_os_string);
         let workspace = workspace.map(OsStr::to_os_string);
+        let runtime = runtime.map(OsStr::to_os_string);
         move |name: &str| match name {
             PREVIOUS_RUSTC_WRAPPER_ENV => cache.clone(),
             PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV => workspace.clone(),
+            "RUSTC_WORKSPACE_WRAPPER" | "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER" => runtime.clone(),
             _ => None,
         }
     };
     // Cargo's RUSTC_WRAPPER runs in front of every compiler call.
     assert!(compiler_runs_through_wrapper_using(
         rustc,
-        env(Some(other), None)
+        env(Some(other), None, None)
     ));
     assert!(compiler_runs_through_wrapper_using(
         clippy,
-        env(Some(other), None)
+        env(Some(other), None, None)
     ));
     // A workspace wrapper other than clippy-driver runs in place of rustc.
     assert!(compiler_runs_through_wrapper_using(
         other,
-        env(None, Some(other))
+        env(None, Some(other), None)
+    ));
+    // A Cargo subcommand such as ra-jit can set its wrapper after mbx has
+    // started the session. The wrapper is opaque only for its own invocations.
+    assert!(compiler_runs_through_wrapper_using(
+        other,
+        env(None, None, Some(other))
+    ));
+    assert!(!compiler_runs_through_wrapper_using(
+        rustc,
+        env(None, None, Some(other))
+    ));
+    assert!(compiler_runs_through_wrapper_using(
+        other,
+        |name| match name {
+            "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER" => Some(other.to_os_string()),
+            _ => None,
+        }
+    ));
+    let nested_arguments = [rustc.to_os_string(), OsString::from("--crate-name")];
+    assert!(super::is_nested_rustc_workspace_wrapper(
+        other,
+        &nested_arguments
+    ));
+    assert!(!super::is_nested_rustc_workspace_wrapper(
+        clippy,
+        &nested_arguments
+    ));
+    assert!(!super::is_nested_rustc_workspace_wrapper(
+        rustc,
+        &[OsString::from("--crate-name")]
     ));
     // Under `cargo clippy`, dependencies still run rustc, and clippy-driver
     // compiles in its own process.
     assert!(!compiler_runs_through_wrapper_using(
         rustc,
-        env(None, Some(clippy))
+        env(None, Some(clippy), None)
     ));
     assert!(!compiler_runs_through_wrapper_using(
         clippy,
-        env(None, Some(clippy))
+        env(None, Some(clippy), None)
     ));
-    assert!(!compiler_runs_through_wrapper_using(rustc, env(None, None)));
+    assert!(!compiler_runs_through_wrapper_using(
+        rustc,
+        env(None, None, None)
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn opaque_workspace_wrappers_do_not_snapshot_or_remove_old_objects() {
+    let output = tempfile::tempdir().unwrap();
+    let object = output.path().join("widget-0123456789abcdef.1.rcgu.o");
+    let arguments = vec![
+        "--crate-name".into(),
+        "widget".into(),
+        "--out-dir".into(),
+        output.path().as_os_str().to_owned(),
+        "-C".into(),
+        "extra-filename=-0123456789abcdef".into(),
+        "-C".into(),
+        "split-debuginfo=unpacked".into(),
+    ];
+
+    std::fs::write(&object, b"object from an earlier build").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2_100));
+    let snapshot =
+        super::object_snapshot_for_transparent_compile(false, &arguments, Path::new("/"))
+            .expect("a direct rustc compile tracks its old objects");
+    let successful = std::process::Command::new("true").status().unwrap();
+    assert_eq!(snapshot.remove_superseded(&successful), 1);
+    assert!(
+        !object.exists(),
+        "a direct rustc compile removes old objects"
+    );
+
+    std::fs::write(&object, b"object from an earlier build").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2_100));
+    assert!(
+        super::object_snapshot_for_transparent_compile(true, &arguments, Path::new("/")).is_none()
+    );
+    assert!(
+        object.exists(),
+        "a successful wrapper may not have compiled"
+    );
 }
 
 #[test]

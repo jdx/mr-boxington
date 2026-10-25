@@ -854,8 +854,22 @@ impl CompilationInputs {
     /// Rebuild the declaration signature, rejecting explicit watches that
     /// include compiler outputs rather than silently excluding watched files.
     fn digest(&self, digests: &dyn FileDigestCache) -> Result<(CacheDigest, bool)> {
-        let stdout = std::fs::read_to_string(&self.input.path)
-            .wrap_err("failed to read Cargo's build-script declarations")?;
+        let stdout = match std::fs::read_to_string(&self.input.path) {
+            Ok(stdout) => stdout,
+            // Cargo writes the record only after the script exits, so a probe
+            // the script runs itself finds nothing yet.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(
+                    mbx_cache_rustc::BypassReason::BuildScriptDeclarationsPending(
+                        self.input.path.clone(),
+                    )
+                    .into(),
+                );
+            }
+            Err(error) => {
+                return Err(error).wrap_err("failed to read Cargo's build-script declarations");
+            }
+        };
         let mut inputs = BTreeMap::new();
         let mut environment = BTreeMap::new();
         for line in stdout.lines() {
@@ -1870,9 +1884,42 @@ mod tests {
             assert_eq!(populated.input.digest, snapshot().input.digest);
             std::fs::write(&output, "cargo::rerun-if-changed=\n").unwrap();
             assert!(CompilationInputs::read(&out_dir, package.path()).is_err());
-            std::fs::remove_file(output).unwrap();
-            assert!(CompilationInputs::read(&out_dir, package.path()).is_err());
+            std::fs::remove_file(&output).unwrap();
+            // A script probing `$RUSTC` runs before Cargo records its output,
+            // which is an expected bypass rather than a failed read.
+            let error = CompilationInputs::read(&out_dir, package.path())
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.downcast_ref::<mbx_cache_rustc::BypassReason>(),
+                Some(
+                    &mbx_cache_rustc::BypassReason::BuildScriptDeclarationsPending(output.clone())
+                )
+            );
         }
+    }
+
+    #[test]
+    fn unreadable_declarations_stay_a_failed_read() {
+        let package = tempfile::tempdir().unwrap();
+        let out_dir = package.path().join("target/debug/build/fixture/out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        // A directory where the record belongs is a read failure, not a
+        // record Cargo has yet to write.
+        std::fs::create_dir(out_dir.parent().unwrap().join("output")).unwrap();
+        let error = CompilationInputs::read(&out_dir, package.path())
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .downcast_ref::<mbx_cache_rustc::BypassReason>()
+                .is_none()
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("failed to read Cargo's build-script declarations")
+        );
     }
 
     fn declare_out_dir_dependency(root: &Path) -> PathBuf {

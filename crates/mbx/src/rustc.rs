@@ -405,6 +405,11 @@ pub(crate) fn compile(
             Ok(None) => {
                 prediction_missing = !action_lookup_attempted;
             }
+            // A prediction learned on another branch can name a file this
+            // checkout lacks. Compiling normally is the whole consequence.
+            Err(error) if is_missing_compiler_input(&error) => {
+                session::report_shim_debug(&format!("prediction was not restored: {error:#}"));
+            }
             Err(error) => {
                 session::report_shim_warning(&format!("prediction was not restored: {error:#}"));
             }
@@ -446,6 +451,11 @@ pub(crate) fn compile(
                 return Ok(ExitCode::SUCCESS);
             }
             Ok(None) => {}
+            Err(error) if is_missing_compiler_input(&error) => {
+                session::report_shim_debug(&format!(
+                    "a flight prediction was not restored: {error:#}"
+                ));
+            }
             Err(error) => {
                 session::report_shim_warning(&format!(
                     "a flight prediction was not restored: {error:#}"
@@ -504,6 +514,11 @@ pub(crate) fn compile(
                             return Ok(ExitCode::SUCCESS);
                         }
                         Ok(None) => {}
+                        Err(error) if is_missing_compiler_input(&error) => {
+                            session::report_shim_debug(&format!(
+                                "a remote flight prediction was not restored: {error:#}"
+                            ));
+                        }
                         Err(error) => session::report_shim_warning(&format!(
                             "a remote flight prediction was not restored: {error:#}"
                         )),
@@ -1999,6 +2014,18 @@ fn is_unshareable_search_path(error: &eyre::Report) -> bool {
     matches!(
         error.downcast_ref::<BypassReason>(),
         Some(BypassReason::UnsupportedSearchPath(_) | BypassReason::InputRead { .. })
+    )
+}
+
+/// Whether the error is a compiler input that no longer exists on disk.
+fn is_missing_compiler_input(error: &eyre::Report) -> bool {
+    matches!(
+        error.downcast_ref::<BypassReason>(),
+        Some(BypassReason::InputRead { path, .. })
+            if matches!(
+                std::fs::symlink_metadata(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            )
     )
 }
 
@@ -4260,10 +4287,24 @@ fn publish_result<'a>(
             requests.push(AgentRequest::StoreBlob { digest, source });
         }
     }
-    requests.push(AgentRequest::StoreActionResult { result });
+    requests.push(AgentRequest::StoreActionResult {
+        result: result.clone(),
+    });
     for response in session::request_agent(&requests)? {
         match response {
             AgentResponse::Stored { .. } | AgentResponse::ActionStored { .. } => {}
+            // Another checkout published this key between the check above and
+            // the store. That is the same expected difference, so keep its
+            // record when it is intact.
+            AgentResponse::Error { message }
+                if message == mbx_cache_core::ACTION_CONFLICT_MESSAGE
+                    && existing_result_supersedes(&result, outputs) =>
+            {
+                session::report_shim_debug(&format!(
+                    "result was not stored: {message}; another checkout's result for this key was kept"
+                ));
+                return Ok(action);
+            }
             AgentResponse::Error { message } => bail!(message),
             _ => bail!("cache agent returned an unexpected publish response"),
         }

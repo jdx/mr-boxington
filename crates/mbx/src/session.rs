@@ -39,7 +39,7 @@ pub(crate) mod verification;
 use client::validate_handshake_response;
 use client::{request_agent_at, request_standalone_agent};
 pub(crate) use diagnostics::{
-    note, report_shim_error, report_shim_warning, reserve_stderr_for_compiler,
+    note, report_shim_debug, report_shim_error, report_shim_warning, reserve_stderr_for_compiler,
 };
 #[cfg(unix)]
 pub(crate) use server::create_fifo;
@@ -1761,10 +1761,11 @@ pub fn run_rustc_shim() -> ExitCode {
     if let Some(linker) = std::env::var_os(MANAGED_LINKER_ENV).filter(|path| !path.is_empty()) {
         use_managed_linker(&mut arguments, &linker);
     }
-    let is_workspace_wrapper = std::env::var_os(PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV)
-        .is_some_and(|wrapper| wrapper == rustc);
+    let is_workspace_wrapper =
+        workspace_wrapper_matches(&rustc) || is_nested_rustc_workspace_wrapper(&rustc, &arguments);
     let (wrapper_argument, compiler_arguments) = workspace_wrapper_arguments(&rustc, &arguments);
     let cacheable_workspace_wrapper = is_workspace_wrapper && wrapper_argument.is_some();
+    let opaque_workspace_wrapper = is_workspace_wrapper && !cacheable_workspace_wrapper;
     // Cargo moves long argument lists into `@argfile`s; the flags that name
     // and describe the compilation are inside them then. rustc still receives
     // the arguments as they were given.
@@ -1794,7 +1795,13 @@ pub fn run_rustc_shim() -> ExitCode {
         }
     }
 
-    run_transparent_rustc(rustc, arguments, &described, bypassed)
+    run_transparent_rustc(
+        rustc,
+        arguments,
+        &described,
+        bypassed,
+        opaque_workspace_wrapper,
+    )
 }
 
 /// Explicit Cargo targets must not affect host build scripts or proc macros.
@@ -1863,13 +1870,41 @@ pub(crate) fn compiler_runs_through_wrapper(compiler: &OsStr) -> bool {
     compiler_runs_through_wrapper_using(compiler, |name| std::env::var_os(name))
 }
 
+/// Cargo subcommands can set a workspace wrapper after mbx started its
+/// session. Match Cargo's live variables as well as the session snapshot.
+fn workspace_wrapper_matches(compiler: &OsStr) -> bool {
+    workspace_wrapper_matches_using(compiler, |name| std::env::var_os(name))
+}
+
+/// Check the saved and live Cargo settings for this compiler path.
+fn workspace_wrapper_matches_using(
+    compiler: &OsStr,
+    get: impl Fn(&str) -> Option<OsString>,
+) -> bool {
+    [
+        PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV,
+        "RUSTC_WORKSPACE_WRAPPER",
+        "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+    ]
+    .into_iter()
+    .filter_map(get)
+    .any(|wrapper| wrapper == compiler)
+}
+
+/// Detect Cargo's nested workspace-wrapper argv even when `--config` supplied it.
+fn is_nested_rustc_workspace_wrapper(compiler: &OsStr, arguments: &[OsString]) -> bool {
+    !is_clippy_driver(compiler)
+        && arguments
+            .first()
+            .is_some_and(|rustc| executable_stem(rustc) == Some("rustc"))
+}
+
 fn compiler_runs_through_wrapper_using(
     compiler: &OsStr,
     get: impl Fn(&str) -> Option<OsString>,
 ) -> bool {
     get(PREVIOUS_RUSTC_WRAPPER_ENV).is_some()
-        || (!is_clippy_driver(compiler)
-            && get(PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV).is_some_and(|wrapper| wrapper == compiler))
+        || (!is_clippy_driver(compiler) && workspace_wrapper_matches_using(compiler, &get))
 }
 
 pub(crate) fn is_clippy_driver(compiler: &OsStr) -> bool {
@@ -1899,7 +1934,9 @@ fn run_transparent_rustc(
     arguments: Vec<OsString>,
     described: &[OsString],
     bypassed: bool,
+    opaque_workspace_wrapper: bool,
 ) -> ExitCode {
+    let wrapped = opaque_workspace_wrapper || compiler_runs_through_wrapper(&rustc);
     // The compiler below may replace this process, and with it any lease on
     // a stable `OUT_DIR`; it compiles against Cargo's own tree instead.
     crate::out_dir::restore();
@@ -1924,7 +1961,7 @@ fn run_transparent_rustc(
             name,
             described,
             incremental_flag.as_deref(),
-            compiler_runs_through_wrapper(&rustc),
+            wrapped,
             is_clippy_driver(&rustc),
         )
     });
@@ -1961,7 +1998,7 @@ fn run_transparent_rustc(
     // Only a compilation this process waits for can clean up after itself.
     let objects = demand.as_ref().and_then(|_| {
         let working_dir = std::env::current_dir().ok()?;
-        crate::object_cleanup::ObjectSnapshot::before_compiling(described, &working_dir)
+        object_snapshot_for_transparent_compile(wrapped, described, &working_dir)
     });
 
     #[cfg(unix)]
@@ -2056,6 +2093,18 @@ fn run_transparent_rustc(
             }
         }
     }
+}
+
+/// Avoid object cleanup when a wrapper can report success without compiling.
+fn object_snapshot_for_transparent_compile(
+    wrapped: bool,
+    described: &[OsString],
+    working_dir: &Path,
+) -> Option<crate::object_cleanup::ObjectSnapshot> {
+    if wrapped {
+        return None;
+    }
+    crate::object_cleanup::ObjectSnapshot::before_compiling(described, working_dir)
 }
 
 /// Whether a bypassed invocation will run a linker.
@@ -2470,6 +2519,7 @@ fn expected_rustc_bypass(reason: Option<&mbx_cache_rustc::BypassReason>) -> bool
                 | ImplicitEmitWithOutputFile(_)
                 | AmbiguousOutputName(_)
                 | BuildScriptInputOverlapsOutputs(_)
+                | BuildScriptDeclarationsPending(_)
         )
     )
 }
@@ -2481,6 +2531,7 @@ fn expected_cc_bypass(reason: Option<&mbx_cache_cc::CcBypassReason>) -> bool {
         Some(
             CompilerQuery
                 | NotACompile
+                | MissingOutput
                 | UnknownFlag(_)
                 | ResponseFile(_)
                 | NonObjectOutput(_)

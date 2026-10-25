@@ -1544,6 +1544,7 @@ dependencies = [
  "rand 0.10.3",
  "reflink-copy",
  "reqwest",
+ "same-file",
  "serde",
  "serde_json",
  "sha2",

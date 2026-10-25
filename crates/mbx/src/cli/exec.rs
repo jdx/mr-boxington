@@ -1,4 +1,4 @@
-use super::cargo::{absolute, account_session, inherited_environment, run_cargo};
+use super::cargo::{SurviveInterrupt, absolute, account_session, inherited_environment, run_cargo};
 use crate::config::{CliSettings, Config};
 use crate::session::{self, CacheSession};
 use crate::util::is_checkout_root;
@@ -45,6 +45,7 @@ pub(super) fn run(config: &Config, settings: &CliSettings, args: &ExecArgs) -> R
     }
 
     crate::storage::check_cache(config)?;
+    let _interrupt = SurviveInterrupt::install();
     let session_dir = tempfile::Builder::new().prefix("mbx-session-").tempdir()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

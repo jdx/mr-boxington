@@ -81,8 +81,14 @@ fn cargo_with_settings_bypass_log_and_roots(
         settings.summary
     };
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    // Running a toolchain Cargo directly skips rustup's compiler selection.
+    // Select Cargo's own compiler before crate working directories can change
+    // it. An explicit RUSTC wins, as it does for rustup, and so does
+    // RUSTUP_TOOLCHAIN: with it set, rustup sends every compiler invocation to
+    // that one toolchain, so nothing can mix.
+    let rustc = selected_compiler(&cargo, arguments);
     if super::launch::needs_plain_launch(arguments) {
-        return super::launch::plain_launch(&cargo, arguments);
+        return super::launch::plain_launch(&cargo, arguments, rustc.as_deref());
     }
     let os_arguments = arguments
         .iter()
@@ -391,6 +397,7 @@ fn cargo_with_settings_bypass_log_and_roots(
         mark_explained(&config.store_dir());
     }
 
+    let _interrupt = SurviveInterrupt::install();
     let session_dir = tempfile::Builder::new().prefix("mbx-session-").tempdir()?;
     let launch = super::launch::Launch::prepare(arguments, session_dir.path())?;
     let test_runner = super::test_runner::TestRunner::prepare(
@@ -427,6 +434,9 @@ fn cargo_with_settings_bypass_log_and_roots(
                     ("MBX_DISABLE".into(), "1".into()),
                     (session::SOCKET_ENV.into(), String::new()),
                 ]);
+                if let Some(rustc) = &rustc {
+                    environment.insert("RUSTC".into(), rustc.to_string_lossy().into_owned());
+                }
                 if settings.plain_output {
                     environment.insert("CARGO_TERM_PROGRESS_WHEN".into(), "never".into());
                 }
@@ -438,6 +448,9 @@ fn cargo_with_settings_bypass_log_and_roots(
             Err(error) => return Err(error),
         };
         let mut environment = inherited_environment(|name| std::env::var(name).ok(), &working_dir);
+        if let Some(rustc) = &rustc {
+            environment.insert("RUSTC".into(), rustc.to_string_lossy().into_owned());
+        }
         let _lease = super::launch::lease(session_dir.path(), &mut environment)?;
         if let Some(path) = bypass_log {
             let path = if path.is_absolute() {
@@ -526,7 +539,11 @@ fn cargo_with_settings_bypass_log_and_roots(
         } else {
             arguments
         };
-        let status = if !settings.plain_output && super::pretty::enabled(arguments) {
+        // Checked before choosing a runner: the pretty and plain-progress
+        // runners spawn Cargo themselves and would not reach run_cargo's check.
+        let status = if interrupted() {
+            Ok(ExitCode::from(INTERRUPTED_EXIT_CODE))
+        } else if !settings.plain_output && super::pretty::enabled(arguments) {
             match super::pretty::run(&cargo, cargo_arguments, &environment, settings.pretty_inspect, || session.progress_stats()) {
                 Ok(Some(status)) => Ok(status),
                 Ok(None) => run_cargo(&cargo, cargo_arguments, environment),
@@ -567,6 +584,15 @@ fn cargo_with_settings_bypass_log_and_roots(
     // keep the automatic target sweep after it exits: collection must not
     // remove the executable Cargo just selected before we have started it.
     let session_outcome = match session_outcome {
+        // An interrupt swallowed while the session wound down cancels the
+        // application too.
+        Ok((Ok(status), stats))
+            if status == ExitCode::SUCCESS
+                && interrupted()
+                && launch.as_ref().is_some_and(|launch| launch.was_captured()) =>
+        {
+            Ok((Ok(ExitCode::from(INTERRUPTED_EXIT_CODE)), stats))
+        }
         Ok((Ok(status), stats))
             if status == ExitCode::SUCCESS
                 && launch.as_ref().is_some_and(|launch| launch.was_captured()) =>
@@ -1085,11 +1111,102 @@ pub(super) fn manage_existing_target_with(
     Ok(ask_to_remove(&roots.target_dir)?.then_some(ExistingTarget::Remove))
 }
 
+/// The compiler mbx gives `cargo`, if it needs to choose one at all.
+///
+/// Cargo already resolves the right compiler when RUSTC or RUSTUP_TOOLCHAIN is
+/// set; otherwise a Cargo inside a rustup toolchain gets that toolchain's own.
+pub(super) fn compiler_for_cargo(
+    cargo: &Path,
+    get_env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    if ["RUSTC", "CARGO_BUILD_RUSTC", "RUSTUP_TOOLCHAIN"]
+        .iter()
+        .any(|name| get_env(name).is_some())
+    {
+        return None;
+    }
+    toolchain_rustc(cargo)
+}
+
+/// [`compiler_for_cargo`] for this invocation, which also leaves the choice to
+/// a `+toolchain` argument and to a compiler Cargo's configuration names
+/// (`build.rustc`): the injected RUSTC would override either.
+fn selected_compiler(cargo: &std::ffi::OsStr, arguments: &[String]) -> Option<PathBuf> {
+    let before_program = || arguments.iter().take_while(|argument| *argument != "--");
+    if before_program().any(|argument| argument.starts_with('+')) {
+        return None;
+    }
+    let rustc = compiler_for_cargo(Path::new(cargo), |name| std::env::var_os(name))?;
+    (!build_rustc_configured(&std::env::current_dir().ok()?, arguments)).then_some(rustc)
+}
+
+/// Whether Cargo's configuration names a compiler: `build.rustc` set by a
+/// `--config` value, in a file a `--config` names, or in a configuration file.
+/// Other settings, `build.rustc-wrapper` included, do not choose a compiler.
+pub(super) fn build_rustc_configured(working_dir: &Path, arguments: &[String]) -> bool {
+    // An `include` can pull in a file that sets it, so count one as setting it.
+    let sets_rustc = |table: &toml::Table| {
+        table.contains_key("include")
+            || table
+                .get("build")
+                .and_then(toml::Value::as_table)
+                .is_some_and(|build| build.contains_key("rustc"))
+    };
+    let mut remaining = arguments.iter().take_while(|argument| *argument != "--");
+    while let Some(argument) = remaining.next() {
+        let value = match argument.strip_prefix("--config=") {
+            Some(value) => value,
+            None if argument == "--config" => match remaining.next() {
+                Some(value) => value,
+                None => return false,
+            },
+            None => continue,
+        };
+        // Cargo reads a value with `=` as TOML and anything else as a file.
+        let table = if value.contains('=') {
+            value.parse::<toml::Table>().ok()
+        } else {
+            // Relative to where Cargo runs, which `-C` moves.
+            std::fs::read_to_string(invocation_dir(working_dir, arguments).join(value))
+                .ok()
+                .and_then(|text| text.parse::<toml::Table>().ok())
+        };
+        if table.as_ref().is_some_and(sets_rustc) {
+            return true;
+        }
+    }
+    match cargo_config2::Config::load_with_cwd(invocation_dir(working_dir, arguments)) {
+        Ok(config) => config.build.rustc.is_some(),
+        // Cargo will not run with configuration it cannot read either.
+        Err(_) => true,
+    }
+}
+
+/// Recognize rustup's toolchain layout without guessing what a Cargo wrapper
+/// or a system installation runs. The rustup proxy on PATH remains untouched.
+pub(super) fn toolchain_rustc(cargo: &Path) -> Option<PathBuf> {
+    let executable = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+    if !cargo.is_absolute() || cargo.file_name()? != executable {
+        return None;
+    }
+    let bin = cargo.parent()?;
+    if bin.file_name()? != "bin" || bin.parent()?.parent()?.file_name()? != "toolchains" {
+        return None;
+    }
+    let rustc = bin.join(if cfg!(windows) { "rustc.exe" } else { "rustc" });
+    rustc.is_file().then_some(rustc)
+}
+
 pub(super) fn run_cargo(
     cargo: &std::ffi::OsStr,
     arguments: &[impl AsRef<std::ffi::OsStr>],
     environment: BTreeMap<String, String>,
 ) -> Result<ExitCode> {
+    // An interrupt swallowed during setup still cancels the command: the
+    // session is torn down and the command never starts.
+    if interrupted() {
+        return Ok(ExitCode::from(INTERRUPTED_EXIT_CODE));
+    }
     let mut command = Command::new(cargo);
     command.args(arguments);
     command.envs(environment);
@@ -1097,6 +1214,70 @@ pub(super) fn run_cargo(
         .status()
         .wrap_err_with(|| format!("failed to run {}", cargo.to_string_lossy()))?;
     Ok(exit_code(status))
+}
+
+/// Windows ends a process that receives Ctrl+C through `ExitProcess`, which
+/// skips destructors, so an interrupted build would leave its session
+/// directory in the temp directory for good. Held from the session
+/// directory's creation until it is removed, so setup and the wait for cache
+/// uploads are covered too. The child shares the console and still receives
+/// the event; mbx only has to outlive it to clean up and report the child's
+/// exit code. Elsewhere the default signal handling is kept.
+pub(super) struct SurviveInterrupt;
+
+/// The conventional exit code for a command ended by Ctrl+C.
+const INTERRUPTED_EXIT_CODE: u8 = 130;
+
+#[cfg(windows)]
+static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether Ctrl+C or Ctrl+Break arrived while a [`SurviveInterrupt`] guard was
+/// held.
+fn interrupted() -> bool {
+    #[cfg(windows)]
+    return INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst);
+    #[cfg(not(windows))]
+    false
+}
+
+#[cfg(not(windows))]
+impl SurviveInterrupt {
+    pub(super) fn install() -> Self {
+        Self
+    }
+}
+
+#[cfg(windows)]
+impl SurviveInterrupt {
+    pub(super) fn install() -> Self {
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+        INTERRUPTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        // SAFETY: the handler only stores to an atomic. A handler routine, not
+        // the null "ignore" form, because only the null form is inherited and
+        // the child must keep its default Ctrl+C behavior.
+        unsafe { SetConsoleCtrlHandler(Some(swallow_interrupt), 1) };
+        Self
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SurviveInterrupt {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+        // SAFETY: removes the handler install added.
+        unsafe { SetConsoleCtrlHandler(Some(swallow_interrupt), 0) };
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn swallow_interrupt(control: u32) -> i32 {
+    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT};
+    if control == CTRL_C_EVENT || control == CTRL_BREAK_EVENT {
+        INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        1
+    } else {
+        0
+    }
 }
 
 /// Cargo's quiet flag applies to mbx's build summary as well as Cargo's own

@@ -63,6 +63,14 @@ other than Clippy's `clippy-driver` the same way for workspace crates: it
 defers to the wrapper and does not cache those compilations. See
 [Migrate from rust-cache or sccache](/cookbook/migrate#from-sccache).
 
+## Can I use mbx together with ra-jit?
+
+Yes. ra-jit can set Cargo's `RUSTC_WORKSPACE_WRAPPER` after mbx starts its
+session. mbx passes those workspace compiler calls through to ra-jit and leaves
+their existing object files alone when the wrapper reports success. Other
+eligible Rust compilations, such as dependencies, can still use mbx's cache.
+This does not make ra-jit's own workspace builds cache hits in mbx.
+
 ## Are restored artifacts byte-identical to freshly compiled ones? {#are-restored-artifacts-byte-identical-to-what-a-compile-would-produce}
 
 Equivalent, not always identical: rustc and C compilers record absolute
