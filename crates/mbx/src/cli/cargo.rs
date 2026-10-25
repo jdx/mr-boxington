@@ -1093,10 +1093,47 @@ pub(super) fn run_cargo(
     let mut command = Command::new(cargo);
     command.args(arguments);
     command.envs(environment);
+    #[cfg(windows)]
+    let _interrupt = SurviveInterrupt::install();
     let status = command
         .status()
         .wrap_err_with(|| format!("failed to run {}", cargo.to_string_lossy()))?;
     Ok(exit_code(status))
+}
+
+/// Windows ends a process that receives Ctrl+C through `ExitProcess`, which
+/// skips destructors, so an interrupted build would leave its session
+/// directory in the temp directory for good. The child shares the console and
+/// still receives the event; mbx only has to outlive it to clean up and report
+/// the child's exit code.
+#[cfg(windows)]
+struct SurviveInterrupt;
+
+#[cfg(windows)]
+impl SurviveInterrupt {
+    fn install() -> Self {
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+        // SAFETY: the handler only reads its argument. A handler routine, not
+        // the null "ignore" form, because only the null form is inherited and
+        // the child must keep its default Ctrl+C behavior.
+        unsafe { SetConsoleCtrlHandler(Some(swallow_interrupt), 1) };
+        Self
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SurviveInterrupt {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+        // SAFETY: removes the handler install added.
+        unsafe { SetConsoleCtrlHandler(Some(swallow_interrupt), 0) };
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn swallow_interrupt(control: u32) -> i32 {
+    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT};
+    i32::from(control == CTRL_C_EVENT || control == CTRL_BREAK_EVENT)
 }
 
 /// Cargo's quiet flag applies to mbx's build summary as well as Cargo's own
