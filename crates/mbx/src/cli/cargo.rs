@@ -572,6 +572,15 @@ fn cargo_with_settings_bypass_log_and_roots(
     // keep the automatic target sweep after it exits: collection must not
     // remove the executable Cargo just selected before we have started it.
     let session_outcome = match session_outcome {
+        // An interrupt swallowed while the session wound down cancels the
+        // application too.
+        Ok((Ok(status), stats))
+            if status == ExitCode::SUCCESS
+                && interrupted()
+                && launch.as_ref().is_some_and(|launch| launch.was_captured()) =>
+        {
+            Ok((Ok(ExitCode::from(INTERRUPTED_EXIT_CODE)), stats))
+        }
         Ok((Ok(status), stats))
             if status == ExitCode::SUCCESS
                 && launch.as_ref().is_some_and(|launch| launch.was_captured()) =>
