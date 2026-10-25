@@ -226,8 +226,8 @@ with, including nightlies. A version counts as in use while any of its results
 was restored or written within the window. The sweep, and `mbx gc`, remove the
 results of every other version together with the objects only those results
 need. The most recently used version is always kept, so a store left idle for
-longer than the window is not emptied. Results that are not Rust compilations
-are not affected.
+longer than the window is not emptied. Results that are not Rust compilations,
+and results a pending grouped CI export still needs, are not affected.
 
 Use time is the result file's access time where the filesystem records it,
 otherwise its modification time. Mounts with `noatime` therefore see only

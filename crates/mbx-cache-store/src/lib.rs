@@ -1897,6 +1897,12 @@ fn stale_compilers_pass(
             kept_actions.extend(results.into_iter().map(|r| r.action));
         }
     }
+    // A grouped CI export deliberately retains its actions until the post-job
+    // step runs, whatever compiler made them. Those are never stale.
+    let pending = grouped_receipt_actions(store)?;
+    let (pinned, stale): (Vec<_>, Vec<_>) =
+        stale.into_iter().partition(|r| pending.contains(&r.action));
+    kept_actions.extend(pinned.into_iter().map(|r| r.action));
     let mut planned = HashSet::new();
     if stale.is_empty() {
         return Ok((outcome, planned));

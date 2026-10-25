@@ -2723,3 +2723,30 @@ fn a_dry_run_counts_the_stale_pass_and_the_budget_sweep_once() {
         stale.removed_objects + budget.removed_objects
     );
 }
+
+#[test]
+fn a_pending_grouped_export_keeps_its_stale_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let (old, old_output) = store_rustc_result(dir.path(), "rustc 1.80.0", b"old output");
+    let (_, _) = store_rustc_result(dir.path(), "rustc 1.90.0", b"new output");
+    age_result(dir.path(), &old, 100 * DAY);
+    record_build_in_group(
+        dir.path(),
+        &"a".repeat(64),
+        workspace.path(),
+        std::slice::from_ref(&old),
+        Some("ci-job"),
+    );
+
+    let outcome = gc_stale_compilers(dir.path(), 90 * DAY, false).unwrap();
+
+    assert_eq!(outcome.removed_action_results, 0);
+    assert!(read_action_result(dir.path(), &old).is_some());
+    assert!(
+        LocalCas::new(dir.path())
+            .path_for(&old_output)
+            .unwrap()
+            .exists()
+    );
+}
