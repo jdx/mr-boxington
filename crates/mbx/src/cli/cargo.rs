@@ -391,6 +391,7 @@ fn cargo_with_settings_bypass_log_and_roots(
         mark_explained(&config.store_dir());
     }
 
+    let _interrupt = SurviveInterrupt::install();
     let session_dir = tempfile::Builder::new().prefix("mbx-session-").tempdir()?;
     let launch = super::launch::Launch::prepare(arguments, session_dir.path())?;
     let test_runner = super::test_runner::TestRunner::prepare(
@@ -1093,8 +1094,6 @@ pub(super) fn run_cargo(
     let mut command = Command::new(cargo);
     command.args(arguments);
     command.envs(environment);
-    #[cfg(windows)]
-    let _interrupt = SurviveInterrupt::install();
     let status = command
         .status()
         .wrap_err_with(|| format!("failed to run {}", cargo.to_string_lossy()))?;
@@ -1103,15 +1102,23 @@ pub(super) fn run_cargo(
 
 /// Windows ends a process that receives Ctrl+C through `ExitProcess`, which
 /// skips destructors, so an interrupted build would leave its session
-/// directory in the temp directory for good. The child shares the console and
-/// still receives the event; mbx only has to outlive it to clean up and report
-/// the child's exit code.
-#[cfg(windows)]
-struct SurviveInterrupt;
+/// directory in the temp directory for good. Held from the session
+/// directory's creation until it is removed, so setup and the wait for cache
+/// uploads are covered too. The child shares the console and still receives
+/// the event; mbx only has to outlive it to clean up and report the child's
+/// exit code. Elsewhere the default signal handling is kept.
+pub(super) struct SurviveInterrupt;
+
+#[cfg(not(windows))]
+impl SurviveInterrupt {
+    pub(super) fn install() -> Self {
+        Self
+    }
+}
 
 #[cfg(windows)]
 impl SurviveInterrupt {
-    fn install() -> Self {
+    pub(super) fn install() -> Self {
         use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
         // SAFETY: the handler only reads its argument. A handler routine, not
         // the null "ignore" form, because only the null form is inherited and
