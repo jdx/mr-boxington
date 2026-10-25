@@ -9,6 +9,7 @@ fn combined_budget_respects_component_caps_and_occupied_reserves() {
         target_max_age: None,
         incremental_max_bytes: Some(20),
         incremental_max_age: None,
+        rustc_max_age: None,
         max_total_bytes: Some(100),
         target_precedence: Default::default(),
         min_free: None,
@@ -191,6 +192,7 @@ fn always_short() -> RetentionSettings {
         target_max_age: None,
         incremental_max_bytes: None,
         incremental_max_age: None,
+        rustc_max_age: None,
         max_total_bytes: None,
         min_free: Some(crate::config::MinFree::Bytes(u64::MAX / 2)),
         target_precedence: Default::default(),
@@ -653,6 +655,7 @@ fn generated_trees_get_a_bounded_first_share_despite_busy_incremental_state() {
         let mut retention = RetentionSettings {
             incremental_max_bytes: Some(100),
             incremental_max_age: None,
+            rustc_max_age: None,
             target_max_bytes: None,
             target_max_age: None,
             min_free: None,

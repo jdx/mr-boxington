@@ -211,6 +211,16 @@ Free space to keep on the disks that hold the cache directory and managed target
 
 Below it, sweeps run more often and collect private state, generated source trees, managed targets, and shared store objects past their budgets to free the shortfall. Active state and explicitly kept targets stay, so the disk can remain short.
 
+### `gc.rustc_max_age`
+
+- **Type:** `duration`
+- **Default:** `none`
+- **Set with:** `MBX_GC_RUSTC_MAX_AGE`
+
+Collect cached Rust compilations for compiler versions unused this long, or `"none"`.
+
+A new compiler cannot reuse what an older one cached. A version counts as in use while any of its cached results was used within this window, and the sweep removes the results of the others along with the objects only they need. The most recently used version is always kept. Off by default; `"90d"` suits a machine that upgrades Rust now and then.
+
 ### `http.download_timeout`
 
 - **Type:** `duration`

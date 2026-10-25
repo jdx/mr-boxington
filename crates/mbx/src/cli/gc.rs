@@ -177,11 +177,13 @@ pub(super) fn run(
         crate::scheduler::prune_flights(&config.cache_dir);
         crate::scheduler::prune_test_history(&config.cache_dir);
     }
+    let stale = stale_compilers(&store, retention, dry_run);
     let outcome = if dry_run {
         store::gc_dry_run(&store, store_budget)
     } else {
         store::gc(&store, store_budget)
-    };
+    }
+    .map(|outcome| with_stale_compilers(stale, outcome));
     // Independent collections: a broken action store must not prevent the
     // command from freeing the usually much larger target directories.
     let outcome = match outcome {
@@ -637,6 +639,29 @@ pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool
 ///
 /// Shared so the explicit command and the automatic sweep cannot drift into
 /// describing the same outcome two different ways.
+/// Drop the results of compiler versions `gc.rustc_max_age` has aged out.
+///
+/// Failure is logged and forgotten: the budget sweep that follows is the
+/// store's main collection and must still run.
+fn stale_compilers(store: &Path, retention: &RetentionSettings, dry_run: bool) -> store::GcOutcome {
+    let Some(max_age) = retention.rustc_max_age else {
+        return store::GcOutcome::default();
+    };
+    store::gc_stale_compilers(store, max_age, dry_run).unwrap_or_else(|error| {
+        log::warn!("stale compiler versions were not collected: {error}");
+        store::GcOutcome::default()
+    })
+}
+
+/// Fold the budget sweep's outcome into the stale-compiler pass that ran first.
+fn with_stale_compilers(
+    mut stale: store::GcOutcome,
+    outcome: store::GcOutcome,
+) -> store::GcOutcome {
+    add_gc_outcome(&mut stale, outcome);
+    stale
+}
+
 pub(super) fn evictions(outcome: &store::GcOutcome) -> String {
     format!(
         "evicted {} objects and {} action results ({} logical); {} logical remain",
@@ -704,11 +729,12 @@ fn run_sweep_body(config: &Config, retention: &RetentionSettings) -> Sweep {
     let store_budget = store_budget(retention, config.gc.max_bytes, non_store_bytes);
     crate::scheduler::prune_flights(&config.cache_dir);
     crate::scheduler::prune_test_history(&config.cache_dir);
+    let stale = stale_compilers(&config.store_dir(), retention, false);
     let outcome = match store::gc(&config.store_dir(), store_budget) {
-        Ok(outcome) => outcome,
+        Ok(outcome) => with_stale_compilers(stale, outcome),
         Err(error) => {
             log::warn!("the store was not swept: {error}");
-            store::GcOutcome::default()
+            with_stale_compilers(stale, store::GcOutcome::default())
         }
     };
     sweep.delta.freed_store_bytes = outcome.removed_bytes;

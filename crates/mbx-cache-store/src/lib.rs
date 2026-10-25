@@ -1804,6 +1804,102 @@ fn gc_with_mode(store: &Path, max_bytes: u64, dry_run: bool) -> Result<GcOutcome
     Ok(outcome)
 }
 
+/// Drop cached compilations for Rust compiler versions that have gone unused.
+///
+/// A new compiler never reuses what an older one cached, so after an upgrade
+/// the old version's results only occupy disk. Each action result is
+/// attributed to the compiler version recorded in its action descriptor. A
+/// version counts as in use while any of its results was used within
+/// `max_age`; the rest are removed together with the objects only they
+/// reach. The most recently used version is always kept, so a store that has
+/// sat idle for longer than `max_age` is not emptied wholesale.
+///
+/// Results that cannot be attributed (other languages' actions, unreadable
+/// descriptors) are never touched. Use is read from the result file's access
+/// time where the filesystem records it, else its modification time.
+pub fn gc_stale_compilers(store: &Path, max_age: Duration, dry_run: bool) -> Result<GcOutcome> {
+    struct Attributed {
+        entry: Entry,
+        action: CacheDigest,
+    }
+
+    let cas = LocalCas::new(store);
+    let mut by_version: BTreeMap<String, Vec<Attributed>> = BTreeMap::new();
+    let mut unattributed = Vec::new();
+    for entry in walk_files(&store.join(ACTION_RESULTS_DIR))? {
+        let result = std::fs::read(&entry.path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<RemoteActionResult>(&bytes).ok());
+        let Some(result) = result else {
+            continue;
+        };
+        match rustc_version_of(&cas, &result.action) {
+            Some(version) => by_version.entry(version).or_default().push(Attributed {
+                entry,
+                action: result.action,
+            }),
+            None => unattributed.push(result.action),
+        }
+    }
+
+    let last_used = |results: &[Attributed]| results.iter().map(|r| r.entry.used).max();
+    let newest = by_version
+        .iter()
+        .max_by_key(|(_, results)| last_used(results))
+        .map(|(version, _)| version.clone());
+    let cutoff = SystemTime::now()
+        .checked_sub(max_age)
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut outcome = GcOutcome::default();
+    let mut stale = Vec::new();
+    let mut kept_actions = unattributed;
+    for (version, results) in by_version {
+        let idle = last_used(&results).is_some_and(|used| used < cutoff);
+        if idle && Some(&version) != newest.as_ref() {
+            stale.extend(results);
+        } else {
+            kept_actions.extend(results.into_iter().map(|r| r.action));
+        }
+    }
+    if stale.is_empty() {
+        return Ok(outcome);
+    }
+
+    let doomed = rooted_action_objects(store, stale.iter().map(|r| r.action.clone()));
+    let kept = rooted_action_objects(store, kept_actions);
+    for result in &stale {
+        if dry_run || matches!(remove(&result.entry.path)?, Removal::Removed) {
+            outcome.removed_action_results += 1;
+            outcome.removed_bytes += result.entry.size;
+        }
+    }
+    for path in doomed.difference(&kept) {
+        let Ok(metadata) = std::fs::metadata(path) else {
+            continue;
+        };
+        if dry_run || matches!(remove(path)?, Removal::Removed) {
+            outcome.removed_objects += 1;
+            outcome.removed_bytes += metadata.len();
+        }
+    }
+    Ok(outcome)
+}
+
+/// The compiler version a rustc action descriptor was keyed under.
+fn rustc_version_of(cas: &LocalCas, action: &CacheDigest) -> Option<String> {
+    let bytes = std::fs::read(cas.path_for(action).ok()?).ok()?;
+    let descriptor: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    if descriptor.get("kind")?.as_str()? != "rustc" {
+        return None;
+    }
+    Some(
+        descriptor
+            .pointer("/compiler/rustc_version")?
+            .as_str()?
+            .to_owned(),
+    )
+}
+
 /// Discard import staging trees that a killed process left behind.
 ///
 /// A finished import removes its own tree, and a failed one unwinds through

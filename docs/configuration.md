@@ -67,6 +67,7 @@ accept values such as `30s`, `15m`, `1h`, and `30d`.
 | Leave capacity for your editor | `mbx settings set scheduler.reserve_cpus 2`; [parallel builds](/scheduling) |
 | Set one budget for cached build data | `mbx settings set gc.max_total_size 50GiB`; [single cache budget](#single-cache-budget) |
 | Keep the action store under a fixed size | `mbx settings set gc.max_size 20GiB` |
+| Drop cached results of Rust versions you stopped using | `mbx settings set gc.rustc_max_age 90d`; [old compiler versions](#old-compiler-versions) |
 | Keep live targets longer | `mbx settings set target.max_age 60d`; [managed target directories](/managed-targets#collection) |
 | Collect agent worktrees' targets first | `mbx settings set target.evict_first .claude/worktrees`; [managed targets](/managed-targets#keep-or-evict-specific-checkouts) |
 | Use factual savings messages | `mbx settings set savings plain` |
@@ -210,6 +211,29 @@ cache directory; free-space safeguards still operate per disk. Setting
 [disk-scaled defaults](/managed-targets#budgets-scale-with-the-disk) for any
 component without an explicit limit.
 
+### Old compiler versions {#old-compiler-versions}
+
+A new Rust release cannot reuse what an older one cached, so after an upgrade
+the previous version's results only take up space until the size budget evicts
+them. `gc.rustc_max_age` removes them sooner:
+
+```sh
+mbx settings set gc.rustc_max_age 90d   # or none, the default
+```
+
+Each cached compilation is attributed to the exact compiler build it was made
+with, including nightlies. A version counts as in use while any of its results
+was restored or written within the window. The sweep, and `mbx gc`, remove the
+results of every other version together with the objects only those results
+need. The most recently used version is always kept, so a store left idle for
+longer than the window is not emptied. Results that are not Rust compilations
+are not affected.
+
+Use time is the result file's access time where the filesystem records it,
+otherwise its modification time. Mounts with `noatime` therefore see only
+writes, so choose a window longer than you go between building a project and
+rebuilding it. `mbx gc --dry-run` shows what a window would remove.
+
 <span id="disk-scaled-defaults"></span>
 
 ## Example global configuration {#example}
@@ -253,6 +277,7 @@ auto = true
 max_size = "20GiB"       # default: 5% of the cache disk
 incremental_max_size = "20GiB" # default: 5% of the cache disk
 incremental_max_age = "30d"    # default
+rustc_max_age = "90d"    # optional, off by default
 max_total_size = "50GiB" # optional combined budget
 min_free_size = "20GiB"  # default: 10% of each disk
 interval = "1h"

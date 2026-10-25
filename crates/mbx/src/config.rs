@@ -647,6 +647,16 @@ struct RawGc {
     /// Collect learned incremental units unused this long, or `"none"`.
     #[usage(env = "MBX_GC_INCREMENTAL_MAX_AGE", default = "30d", ty = "duration")]
     incremental_max_age: String,
+    /// Collect cached Rust compilations for compiler versions unused this
+    /// long, or `"none"`.
+    ///
+    /// A new compiler cannot reuse what an older one cached. A version counts
+    /// as in use while any of its cached results was used within this
+    /// window, and the sweep removes the results of the others along with the
+    /// objects only they need. The most recently used version is always kept.
+    /// Off by default; `"90d"` suits a machine that upgrades Rust now and then.
+    #[usage(env = "MBX_GC_RUSTC_MAX_AGE", default = "none", ty = "duration")]
+    rustc_max_age: String,
     /// Free space to keep on the disks that hold the cache directory and
     /// managed targets, or `"none"`.
     ///
@@ -986,6 +996,9 @@ pub(crate) struct RetentionSettings {
     pub target_max_age: Option<Duration>,
     pub incremental_max_bytes: Option<u64>,
     pub incremental_max_age: Option<Duration>,
+    /// Age past which a compiler version's cached results are collected;
+    /// `None` never does.
+    pub rustc_max_age: Option<Duration>,
     pub max_total_bytes: Option<u64>,
     /// Checkouts whose targets `target.keep` and `target.evict_first` set apart.
     pub target_precedence: crate::target::Precedence,
@@ -1147,6 +1160,7 @@ impl Default for RetentionSettings {
             target_max_age: Some(DEFAULT_TARGET_MAX_AGE),
             incremental_max_bytes: Some(INCREMENTAL_BUDGET.fallback),
             incremental_max_age: Some(DEFAULT_TARGET_MAX_AGE),
+            rustc_max_age: None,
             max_total_bytes: None,
             target_precedence: crate::target::Precedence::default(),
             // Off, unlike the configured default: whether a disk is short
@@ -1355,6 +1369,8 @@ impl Config {
             }),
             incremental_max_age: parse_optional_duration(&raw.gc.incremental_max_age)
                 .wrap_err(Invalid("gc.incremental_max_age"))?,
+            rustc_max_age: parse_optional_duration(&raw.gc.rustc_max_age)
+                .wrap_err(Invalid("gc.rustc_max_age"))?,
             max_total_bytes: total_budget,
             target_precedence: crate::target::Precedence {
                 keep: checkout_patterns(raw.target.keep.as_deref(), dirs::home_dir())
@@ -2447,6 +2463,24 @@ mod tests {
         assert!(
             message.contains("cannot be disabled"),
             "the error should say why rather than blame a float: {message}"
+        );
+    }
+
+    #[test]
+    fn compiler_version_collection_is_off_until_configured() {
+        let (_, retention) = configured_retention(None, &[]).unwrap();
+        assert_eq!(retention.rustc_max_age, None);
+        let (_, retention) =
+            configured_retention(Some("[gc]\nrustc_max_age = \"90d\""), &[]).unwrap();
+        assert_eq!(
+            retention.rustc_max_age,
+            Some(Duration::from_secs(90 * 86_400))
+        );
+        let (_, retention) =
+            configured_retention(None, &[("MBX_GC_RUSTC_MAX_AGE", "30d")]).unwrap();
+        assert_eq!(
+            retention.rustc_max_age,
+            Some(Duration::from_secs(30 * 86_400))
         );
     }
 
