@@ -527,7 +527,11 @@ fn cargo_with_settings_bypass_log_and_roots(
         } else {
             arguments
         };
-        let status = if !settings.plain_output && super::pretty::enabled(arguments) {
+        // Checked before choosing a runner: the pretty and plain-progress
+        // runners spawn Cargo themselves and would not reach run_cargo's check.
+        let status = if interrupted() {
+            Ok(ExitCode::from(INTERRUPTED_EXIT_CODE))
+        } else if !settings.plain_output && super::pretty::enabled(arguments) {
             match super::pretty::run(&cargo, cargo_arguments, &environment, settings.pretty_inspect, || session.progress_stats()) {
                 Ok(Some(status)) => Ok(status),
                 Ok(None) => run_cargo(&cargo, cargo_arguments, environment),
