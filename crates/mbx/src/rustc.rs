@@ -451,6 +451,11 @@ pub(crate) fn compile(
                 return Ok(ExitCode::SUCCESS);
             }
             Ok(None) => {}
+            Err(error) if is_missing_compiler_input(&error) => {
+                session::report_shim_debug(&format!(
+                    "a flight prediction was not restored: {error:#}"
+                ));
+            }
             Err(error) => {
                 session::report_shim_warning(&format!(
                     "a flight prediction was not restored: {error:#}"
@@ -509,6 +514,11 @@ pub(crate) fn compile(
                             return Ok(ExitCode::SUCCESS);
                         }
                         Ok(None) => {}
+                        Err(error) if is_missing_compiler_input(&error) => {
+                            session::report_shim_debug(&format!(
+                                "a remote flight prediction was not restored: {error:#}"
+                            ));
+                        }
                         Err(error) => session::report_shim_warning(&format!(
                             "a remote flight prediction was not restored: {error:#}"
                         )),
