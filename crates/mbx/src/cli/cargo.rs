@@ -1091,6 +1091,11 @@ pub(super) fn run_cargo(
     arguments: &[impl AsRef<std::ffi::OsStr>],
     environment: BTreeMap<String, String>,
 ) -> Result<ExitCode> {
+    // An interrupt swallowed during setup still cancels the command: the
+    // session is torn down and the command never starts.
+    if interrupted() {
+        return Ok(ExitCode::from(INTERRUPTED_EXIT_CODE));
+    }
     let mut command = Command::new(cargo);
     command.args(arguments);
     command.envs(environment);
@@ -1109,6 +1114,21 @@ pub(super) fn run_cargo(
 /// exit code. Elsewhere the default signal handling is kept.
 pub(super) struct SurviveInterrupt;
 
+/// The conventional exit code for a command ended by Ctrl+C.
+const INTERRUPTED_EXIT_CODE: u8 = 130;
+
+#[cfg(windows)]
+static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether Ctrl+C or Ctrl+Break arrived while a [`SurviveInterrupt`] guard was
+/// held.
+fn interrupted() -> bool {
+    #[cfg(windows)]
+    return INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst);
+    #[cfg(not(windows))]
+    false
+}
+
 #[cfg(not(windows))]
 impl SurviveInterrupt {
     pub(super) fn install() -> Self {
@@ -1120,7 +1140,8 @@ impl SurviveInterrupt {
 impl SurviveInterrupt {
     pub(super) fn install() -> Self {
         use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
-        // SAFETY: the handler only reads its argument. A handler routine, not
+        INTERRUPTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        // SAFETY: the handler only stores to an atomic. A handler routine, not
         // the null "ignore" form, because only the null form is inherited and
         // the child must keep its default Ctrl+C behavior.
         unsafe { SetConsoleCtrlHandler(Some(swallow_interrupt), 1) };
@@ -1140,7 +1161,12 @@ impl Drop for SurviveInterrupt {
 #[cfg(windows)]
 unsafe extern "system" fn swallow_interrupt(control: u32) -> i32 {
     use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT};
-    i32::from(control == CTRL_C_EVENT || control == CTRL_BREAK_EVENT)
+    if control == CTRL_C_EVENT || control == CTRL_BREAK_EVENT {
+        INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        1
+    } else {
+        0
+    }
 }
 
 /// Cargo's quiet flag applies to mbx's build summary as well as Cargo's own
