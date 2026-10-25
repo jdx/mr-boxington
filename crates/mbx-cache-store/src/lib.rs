@@ -1947,7 +1947,7 @@ fn stale_compilers_pass(
     Ok((outcome, planned))
 }
 
-/// Read an action result without advancing the access time sweeps treat as use.
+/// Read a cache file without advancing the access time sweeps treat as use.
 ///
 /// Maintenance passes read every result. Where the filesystem records access
 /// times, that would make each sweep look like a use and an idle compiler
@@ -1979,7 +1979,7 @@ fn read_result_untouched(path: &Path) -> std::io::Result<Vec<u8>> {
 
 /// The compiler version a rustc action descriptor was keyed under.
 fn rustc_version_of(cas: &LocalCas, action: &CacheDigest) -> Option<String> {
-    let bytes = std::fs::read(cas.path_for(action).ok()?).ok()?;
+    let bytes = read_result_untouched(&cas.path_for(action).ok()?).ok()?;
     let descriptor: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     if descriptor.get("kind")?.as_str()? != "rustc" {
         return None;
