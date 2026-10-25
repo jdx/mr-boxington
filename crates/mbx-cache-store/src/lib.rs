@@ -1790,7 +1790,11 @@ fn gc_with_mode(
     // Walking each result's output tree costs a read per tree blob and a stat
     // per file, so it is done only when this sweep evicted something. That is
     // the moment a tree can have lost a file while its own object survived.
-    let walk_trees = outcome.removed_objects > 0 || !virtually_removed.is_empty();
+    //
+    // Only this call's own evictions count, in a dry run too: objects a stale
+    // pass planned to drop are accounted for by that pass, and a real run has
+    // already deleted them, so neither makes this sweep walk trees.
+    let walk_trees = outcome.removed_objects > 0;
     let cas = LocalCas::new(store);
     let mut trees = HashMap::new();
     for entry in &results {

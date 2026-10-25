@@ -2813,3 +2813,27 @@ fn a_pending_grouped_export_keeps_its_stale_version() {
             .exists()
     );
 }
+
+#[test]
+fn a_dry_run_after_stale_does_not_walk_trees_a_real_run_would_skip() {
+    let dir = tempfile::tempdir().unwrap();
+    let (old, _) = store_rustc_result(dir.path(), "rustc 1.80.0", b"old output");
+    let (_, _) = store_rustc_result(dir.path(), "rustc 1.90.0", b"new output");
+    age_result(dir.path(), &old, 100 * DAY);
+    // A surviving result whose output file is gone, as an interrupted
+    // collection leaves behind.
+    let lost = store_object(dir.path(), b"lost output");
+    let broken = store_result(dir.path(), "broken", std::slice::from_ref(&lost));
+    std::fs::remove_file(LocalCas::new(dir.path()).path_for(&lost).unwrap()).unwrap();
+
+    let preview = gc_dry_run_after_stale(dir.path(), u64::MAX, 90 * DAY).unwrap();
+    let stale = gc_stale_compilers(dir.path(), 90 * DAY, false).unwrap();
+    let real = gc(dir.path(), u64::MAX).unwrap();
+
+    assert_eq!(preview.removed_action_results, 1);
+    assert_eq!(
+        preview.removed_action_results,
+        stale.removed_action_results + real.removed_action_results
+    );
+    assert!(read_action_result(dir.path(), &broken).is_some());
+}

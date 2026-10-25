@@ -745,7 +745,17 @@ fn run_sweep_body(config: &Config, retention: &RetentionSettings) -> Sweep {
         Ok(outcome) => with_stale_compilers(stale, outcome),
         Err(error) => {
             log::warn!("the store was not swept: {error}");
-            with_stale_compilers(stale, store::GcOutcome::default())
+            // The budget sweep did not measure the store, so measure it here
+            // rather than report the empty default as what remains.
+            let remaining =
+                store::stats(&config.store_dir()).map_or(0, |stats| stats.total_bytes());
+            with_stale_compilers(
+                stale,
+                store::GcOutcome {
+                    remaining_bytes: remaining,
+                    ..store::GcOutcome::default()
+                },
+            )
         }
     };
     sweep.delta.freed_store_bytes = outcome.removed_bytes;
