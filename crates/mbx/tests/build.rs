@@ -200,6 +200,22 @@ fn find_files(root: &Path, matches: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
     found
 }
 
+/// Whether a build wrote the fixture's rlib under `profile_dir` (`target/debug`).
+///
+/// Cargo used to copy a library's rlib up to `<profile>/lib<name>.rlib`; recent
+/// nightlies leave it with the unit's other outputs, wherever that layout puts
+/// them. Searching for it keeps a test about "the build wrote its output" from
+/// depending on which Cargo ran.
+fn fixture_rlib_exists(profile_dir: &Path) -> bool {
+    !find_files(profile_dir, |path| {
+        file_name_is(path, |name| {
+            name == "libfixture.rlib"
+                || (name.starts_with("libfixture-") && name.ends_with(".rlib"))
+        })
+    })
+    .is_empty()
+}
+
 /// Whether `path`'s file name satisfies `matches`.
 fn file_name_is(path: &Path, matches: impl FnOnce(&str) -> bool) -> bool {
     path.file_name()
@@ -2975,7 +2991,7 @@ fn restores_a_wiped_target_directory_from_the_store() {
     // A hit that never lands on disk is still a broken restore, so check the
     // artifact itself rather than trusting the counter.
     assert!(
-        project.path().join("target/debug/libfixture.rlib").exists(),
+        fixture_rlib_exists(&project.path().join("target/debug")),
         "the restored artifact should be materialized: {warm}"
     );
     assert_eq!(
@@ -4013,7 +4029,7 @@ fn build_script_watching_compiler_outputs_keeps_successful_results() {
                 &["build", "--offline"],
                 &[("MBX_INCREMENTAL", "0"), ("CARGO_TARGET_DIR", target_name)],
             );
-            assert!(target.join("debug/libfixture.rlib").is_file());
+            assert!(fixture_rlib_exists(&target.join("debug")));
             assert!(
                 stats["bypasses"]["build-script-input-overlaps-outputs"]
                     .as_u64()
@@ -5271,7 +5287,7 @@ mod target_views {
         // The link is the point: a relocation that breaks the paths people type
         // would not be worth the disk it reclaims.
         assert!(
-            project.path().join("target/debug/libfixture.rlib").exists(),
+            fixture_rlib_exists(&project.path().join("target/debug")),
             "the workspace should still reach its own build outputs"
         );
     }
@@ -5354,7 +5370,7 @@ mod target_views {
                 &settings,
             );
             assert!(
-                project.path().join("target/debug/libfixture.rlib").exists(),
+                fixture_rlib_exists(&project.path().join("target/debug")),
                 "a build should still write where builds have always written"
             );
         }
@@ -6407,7 +6423,7 @@ mod target_views {
         );
         assert!(stderr.contains("moved the existing target/ directory"));
         assert!(!stderr.contains("Compiling"), "adoption kept the outputs");
-        assert!(project.path().join("target/debug/libfixture.rlib").exists());
+        assert!(fixture_rlib_exists(&project.path().join("target/debug")));
     }
 
     #[test]
@@ -6435,7 +6451,7 @@ mod target_views {
             std::fs::read_link(project.path().join("target")).is_err(),
             "CI outputs stay where the cache step expects them"
         );
-        assert!(project.path().join("target/debug/libfixture.rlib").exists());
+        assert!(fixture_rlib_exists(&project.path().join("target/debug")));
     }
 }
 
