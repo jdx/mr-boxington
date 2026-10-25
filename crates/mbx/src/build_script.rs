@@ -1670,48 +1670,99 @@ fn cargo_environment(mappings: &[PathMapping]) -> BTreeMap<String, Option<String
         .collect()
 }
 
-fn restore_directory(digest: &CacheDigest, destination: &Path) -> Result<(u64, u64)> {
-    let path = find_blobs(std::slice::from_ref(digest))?.remove(0);
-    let directory: CacheDirectory =
-        read_canonical_blob(&path, digest, "build-script output directory")?;
-    if directory.version != 1 {
-        bail!("cached build-script output directory is unsupported");
-    }
-    std::fs::create_dir_all(destination)?;
-    let mut count = 0_u64;
-    let mut bytes = 0_u64;
-    for node in directory.files {
-        validate_name(&node.name)?;
-        validate_file_mode(&node, node.executable)?;
-        let source = find_blobs(std::slice::from_ref(&node.digest))?.remove(0);
-        let target = destination.join(&node.name);
-        if std::fs::copy(&source, &target)? != node.digest.size {
-            bail!("restored build-script output has the wrong size");
+/// Copies run at once while restoring one OUT_DIR. Each copy is cheap on its
+/// own, but where an on-access scanner holds every new file it is the wait
+/// that dominates, and that overlaps.
+const MAX_RESTORE_COPIES: usize = 8;
+
+fn restore_directory(root: &CacheDigest, destination: &Path) -> Result<(u64, u64)> {
+    // Directory records are looked up one tree level per request, and every
+    // file's contents in one more, so a wide OUT_DIR costs a few round trips
+    // rather than one per file.
+    let mut files = Vec::new();
+    let mut symlinks = Vec::new();
+    let mut level = vec![(root.clone(), destination.to_path_buf())];
+    while !level.is_empty() {
+        let digests = level
+            .iter()
+            .map(|(digest, _)| digest.clone())
+            .collect::<Vec<_>>();
+        let paths = find_blobs(&digests)?;
+        let mut next = Vec::new();
+        for ((digest, destination), path) in level.into_iter().zip(paths) {
+            let directory: CacheDirectory =
+                read_canonical_blob(&path, &digest, "build-script output directory")?;
+            if directory.version != 1 {
+                bail!("cached build-script output directory is unsupported");
+            }
+            std::fs::create_dir_all(&destination)?;
+            for node in directory.files {
+                validate_name(&node.name)?;
+                validate_file_mode(&node, node.executable)?;
+                let target = destination.join(&node.name);
+                files.push((node, target));
+            }
+            for node in directory.directories {
+                validate_name(&node.name)?;
+                next.push((node.digest, destination.join(node.name)));
+            }
+            for node in directory.symlinks {
+                validate_name(&node.name)?;
+                let target = Path::new(&node.target);
+                if target.is_absolute()
+                    || target
+                        .components()
+                        .any(|component| matches!(component, std::path::Component::ParentDir))
+                {
+                    bail!("cached build-script output has an unsafe symlink");
+                }
+                symlinks.push((node.target, destination.join(node.name)));
+            }
         }
-        apply_file_mode(&target, node.mode, node.executable)?;
-        count = count.saturating_add(1);
-        bytes = bytes.saturating_add(node.digest.size);
+        level = next;
     }
-    for node in directory.directories {
-        validate_name(&node.name)?;
-        let (child_count, child_bytes) =
-            restore_directory(&node.digest, &destination.join(node.name))?;
-        count = count.saturating_add(child_count);
-        bytes = bytes.saturating_add(child_bytes);
+    let sources = if files.is_empty() {
+        Vec::new()
+    } else {
+        find_blobs(&files.iter().map(|(node, _)| node.digest.clone()).collect::<Vec<_>>())?
+    };
+    copy_restored_files(&files, &sources)?;
+    for (target, link) in symlinks {
+        restore_symlink(&target, &link)?;
     }
-    for node in directory.symlinks {
-        validate_name(&node.name)?;
-        let target = Path::new(&node.target);
-        if target.is_absolute()
-            || target
-                .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
-        {
-            bail!("cached build-script output has an unsafe symlink");
+    let bytes = files
+        .iter()
+        .fold(0_u64, |bytes, (node, _)| bytes.saturating_add(node.digest.size));
+    Ok((files.len() as u64, bytes))
+}
+
+fn copy_restored_files(files: &[(CacheFileNode, PathBuf)], sources: &[PathBuf]) -> Result<()> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let copy = || -> Result<()> {
+        loop {
+            let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let (Some((node, target)), Some(source)) = (files.get(index), sources.get(index))
+            else {
+                return Ok(());
+            };
+            if std::fs::copy(source, target)? != node.digest.size {
+                bail!("restored build-script output has the wrong size");
+            }
+            apply_file_mode(target, node.mode, node.executable)?;
         }
-        restore_symlink(&node.target, &destination.join(node.name))?;
+    };
+    let workers = files.len().min(MAX_RESTORE_COPIES);
+    if workers <= 1 {
+        return copy();
     }
-    Ok((count, bytes))
+    std::thread::scope(|scope| {
+        let handles = (0..workers)
+            .map(|_| scope.spawn(copy))
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .try_for_each(|handle| handle.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
+    })
 }
 
 fn validate_name(name: &str) -> Result<()> {

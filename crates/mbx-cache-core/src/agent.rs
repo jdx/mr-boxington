@@ -95,6 +95,10 @@ const MAX_FILE_DIGEST_ENTRIES: usize = 1024 * 1024;
 /// Distinct cold file reads allowed at once. Identical reads coalesce before
 /// this limit, while the limit prevents a wide cold build from flooding NFS.
 const MAX_CONCURRENT_FILE_DIGESTS: usize = 8;
+/// Blobs a session reads for verification at once, across every request.
+/// High enough to overlap the per-file stalls of an on-access scanner, low
+/// enough that the blocking threads stay a small fixed number.
+const MAX_CONCURRENT_BLOB_VERIFICATIONS: usize = 16;
 const MAX_REMOTE_TRANSFERS: usize = 64;
 const MAX_PREFETCH_TRANSFERS: usize = 48;
 /// Most blob packs downloaded at once.
@@ -382,6 +386,7 @@ pub struct CacheAgent {
     /// Per-identity flights that make concurrent cold lookups share one read.
     file_digest_locks: Arc<Mutex<FileDigestFlights>>,
     file_digest_permits: Arc<tokio::sync::Semaphore>,
+    blob_verification_permits: Arc<tokio::sync::Semaphore>,
     #[cfg(test)]
     file_digest_reads: Arc<AtomicU64>,
     /// Deferred remote publication, present only when the session may write.
@@ -488,6 +493,23 @@ fn file_object(metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
 #[cfg(not(unix))]
 fn file_object(_metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
     None
+}
+
+/// Find a stored blob and hash it in full.
+fn find_stored_blob(cas: &LocalCas, digest: &CacheDigest) -> Option<PathBuf> {
+    // Blobs are published by rename without an fsync, so a crash can leave
+    // one torn under a valid name. It is not restored from, and it is not an
+    // error either: the compilation runs again and its publication replaces
+    // the bad bytes, the same way a blob that was never stored gets there.
+    // Reporting it as a failure would surface a warning for a build that is
+    // behaving correctly.
+    cas.find(digest).unwrap_or_else(|error| {
+        warn!(
+            "local CAS blob {} is not restorable and will be republished: {error}",
+            digest.hash
+        );
+        None
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -906,6 +928,9 @@ impl CacheAgent {
             file_digests: Arc::new(Mutex::new(BTreeMap::new())),
             file_digest_locks: Arc::new(Mutex::new(BTreeMap::new())),
             file_digest_permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FILE_DIGESTS)),
+            blob_verification_permits: Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_BLOB_VERIFICATIONS,
+            )),
             #[cfg(test)]
             file_digest_reads: Arc::new(AtomicU64::new(0)),
             uploads,
@@ -2173,15 +2198,33 @@ impl CacheAgent {
 
     async fn find_blobs(&self, digests: Vec<CacheDigest>) -> Result<AgentResponse> {
         let mut paths = BTreeMap::new();
-        let mut missing = Vec::new();
+        let mut cold = BTreeSet::new();
         for digest in &digests {
-            match self.find_verified_blob(digest)? {
+            match self.find_remembered_blob(digest) {
                 Some(path) => {
                     paths.insert(digest.clone(), path);
                 }
                 None => {
-                    missing.push(digest.clone());
+                    cold.insert(digest.clone());
                 }
+            }
+        }
+        // Verifying a blob reads it in full, and the first open of a file can
+        // stall far longer than its size explains: an on-access malware
+        // scanner holds each one for seconds. One after another, a request for
+        // hundreds of small files would wait out every scan in turn.
+        let verified = stream::iter(cold)
+            .map(|digest| self.verify_cold_blob(digest))
+            .buffered(MAX_CONCURRENT_BLOB_VERIFICATIONS)
+            .collect::<Vec<_>>()
+            .await;
+        let mut missing = Vec::new();
+        for verified in verified {
+            match verified? {
+                (digest, Some(path)) => {
+                    paths.insert(digest, path);
+                }
+                (digest, None) => missing.push(digest),
             }
         }
 
@@ -2232,6 +2275,31 @@ impl CacheAgent {
     }
 
     fn find_verified_blob(&self, digest: &CacheDigest) -> Result<Option<PathBuf>> {
+        if let Some(path) = self.find_remembered_blob(digest) {
+            return Ok(Some(path));
+        }
+        let path = find_stored_blob(&self.cas, digest);
+        if let Some(path) = &path {
+            self.remember_verified_blob(digest, path);
+        }
+        Ok(path)
+    }
+
+    /// Verify a blob this session has not read yet off the async workers, so
+    /// a slow read holds up neither other connections nor the rest of its own
+    /// request.
+    async fn verify_cold_blob(&self, digest: CacheDigest) -> Result<(CacheDigest, Option<PathBuf>)> {
+        let _permit = self.blob_verification_permits.acquire().await?;
+        let cas = self.cas.clone();
+        let lookup = digest.clone();
+        let path = tokio::task::spawn_blocking(move || find_stored_blob(&cas, &lookup)).await?;
+        if let Some(path) = &path {
+            self.remember_verified_blob(&digest, path);
+        }
+        Ok((digest, path))
+    }
+
+    fn find_remembered_blob(&self, digest: &CacheDigest) -> Option<PathBuf> {
         let remembered = self.verified_blobs.lock().unwrap().get(digest).cloned();
         if let Some(remembered) = remembered {
             // The contents behind this digest were hashed in full when the
@@ -2245,30 +2313,11 @@ impl CacheAgent {
             // content-derived name -- would go unnoticed until `mbx cache
             // verify` reads the store back in full.
             if remembered.is_unchanged() {
-                return Ok(Some(remembered.path));
+                return Some(remembered.path);
             }
             self.verified_blobs.lock().unwrap().remove(digest);
         }
-        // Blobs are published by rename without an fsync, so a crash can leave
-        // one torn under a valid name. It is not restored from, and it is not
-        // an error either: the compilation runs again and its publication
-        // replaces the bad bytes, the same way a blob that was never stored
-        // gets there. Reporting it as a failure would surface a warning for a
-        // build that is behaving correctly.
-        let path = match self.cas.find(digest) {
-            Ok(path) => path,
-            Err(error) => {
-                warn!(
-                    "local CAS blob {} is not restorable and will be republished: {error}",
-                    digest.hash
-                );
-                return Ok(None);
-            }
-        };
-        if let Some(path) = &path {
-            self.remember_verified_blob(digest, path);
-        }
-        Ok(path)
+        None
     }
 
     fn remember_verified_blob(&self, digest: &CacheDigest, path: &Path) {

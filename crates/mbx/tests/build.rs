@@ -3449,6 +3449,85 @@ fn build_script_execution_and_out_dir_restore_across_checkouts() {
     assert!(count(&warm, "hits") >= 1, "build script should hit: {warm}");
 }
 
+/// An OUT_DIR that is wide and deep, with repeated and empty files, restores
+/// exactly.
+#[test]
+fn build_script_restores_a_wide_nested_out_dir() {
+    const DIRECTORIES: [&str; 5] = ["", "a", "a/b", "a/b/c", "z"];
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    for project in [first.path(), second.path()] {
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"wide-out-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("build.rs"),
+            format!(
+                r#"fn main() {{
+    println!("cargo:rerun-if-changed=build.rs");
+    std::fs::write("ran", "executed").unwrap();
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    for directory in {DIRECTORIES:?} {{
+        let directory = out.join(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("empty"), "").unwrap();
+        for index in 0..12 {{
+            let contents = if index % 4 == 0 {{ "shared\n".to_owned() }} else {{ format!("{{}}{{index}}\n", directory.display()) }};
+            std::fs::write(directory.join(format!("f{{index}}")), contents.replace(&out.display().to_string(), "")).unwrap();
+        }}
+    }}
+}}
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(project.join("src/lib.rs"), "").unwrap();
+        generate_lockfile(project);
+    }
+    let settings = [("MBX_BUILD_SCRIPT_EXECUTION", "1"), ("MBX_CACHE_LINKS", "0")];
+    build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+        &settings,
+    );
+    let (warm, stderr) = build_with(
+        second.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+        &settings,
+    );
+    assert!(first.path().join("ran").exists());
+    assert!(
+        !second.path().join("ran").exists(),
+        "build script executed instead of hitting: {warm}\n{stderr}"
+    );
+
+    let restored = |project: &Path| {
+        let build = project.join("target/debug/build");
+        let marker = find_files(&build, |path| path.ends_with("out/a/b/c/empty"))
+            .into_iter()
+            .next()
+            .expect("the nested OUT_DIR should exist");
+        let out = marker.ancestors().nth(4).unwrap().to_path_buf();
+        find_files(&out, |_| true)
+            .into_iter()
+            .map(|path| {
+                let contents = std::fs::read(&path).unwrap();
+                (path.strip_prefix(&out).unwrap().to_path_buf(), contents)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let published = restored(first.path());
+    assert_eq!(published.len(), DIRECTORIES.len() * 13);
+    assert_eq!(restored(second.path()), published);
+}
+
 /// Canonical OUT_DIR strings in directives must follow the receiving checkout,
 /// even though Cargo's target path names a symlink to a different managed view.
 #[cfg(unix)]

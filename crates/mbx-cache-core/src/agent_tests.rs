@@ -445,6 +445,46 @@ async fn a_lookup_of_a_torn_blob_reports_a_miss_not_an_error() {
     }
 }
 
+/// Blobs verified side by side still answer in request order, whether a
+/// digest was already remembered, is repeated, or is not stored at all, and
+/// every one found is remembered for the next lookup.
+#[tokio::test]
+async fn a_wide_blob_lookup_answers_in_request_order() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    let stored = (0..40)
+        .map(|index| {
+            let bytes = format!("object {index}").into_bytes();
+            let digest = CacheDigest::blake3(&bytes);
+            let path = agent.cas.store_bytes(&digest, &bytes).unwrap();
+            (digest, path)
+        })
+        .collect::<Vec<_>>();
+    assert!(agent.find_verified_blob(&stored[7].0).unwrap().is_some());
+    let absent = CacheDigest::blake3(b"never stored");
+
+    let mut digests = stored
+        .iter()
+        .map(|(digest, _)| digest.clone())
+        .collect::<Vec<_>>();
+    digests.insert(3, absent.clone());
+    digests.push(stored[0].0.clone());
+    let mut expected = stored
+        .iter()
+        .map(|(_, path)| Some(path.clone()))
+        .collect::<Vec<_>>();
+    expected.insert(3, None);
+    expected.push(Some(stored[0].1.clone()));
+
+    match agent.find_blobs(digests).await.unwrap() {
+        AgentResponse::Blobs { paths } => assert_eq!(paths, expected),
+        other => panic!("unexpected response {other:?}"),
+    }
+    let remembered = agent.verified_blobs.lock().unwrap();
+    assert!(stored.iter().all(|(digest, _)| remembered.contains_key(digest)));
+    assert!(!remembered.contains_key(&absent));
+}
+
 /// A remembered blob is revalidated by file identity rather than by rehashing
 /// it, so an overwrite that preserves the length is still caught: writing the
 /// file moves its modification time. The modification time is set explicitly
