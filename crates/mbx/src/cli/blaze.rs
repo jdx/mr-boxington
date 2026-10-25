@@ -72,14 +72,28 @@ pub(super) fn route(
 }
 
 /// The Cargo to run for a call blaze made through `shim`: the one the shim had
-/// selected before routing. `None` for any other call, and for a value that
-/// names the shim's own directory, which would only come back here again.
+/// selected before routing. Both variables are inherited by everything blaze
+/// starts, so the selection applies only while `CARGO` still names the shim,
+/// as blaze set it; a program that names another Cargo keeps its choice.
+/// `None` for any other call, and for a selection in the shim's own directory,
+/// which would only come back here again.
 pub(super) fn returning_cargo(shim: &Path) -> Option<OsString> {
     std::env::var_os(ROUTED_ENV)?;
-    returning_cargo_from(shim, std::env::var_os(RETURN_CARGO_ENV).as_deref())
+    returning_cargo_from(
+        shim,
+        std::env::var_os("CARGO").as_deref(),
+        std::env::var_os(RETURN_CARGO_ENV).as_deref(),
+    )
 }
 
-fn returning_cargo_from(shim: &Path, selected: Option<&OsStr>) -> Option<OsString> {
+fn returning_cargo_from(
+    shim: &Path,
+    cargo: Option<&OsStr>,
+    selected: Option<&OsStr>,
+) -> Option<OsString> {
+    if Path::new(cargo?).parent() != shim.parent() {
+        return None;
+    }
     let selected = Path::new(selected?);
     (selected.is_absolute() && is_executable(selected) && selected.parent() != shim.parent())
         .then(|| selected.as_os_str().to_owned())
@@ -240,18 +254,38 @@ mod tests {
         let selected = tools.join("cargo");
         executable(&shim);
         executable(&selected);
+        let returning = |selected: Option<&OsStr>| {
+            returning_cargo_from(&shim, Some(shim.as_os_str()), selected)
+        };
         assert_eq!(
-            returning_cargo_from(&shim, Some(selected.as_os_str())),
+            returning(Some(selected.as_os_str())),
             Some(selected.clone().into_os_string())
         );
         // Naming the shim again, or nothing usable, leaves the usual search.
-        assert_eq!(returning_cargo_from(&shim, Some(shim.as_os_str())), None);
-        assert_eq!(returning_cargo_from(&shim, Some(OsStr::new("cargo"))), None);
+        assert_eq!(returning(Some(shim.as_os_str())), None);
+        assert_eq!(returning(Some(OsStr::new("cargo"))), None);
+        assert_eq!(returning(Some(tools.join("missing").as_os_str())), None);
+        assert_eq!(returning(None), None);
+    }
+
+    #[test]
+    fn a_program_that_names_another_cargo_keeps_it() {
+        let root = tempfile::tempdir().unwrap();
+        let shim = root.path().join("mbx").join("cargo");
+        let selected = root.path().join("tools").join("cargo");
+        let other = root.path().join("other").join("cargo");
+        for path in [&shim, &selected, &other] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            executable(path);
+        }
         assert_eq!(
-            returning_cargo_from(&shim, Some(tools.join("missing").as_os_str())),
+            returning_cargo_from(&shim, Some(other.as_os_str()), Some(selected.as_os_str())),
             None
         );
-        assert_eq!(returning_cargo_from(&shim, None), None);
+        assert_eq!(
+            returning_cargo_from(&shim, None, Some(selected.as_os_str())),
+            None
+        );
     }
 
     #[test]
