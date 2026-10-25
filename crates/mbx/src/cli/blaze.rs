@@ -68,7 +68,7 @@ pub(super) fn route(
         arguments.join(" "),
         engine.display()
     );
-    Some(run(&engine, shim, real_cargo, arguments))
+    run(&engine, shim, real_cargo, arguments)
 }
 
 /// The Cargo to run for a call blaze made through `shim`: the one the shim had
@@ -147,16 +147,38 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-fn run(engine: &Path, shim: &Path, real_cargo: &OsStr, arguments: &[String]) -> Result<ExitCode> {
-    let status = Command::new(engine)
+/// Run blaze's client for `arguments`. `None` when it could not be started,
+/// such as a `ra-jit` built for another machine: blaze has done nothing yet, so
+/// the command goes to Cargo. A failure once it has started is the build's own.
+fn run(
+    engine: &Path,
+    shim: &Path,
+    real_cargo: &OsStr,
+    arguments: &[String],
+) -> Option<Result<ExitCode>> {
+    let mut child = match Command::new(engine)
         .arg("cargo")
         .args(arguments)
         .env("CARGO", shim)
         .env(RETURN_CARGO_ENV, real_cargo)
         .env(ROUTED_ENV, "1")
-        .status()
-        .wrap_err_with(|| format!("failed to run {}", engine.display()))?;
-    Ok(super::cargo::exit_code(status))
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            log::warn!(
+                "blaze is on, but {} could not be started ({error}); building with Cargo",
+                engine.display()
+            );
+            return None;
+        }
+    };
+    Some(
+        child
+            .wait()
+            .wrap_err_with(|| format!("failed to wait for {}", engine.display()))
+            .map(super::cargo::exit_code),
+    )
 }
 
 #[cfg(test)]
@@ -285,6 +307,25 @@ mod tests {
         assert_eq!(
             returning_cargo_from(&shim, None, Some(selected.as_os_str())),
             None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_engine_that_cannot_start_leaves_the_build_to_cargo() {
+        let root = tempfile::tempdir().unwrap();
+        // Executable, but no program the kernel can load.
+        let engine = root.path().join(ENGINE);
+        std::fs::write(&engine, [0u8; 16]).unwrap();
+        executable(&engine);
+        assert!(
+            run(
+                &engine,
+                Path::new("/shim/cargo"),
+                OsStr::new("/usr/bin/cargo"),
+                &arguments("build"),
+            )
+            .is_none()
         );
     }
 
