@@ -91,7 +91,7 @@ fn run_cargo_shim_inner() -> Result<ExitCode> {
     // an installed shim can stand in for it.
     let blaze_shim;
     let real_cargo = if invoked_via_mise_wrapper {
-        blaze_shim = configured_shim.is_file().then(|| configured_shim.clone());
+        blaze_shim = super::blaze::is_executable(&configured_shim).then(|| configured_shim.clone());
         selected_cargo(&configured_shim)?
     } else {
         let shim = resolve_active_cargo_shim(

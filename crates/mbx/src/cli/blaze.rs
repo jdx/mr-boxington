@@ -134,7 +134,7 @@ fn engine(path: Option<&OsStr>) -> Option<PathBuf> {
 
 /// A file a command search would run: a `ra-jit` without the execute bit,
 /// such as a half-finished download, is passed over as the shell would.
-fn is_executable(path: &Path) -> bool {
+pub(super) fn is_executable(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
