@@ -6,10 +6,12 @@
 //! gives; a workspace wrapper alone does not. With the `blaze` setting on, the
 //! Cargo shim runs that client for the commands it serves and names itself as
 //! the client's `CARGO`, so the Cargo builds blaze still runs come back through
-//! the shim and use the cache.
+//! the shim and use the cache. The Cargo the shim selected travels beside it,
+//! so that the build that comes back runs the same Cargo a build that never
+//! left would have.
 
 use eyre::{Context, Result};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -18,18 +20,31 @@ use std::process::{Command, ExitCode};
 /// ran, and either one has already been through blaze once.
 pub(super) const ROUTED_ENV: &str = "MBX_BLAZE_ROUTED";
 
+/// The Cargo the shim selected before it handed the command to blaze, which
+/// the shim runs when blaze's Cargo call comes back. blaze's `CARGO` names the
+/// shim, so the shim can't find that choice anywhere else.
+const RETURN_CARGO_ENV: &str = "MBX_BLAZE_CARGO";
+
 /// blaze's engine. Releases before the rename have no `blaze` program, and
 /// every release has this one, which `cargo blaze` runs as `ra-jit cargo`.
 const ENGINE: &str = "ra-jit";
 
+/// Whether blaze could take this command, before any setting is read. Every
+/// other command goes on without the settings `route` needs.
+pub(super) fn wanted(arguments: &[String]) -> bool {
+    std::env::var_os(ROUTED_ENV).is_none() && serves(arguments)
+}
+
 /// Run `arguments` through blaze when the setting, the command, the platform,
-/// and the installation allow it. `None` leaves the command to mbx.
+/// and the installation allow it. `None` leaves the command to mbx, which runs
+/// `real_cargo` as it would have.
 pub(super) fn route(
     enabled: bool,
     arguments: &[String],
     shim: Option<&Path>,
+    real_cargo: &OsStr,
 ) -> Option<Result<ExitCode>> {
-    if !enabled || std::env::var_os(ROUTED_ENV).is_some() || !serves(arguments) {
+    if !enabled || !wanted(arguments) {
         return None;
     }
     if !builds_here() {
@@ -53,7 +68,21 @@ pub(super) fn route(
         arguments.join(" "),
         engine.display()
     );
-    Some(run(&engine, shim, arguments))
+    Some(run(&engine, shim, real_cargo, arguments))
+}
+
+/// The Cargo to run for a call blaze made through `shim`: the one the shim had
+/// selected before routing. `None` for any other call, and for a value that
+/// names the shim's own directory, which would only come back here again.
+pub(super) fn returning_cargo(shim: &Path) -> Option<OsString> {
+    std::env::var_os(ROUTED_ENV)?;
+    returning_cargo_from(shim, std::env::var_os(RETURN_CARGO_ENV).as_deref())
+}
+
+fn returning_cargo_from(shim: &Path, selected: Option<&OsStr>) -> Option<OsString> {
+    let selected = Path::new(selected?);
+    (selected.is_absolute() && is_executable(selected) && selected.parent() != shim.parent())
+        .then(|| selected.as_os_str().to_owned())
 }
 
 /// Whether blaze's client serves this command line: a dev-profile build, run,
@@ -86,14 +115,30 @@ fn builds_here() -> bool {
 fn engine(path: Option<&OsStr>) -> Option<PathBuf> {
     std::env::split_paths(path?)
         .map(|directory| directory.join(ENGINE))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable(candidate))
 }
 
-fn run(engine: &Path, shim: &Path, arguments: &[String]) -> Result<ExitCode> {
+/// A file a command search would run: a `ra-jit` without the execute bit,
+/// such as a half-finished download, is passed over as the shell would.
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+fn run(engine: &Path, shim: &Path, real_cargo: &OsStr, arguments: &[String]) -> Result<ExitCode> {
     let status = Command::new(engine)
         .arg("cargo")
         .args(arguments)
         .env("CARGO", shim)
+        .env(RETURN_CARGO_ENV, real_cargo)
         .env(ROUTED_ENV, "1")
         .status()
         .wrap_err_with(|| format!("failed to run {}", engine.display()))?;
@@ -146,6 +191,15 @@ mod tests {
         }
     }
 
+    fn executable(path: &Path) {
+        std::fs::write(path, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
     #[test]
     fn engine_is_found_on_path() {
         let root = tempfile::tempdir().unwrap();
@@ -153,7 +207,7 @@ mod tests {
         let blaze = root.path().join("blaze");
         std::fs::create_dir_all(&empty).unwrap();
         std::fs::create_dir_all(&blaze).unwrap();
-        std::fs::write(blaze.join(ENGINE), "").unwrap();
+        executable(&blaze.join(ENGINE));
         let path = std::env::join_paths([&empty, &blaze]).unwrap();
         assert_eq!(engine(Some(&path)), Some(blaze.join(ENGINE)));
         let path = std::env::join_paths([&empty]).unwrap();
@@ -161,8 +215,55 @@ mod tests {
         assert_eq!(engine(None), None);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn engine_lookup_passes_over_a_file_it_cannot_run() {
+        let root = tempfile::tempdir().unwrap();
+        let broken = root.path().join("broken");
+        let blaze = root.path().join("blaze");
+        std::fs::create_dir_all(&broken).unwrap();
+        std::fs::create_dir_all(&blaze).unwrap();
+        std::fs::write(broken.join(ENGINE), "").unwrap();
+        executable(&blaze.join(ENGINE));
+        let path = std::env::join_paths([&broken, &blaze]).unwrap();
+        assert_eq!(engine(Some(&path)), Some(blaze.join(ENGINE)));
+    }
+
+    #[test]
+    fn the_returning_call_runs_the_cargo_selected_before_routing() {
+        let root = tempfile::tempdir().unwrap();
+        let shim_dir = root.path().join("mbx");
+        let tools = root.path().join("tools");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        std::fs::create_dir_all(&tools).unwrap();
+        let shim = shim_dir.join("cargo");
+        let selected = tools.join("cargo");
+        executable(&shim);
+        executable(&selected);
+        assert_eq!(
+            returning_cargo_from(&shim, Some(selected.as_os_str())),
+            Some(selected.clone().into_os_string())
+        );
+        // Naming the shim again, or nothing usable, leaves the usual search.
+        assert_eq!(returning_cargo_from(&shim, Some(shim.as_os_str())), None);
+        assert_eq!(returning_cargo_from(&shim, Some(OsStr::new("cargo"))), None);
+        assert_eq!(
+            returning_cargo_from(&shim, Some(tools.join("missing").as_os_str())),
+            None
+        );
+        assert_eq!(returning_cargo_from(&shim, None), None);
+    }
+
     #[test]
     fn routing_needs_the_setting() {
-        assert!(route(false, &arguments("build"), Some(Path::new("/shim/cargo"))).is_none());
+        assert!(
+            route(
+                false,
+                &arguments("build"),
+                Some(Path::new("/shim/cargo")),
+                OsStr::new("/usr/bin/cargo"),
+            )
+            .is_none()
+        );
     }
 }
