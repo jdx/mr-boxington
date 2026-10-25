@@ -1603,6 +1603,7 @@ pub fn verify(store: &Path) -> Result<VerifyOutcome> {
     // no object is pending removal the way one is mid-sweep.
     let virtually_removed = HashSet::new();
     let mut outcome = VerifyOutcome::default();
+    let mut trees = HashMap::new();
     for entry in walk_files(&store.join(CAS_DIR))? {
         let Some(digest) = addressed_digest(store, &entry.path, false) else {
             continue;
@@ -1618,7 +1619,7 @@ pub fn verify(store: &Path) -> Result<VerifyOutcome> {
         };
         outcome.checked_action_results += 1;
         if !matches!(action_cache.find(&digest), Ok(Some(_)))
-            || action_result_is_dangling(&cas, &entry.path, &virtually_removed)?
+            || action_result_is_dangling(&cas, &entry.path, &virtually_removed, true, &mut trees)?
         {
             outcome.problems.push(entry.path);
         }
@@ -1776,9 +1777,21 @@ fn gc_with_mode(store: &Path, max_bytes: u64, dry_run: bool) -> Result<GcOutcome
     // it rather than leave the index pointing at nothing. This runs whether or
     // not this call evicted anything, since another process may have, and a
     // store that is over budget on results alone still needs the sweep.
+    //
+    // Walking each result's output tree costs a read per tree blob and a stat
+    // per file, so it is done only when this sweep evicted something. That is
+    // the moment a tree can have lost a file while its own object survived.
+    let walk_trees = outcome.removed_objects > 0 || !virtually_removed.is_empty();
     let cas = LocalCas::new(store);
+    let mut trees = HashMap::new();
     for entry in &results {
-        if action_result_is_dangling(&cas, &entry.path, &virtually_removed)? {
+        if action_result_is_dangling(
+            &cas,
+            &entry.path,
+            &virtually_removed,
+            walk_trees,
+            &mut trees,
+        )? {
             match if dry_run {
                 Removal::Removed
             } else {
@@ -2409,12 +2422,18 @@ fn evict_objects(
 /// keeps its result and turns into a miss on restore, and both CAS write paths
 /// republish over a corrupt blob rather than trusting it.
 ///
-/// Only the top-level objects are checked; a result whose output tree lost a
-/// nested object still restores as a miss, which is safe.
+/// With `walk_tree`, every directory and file the output tree lists is checked
+/// too. Eviction removes individual objects, so it can take a file out of a tree
+/// whose own object survives; the result would then stay listed and fail its
+/// next restore with a missing blob until a rebuild replaced it. Without it
+/// only the top-level objects are checked, which keeps a sweep that evicted
+/// nothing to a directory walk and one read per result.
 fn action_result_is_dangling(
     cas: &LocalCas,
     path: &Path,
     virtually_removed: &HashSet<PathBuf>,
+    walk_tree: bool,
+    trees: &mut HashMap<CacheDigest, bool>,
 ) -> Result<bool> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -2427,6 +2446,12 @@ fn action_result_is_dangling(
     let Ok(result) = serde_json::from_slice::<RemoteActionResult>(&bytes) else {
         return Ok(false);
     };
+    let missing = |digest: &CacheDigest| match cas.path_for(digest) {
+        // A path that cannot be inspected is not known to be gone.
+        Ok(path) => virtually_removed.contains(&path) || matches!(path.try_exists(), Ok(false)),
+        // A digest the CAS cannot even address is not one it can hold.
+        Err(_) => true,
+    };
     for digest in [
         Some(&result.action),
         result.metadata.as_ref(),
@@ -2435,17 +2460,39 @@ fn action_result_is_dangling(
     .into_iter()
     .flatten()
     {
-        match cas.path_for(digest) {
-            Ok(path) => {
-                if virtually_removed.contains(&path) || !path.exists() {
-                    return Ok(true);
-                }
-            }
-            // A digest the CAS cannot even address is not one it can hold.
-            Err(_) => return Ok(true),
+        if missing(digest) {
+            return Ok(true);
         }
     }
+    if walk_tree && let Some(output_root) = &result.output_root {
+        return Ok(!tree_is_complete(cas, output_root, &missing, trees));
+    }
     Ok(false)
+}
+
+/// Whether every file and directory under `digest` is present, remembering the
+/// verdict in `trees` so a subtree shared by many results is read once per sweep.
+fn tree_is_complete(
+    cas: &LocalCas,
+    digest: &CacheDigest,
+    missing: &impl Fn(&CacheDigest) -> bool,
+    trees: &mut HashMap<CacheDigest, bool>,
+) -> bool {
+    if let Some(&complete) = trees.get(digest) {
+        return complete;
+    }
+    // Content addressing rules out cycles; this only keeps a malformed tree
+    // from recursing forever.
+    trees.insert(digest.clone(), true);
+    // Present but unreadable is left to the restore, as for any blob.
+    let complete = read_directory(cas, digest).is_none_or(|directory| {
+        directory.files.iter().all(|file| !missing(&file.digest))
+            && directory.directories.iter().all(|child| {
+                !missing(&child.digest) && tree_is_complete(cas, &child.digest, missing, trees)
+            })
+    });
+    trees.insert(digest.clone(), complete);
+    complete
 }
 
 struct Entry {

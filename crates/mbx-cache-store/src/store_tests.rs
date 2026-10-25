@@ -2543,3 +2543,66 @@ fn import_repairs_missing_captured_streams_and_can_export_again() {
         }
     }
 }
+
+#[test]
+fn drops_an_action_result_whose_output_tree_lost_a_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    let big = store_object(store, &[7_u8; 4096]);
+    let small = store_object(store, b"small output");
+    let broken = store_result(store, "broken", &[big.clone(), small.clone()]);
+    let kept = store_result(store, "kept", std::slice::from_ref(&small));
+    age(store, &big, Duration::from_secs(3600));
+    let cache = LocalActionCache::new(store);
+    let before = stats(store).unwrap();
+
+    // The budget forces out the oldest object, one file inside `broken`'s tree.
+    // The tree object itself survives, so only walking the tree can notice.
+    let outcome = gc(store, before.total_bytes() - 4096).unwrap();
+
+    assert_eq!(outcome.removed_objects, 1);
+    assert_eq!(outcome.removed_action_results, 1);
+    assert!(cache.find(&broken).unwrap().is_none());
+    assert!(cache.find(&kept).unwrap().is_some());
+}
+
+#[test]
+fn drops_an_action_result_whose_nested_file_was_evicted() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    let shared = store_object(store, b"shared output");
+    let deep = store_object(store, &[9_u8; 4096]);
+    let action = store_nested_result(store, &shared, &deep);
+    age(store, &deep, Duration::from_secs(3600));
+    let before = stats(store).unwrap();
+
+    let outcome = gc(store, before.total_bytes() - 4096).unwrap();
+
+    assert_eq!(outcome.removed_action_results, 1);
+    assert!(
+        LocalActionCache::new(store)
+            .find(&action)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_dry_run_counts_results_whose_output_tree_would_lose_a_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    let big = store_object(store, &[7_u8; 4096]);
+    let broken = store_result(store, "broken", std::slice::from_ref(&big));
+    age(store, &big, Duration::from_secs(3600));
+    let before = stats(store).unwrap();
+
+    let outcome = gc_dry_run(store, before.total_bytes() - 4096).unwrap();
+
+    assert_eq!(outcome.removed_action_results, 1);
+    assert!(
+        LocalActionCache::new(store)
+            .find(&broken)
+            .unwrap()
+            .is_some()
+    );
+}

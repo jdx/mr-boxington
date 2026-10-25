@@ -391,6 +391,7 @@ fn cargo_with_settings_bypass_log_and_roots(
         mark_explained(&config.store_dir());
     }
 
+    let _interrupt = SurviveInterrupt::install();
     let session_dir = tempfile::Builder::new().prefix("mbx-session-").tempdir()?;
     let launch = super::launch::Launch::prepare(arguments, session_dir.path())?;
     let test_runner = super::test_runner::TestRunner::prepare(
@@ -526,7 +527,11 @@ fn cargo_with_settings_bypass_log_and_roots(
         } else {
             arguments
         };
-        let status = if !settings.plain_output && super::pretty::enabled(arguments) {
+        // Checked before choosing a runner: the pretty and plain-progress
+        // runners spawn Cargo themselves and would not reach run_cargo's check.
+        let status = if interrupted() {
+            Ok(ExitCode::from(INTERRUPTED_EXIT_CODE))
+        } else if !settings.plain_output && super::pretty::enabled(arguments) {
             match super::pretty::run(&cargo, cargo_arguments, &environment, settings.pretty_inspect, || session.progress_stats()) {
                 Ok(Some(status)) => Ok(status),
                 Ok(None) => run_cargo(&cargo, cargo_arguments, environment),
@@ -567,6 +572,15 @@ fn cargo_with_settings_bypass_log_and_roots(
     // keep the automatic target sweep after it exits: collection must not
     // remove the executable Cargo just selected before we have started it.
     let session_outcome = match session_outcome {
+        // An interrupt swallowed while the session wound down cancels the
+        // application too.
+        Ok((Ok(status), stats))
+            if status == ExitCode::SUCCESS
+                && interrupted()
+                && launch.as_ref().is_some_and(|launch| launch.was_captured()) =>
+        {
+            Ok((Ok(ExitCode::from(INTERRUPTED_EXIT_CODE)), stats))
+        }
         Ok((Ok(status), stats))
             if status == ExitCode::SUCCESS
                 && launch.as_ref().is_some_and(|launch| launch.was_captured()) =>
@@ -1090,6 +1104,11 @@ pub(super) fn run_cargo(
     arguments: &[impl AsRef<std::ffi::OsStr>],
     environment: BTreeMap<String, String>,
 ) -> Result<ExitCode> {
+    // An interrupt swallowed during setup still cancels the command: the
+    // session is torn down and the command never starts.
+    if interrupted() {
+        return Ok(ExitCode::from(INTERRUPTED_EXIT_CODE));
+    }
     let mut command = Command::new(cargo);
     command.args(arguments);
     command.envs(environment);
@@ -1097,6 +1116,70 @@ pub(super) fn run_cargo(
         .status()
         .wrap_err_with(|| format!("failed to run {}", cargo.to_string_lossy()))?;
     Ok(exit_code(status))
+}
+
+/// Windows ends a process that receives Ctrl+C through `ExitProcess`, which
+/// skips destructors, so an interrupted build would leave its session
+/// directory in the temp directory for good. Held from the session
+/// directory's creation until it is removed, so setup and the wait for cache
+/// uploads are covered too. The child shares the console and still receives
+/// the event; mbx only has to outlive it to clean up and report the child's
+/// exit code. Elsewhere the default signal handling is kept.
+pub(super) struct SurviveInterrupt;
+
+/// The conventional exit code for a command ended by Ctrl+C.
+const INTERRUPTED_EXIT_CODE: u8 = 130;
+
+#[cfg(windows)]
+static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether Ctrl+C or Ctrl+Break arrived while a [`SurviveInterrupt`] guard was
+/// held.
+fn interrupted() -> bool {
+    #[cfg(windows)]
+    return INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst);
+    #[cfg(not(windows))]
+    false
+}
+
+#[cfg(not(windows))]
+impl SurviveInterrupt {
+    pub(super) fn install() -> Self {
+        Self
+    }
+}
+
+#[cfg(windows)]
+impl SurviveInterrupt {
+    pub(super) fn install() -> Self {
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+        INTERRUPTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        // SAFETY: the handler only stores to an atomic. A handler routine, not
+        // the null "ignore" form, because only the null form is inherited and
+        // the child must keep its default Ctrl+C behavior.
+        unsafe { SetConsoleCtrlHandler(Some(swallow_interrupt), 1) };
+        Self
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SurviveInterrupt {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+        // SAFETY: removes the handler install added.
+        unsafe { SetConsoleCtrlHandler(Some(swallow_interrupt), 0) };
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn swallow_interrupt(control: u32) -> i32 {
+    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT};
+    if control == CTRL_C_EVENT || control == CTRL_BREAK_EVENT {
+        INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        1
+    } else {
+        0
+    }
 }
 
 /// Cargo's quiet flag applies to mbx's build summary as well as Cargo's own
