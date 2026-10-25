@@ -86,7 +86,12 @@ fn run_cargo_shim_inner() -> Result<ExitCode> {
         .ok_or_else(|| eyre::eyre!("the platform data directory could not be located"))?;
     let configured_shim = shim_dir.join(if cfg!(windows) { "cargo.exe" } else { "cargo" });
     let configured_cargo = std::env::var_os("CARGO");
+    // What blaze is given as its Cargo, so that the builds it hands to Cargo
+    // come back here. mise's wrapper has no path of its own to give, so only
+    // an installed shim can stand in for it.
+    let blaze_shim;
     let real_cargo = if invoked_via_mise_wrapper {
+        blaze_shim = configured_shim.is_file().then(|| configured_shim.clone());
         resolve_real_cargo(&configured_shim)?
     } else {
         let shim = resolve_active_cargo_shim(
@@ -95,7 +100,9 @@ fn run_cargo_shim_inner() -> Result<ExitCode> {
             std::env::var_os("PATH").as_deref(),
         );
         exclude_shim_from_path(&shim)?;
-        resolve_real_cargo(&shim)?
+        let real_cargo = resolve_real_cargo(&shim)?;
+        blaze_shim = Some(shim);
+        real_cargo
     };
     record_cargo_selection(&real_cargo, configured_cargo.as_deref())?;
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
@@ -113,6 +120,12 @@ fn run_cargo_shim_inner() -> Result<ExitCode> {
     let Ok(string_arguments) = super::strings(&arguments) else {
         return run_real_cargo(&real_cargo, &arguments);
     };
+    let (config, settings) = Config::load_for_cli()?;
+    if let Some(result) =
+        super::blaze::route(settings.blaze, &string_arguments, blaze_shim.as_deref())
+    {
+        return result;
+    }
     // The roots probe can persist metadata under the cache root. Reject its
     // placement before probing, but only after passthrough decisions above.
     if let Some(root) = mbx_cache_cargo::cache_root() {
@@ -141,7 +154,6 @@ fn run_cargo_shim_inner() -> Result<ExitCode> {
     };
     // Every probe and the final child must name Cargo directly.
     unsafe { std::env::set_var("CARGO", &real_cargo) };
-    let (config, settings) = Config::load_for_cli()?;
     super::cargo::run_with_roots(&config, &settings, &string_arguments, roots)
 }
 

@@ -115,6 +115,35 @@ fn an_unrecognized_workspace_wrapper_argument_is_left_for_transparent_execution(
 }
 
 #[test]
+fn blaze_wrapper_is_recognized_under_both_names() {
+    for wrapper in [
+        "/home/me/.cargo/bin/ra-jit-rustc",
+        "/home/me/.cargo/bin/ra-jit-rustc-first",
+    ] {
+        assert!(
+            is_blaze_wrapper(executable_stem(OsStr::new(wrapper))),
+            "{wrapper}"
+        );
+    }
+    for wrapper in ["/usr/bin/rustc", "clippy-driver", "ra-jit"] {
+        assert!(
+            !is_blaze_wrapper(executable_stem(OsStr::new(wrapper))),
+            "{wrapper}"
+        );
+    }
+}
+
+#[test]
+fn compiler_queries_are_not_compilations() {
+    let query = |arguments: &[&str]| {
+        is_compiler_query(&arguments.iter().map(OsString::from).collect::<Vec<_>>())
+    };
+    assert!(query(&["-", "--crate-name", "___", "--print=file-names"]));
+    assert!(query(&["-vV", "--print", "cfg"]));
+    assert!(!query(&["--crate-name", "app", "src/main.rs"]));
+}
+
+#[test]
 fn ambiguous_build_script_sidecars_are_refused() {
     let directory = tempfile::tempdir().unwrap();
     let invoked = directory.path().join(format!(

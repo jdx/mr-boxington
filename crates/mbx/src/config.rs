@@ -317,6 +317,17 @@ pub(crate) struct RawConfig {
     /// compiler shim itself.
     #[usage(env = "MBX_FORWARD_COMPILER_NOTIFICATIONS", default = true)]
     forward_compiler_notifications: bool,
+    /// Send dev builds typed as plain `cargo` through blaze.
+    ///
+    /// When the Cargo shim receives `cargo build`, `run`, `test`, or `check`
+    /// without `--release` or `--profile`, and blaze's `ra-jit` is on `PATH`,
+    /// it runs `ra-jit cargo` instead of Cargo. blaze rebuilds an edited
+    /// function in milliseconds and runs Cargo when it has to, through this
+    /// shim, so those builds still use the cache. blaze compiles workspace
+    /// crates itself, and mbx does not cache those. Experimental: Linux and
+    /// macOS on Apple silicon only, where blaze builds.
+    #[usage(env = "MBX_BLAZE", default = false)]
+    blaze: bool,
     /// Style of the savings line printed after a build.
     ///
     /// `quips` draws the line from a pool of dry one-liners, `plain` reports
@@ -1042,6 +1053,8 @@ pub(crate) struct CliSettings {
     pub removed_incremental_cap: bool,
     /// Whether natively linked programs may be cached.
     pub cache_links: bool,
+    /// Whether the Cargo shim sends dev builds through blaze.
+    pub blaze: bool,
     /// How many bytes of per-compilation rows one build may record; `None` is
     /// no limit.
     pub events_max_size: Option<u64>,
@@ -1061,6 +1074,7 @@ impl Default for CliSettings {
             seed_incremental: true,
             removed_incremental_cap: false,
             cache_links: true,
+            blaze: false,
             events_max_size: Some(DEFAULT_EVENTS_MAX_SIZE),
         }
     }
@@ -1493,6 +1507,7 @@ impl Config {
                 seed_incremental: raw.seed_incremental,
                 removed_incremental_cap: false,
                 cache_links: raw.cache_links,
+                blaze: raw.blaze,
                 events_max_size: parse_optional_byte_size(&raw.events_max_size)
                     .wrap_err(Invalid("events_max_size"))?,
             },

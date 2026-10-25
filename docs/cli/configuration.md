@@ -26,6 +26,16 @@ mbx sets the variable through the build-script wrapper that `build_script_execut
 - `off`
 
 
+### `blaze`
+
+- **Type:** `bool`
+- **Default:** `false`
+- **Set with:** `MBX_BLAZE`
+
+Send dev builds typed as plain `cargo` through blaze.
+
+When the Cargo shim receives `cargo build`, `run`, `test`, or `check` without `--release` or `--profile`, and blaze's `ra-jit` is on `PATH`, it runs `ra-jit cargo` instead of Cargo. blaze rebuilds an edited function in milliseconds and runs Cargo when it has to, through this shim, so those builds still use the cache. blaze compiles workspace crates itself, and mbx does not cache those. Experimental: Linux and macOS on Apple silicon only, where blaze builds.
+
 ### `build_script_execution`
 
 - **Type:** `bool`

@@ -120,6 +120,8 @@ pub(crate) const TARGET_DIR_ENV: &str = "MBX_TARGET_DIR";
 pub(crate) const BUILD_SCRIPT_REAL_SUFFIX: &str = ".mbx-real";
 const PREVIOUS_RUSTC_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WRAPPER";
 const PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WORKSPACE_WRAPPER";
+/// The bypass kind of a workspace crate a wrapper compiles instead of rustc.
+const WORKSPACE_WRAPPER_BYPASS: &str = "workspace-wrapper";
 const REAL_RUSTDOC_ENV: &str = "MBX_REAL_RUSTDOC";
 pub(crate) const BYPASS_LOG_ENV: &str = "MBX_BYPASS_LOG";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -593,7 +595,14 @@ impl CacheSession {
             // that path to recognize the nested invocation. Clippy has a
             // modeled identity and configuration inputs; other workspace
             // wrappers remain transparent because mbx cannot key their work.
-            if executable_stem(OsStr::new(previous)) != Some("clippy-driver") {
+            let stem = executable_stem(OsStr::new(previous));
+            if is_blaze_wrapper(stem) {
+                // blaze sets it for the Cargo builds it runs, which arrive
+                // here when the Cargo shim sent the command through blaze.
+                // Each workspace crate it compiles is counted as a bypass
+                // under its name, so a warning per build would only repeat it.
+                log::debug!("blaze compiles workspace crates through {previous}");
+            } else if stem != Some("clippy-driver") {
                 warn!(
                     "RUSTC_WORKSPACE_WRAPPER is already set to {previous}; deferring to it for workspace crates, so those compilations are not cached"
                 );
@@ -1794,6 +1803,12 @@ pub fn run_rustc_shim() -> ExitCode {
             }
         }
     }
+    if opaque_workspace_wrapper
+        && crate_name_argument(&described).is_some()
+        && !is_compiler_query(&described)
+    {
+        record_workspace_wrapper_bypass(&rustc);
+    }
 
     run_transparent_rustc(
         rustc,
@@ -1911,6 +1926,46 @@ pub(crate) fn is_clippy_driver(compiler: &OsStr) -> bool {
     executable_stem(compiler) == Some("clippy-driver")
 }
 
+/// blaze's workspace wrapper, under its name before and during a workspace's
+/// first build.
+fn is_blaze_wrapper(stem: Option<&str>) -> bool {
+    matches!(stem, Some("ra-jit-rustc" | "ra-jit-rustc-first"))
+}
+
+/// Whether an invocation asks the compiler something instead of compiling.
+fn is_compiler_query(described: &[OsString]) -> bool {
+    described.iter().any(|argument| {
+        argument == "-"
+            || argument
+                .to_str()
+                .is_some_and(|argument| argument.starts_with("--print"))
+    })
+}
+
+/// Count a workspace crate that a wrapper other than clippy-driver compiles,
+/// under the wrapper's name: mbx defers to it rather than keying work it cannot
+/// see, and without this the crate is missing from the summary altogether.
+fn record_workspace_wrapper_bypass(wrapper: &OsStr) {
+    let stem = executable_stem(wrapper);
+    let owner = if is_blaze_wrapper(stem) {
+        " for blaze"
+    } else {
+        ""
+    };
+    let error = eyre::eyre!(
+        "workspace crate compiled by {}{owner}, which mbx does not cache",
+        stem.unwrap_or("the workspace wrapper")
+    );
+    append_bypass_log(None, WORKSPACE_WRAPPER_BYPASS, &error, None);
+    let diagnostic = bypass_diagnostic(true, &format!("rustc cache bypassed: {error:#}"));
+    let _ = request_agent(&[
+        AgentRequest::RecordBypass {
+            kind: WORKSPACE_WRAPPER_BYPASS.into(),
+        },
+        diagnostic,
+    ]);
+}
+
 fn transparent_compiler_demand(
     name: &str,
     described: &[OsString],
@@ -1947,12 +2002,7 @@ fn run_transparent_rustc(
     // for a permit would stall a build's startup behind its siblings' permits.
     // Most probes carry no --crate-name; the target-info queries carry the
     // placeholder name `___` alongside `--print`, and compile nothing.
-    let is_query = described.iter().any(|argument| {
-        argument == "-"
-            || argument
-                .to_str()
-                .is_some_and(|argument| argument.starts_with("--print"))
-    });
+    let is_query = is_compiler_query(described);
     let incremental_flag = bypassed
         .then(|| crate::rustc::bypassed_library_incremental_flag(described))
         .flatten();

@@ -63,13 +63,32 @@ other than Clippy's `clippy-driver` the same way for workspace crates: it
 defers to the wrapper and does not cache those compilations. See
 [Migrate from rust-cache or sccache](/cookbook/migrate#from-sccache).
 
-## Can I use mbx together with ra-jit?
+## Can I use mbx together with blaze? {#can-i-use-mbx-together-with-ra-jit}
 
-Yes. ra-jit can set Cargo's `RUSTC_WORKSPACE_WRAPPER` after mbx starts its
-session. mbx passes those workspace compiler calls through to ra-jit and leaves
-their existing object files alone when the wrapper reports success. Other
-eligible Rust compilations, such as dependencies, can still use mbx's cache.
-This does not make ra-jit's own workspace builds cache hits in mbx.
+Yes. [blaze](https://github.com/indexable-inc/blaze), formerly ra-jit, sets
+Cargo's `RUSTC_WORKSPACE_WRAPPER` for the builds it runs, which can be after mbx
+starts its session. mbx passes those workspace compiler calls through to blaze
+and leaves their existing object files alone when the wrapper reports success.
+Other eligible Rust compilations, such as dependencies, can still use mbx's
+cache. The build summary counts each workspace crate blaze compiles as a
+`workspace-wrapper` bypass.
+
+blaze rebuilds an edited function in milliseconds only when its own client runs
+in place of Cargo, as `cargo blaze build` does. To get that from plain `cargo`
+commands, turn on the [`blaze`](/configuration#blaze) setting:
+
+```sh
+export MBX_BLAZE=1
+cargo build
+```
+
+mbx's Cargo shim then runs `ra-jit cargo build` instead, and blaze's own Cargo
+builds come back through the shim. Only dev `build`, `run`, `test`, and `check`
+commands go to blaze; `--release` and `--profile` builds and other commands run
+Cargo as before. This needs `ra-jit` on `PATH` and the Cargo shim that
+`mbx setup` installs, which is how blaze reaches mbx again. blaze builds with
+Rust 1.99.0 whatever toolchain the project selects, so the entries its builds
+store serve other blaze builds, not builds with another toolchain.
 
 ## Are restored artifacts byte-identical to freshly compiled ones? {#are-restored-artifacts-byte-identical-to-what-a-compile-would-produce}
 
