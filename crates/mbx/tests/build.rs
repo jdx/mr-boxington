@@ -2326,6 +2326,95 @@ fn eager_incremental_is_opt_in_and_yields_to_verification() {
     }
 }
 
+/// A build script that hands its crate a value through `cargo:rustc-env`
+/// changes what the crate compiles whenever the value changes, as an edit to
+/// its sources would. The crate keeps its private incremental state across
+/// such a change instead of compiling from scratch, and a value the cache
+/// already holds restores.
+#[test]
+fn a_changed_build_script_environment_value_counts_as_an_edit() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join("src")).unwrap();
+    std::fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname = \"fingerprinted\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("build.rs"),
+        "fn main() {\n    println!(\"cargo:rerun-if-changed=fingerprint.txt\");\n    \
+         let value = std::fs::read_to_string(\"fingerprint.txt\").unwrap();\n    \
+         println!(\"cargo:rustc-env=FINGERPRINT={}\", value.trim());\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("src/main.rs"),
+        "fn main() {\n    println!(\"{}\", env!(\"FINGERPRINT\"));\n}\n",
+    )
+    .unwrap();
+    std::fs::write(project.path().join("fingerprint.txt"), "0\n").unwrap();
+    generate_lockfile(project.path());
+
+    let cold = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+    );
+    assert_eq!(compiled_incrementally(&cold), 0, "{cold}");
+
+    let binary = project.path().join(format!(
+        "target/debug/fingerprinted{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    for revision in 1..=2 {
+        std::fs::write(
+            project.path().join("fingerprint.txt"),
+            format!("{revision}\n"),
+        )
+        .unwrap();
+        let (stats, stderr) = build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("{revision}.json")),
+            &[],
+        );
+        assert!(
+            compiled_incrementally(&stats) > 0,
+            "revision {revision} should have kept private state: {stats}\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("incremental state was not reused"),
+            "revision {revision}: {stderr}"
+        );
+        let run = Command::new(&binary).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout),
+            format!("{revision}\n")
+        );
+    }
+
+    // Back to the value the cold build published: the crate is active, but a
+    // changed value is still looked up, and this one restores.
+    std::fs::write(project.path().join("fingerprint.txt"), "0\n").unwrap();
+    let (returned, stderr) = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("returned.json"),
+        &[],
+    );
+    assert_eq!(compiled_incrementally(&returned), 0, "{returned}\n{stderr}");
+    assert!(
+        returned["compiler"]
+            .as_object()
+            .is_none_or(|compiled| compiled.is_empty()),
+        "{returned}\n{stderr}"
+    );
+    let run = Command::new(&binary).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "0\n");
+}
+
 /// A workspace crate somebody is editing misses on every build no matter what
 /// the cache does. On its first edit, it gets its own incremental
 /// state -- which never reaches the store, because it describes one checkout's
@@ -2572,6 +2661,71 @@ fn a_dangling_link_in_a_native_search_path_does_not_stop_the_first_edit_going_in
     assert_incremental_on_first_edit_despite_native_dir(|native, elsewhere| {
         std::os::unix::fs::symlink(elsewhere.join("missing"), native.join("libgone.so")).unwrap();
     });
+}
+
+/// An uncacheable crate whose build script hands it a changed value through
+/// `cargo:rustc-env` counts as edited too, and keeps private state.
+#[cfg(unix)]
+#[test]
+fn a_crate_with_an_unshareable_native_search_path_keeps_state_across_environment_changes() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let native = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::fs::write(elsewhere.path().join("libextra.so.1"), b"not a library").unwrap();
+    std::os::unix::fs::symlink(
+        elsewhere.path().join("libextra.so.1"),
+        native.path().join("libextra.so"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.path().join("src")).unwrap();
+    std::fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname = \"fingerprinted\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("build.rs"),
+        format!(
+            "fn main() {{\n    println!(\"cargo:rerun-if-changed=fingerprint.txt\");\n    \
+             println!(\"cargo:rustc-link-search=native={}\");\n    \
+             let value = std::fs::read_to_string(\"fingerprint.txt\").unwrap();\n    \
+             println!(\"cargo:rustc-env=FINGERPRINT={{}}\", value.trim());\n}}\n",
+            native.path().display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("src/main.rs"),
+        "fn main() {\n    println!(\"{}\", env!(\"FINGERPRINT\"));\n}\n",
+    )
+    .unwrap();
+    std::fs::write(project.path().join("fingerprint.txt"), "0\n").unwrap();
+    generate_lockfile(project.path());
+
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+    );
+    for revision in 1..=2 {
+        std::fs::write(
+            project.path().join("fingerprint.txt"),
+            format!("{revision}\n"),
+        )
+        .unwrap();
+        let (stats, stderr) = build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("{revision}.json")),
+            &[],
+        );
+        assert!(
+            compiled_incrementally(&stats) > 0,
+            "revision {revision} should have kept private state: {stats}\n{stderr}"
+        );
+    }
 }
 
 /// The same evidence that turns it on turns it off: once the content stops

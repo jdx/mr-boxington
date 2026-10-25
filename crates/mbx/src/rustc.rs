@@ -46,8 +46,10 @@ const HOT_STREAK_THRESHOLD: u32 = 3;
 /// the private artifact the hot unit produced; see [`links_private_artifact`].
 const WORKSPACE_HOT_STREAK_THRESHOLD: u32 = 1;
 
-/// Schema version of the per-checkout churn record.
-const CHURN_STATE_VERSION: u8 = 1;
+/// Schema version of the per-checkout churn record. Version 2 fingerprints the
+/// environment a unit reads along with its sources; a version 1 record cannot
+/// be compared with it, so it starts the unit's streak afresh.
+const CHURN_STATE_VERSION: u8 = 2;
 
 /// Schema version of a private-artifact marker.
 const PRIVATE_ARTIFACT_VERSION: u8 = 1;
@@ -143,7 +145,7 @@ impl LearnedPlan {
 struct ChurnState {
     /// Version of this record's schema.
     version: u8,
-    /// Digest of the sources compiled here last time.
+    /// [`churn_fingerprint`] of what was compiled here last time.
     sources: String,
     /// Consecutive compilations whose sources had changed.
     streak: u32,
@@ -1955,7 +1957,7 @@ fn plan_learned_reuse(
     enabled: bool,
 ) -> LearnedPlan {
     let planned = (|| {
-        let sources = compilation.invocation.source_fingerprint(discovered);
+        let sources = churn_fingerprint(compilation, discovered);
         let (unit, mode) = incremental_unit_identity(compilation)?;
         let Some(state_path) = churn_state_path(&unit) else {
             return Result::<LearnedPlan>::Ok(LearnedPlan::default());
@@ -2002,6 +2004,37 @@ fn is_unshareable_search_path(error: &eyre::Report) -> bool {
     )
 }
 
+/// What a churn decision compares: the crate's own sources, and the current
+/// value of every environment variable it read through `env!` or
+/// `option_env!`.
+///
+/// A build script's `cargo:rustc-env` changes what the crate compiles as much
+/// as an edit to its sources does, and rustc tracks those reads as finely as
+/// file reads, so private state stays as useful across such a change as across
+/// an edit. The values are read now, not taken from dep-info, which records
+/// those of the last compilation.
+fn churn_fingerprint(compilation: &Compilation<'_>, discovered: &DiscoveredInputs) -> CacheDigest {
+    let sources = compilation.invocation.source_fingerprint(discovered);
+    if discovered.environment.is_empty() {
+        return sources;
+    }
+    let mut bytes = sources.key().into_bytes();
+    for name in discovered.environment.keys() {
+        bytes.push(0);
+        bytes.extend_from_slice(name.as_bytes());
+        match std::env::var_os(name) {
+            Some(value) => {
+                let value = value.as_encoded_bytes();
+                bytes.push(1);
+                bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+                bytes.extend_from_slice(value);
+            }
+            None => bytes.push(0),
+        }
+    }
+    CacheDigest::blake3(&bytes)
+}
+
 /// The inputs a churn decision compares, which are the crate's own sources.
 ///
 /// Native search directories are part of a shared key but not of that
@@ -2042,7 +2075,8 @@ fn plan_learned_without_action_key(
     let discovered = RustcDepInfo::read(&outputs.dep_info)
         .map_err(eyre::Report::from)
         .and_then(|dep_info| {
-            verify_environment(&dep_info.environment)?;
+            // A changed environment is an edit, which the churn fingerprint
+            // reads for itself; it is no reason to stop watching the crate.
             Ok(compilation.invocation.discover_source_inputs(
                 &dep_info,
                 compilation.working_dir,
@@ -2116,11 +2150,14 @@ fn eager_incremental_plan(compilation: &Compilation<'_>) -> LearnedPlan {
 /// Re-enter a workspace unit's established private state without rebuilding a
 /// shared action key first.
 ///
-/// An intact dep-info file supplies the source fingerprint without constructing
-/// a shared action. A missing target, settled source, or changed environment
-/// deliberately takes the slower path so it can restore or republish. Settled
-/// sources above a private artifact are the exception: no shared action can
-/// describe what they link, so the lookup would only ever miss.
+/// An intact dep-info file supplies the churn fingerprint without constructing
+/// a shared action. A missing target, settled sources, or a changed environment
+/// value deliberately take the slower path so it can restore or republish.
+/// A changed value can be one the cache already holds, such as a commit hash
+/// another checkout published, and the slower path still counts it as an edit
+/// when the lookup misses. Settled sources above a private artifact are the
+/// exception: no shared action can describe what they link, so the lookup
+/// would only ever miss.
 fn reuse_hot_workspace_plan(
     compilation: &Compilation<'_>,
     outputs: &RustcOutputs,
@@ -2138,9 +2175,11 @@ fn reuse_hot_workspace_plan(
             return Ok(LearnedPlan::default());
         };
         let dep_info = RustcDepInfo::read(&outputs.dep_info)?;
-        verify_environment(&dep_info.environment)?;
+        if verify_environment(&dep_info.environment).is_err() {
+            return Ok(LearnedPlan::default());
+        }
         let discovered = discover_for_churn(compilation, &dep_info)?;
-        let sources = compilation.invocation.source_fingerprint(&discovered);
+        let sources = churn_fingerprint(compilation, &discovered);
         let changed = recorded.sources != sources.key();
         let edited = changed && recorded.streak >= WORKSPACE_HOT_STREAK_THRESHOLD;
         if !edited && !links_private_artifact(compilation) {
@@ -2253,7 +2292,7 @@ fn record_learned_baseline(compilation: &Compilation<'_>, discovered: &Discovere
         let Some(path) = churn_state_path(&unit) else {
             return Result::<()>::Ok(());
         };
-        let sources = compilation.invocation.source_fingerprint(discovered);
+        let sources = churn_fingerprint(compilation, discovered);
         if read_churn_state(&path)
             .is_some_and(|recorded| recorded.sources == sources.key() && recorded.streak == 0)
         {
@@ -2741,8 +2780,12 @@ fn action_from_current_dep_info(
     dep_info: &Path,
 ) -> Result<(ActionCandidates, DiscoveredInputs)> {
     let dep_info = RustcDepInfo::read(dep_info)?;
+    // Discovered first: a crate that cannot be keyed has to say so even when
+    // its environment changed too, or it would miss the churn fallback for
+    // uncacheable crates. A changed environment still refuses the lookup.
+    let action = action_from_parsed_dep_info(compilation, &dep_info)?;
     verify_environment(&dep_info.environment)?;
-    action_from_parsed_dep_info(compilation, &dep_info)
+    Ok(action)
 }
 
 fn action_from_parsed_dep_info(
