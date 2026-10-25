@@ -39,7 +39,7 @@ pub(crate) mod verification;
 use client::validate_handshake_response;
 use client::{request_agent_at, request_standalone_agent};
 pub(crate) use diagnostics::{
-    note, report_shim_error, report_shim_warning, reserve_stderr_for_compiler,
+    note, report_shim_debug, report_shim_error, report_shim_warning, reserve_stderr_for_compiler,
 };
 #[cfg(unix)]
 pub(crate) use server::create_fifo;
@@ -2470,6 +2470,7 @@ fn expected_rustc_bypass(reason: Option<&mbx_cache_rustc::BypassReason>) -> bool
                 | ImplicitEmitWithOutputFile(_)
                 | AmbiguousOutputName(_)
                 | BuildScriptInputOverlapsOutputs(_)
+                | BuildScriptDeclarationsPending(_)
         )
     )
 }
@@ -2481,6 +2482,7 @@ fn expected_cc_bypass(reason: Option<&mbx_cache_cc::CcBypassReason>) -> bool {
         Some(
             CompilerQuery
                 | NotACompile
+                | MissingOutput
                 | UnknownFlag(_)
                 | ResponseFile(_)
                 | NonObjectOutput(_)

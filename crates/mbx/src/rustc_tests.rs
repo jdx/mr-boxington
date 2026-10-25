@@ -2505,3 +2505,24 @@ fn object_cleanup_reads_the_unit_from_a_response_file() {
         .is_some()
     );
 }
+
+#[test]
+fn only_a_vanished_compiler_input_is_a_quiet_prediction_miss() {
+    let directory = tempfile::tempdir().unwrap();
+    let present = directory.path().join("present.rs");
+    std::fs::write(&present, "").unwrap();
+    let input_read = |path: &Path| {
+        eyre::Report::new(BypassReason::InputRead {
+            path: path.to_path_buf(),
+            message: "unreadable".into(),
+        })
+    };
+
+    assert!(is_missing_compiler_input(&input_read(
+        &directory.path().join("deleted.rs")
+    )));
+    assert!(!is_missing_compiler_input(&input_read(&present)));
+    assert!(!is_missing_compiler_input(&eyre::eyre!(
+        "the cache is unavailable"
+    )));
+}

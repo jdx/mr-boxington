@@ -2058,8 +2058,14 @@ fn routine_bypasses_are_debug_but_failed_cache_paths_are_warnings() {
     assert!(super::expected_rustc_bypass(Some(
         &mbx_cache_rustc::BypassReason::BuildScriptInputOverlapsOutputs(".".into())
     )));
+    assert!(super::expected_rustc_bypass(Some(
+        &mbx_cache_rustc::BypassReason::BuildScriptDeclarationsPending(".".into())
+    )));
     assert!(super::expected_cc_bypass(Some(
         &mbx_cache_cc::CcBypassReason::NotACompile
+    )));
+    assert!(super::expected_cc_bypass(Some(
+        &mbx_cache_cc::CcBypassReason::MissingOutput
     )));
     assert!(!super::expected_rustc_bypass(Some(
         &mbx_cache_rustc::BypassReason::InputRead {

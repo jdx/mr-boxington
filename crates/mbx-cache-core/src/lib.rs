@@ -56,7 +56,7 @@ pub use agent::{
 };
 pub use client::BlockingAgentClient;
 pub use imds::{InstanceRoleCredentials, TemporaryCredentials};
-pub use local::{ActionStoreOutcome, LocalActionCache, LocalCas};
+pub use local::{ACTION_CONFLICT_MESSAGE, ActionStoreOutcome, LocalActionCache, LocalCas};
 pub use mbx_cache_protocol::{
     ACTION_PROMISE_MEDIA_TYPE, ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE,
     ActionPrediction, ActionPromiseCompletion, ActionPromiseJoin, ActionPromiseState,
