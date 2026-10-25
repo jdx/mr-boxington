@@ -2678,3 +2678,48 @@ fn a_dry_run_reports_the_stale_version_without_removing_it() {
     assert_eq!(outcome.removed_action_results, 1);
     assert!(read_action_result(dir.path(), &old).is_some());
 }
+
+#[test]
+fn sweeps_do_not_refresh_the_use_time_of_an_idle_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let (idle, _) = store_rustc_result(dir.path(), "rustc 1.80.0", b"idle");
+    let (_, _) = store_rustc_result(dir.path(), "rustc 1.90.0", b"current");
+    age_result(dir.path(), &idle, 30 * DAY);
+    let path = LocalActionCache::new(dir.path()).path_for(&idle).unwrap();
+    let atime =
+        |path: &Path| filetime::FileTime::from_last_access_time(&std::fs::metadata(path).unwrap());
+    let before = atime(&path);
+
+    // Neither pass is allowed to count as a use, even where reads update atime.
+    gc_stale_compilers(dir.path(), 90 * DAY, false).unwrap();
+    gc(dir.path(), u64::MAX).unwrap();
+
+    assert_eq!(atime(&path), before);
+}
+
+#[test]
+fn a_dry_run_counts_the_stale_pass_and_the_budget_sweep_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (old, _) = store_rustc_result(dir.path(), "rustc 1.80.0", b"old output");
+    let (_, _) = store_rustc_result(dir.path(), "rustc 1.90.0", b"new output");
+    age_result(dir.path(), &old, 100 * DAY);
+    let before = stats(dir.path()).unwrap().total_bytes();
+
+    let preview = gc_dry_run_after_stale(dir.path(), u64::MAX, 90 * DAY).unwrap();
+    assert_eq!(preview.removed_action_results, 1);
+    assert_eq!(preview.remaining_bytes, before - preview.removed_bytes);
+
+    // Over budget as well: the objects the first plan removed are not
+    // removed again by the second.
+    let tight = gc_dry_run_after_stale(dir.path(), 0, 90 * DAY).unwrap();
+    let stale = gc_stale_compilers(dir.path(), 90 * DAY, false).unwrap();
+    let budget = gc(dir.path(), 0).unwrap();
+    assert_eq!(
+        tight.removed_bytes,
+        stale.removed_bytes + budget.removed_bytes
+    );
+    assert_eq!(
+        tight.removed_objects,
+        stale.removed_objects + budget.removed_objects
+    );
+}

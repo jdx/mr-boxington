@@ -1706,17 +1706,26 @@ fn checkout_record_path(store: &Path, identity: &str, workspace_root: &Path) -> 
 /// the mount records one, so the ordering is an approximation either way.
 /// Evicting a live object costs a recompile, never correctness.
 pub fn gc(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
-    gc_with_mode(store, max_bytes, false)
+    gc_with_mode(store, max_bytes, false, HashSet::new())
 }
 
 /// Describe the collection `gc` would perform without changing the store.
 pub fn gc_dry_run(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
-    gc_with_mode(store, max_bytes, true)
+    gc_with_mode(store, max_bytes, true, HashSet::new())
 }
 
-fn gc_with_mode(store: &Path, max_bytes: u64, dry_run: bool) -> Result<GcOutcome> {
+/// `already_removed` names paths an earlier dry-run pass planned to delete;
+/// they are treated as gone, so the two plans describe one collection.
+fn gc_with_mode(
+    store: &Path,
+    max_bytes: u64,
+    dry_run: bool,
+    already_removed: HashSet<PathBuf>,
+) -> Result<GcOutcome> {
     let mut objects = walk_files(&store.join(CAS_DIR))?;
-    let results = walk_files(&store.join(ACTION_RESULTS_DIR))?;
+    let mut results = walk_files(&store.join(ACTION_RESULTS_DIR))?;
+    objects.retain(|entry| !already_removed.contains(&entry.path));
+    results.retain(|entry| !already_removed.contains(&entry.path));
     let mut live_bytes = objects
         .iter()
         .chain(results.iter())
@@ -1739,7 +1748,7 @@ fn gc_with_mode(store: &Path, max_bytes: u64, dry_run: bool) -> Result<GcOutcome
         }
     }
 
-    let mut virtually_removed = HashSet::new();
+    let mut virtually_removed = already_removed;
     if live_bytes > max_bytes {
         // Reachability costs a read per action result and per output tree, so
         // it is computed only when something is actually about to be evicted.
@@ -1818,6 +1827,33 @@ fn gc_with_mode(store: &Path, max_bytes: u64, dry_run: bool) -> Result<GcOutcome
 /// descriptors) are never touched. Use is read from the result file's access
 /// time where the filesystem records it, else its modification time.
 pub fn gc_stale_compilers(store: &Path, max_age: Duration, dry_run: bool) -> Result<GcOutcome> {
+    stale_compilers_pass(store, max_age, dry_run).map(|(outcome, _)| outcome)
+}
+
+/// Describe what `gc_stale_compilers` followed by `gc_dry_run` would remove,
+/// counting nothing twice and measuring the budget after the stale pass.
+pub fn gc_dry_run_after_stale(
+    store: &Path,
+    max_bytes: u64,
+    max_age: Duration,
+) -> Result<GcOutcome> {
+    let (mut stale, planned) = stale_compilers_pass(store, max_age, true)?;
+    let budget = gc_with_mode(store, max_bytes, true, planned)?;
+    stale.removed_objects += budget.removed_objects;
+    stale.removed_action_results += budget.removed_action_results;
+    stale.removed_checkout_records += budget.removed_checkout_records;
+    stale.removed_session_streams += budget.removed_session_streams;
+    stale.removed_bytes += budget.removed_bytes;
+    stale.remaining_bytes = budget.remaining_bytes;
+    Ok(stale)
+}
+
+/// The paths a pass removed, or in a dry run would remove.
+fn stale_compilers_pass(
+    store: &Path,
+    max_age: Duration,
+    dry_run: bool,
+) -> Result<(GcOutcome, HashSet<PathBuf>)> {
     struct Attributed {
         entry: Entry,
         action: CacheDigest,
@@ -1827,7 +1863,7 @@ pub fn gc_stale_compilers(store: &Path, max_age: Duration, dry_run: bool) -> Res
     let mut by_version: BTreeMap<String, Vec<Attributed>> = BTreeMap::new();
     let mut unattributed = Vec::new();
     for entry in walk_files(&store.join(ACTION_RESULTS_DIR))? {
-        let result = std::fs::read(&entry.path)
+        let result = read_result_untouched(&entry.path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<RemoteActionResult>(&bytes).ok());
         let Some(result) = result else {
@@ -1861,8 +1897,9 @@ pub fn gc_stale_compilers(store: &Path, max_age: Duration, dry_run: bool) -> Res
             kept_actions.extend(results.into_iter().map(|r| r.action));
         }
     }
+    let mut planned = HashSet::new();
     if stale.is_empty() {
-        return Ok(outcome);
+        return Ok((outcome, planned));
     }
 
     let doomed = rooted_action_objects(store, stale.iter().map(|r| r.action.clone()));
@@ -1871,6 +1908,7 @@ pub fn gc_stale_compilers(store: &Path, max_age: Duration, dry_run: bool) -> Res
         if dry_run || matches!(remove(&result.entry.path)?, Removal::Removed) {
             outcome.removed_action_results += 1;
             outcome.removed_bytes += result.entry.size;
+            planned.insert(result.entry.path.clone());
         }
     }
     for path in doomed.difference(&kept) {
@@ -1880,9 +1918,22 @@ pub fn gc_stale_compilers(store: &Path, max_age: Duration, dry_run: bool) -> Res
         if dry_run || matches!(remove(path)?, Removal::Removed) {
             outcome.removed_objects += 1;
             outcome.removed_bytes += metadata.len();
+            planned.insert(path.clone());
         }
     }
-    Ok(outcome)
+    Ok((outcome, planned))
+}
+
+/// Read an action result without advancing the access time sweeps treat as use.
+///
+/// Maintenance passes read every result. Where the filesystem records access
+/// times, that would make each sweep look like a use and an idle compiler
+/// version would never age out, so the time seen before the read is put back.
+fn read_result_untouched(path: &Path) -> std::io::Result<Vec<u8>> {
+    let before = std::fs::metadata(path)?;
+    let bytes = std::fs::read(path)?;
+    let _ = filetime::set_file_atime(path, filetime::FileTime::from_last_access_time(&before));
+    Ok(bytes)
 }
 
 /// The compiler version a rustc action descriptor was keyed under.
@@ -2378,7 +2429,7 @@ fn read_action_result(store: &Path, action: &CacheDigest) -> Option<RemoteAction
     let path = mbx_cache_core::LocalActionCache::new(store)
         .path_for(action)
         .ok()?;
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = read_result_untouched(&path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
@@ -2512,7 +2563,7 @@ fn action_result_is_dangling(
     path: &Path,
     virtually_removed: &HashSet<PathBuf>,
 ) -> Result<bool> {
-    let bytes = match std::fs::read(path) {
+    let bytes = match read_result_untouched(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => {

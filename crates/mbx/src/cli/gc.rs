@@ -177,13 +177,23 @@ pub(super) fn run(
         crate::scheduler::prune_flights(&config.cache_dir);
         crate::scheduler::prune_test_history(&config.cache_dir);
     }
-    let stale = stale_compilers(&store, retention, dry_run);
-    let outcome = if dry_run {
-        store::gc_dry_run(&store, store_budget)
-    } else {
-        store::gc(&store, store_budget)
-    }
-    .map(|outcome| with_stale_compilers(stale, outcome));
+    // The stale-compiler pass runs first and deletes for real, so a budget
+    // sweep that fails afterwards must still get credit for what it freed.
+    let (outcome, stale_bytes) = match (dry_run, retention.rustc_max_age) {
+        (true, Some(max_age)) => (
+            store::gc_dry_run_after_stale(&store, store_budget, max_age),
+            0,
+        ),
+        (true, None) => (store::gc_dry_run(&store, store_budget), 0),
+        (false, _) => {
+            let stale = stale_compilers(&store, retention, false);
+            let stale_bytes = stale.removed_bytes;
+            (
+                store::gc(&store, store_budget).map(|outcome| with_stale_compilers(stale, outcome)),
+                stale_bytes,
+            )
+        }
+    };
     // Independent collections: a broken action store must not prevent the
     // command from freeing the usually much larger target directories.
     let outcome = match outcome {
@@ -215,7 +225,8 @@ pub(super) fn run(
             let low_store_bytes = low_disk
                 .store
                 .as_ref()
-                .map_or(0, |outcome| outcome.removed_bytes);
+                .map_or(0, |outcome| outcome.removed_bytes)
+                .saturating_add(stale_bytes);
             freed_bytes = freed_bytes.saturating_add(low_disk.freed_target_bytes);
             record_collection(&store, low_store_bytes, freed_bytes, dry_run);
             if !json {
