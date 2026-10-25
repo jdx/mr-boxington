@@ -312,7 +312,12 @@ pub(crate) fn compile(
     {
         eager_incremental_plan(&compilation)
     } else {
-        reuse_hot_workspace_plan(&compilation, &outputs, learned_enabled)
+        reuse_hot_workspace_plan(
+            &compilation,
+            &outputs,
+            learned_enabled,
+            ChangedEnvironment::LookUp,
+        )
     };
     let mut unshareable = false;
     if !private_inputs
@@ -454,6 +459,17 @@ pub(crate) fn compile(
                 ));
             }
         }
+    }
+    // An active unit whose environment changed was left to the lookups above.
+    // When none of them got far enough to plan its churn, as when no
+    // prediction survives to key it, the change still keeps private state.
+    if !verify && !private_inputs && !learned.engaged() && learned.record.is_none() {
+        learned = reuse_hot_workspace_plan(
+            &compilation,
+            &outputs,
+            learned_enabled,
+            ChangedEnvironment::Edit,
+        );
     }
     let mut remote_claim = None;
     if let Some(flight) = &flight
@@ -2147,6 +2163,16 @@ fn eager_incremental_plan(compilation: &Compilation<'_>) -> LearnedPlan {
     })
 }
 
+/// What [`reuse_hot_workspace_plan`] does with a unit whose environment
+/// changed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChangedEnvironment {
+    /// Leave it to the slower path, which looks the new value up first.
+    LookUp,
+    /// Count it as an edit, once no lookup is left to make.
+    Edit,
+}
+
 /// Re-enter a workspace unit's established private state without rebuilding a
 /// shared action key first.
 ///
@@ -2155,13 +2181,15 @@ fn eager_incremental_plan(compilation: &Compilation<'_>) -> LearnedPlan {
 /// value deliberately take the slower path so it can restore or republish.
 /// A changed value can be one the cache already holds, such as a commit hash
 /// another checkout published, and the slower path still counts it as an edit
-/// when the lookup misses. Settled sources above a private artifact are the
-/// exception: no shared action can describe what they link, so the lookup
-/// would only ever miss.
+/// when the lookup misses, or calls this again with
+/// [`ChangedEnvironment::Edit`] when no lookup could be made. Settled sources
+/// above a private artifact are the exception: no shared action can describe
+/// what they link, so the lookup would only ever miss.
 fn reuse_hot_workspace_plan(
     compilation: &Compilation<'_>,
     outputs: &RustcOutputs,
     enabled: bool,
+    environment: ChangedEnvironment,
 ) -> LearnedPlan {
     if !enabled || !outputs.dep_info.is_file() || !source_is_in_workspace(compilation) {
         return LearnedPlan::default();
@@ -2175,7 +2203,9 @@ fn reuse_hot_workspace_plan(
             return Ok(LearnedPlan::default());
         };
         let dep_info = RustcDepInfo::read(&outputs.dep_info)?;
-        if verify_environment(&dep_info.environment).is_err() {
+        if environment == ChangedEnvironment::LookUp
+            && verify_environment(&dep_info.environment).is_err()
+        {
             return Ok(LearnedPlan::default());
         }
         let discovered = discover_for_churn(compilation, &dep_info)?;

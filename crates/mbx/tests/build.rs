@@ -2326,6 +2326,92 @@ fn eager_incremental_is_opt_in_and_yields_to_verification() {
     }
 }
 
+/// A binary crate that prints `FINGERPRINT`, which its build script sets with
+/// `cargo:rustc-env` from `fingerprint.txt`. `extra` is one more statement for
+/// the build script.
+fn write_fingerprinted_project(directory: &Path, extra: &str) {
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[package]\nname = \"fingerprinted\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("build.rs"),
+        format!(
+            "fn main() {{\n    println!(\"cargo:rerun-if-changed=fingerprint.txt\");\n    \
+             {extra}\n    \
+             let value = std::fs::read_to_string(\"fingerprint.txt\").unwrap();\n    \
+             println!(\"cargo:rustc-env=FINGERPRINT={{}}\", value.trim());\n}}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/main.rs"),
+        "fn main() {\n    println!(\"{}\", env!(\"FINGERPRINT\"));\n}\n",
+    )
+    .unwrap();
+    std::fs::write(directory.join("fingerprint.txt"), "0\n").unwrap();
+    generate_lockfile(directory);
+}
+
+/// The lookup a changed environment value gets first can have nothing to look
+/// up: no prediction survives to key the compilation. The change still counts
+/// as an edit, and the active crate keeps private state.
+#[test]
+fn a_changed_environment_value_keeps_private_state_without_a_prediction() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_fingerprinted_project(project.path(), "");
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+    );
+    for revision in 1..=2 {
+        std::fs::write(
+            project.path().join("fingerprint.txt"),
+            format!("{revision}\n"),
+        )
+        .unwrap();
+        build(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("{revision}.json")),
+        );
+    }
+
+    // The churn records stay; the predictions go, including those finished
+    // flights leave behind.
+    std::fs::remove_dir_all(store.path().join("actions/task-manifests/v1")).unwrap();
+    let flights = find_files(store.path(), |path| {
+        path.extension()
+            .is_some_and(|extension| extension == "prediction")
+    });
+    assert!(!flights.is_empty());
+    for flight in flights {
+        std::fs::remove_file(flight).unwrap();
+    }
+    std::fs::write(project.path().join("fingerprint.txt"), "3\n").unwrap();
+    let (stats, stderr) = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("3.json"),
+        &[],
+    );
+    assert!(
+        compiled_incrementally(&stats) > 0,
+        "the change should have kept private state: {stats}\n{stderr}"
+    );
+    let binary = project.path().join(format!(
+        "target/debug/fingerprinted{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    let run = Command::new(&binary).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "3\n");
+}
+
 /// A build script that hands its crate a value through `cargo:rustc-env`
 /// changes what the crate compiles whenever the value changes, as an edit to
 /// its sources would. The crate keeps its private incremental state across
@@ -2336,26 +2422,7 @@ fn a_changed_build_script_environment_value_counts_as_an_edit() {
     let store = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(project.path().join("src")).unwrap();
-    std::fs::write(
-        project.path().join("Cargo.toml"),
-        "[package]\nname = \"fingerprinted\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-    )
-    .unwrap();
-    std::fs::write(
-        project.path().join("build.rs"),
-        "fn main() {\n    println!(\"cargo:rerun-if-changed=fingerprint.txt\");\n    \
-         let value = std::fs::read_to_string(\"fingerprint.txt\").unwrap();\n    \
-         println!(\"cargo:rustc-env=FINGERPRINT={}\", value.trim());\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        project.path().join("src/main.rs"),
-        "fn main() {\n    println!(\"{}\", env!(\"FINGERPRINT\"));\n}\n",
-    )
-    .unwrap();
-    std::fs::write(project.path().join("fingerprint.txt"), "0\n").unwrap();
-    generate_lockfile(project.path());
+    write_fingerprinted_project(project.path(), "");
 
     let cold = build(
         project.path(),
@@ -2679,30 +2746,13 @@ fn a_crate_with_an_unshareable_native_search_path_keeps_state_across_environment
         native.path().join("libextra.so"),
     )
     .unwrap();
-    std::fs::create_dir_all(project.path().join("src")).unwrap();
-    std::fs::write(
-        project.path().join("Cargo.toml"),
-        "[package]\nname = \"fingerprinted\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-    )
-    .unwrap();
-    std::fs::write(
-        project.path().join("build.rs"),
-        format!(
-            "fn main() {{\n    println!(\"cargo:rerun-if-changed=fingerprint.txt\");\n    \
-             println!(\"cargo:rustc-link-search=native={}\");\n    \
-             let value = std::fs::read_to_string(\"fingerprint.txt\").unwrap();\n    \
-             println!(\"cargo:rustc-env=FINGERPRINT={{}}\", value.trim());\n}}\n",
+    write_fingerprinted_project(
+        project.path(),
+        &format!(
+            "println!(\"cargo:rustc-link-search=native={}\");",
             native.path().display()
         ),
-    )
-    .unwrap();
-    std::fs::write(
-        project.path().join("src/main.rs"),
-        "fn main() {\n    println!(\"{}\", env!(\"FINGERPRINT\"));\n}\n",
-    )
-    .unwrap();
-    std::fs::write(project.path().join("fingerprint.txt"), "0\n").unwrap();
-    generate_lockfile(project.path());
+    );
 
     build(
         project.path(),
