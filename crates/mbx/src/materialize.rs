@@ -52,8 +52,21 @@ pub(crate) enum Materialization {
     Copy,
 }
 
-/// Look up every blob at once, failing if the action is missing any of them.
+/// Digests asked about in one agent request. A digest serializes to about a
+/// hundred bytes, so this stays far below the agent's request size limit
+/// however many files an output tree holds.
+const MAX_BLOB_LOOKUP_BATCH: usize = 4096;
+
+/// Look up every blob, failing if the action is missing any of them.
 pub(crate) fn find_blobs(digests: &[CacheDigest]) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::with_capacity(digests.len());
+    for batch in digests.chunks(MAX_BLOB_LOOKUP_BATCH) {
+        paths.extend(find_blob_batch(batch)?);
+    }
+    Ok(paths)
+}
+
+fn find_blob_batch(digests: &[CacheDigest]) -> Result<Vec<PathBuf>> {
     let responses = session::request_agent(&[AgentRequest::FindBlobs {
         digests: digests.to_vec(),
     }])?;

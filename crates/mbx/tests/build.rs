@@ -3450,7 +3450,8 @@ fn build_script_execution_and_out_dir_restore_across_checkouts() {
 }
 
 /// An OUT_DIR that is wide and deep, with repeated and empty files, restores
-/// exactly.
+/// exactly, including a directory with more files than one blob lookup asks
+/// about.
 #[test]
 fn build_script_restores_a_wide_nested_out_dir() {
     const DIRECTORIES: [&str; 5] = ["", "a", "a/b", "a/b/c", "z"];
@@ -3480,6 +3481,11 @@ fn build_script_restores_a_wide_nested_out_dir() {
             let contents = if index % 4 == 0 {{ "shared\n".to_owned() }} else {{ format!("{{}}{{index}}\n", directory.display()) }};
             std::fs::write(directory.join(format!("f{{index}}")), contents.replace(&out.display().to_string(), "")).unwrap();
         }}
+    }}
+    let many = out.join("many");
+    std::fs::create_dir_all(&many).unwrap();
+    for index in 0..5000 {{
+        std::fs::write(many.join(index.to_string()), index.to_string()).unwrap();
     }}
 }}
 "#
@@ -3527,7 +3533,7 @@ fn build_script_restores_a_wide_nested_out_dir() {
             .collect::<std::collections::BTreeMap<_, _>>()
     };
     let published = restored(first.path());
-    assert_eq!(published.len(), DIRECTORIES.len() * 13);
+    assert_eq!(published.len(), DIRECTORIES.len() * 13 + 5000);
     assert_eq!(restored(second.path()), published);
 }
 

@@ -1676,9 +1676,9 @@ fn cargo_environment(mappings: &[PathMapping]) -> BTreeMap<String, Option<String
 const MAX_RESTORE_COPIES: usize = 8;
 
 fn restore_directory(root: &CacheDigest, destination: &Path) -> Result<(u64, u64)> {
-    // Directory records are looked up one tree level per request, and every
-    // file's contents in one more, so a wide OUT_DIR costs a few round trips
-    // rather than one per file.
+    // Directory records are looked up one tree level at a time, and every
+    // file's contents together after that, so a wide OUT_DIR costs a few round
+    // trips rather than one per file.
     let mut files = Vec::new();
     let mut symlinks = Vec::new();
     let mut level = vec![(root.clone(), destination.to_path_buf())];
@@ -1721,16 +1721,12 @@ fn restore_directory(root: &CacheDigest, destination: &Path) -> Result<(u64, u64
         }
         level = next;
     }
-    let sources = if files.is_empty() {
-        Vec::new()
-    } else {
-        find_blobs(
-            &files
-                .iter()
-                .map(|(node, _)| node.digest.clone())
-                .collect::<Vec<_>>(),
-        )?
-    };
+    let sources = find_blobs(
+        &files
+            .iter()
+            .map(|(node, _)| node.digest.clone())
+            .collect::<Vec<_>>(),
+    )?;
     copy_restored_files(&files, &sources)?;
     for (target, link) in symlinks {
         restore_symlink(&target, &link)?;
