@@ -1928,8 +1928,26 @@ fn stale_compilers_pass(
 ///
 /// Maintenance passes read every result. Where the filesystem records access
 /// times, that would make each sweep look like a use and an idle compiler
-/// version would never age out, so the time seen before the read is put back.
+/// version would never age out. On Linux the file is opened with `O_NOATIME`,
+/// which leaves the time alone without touching it afterwards, so a build's
+/// concurrent hit is never overwritten. Elsewhere, or when the kernel refuses
+/// the flag for a file the caller does not own, the time seen before the read
+/// is put back; that can lose a hit that lands inside the read.
 fn read_result_untouched(path: &Path) -> std::io::Result<Vec<u8>> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::Read as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOATIME)
+            .open(path)
+        {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            return Ok(bytes);
+        }
+    }
     let before = std::fs::metadata(path)?;
     let bytes = std::fs::read(path)?;
     let _ = filetime::set_file_atime(path, filetime::FileTime::from_last_access_time(&before));
