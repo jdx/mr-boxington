@@ -1443,7 +1443,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "mbx"
-version = "1.27.0"
+version = "1.28.0"
 dependencies = [
  "bytesize",
  "cargo-config2",
@@ -1490,7 +1490,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-cargo"
-version = "0.3.17"
+version = "0.3.18"
 dependencies = [
  "dirs",
  "mbx-cache-core",
@@ -1502,7 +1502,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-cc"
-version = "0.20.5"
+version = "0.20.6"
 dependencies = [
  "mbx-cache-core",
  "memchr",
@@ -1515,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-core"
-version = "0.20.5"
+version = "0.20.6"
 dependencies = [
  "async-compression",
  "base64",
@@ -1560,7 +1560,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-rustc"
-version = "0.20.5"
+version = "0.20.6"
 dependencies = [
  "mbx-cache-core",
  "serde",
@@ -1573,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-store"
-version = "0.1.43"
+version = "0.1.44"
 dependencies = [
  "eyre",
  "filetime",

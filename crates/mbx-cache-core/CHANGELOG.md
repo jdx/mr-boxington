@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.6](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.20.5...mbx-cache-core-v0.20.6) - 2026-10-26
+
+### Fixed
+
+- *(cache)* stop concurrent repairs and collection from discarding valid action records ([#809](https://github.com/jdx/mr-boxington/pull/809))
+- *(rustc)* stop warning about expected probes and cross-checkout differences ([#826](https://github.com/jdx/mr-boxington/pull/826))
+- *(cache-core)* bound task action manifests by serialized size ([#798](https://github.com/jdx/mr-boxington/pull/798))
+
+### Other
+
+- *(cache)* restore build-script OUT_DIRs with batched lookups and parallel copies ([#831](https://github.com/jdx/mr-boxington/pull/831))
+
 ## [0.20.5](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.20.4...mbx-cache-core-v0.20.5) - 2026-10-23
 
 ### Fixed

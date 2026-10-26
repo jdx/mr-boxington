@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.6](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.20.5...mbx-cache-rustc-v0.20.6) - 2026-10-26
+
+### Fixed
+
+- *(rustc)* stop warning about expected probes and cross-checkout differences ([#826](https://github.com/jdx/mr-boxington/pull/826))
+- *(cache-rustc)* share dependency cache entries between terminal and piped builds ([#801](https://github.com/jdx/mr-boxington/pull/801))
+
 ## [0.20.4](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.20.3...mbx-cache-rustc-v0.20.4) - 2026-10-20
 
 ### Other

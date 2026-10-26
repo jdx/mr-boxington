@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.44](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.43...mbx-cache-store-v0.1.44) - 2026-10-26
+
+### Added
+
+- *(gc)* collect cached Rust results for unused compiler versions ([#827](https://github.com/jdx/mr-boxington/pull/827))
+
+### Fixed
+
+- *(gc)* retry an automatic sweep that a sandbox killed ([#807](https://github.com/jdx/mr-boxington/pull/807))
+- *(cache)* stop concurrent repairs and collection from discarding valid action records ([#809](https://github.com/jdx/mr-boxington/pull/809))
+- *(store)* drop action results whose output tree lost a file during GC ([#825](https://github.com/jdx/mr-boxington/pull/825))
+
 ## [0.1.43](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.42...mbx-cache-store-v0.1.43) - 2026-10-23
 
 ### Fixed

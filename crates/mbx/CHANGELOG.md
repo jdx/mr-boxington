@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.28.0](https://github.com/jdx/mr-boxington/compare/v1.27.0...v1.28.0) - 2026-10-26
+
+### Added
+
+- *(shim)* send dev cargo builds through blaze ([#832](https://github.com/jdx/mr-boxington/pull/832))
+- *(gc)* collect cached Rust results for unused compiler versions ([#827](https://github.com/jdx/mr-boxington/pull/827))
+
+### Fixed
+
+- *(cache)* stop import, adopt and target-root switches from racing target cleanup ([#811](https://github.com/jdx/mr-boxington/pull/811))
+- *(gc)* retry an automatic sweep that a sandbox killed ([#807](https://github.com/jdx/mr-boxington/pull/807))
+- *(incremental)* keep private state when a build-script environment value changes ([#830](https://github.com/jdx/mr-boxington/pull/830))
+- preserve build state through nested workspace wrappers ([#819](https://github.com/jdx/mr-boxington/pull/819))
+- *(cargo)* compile with the inherited Cargo's own rustc when CARGO is set ([#808](https://github.com/jdx/mr-boxington/pull/808))
+- *(exec)* remove session directory after Ctrl+C on Windows ([#824](https://github.com/jdx/mr-boxington/pull/824))
+- *(rustc)* stop warning about expected probes and cross-checkout differences ([#826](https://github.com/jdx/mr-boxington/pull/826))
+- *(cargo)* run registry and Git installs inside mbx sessions ([#804](https://github.com/jdx/mr-boxington/pull/804))
+- *(gc)* count files shared between managed target directories once ([#793](https://github.com/jdx/mr-boxington/pull/793))
+
+### Other
+
+- *(cache)* restore build-script OUT_DIRs with batched lookups and parallel copies ([#831](https://github.com/jdx/mr-boxington/pull/831))
+- *(gc)* stop deleting a checkout's incremental state from blocking other builds ([#810](https://github.com/jdx/mr-boxington/pull/810))
+- *(build)* accept Cargo no longer uplifting the fixture rlib in nightly ([#828](https://github.com/jdx/mr-boxington/pull/828))
+
 ## [1.27.0](https://github.com/jdx/mr-boxington/compare/v1.26.0...v1.27.0) - 2026-10-23
 
 ### Added
