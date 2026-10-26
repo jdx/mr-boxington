@@ -196,6 +196,7 @@ pub(super) fn run(
     // The stale-compiler pass runs first and deletes for real, so a budget
     // sweep that fails afterwards must still get credit for what it freed.
     let compilers_selected = selection.max_age.is_some() || selection.release.is_some();
+    let mut named_failure = None;
     let (outcome, stale_bytes) = match (dry_run, compilers_selected) {
         (true, true) => (
             store::gc_dry_run_after_compilers(&store, store_budget, &selection),
@@ -203,7 +204,17 @@ pub(super) fn run(
         ),
         (true, false) => (store::gc_dry_run(&store, store_budget), 0),
         (false, _) => {
-            let stale = stale_compilers(&store, &selection, false);
+            // A failed age-based pass is housekeeping the budget sweep covers.
+            // A version the user named is the point of the run: sweep the
+            // budget anyway, then report that the removal did not happen.
+            let stale =
+                checked_stale_compilers(&store, &selection, false).unwrap_or_else(|error| {
+                    log::warn!("compiler versions were not collected: {error}");
+                    if selection.release.is_some() {
+                        named_failure = Some(error);
+                    }
+                    store::GcOutcome::default()
+                });
             let stale_bytes = stale.removed_bytes;
             (
                 store::gc(&store, store_budget).map(|outcome| with_stale_compilers(stale, outcome)),
@@ -331,7 +342,10 @@ pub(super) fn run(
     if !dry_run {
         warn_if_still_low(config, retention);
     }
-    Ok(())
+    match named_failure {
+        Some(error) => Err(error.wrap_err("the requested compiler version was not removed")),
+        None => Ok(()),
+    }
 }
 
 pub(super) fn merged_incremental_report(
@@ -676,13 +690,21 @@ fn stale_compilers(
     selection: &store::CompilerSelection,
     dry_run: bool,
 ) -> store::GcOutcome {
-    if selection.max_age.is_none() && selection.release.is_none() {
-        return store::GcOutcome::default();
-    }
-    store::gc_compilers(store, selection, dry_run).unwrap_or_else(|error| {
+    checked_stale_compilers(store, selection, dry_run).unwrap_or_else(|error| {
         log::warn!("stale compiler versions were not collected: {error}");
         store::GcOutcome::default()
     })
+}
+
+fn checked_stale_compilers(
+    store: &Path,
+    selection: &store::CompilerSelection,
+    dry_run: bool,
+) -> Result<store::GcOutcome> {
+    if selection.max_age.is_none() && selection.release.is_none() {
+        return Ok(store::GcOutcome::default());
+    }
+    store::gc_compilers(store, selection, dry_run)
 }
 
 /// Fold the budget sweep's outcome into the stale-compiler pass that ran first.
