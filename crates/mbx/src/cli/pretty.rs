@@ -332,6 +332,11 @@ fn run_inner(
 }
 
 fn pty_size(cols: u16, rows: u16) -> PtySize {
+    // ConPTY hard-wraps output at the pseudoconsole width, which splits Cargo's
+    // one-line JSON messages so they no longer parse. Make it as wide as ConPTY
+    // allows; the real terminal wraps the text we forward to it. Unix PTYs do
+    // not wrap output, so they keep the real width.
+    let cols = if cfg!(windows) { i16::MAX as u16 } else { cols };
     PtySize {
         rows: rows.max(1),
         cols: cols.max(1),
