@@ -2987,6 +2987,70 @@ fn an_object_shared_with_a_kept_version_is_not_collected() {
     );
 }
 
+fn named(release: &str) -> CompilerSelection {
+    CompilerSelection {
+        max_age: None,
+        release: Some(release.to_owned()),
+    }
+}
+
+#[test]
+fn a_named_compiler_is_removed_even_when_it_is_the_newest_and_in_use() {
+    let dir = tempfile::tempdir().unwrap();
+    let (old, _) = store_rustc_result(dir.path(), "rustc 1.80.0 (abc 2026-01-01)", b"old");
+    let (new, _) = store_rustc_result(dir.path(), "rustc 1.90.0 (def 2026-06-01)", b"new");
+    age_result(dir.path(), &old, DAY);
+
+    let outcome = gc_compilers(dir.path(), &named("1.90.0"), false).unwrap();
+
+    assert_eq!(outcome.removed_action_results, 1);
+    assert!(read_action_result(dir.path(), &new).is_none());
+    assert!(read_action_result(dir.path(), &old).is_some());
+}
+
+#[test]
+fn a_named_compiler_keeps_objects_another_version_reaches() {
+    let dir = tempfile::tempdir().unwrap();
+    let (old, _) = store_rustc_result(dir.path(), "rustc 1.80.0", b"shared output");
+    let (new, shared) = store_rustc_result(dir.path(), "rustc 1.90.0", b"shared output");
+
+    gc_compilers(dir.path(), &named("1.80.0"), false).unwrap();
+
+    assert!(read_action_result(dir.path(), &old).is_none());
+    assert!(read_action_result(dir.path(), &new).is_some());
+    assert!(
+        LocalCas::new(dir.path())
+            .path_for(&shared)
+            .unwrap()
+            .exists()
+    );
+}
+
+#[test]
+fn a_named_compiler_matches_the_release_or_the_whole_version_line() {
+    let line = "rustc 1.99.0-nightly (abc123def 2026-09-01); commit-hash: abc; LLVM version: 22";
+    assert!(names_compiler("1.99.0-nightly", line));
+    assert!(names_compiler("rustc 1.99.0-nightly", line));
+    assert!(names_compiler(
+        "1.99.0-nightly (abc123def 2026-09-01)",
+        line
+    ));
+    assert!(!names_compiler("1.99.0-nightly (other 2026-09-02)", line));
+    assert!(!names_compiler("1.99", line));
+    assert!(!names_compiler("", line));
+}
+
+#[test]
+fn a_named_compiler_dry_run_removes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (old, _) = store_rustc_result(dir.path(), "rustc 1.80.0", b"old");
+
+    let outcome = gc_compilers(dir.path(), &named("1.80.0"), true).unwrap();
+
+    assert_eq!(outcome.removed_action_results, 1);
+    assert!(read_action_result(dir.path(), &old).is_some());
+}
+
 #[test]
 fn results_without_a_rustc_version_are_never_collected() {
     let dir = tempfile::tempdir().unwrap();

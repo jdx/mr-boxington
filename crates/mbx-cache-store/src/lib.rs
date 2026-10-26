@@ -1922,7 +1922,41 @@ fn gc_with_mode(
 /// descriptors) are never touched. Use is read from the result file's access
 /// time where the filesystem records it, else its modification time.
 pub fn gc_stale_compilers(store: &Path, max_age: Duration, dry_run: bool) -> Result<GcOutcome> {
-    stale_compilers_pass(store, max_age, dry_run).map(|(outcome, _)| outcome)
+    gc_compilers(
+        store,
+        &CompilerSelection {
+            max_age: Some(max_age),
+            release: None,
+        },
+        dry_run,
+    )
+}
+
+/// Which compiler versions' cached results a pass removes.
+#[derive(Debug, Clone, Default)]
+pub struct CompilerSelection {
+    /// Remove versions unused for this long, always keeping the newest.
+    pub max_age: Option<Duration>,
+    /// Remove every result of this compiler, however recently it was used.
+    ///
+    /// Matches the release a compiler reports, such as `1.97.1` or
+    /// `1.99.0-nightly`, or the whole version line, such as
+    /// `1.99.0-nightly (abc123def 2026-09-01)`, which tells two nightlies of
+    /// one release apart. Unlike `max_age`, nothing is exempt: naming the
+    /// newest version removes it.
+    pub release: Option<String>,
+}
+
+/// Drop cached compilations for the compilers `selection` names.
+///
+/// See [`gc_stale_compilers`] for how results are attributed and which are
+/// never touched.
+pub fn gc_compilers(
+    store: &Path,
+    selection: &CompilerSelection,
+    dry_run: bool,
+) -> Result<GcOutcome> {
+    stale_compilers_pass(store, selection, dry_run).map(|(outcome, _)| outcome)
 }
 
 /// Describe what `gc_stale_compilers` followed by `gc_dry_run` would remove,
@@ -1932,7 +1966,24 @@ pub fn gc_dry_run_after_stale(
     max_bytes: u64,
     max_age: Duration,
 ) -> Result<GcOutcome> {
-    let (mut stale, planned) = stale_compilers_pass(store, max_age, true)?;
+    gc_dry_run_after_compilers(
+        store,
+        max_bytes,
+        &CompilerSelection {
+            max_age: Some(max_age),
+            release: None,
+        },
+    )
+}
+
+/// Describe what `gc_compilers` followed by `gc_dry_run` would remove,
+/// counting nothing twice and measuring the budget after the compiler pass.
+pub fn gc_dry_run_after_compilers(
+    store: &Path,
+    max_bytes: u64,
+    selection: &CompilerSelection,
+) -> Result<GcOutcome> {
+    let (mut stale, planned) = stale_compilers_pass(store, selection, true)?;
     let budget = gc_with_mode(store, max_bytes, true, planned)?;
     stale.removed_objects += budget.removed_objects;
     stale.removed_action_results += budget.removed_action_results;
@@ -1946,7 +1997,7 @@ pub fn gc_dry_run_after_stale(
 /// The paths a pass removed, or in a dry run would remove.
 fn stale_compilers_pass(
     store: &Path,
-    max_age: Duration,
+    selection: &CompilerSelection,
     dry_run: bool,
 ) -> Result<(GcOutcome, HashSet<PathBuf>)> {
     struct Attributed {
@@ -1978,15 +2029,24 @@ fn stale_compilers_pass(
         .iter()
         .max_by_key(|(_, results)| last_used(results))
         .map(|(version, _)| version.clone());
-    let cutoff = SystemTime::now()
-        .checked_sub(max_age)
-        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let cutoff = selection.max_age.map(|max_age| {
+        SystemTime::now()
+            .checked_sub(max_age)
+            .unwrap_or(SystemTime::UNIX_EPOCH)
+    });
     let mut outcome = GcOutcome::default();
     let mut stale = Vec::new();
     let mut kept_actions = unattributed;
     for (version, results) in by_version {
-        let idle = last_used(&results).is_some_and(|used| used < cutoff);
-        if idle && Some(&version) != newest.as_ref() {
+        let idle = cutoff
+            .zip(last_used(&results))
+            .is_some_and(|(cutoff, used)| used < cutoff)
+            && Some(&version) != newest.as_ref();
+        let named = selection
+            .release
+            .as_deref()
+            .is_some_and(|release| names_compiler(release, &version));
+        if idle || named {
             stale.extend(results);
         } else {
             kept_actions.extend(results.into_iter().map(|r| r.action));
@@ -2053,6 +2113,22 @@ fn read_result_untouched(path: &Path) -> std::io::Result<Vec<u8>> {
     let bytes = std::fs::read(path)?;
     let _ = filetime::set_file_atime(path, filetime::FileTime::from_last_access_time(&before));
     Ok(bytes)
+}
+
+/// Whether `wanted` names the compiler a descriptor recorded as `version`.
+///
+/// `version` is the identity's `rustc ...` line followed by `; `-joined build
+/// details. `wanted` matches the release (the first word after `rustc`) or the
+/// whole first line, with or without the `rustc ` prefix.
+fn names_compiler(wanted: &str, version: &str) -> bool {
+    let wanted = wanted.trim();
+    let wanted = wanted.strip_prefix("rustc ").unwrap_or(wanted);
+    if wanted.is_empty() {
+        return false;
+    }
+    let line = version.split(';').next().unwrap_or(version).trim();
+    let line = line.strip_prefix("rustc ").unwrap_or(line);
+    line == wanted || line.split_whitespace().next() == Some(wanted)
 }
 
 /// The compiler version a rustc action descriptor was keyed under.

@@ -70,6 +70,17 @@ pub(super) struct GcArgs {
     /// or session a compiler is still using; a real run keeps them.
     #[usage(long)]
     pub(super) dry_run: bool,
+    /// Remove every cached Rust result built by this compiler version.
+    ///
+    /// Takes the release `rustc --version` prints, such as `1.97.1` or
+    /// `1.99.0-nightly`, or the whole `rustc -vV` first line without `rustc`,
+    /// such as `1.99.0-nightly (abc123def 2026-09-01)`, to pick one nightly.
+    /// Unlike `gc.rustc_max_age`, this removes the version even if it was used
+    /// a moment ago, and even if it is the newest one in the store. Objects
+    /// that a remaining version also uses stay. Combine with `--dry-run` to
+    /// see what it would remove.
+    #[usage(long, value_name = "VERSION")]
+    pub(super) rustc_version: Option<String>,
     /// Run the throttled sweep a build schedules, if one is due. Builds start
     /// this in the background; it is not meant to be typed.
     #[usage(long, hide = true)]
@@ -81,8 +92,13 @@ pub(super) fn run(
     max_bytes: u64,
     dry_run: bool,
     json: bool,
+    rustc_version: Option<&str>,
     retention: &RetentionSettings,
 ) -> Result<()> {
+    let selection = store::CompilerSelection {
+        max_age: retention.rustc_max_age,
+        release: rustc_version.map(str::to_owned),
+    };
     let store = config.store_dir();
     let mut collector = collector_lock(&store)?;
     if !dry_run {
@@ -179,14 +195,15 @@ pub(super) fn run(
     }
     // The stale-compiler pass runs first and deletes for real, so a budget
     // sweep that fails afterwards must still get credit for what it freed.
-    let (outcome, stale_bytes) = match (dry_run, retention.rustc_max_age) {
-        (true, Some(max_age)) => (
-            store::gc_dry_run_after_stale(&store, store_budget, max_age),
+    let compilers_selected = selection.max_age.is_some() || selection.release.is_some();
+    let (outcome, stale_bytes) = match (dry_run, compilers_selected) {
+        (true, true) => (
+            store::gc_dry_run_after_compilers(&store, store_budget, &selection),
             0,
         ),
-        (true, None) => (store::gc_dry_run(&store, store_budget), 0),
+        (true, false) => (store::gc_dry_run(&store, store_budget), 0),
         (false, _) => {
-            let stale = stale_compilers(&store, retention, false);
+            let stale = stale_compilers(&store, &selection, false);
             let stale_bytes = stale.removed_bytes;
             (
                 store::gc(&store, store_budget).map(|outcome| with_stale_compilers(stale, outcome)),
@@ -654,11 +671,15 @@ pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool
 ///
 /// Failure is logged and forgotten: the budget sweep that follows is the
 /// store's main collection and must still run.
-fn stale_compilers(store: &Path, retention: &RetentionSettings, dry_run: bool) -> store::GcOutcome {
-    let Some(max_age) = retention.rustc_max_age else {
+fn stale_compilers(
+    store: &Path,
+    selection: &store::CompilerSelection,
+    dry_run: bool,
+) -> store::GcOutcome {
+    if selection.max_age.is_none() && selection.release.is_none() {
         return store::GcOutcome::default();
-    };
-    store::gc_stale_compilers(store, max_age, dry_run).unwrap_or_else(|error| {
+    }
+    store::gc_compilers(store, selection, dry_run).unwrap_or_else(|error| {
         log::warn!("stale compiler versions were not collected: {error}");
         store::GcOutcome::default()
     })
@@ -745,7 +766,11 @@ fn run_sweep_body(config: &Config, retention: &RetentionSettings) -> Sweep {
     let store_budget = store_budget(retention, config.gc.max_bytes, non_store_bytes);
     crate::scheduler::prune_flights(&config.cache_dir);
     crate::scheduler::prune_test_history(&config.cache_dir);
-    let stale = stale_compilers(&config.store_dir(), retention, false);
+    let selection = store::CompilerSelection {
+        max_age: retention.rustc_max_age,
+        release: None,
+    };
+    let stale = stale_compilers(&config.store_dir(), &selection, false);
     let outcome = match store::gc(&config.store_dir(), store_budget) {
         Ok(outcome) => with_stale_compilers(stale, outcome),
         Err(error) => {

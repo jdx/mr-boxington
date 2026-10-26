@@ -17,4 +17,7 @@ An evicted object is rebuilt when a build needs it again.
 - **`--dry-run`** — Show what collection would remove without changing any files.
 
   While a disk has less free space than `gc.min_free_size`, a real run can remove a different amount than the preview, because it measures the disk again after each step. To free the cache disk, a real run can also evict more store objects than the action-store budget requires, and the preview never lists them. A preview does not probe rustc's session locks, so it can list a unit or session a compiler is still using; a real run keeps them.
+- **`--rustc-version <VERSION>`** — Remove every cached Rust result built by this compiler version.
+
+  Takes the release `rustc --version` prints, such as `1.97.1` or `1.99.0-nightly`, or the whole `rustc -vV` first line without `rustc`, such as `1.99.0-nightly (abc123def 2026-09-01)`, to pick one nightly. Unlike `gc.rustc_max_age`, this removes the version even if it was used a moment ago, and even if it is the newest one in the store. Objects that a remaining version also uses stay. Combine with `--dry-run` to see what it would remove.
 - **`-h --help`** — Print help

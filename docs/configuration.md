@@ -234,6 +234,21 @@ otherwise its modification time. Mounts with `noatime` therefore see only
 writes, so choose a window longer than you go between building a project and
 rebuilding it. `mbx gc --dry-run` shows what a window would remove.
 
+To drop a version right after you stop using it, name it instead of waiting
+out a window:
+
+```sh
+mbx gc --rustc-version 1.97.1 --dry-run   # preview
+mbx gc --rustc-version 1.97.1
+```
+
+The value is the release `rustc --version` prints, such as `1.97.1` or
+`1.99.0-nightly`. To pick one nightly, give the whole first line of
+`rustc -vV` without `rustc`, such as `1.99.0-nightly (abc123def 2026-09-01)`.
+This removes the version even if it was used a moment ago or is the newest in
+the store, and objects another version also uses stay. It applies to that run
+only; the automatic sweep never uses it.
+
 <span id="disk-scaled-defaults"></span>
 
 ## Example global configuration {#example}

@@ -324,7 +324,8 @@ pub fn run() -> Result<ExitCode> {
         Commands::Analyze(args) => analyze::run(&config, args),
         Commands::Setup(args) => setup::run(&args, args.action()?),
         Commands::Gc(args) if args.automatic => {
-            if args.json || args.dry_run || args.max_size.is_some() {
+            if args.json || args.dry_run || args.max_size.is_some() || args.rustc_version.is_some()
+            {
                 eyre::bail!("--automatic runs the configured sweep and takes no other option");
             }
             gc::run_automatic(&config, &settings.retention).map(|()| ExitCode::SUCCESS)
@@ -335,6 +336,7 @@ pub fn run() -> Result<ExitCode> {
                 .map_or(config.gc.max_bytes, |requested| requested.as_u64()),
             args.dry_run,
             args.json,
+            args.rustc_version.as_deref(),
             &settings.retention,
         )
         .map(|()| ExitCode::SUCCESS),

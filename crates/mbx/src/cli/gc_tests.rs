@@ -400,7 +400,15 @@ fn a_short_disk_reaches_the_store_after_private_collections() {
         contents.len() as u64
     );
 
-    gc::run(&config, config.gc.max_bytes, false, false, &always_short()).unwrap();
+    gc::run(
+        &config,
+        config.gc.max_bytes,
+        false,
+        false,
+        None,
+        &always_short(),
+    )
+    .unwrap();
 
     assert_eq!(
         crate::store::stats(&store).unwrap().total_bytes(),
@@ -482,7 +490,7 @@ fn a_combined_budget_shares_unoccupied_store_capacity() {
             if automatic {
                 sweep_store(&config, &retention);
             } else {
-                gc::run(&config, config.gc.max_bytes, false, false, &retention).unwrap();
+                gc::run(&config, config.gc.max_bytes, false, false, None, &retention).unwrap();
             }
         };
         collect();
@@ -498,7 +506,7 @@ fn a_combined_budget_shares_unoccupied_store_capacity() {
         std::fs::write(objects.join("object"), [0_u8; 64]).unwrap();
         assert_eq!(occupied_store_budget(&config, &retention, 160), 64);
         assert_eq!(occupied_store_budget(&config, &retention, 32), 32);
-        gc::run(&config, config.gc.max_bytes, true, false, &retention).unwrap();
+        gc::run(&config, config.gc.max_bytes, true, false, None, &retention).unwrap();
         assert!(
             views.iter().all(|view| view.exists()),
             "dry runs preserve targets"
@@ -570,14 +578,14 @@ fn unavailable_component_sizes_do_not_leave_room_in_a_combined_budget() {
                     );
                 } else {
                     // Even a failed preview must leave shared objects alone.
-                    let _ = gc::run(&config, 160, true, false, &retention);
+                    let _ = gc::run(&config, 160, true, false, None, &retention);
                     assert_eq!(
                         crate::store::stats(&config.store_dir())
                             .unwrap()
                             .total_bytes(),
                         64
                     );
-                    let result = gc::run(&config, 160, false, false, &retention);
+                    let result = gc::run(&config, 160, false, false, None, &retention);
                     assert_eq!(result.is_err(), component == "targets");
                 }
                 assert_eq!(
@@ -667,7 +675,7 @@ fn generated_trees_get_a_bounded_first_share_despite_busy_incremental_state() {
             if automatic {
                 prune_targets(&config, retention, config.gc.max_bytes);
             } else {
-                gc::run(&config, config.gc.max_bytes, false, false, retention).unwrap();
+                gc::run(&config, config.gc.max_bytes, false, false, None, retention).unwrap();
             }
         };
         collect(&retention);
