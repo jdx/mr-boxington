@@ -2096,14 +2096,41 @@ fn discover_for_churn(
         session::file_digest_cache(),
     ) {
         Err(BypassReason::UnsupportedSearchPath(_) | BypassReason::InputRead { .. }) => {
-            Ok(compilation.invocation.discover_source_inputs(
-                dep_info,
-                compilation.working_dir,
-                session::file_digest_cache(),
-            )?)
+            Ok(discover_churn_sources(compilation, dep_info)?)
         }
         discovered => Ok(discovered?),
     }
+}
+
+/// The sources the last compilation read, as they are now.
+///
+/// A source that has since been deleted or renamed is left out instead of
+/// failing the decision. The fingerprint then differs from the recorded one,
+/// so the deletion counts as an edit like any other, rather than costing the
+/// crate a compilation without its private state.
+fn discover_churn_sources(
+    compilation: &Compilation<'_>,
+    dep_info: &RustcDepInfo,
+) -> Result<DiscoveredInputs, BypassReason> {
+    let discover = |dep_info| {
+        compilation.invocation.discover_source_inputs(
+            dep_info,
+            compilation.working_dir,
+            session::file_digest_cache(),
+        )
+    };
+    let discovered = discover(dep_info);
+    if !matches!(discovered, Err(BypassReason::InputRead { .. })) {
+        return discovered;
+    }
+    let mut present = dep_info.clone();
+    present
+        .files
+        .retain(|path| !matches!(compilation.working_dir.join(path).try_exists(), Ok(false)));
+    if present.files.len() == dep_info.files.len() {
+        return discovered;
+    }
+    discover(&present)
 }
 
 /// [`plan_learned_reuse`] for a workspace unit whose action key could not be
@@ -2120,11 +2147,7 @@ fn plan_learned_without_action_key(
         .and_then(|dep_info| {
             // A changed environment is an edit, which the churn fingerprint
             // reads for itself; it is no reason to stop watching the crate.
-            Ok(compilation.invocation.discover_source_inputs(
-                &dep_info,
-                compilation.working_dir,
-                session::file_digest_cache(),
-            )?)
+            Ok(discover_churn_sources(compilation, &dep_info)?)
         });
     match discovered {
         Ok(discovered) => plan_learned_reuse(compilation, &discovered, true),

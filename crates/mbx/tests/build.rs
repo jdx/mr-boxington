@@ -2666,6 +2666,71 @@ fn a_changed_build_script_environment_value_counts_as_an_edit() {
     assert_eq!(String::from_utf8_lossy(&run.stdout), "0\n");
 }
 
+/// Deleting a source file is an edit. The last compilation's dep-info still
+/// names the file, and the crate keeps its private incremental state rather
+/// than failing to read it.
+#[test]
+fn a_deleted_source_file_counts_as_an_edit() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let directory = project.path();
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[package]\nname = \"pruned\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/main.rs"),
+        "mod color;\nmod other;\n\nfn main() {\n    println!(\"{} {}\", color::value(), other::value());\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/color.rs"),
+        "pub fn value() -> u32 { 1 }\n",
+    )
+    .unwrap();
+    generate_lockfile(directory);
+
+    for revision in 0..=2 {
+        std::fs::write(
+            directory.join("src/other.rs"),
+            format!("pub fn value() -> u32 {{ {revision} }}\n"),
+        )
+        .unwrap();
+        build(
+            directory,
+            store.path(),
+            &reports.path().join(format!("{revision}.json")),
+        );
+    }
+
+    std::fs::remove_file(directory.join("src/color.rs")).unwrap();
+    std::fs::write(
+        directory.join("src/main.rs"),
+        "mod other;\n\nfn main() {\n    println!(\"{}\", other::value());\n}\n",
+    )
+    .unwrap();
+    let (stats, stderr) = build_with(
+        directory,
+        store.path(),
+        &reports.path().join("deleted.json"),
+        &[],
+    );
+    assert!(
+        compiled_incrementally(&stats) > 0,
+        "the deletion should have kept private state: {stats}\n{stderr}"
+    );
+    assert!(!stderr.contains("mbx[warning]"), "{stderr}");
+    let binary = directory.join(format!(
+        "target/debug/pruned{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    let run = Command::new(&binary).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "2\n");
+}
+
 /// A workspace crate somebody is editing misses on every build no matter what
 /// the cache does. On its first edit, it gets its own incremental
 /// state -- which never reaches the store, because it describes one checkout's
