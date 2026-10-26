@@ -74,7 +74,7 @@ jobs:
             runner: namespace-profile-endev-linux-arm64;overrides.cache-tag=cache
             target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       # Empty for the host-target jobs, which pass no `--target` at all and
       # keep cargo's default directory layout.
