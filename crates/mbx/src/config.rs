@@ -1994,10 +1994,41 @@ fn default_cache_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::ffi::{OsStr, OsString};
 
     /// The disk size the tests below resolve scaled budgets against, so an
     /// assertion describes the scaling rule rather than the disk running it.
     const TEST_DISK: u64 = 400 * GIB;
+    const CACHE_ROOT_EMPTY_TEST_CHILD: &str = "MBX_CONFIG_TEST_CACHE_ROOT_EMPTY_CHILD";
+
+    #[cfg(unix)]
+    const CACHE_ROOT_TEST_CASE: &str = "MBX_CONFIG_TEST_CACHE_ROOT_CASE";
+    #[cfg(unix)]
+    const CACHE_ROOT_TEST_EXPECTED: &str = "MBX_CONFIG_TEST_CACHE_ROOT_EXPECTED";
+
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    enum CacheRootCase {
+        EmptyEnvironment,
+        NonUnicodeEnvironment,
+        NoEnvironmentWithFile,
+        ValidEnvironment,
+        Default,
+    }
+
+    #[cfg(unix)]
+    impl CacheRootCase {
+        fn label(self) -> &'static str {
+            match self {
+                Self::EmptyEnvironment => "empty-environment",
+                Self::NonUnicodeEnvironment => "non-unicode-environment",
+                Self::NoEnvironmentWithFile => "no-environment-with-file",
+                Self::ValidEnvironment => "valid-environment",
+                Self::Default => "default",
+            }
+        }
+    }
 
     fn configured(file: Option<&str>, values: &[(&str, &str)]) -> Result<Config> {
         configured_for_cli(file, values).map(|(config, _)| config)
@@ -2044,6 +2075,125 @@ mod tests {
             FileLayer::at(path, FileScope::Global)
         });
         Config::from_layers_measuring(&env, file.as_ref(), measure_disk, || Some(32 * GIB))
+    }
+
+    /// Compare the two public cache-root resolution paths in a child process
+    /// with an isolated home and configuration directory. The child keeps
+    /// process environment changes away from other tests.
+    #[cfg(unix)]
+    fn assert_cache_root_resolvers_match(test_name: &str, case: CacheRootCase) {
+        if let Some(child_case) = std::env::var_os(CACHE_ROOT_TEST_CASE) {
+            assert_eq!(child_case, OsStr::new(case.label()));
+            let config = Config::load().expect("configuration should resolve in the fixture");
+            let cache_root = mbx_cache_cargo::cache_root();
+            // An empty directory is rejected once Config is used; the early
+            // resolver reports none instead of a working-directory path.
+            let expected_root =
+                Some(config.cache_dir.as_path()).filter(|root| !root.as_os_str().is_empty());
+            assert_eq!(
+                cache_root.as_deref(),
+                expected_root,
+                "Config resolved {:?}, while cache_root resolved {:?}",
+                config.cache_dir,
+                cache_root,
+            );
+            if let Some(expected) = std::env::var_os(CACHE_ROOT_TEST_EXPECTED) {
+                assert_eq!(config.cache_dir, PathBuf::from(expected));
+            }
+            return;
+        }
+
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let home = tempfile::tempdir().unwrap();
+        let config_home = if cfg!(target_os = "macos") {
+            home.path().join("Library/Application Support")
+        } else {
+            home.path().join(".config")
+        };
+        let platform_cache_home = if cfg!(target_os = "macos") {
+            home.path().join("Library/Caches")
+        } else {
+            home.path().join(".cache")
+        };
+        let file_cache = home.path().join("file-cache");
+        let environment_cache = home.path().join("environment-cache");
+        let default_cache = platform_cache_home.join("mbx");
+
+        let (environment, configured_cache, expected) = match case {
+            CacheRootCase::EmptyEnvironment => (
+                Some(OsString::new()),
+                Some(file_cache.clone()),
+                Some(PathBuf::new()),
+            ),
+            CacheRootCase::NonUnicodeEnvironment => (
+                Some(OsString::from_vec(vec![0xff, b'x'])),
+                Some(file_cache.clone()),
+                Some(file_cache.clone()),
+            ),
+            CacheRootCase::NoEnvironmentWithFile => {
+                (None, Some(file_cache.clone()), Some(file_cache.clone()))
+            }
+            CacheRootCase::ValidEnvironment => (
+                Some(environment_cache.clone().into_os_string()),
+                Some(file_cache),
+                Some(environment_cache),
+            ),
+            CacheRootCase::Default => (None, None, Some(default_cache)),
+        };
+
+        if let Some(configured_cache) = configured_cache {
+            let config_file = config_home.join("mbx/config.toml");
+            std::fs::create_dir_all(config_file.parent().unwrap()).unwrap();
+            std::fs::write(
+                &config_file,
+                format!("cache_dir = {:?}\n", configured_cache.to_string_lossy()),
+            )
+            .unwrap();
+        }
+
+        let executable = std::env::current_exe().unwrap();
+        let test_name = format!("config::tests::{test_name}");
+        let mut command = std::process::Command::new(executable);
+        command
+            .env_clear()
+            .envs(std::env::vars_os().filter(|(name, _)| {
+                !name
+                    .to_string_lossy()
+                    .to_ascii_uppercase()
+                    .starts_with("MBX_")
+            }))
+            .args([
+                test_name.as_str(),
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CACHE_ROOT_TEST_CASE, case.label())
+            .env("HOME", home.path());
+
+        if cfg!(target_os = "macos") {
+            // macOS dirs follow HOME rather than the XDG overrides.
+        } else {
+            command
+                .env("XDG_CONFIG_HOME", &config_home)
+                .env("XDG_CACHE_HOME", &platform_cache_home);
+        }
+        if let Some(environment) = environment {
+            command.env("MBX_CACHE_DIR", environment);
+        }
+        if let Some(expected) = expected {
+            command.env(CACHE_ROOT_TEST_EXPECTED, expected);
+        }
+
+        let output = command.output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "cache-root case {} failed:\n{stdout}\n{stderr}",
+            case.label(),
+        );
     }
 
     #[test]
@@ -2161,6 +2311,87 @@ mod tests {
         assert_eq!(config.gc.interval, Duration::from_secs(6 * 60 * 60));
         assert_eq!(config.target.root, PathBuf::from("/from/env/targets"));
         assert!(config.target.views);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_root_is_none_when_environment_is_empty() {
+        assert_cache_root_resolvers_match(
+            "cache_root_is_none_when_environment_is_empty",
+            CacheRootCase::EmptyEnvironment,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_root_matches_config_when_environment_is_non_unicode() {
+        assert_cache_root_resolvers_match(
+            "cache_root_matches_config_when_environment_is_non_unicode",
+            CacheRootCase::NonUnicodeEnvironment,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_root_uses_file_config_when_environment_is_absent() {
+        assert_cache_root_resolvers_match(
+            "cache_root_uses_file_config_when_environment_is_absent",
+            CacheRootCase::NoEnvironmentWithFile,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_root_uses_valid_environment_before_file_config() {
+        assert_cache_root_resolvers_match(
+            "cache_root_uses_valid_environment_before_file_config",
+            CacheRootCase::ValidEnvironment,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_root_uses_platform_default_without_environment_or_file() {
+        assert_cache_root_resolvers_match(
+            "cache_root_uses_platform_default_without_environment_or_file",
+            CacheRootCase::Default,
+        );
+    }
+
+    #[test]
+    fn cache_root_is_none_when_environment_is_empty_on_all_platforms() {
+        if std::env::var_os(CACHE_ROOT_EMPTY_TEST_CHILD).is_some() {
+            let config = configured(None, &[("MBX_CACHE_DIR", "")])
+                .expect("an empty cache root should resolve through the environment layer");
+            assert_eq!(config.cache_dir, PathBuf::new());
+
+            assert_eq!(mbx_cache_cargo::cache_root(), None);
+            return;
+        }
+
+        let executable = std::env::current_exe().unwrap();
+        let test_name =
+            "config::tests::cache_root_is_none_when_environment_is_empty_on_all_platforms";
+        let mut command = std::process::Command::new(executable);
+        command
+            .env_clear()
+            .envs(std::env::vars_os().filter(|(name, _)| {
+                !name
+                    .to_string_lossy()
+                    .to_ascii_uppercase()
+                    .starts_with("MBX_")
+            }))
+            .args([test_name, "--exact", "--nocapture", "--test-threads=1"])
+            .env(CACHE_ROOT_EMPTY_TEST_CHILD, "1")
+            .env("MBX_CACHE_DIR", "");
+
+        let output = command.output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "empty cache-root case failed:\n{stdout}\n{stderr}",
+        );
     }
 
     #[test]

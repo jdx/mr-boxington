@@ -314,9 +314,13 @@ fn workspace_marker(workspace_root: &Path) -> String {
 }
 
 /// Resolve the shared mbx cache root from the environment, machine config, or platform default.
+///
+/// Match `Config`'s environment layer: a Unicode value overrides the file, while a non-Unicode
+/// value is skipped. An empty value overrides the file too, but names no usable directory
+/// (`Config` rejects it once loaded), so it resolves no root rather than a relative path.
 pub fn cache_root() -> Option<PathBuf> {
-    if let Some(root) = std::env::var_os("MBX_CACHE_DIR").filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(root));
+    if let Some(root) = std::env::var_os("MBX_CACHE_DIR").filter(|value| value.to_str().is_some()) {
+        return (!root.is_empty()).then(|| PathBuf::from(root));
     }
     if let Some(config) = dirs::config_dir().map(|root| root.join("mbx/config.toml"))
         && let Ok(contents) = std::fs::read_to_string(config)
