@@ -376,7 +376,7 @@ pub(crate) fn compile(
             Ok(None) => {
                 // The fast plan already measured this unit for this compile.
                 if !learned.backstop_rejected {
-                    learned = plan_learned_reuse(&compilation, &discovered, learned_enabled);
+                    learned = plan_learned_reuse(&compilation, &discovered, &[], learned_enabled);
                 }
             }
             Err(error) => {
@@ -1985,10 +1985,11 @@ fn incremental_state_exceeds_backstop(directory: &Path, budget: Option<u64>) -> 
 fn plan_learned_reuse(
     compilation: &Compilation<'_>,
     discovered: &DiscoveredInputs,
+    absent: &[PathBuf],
     enabled: bool,
 ) -> LearnedPlan {
     let planned = (|| {
-        let sources = churn_fingerprint(compilation, discovered);
+        let sources = churn_fingerprint(compilation, discovered, absent);
         let (unit, mode) = incremental_unit_identity(compilation)?;
         let Some(state_path) = churn_state_path(&unit) else {
             return Result::<LearnedPlan>::Ok(LearnedPlan::default());
@@ -2044,9 +2045,17 @@ fn is_unshareable_search_path(error: &eyre::Report) -> bool {
 /// file reads, so private state stays as useful across such a change as across
 /// an edit. The values are read now, not taken from dep-info, which records
 /// those of the last compilation.
-fn churn_fingerprint(compilation: &Compilation<'_>, discovered: &DiscoveredInputs) -> CacheDigest {
+///
+/// `absent` are sources the last compilation read that no longer exist. They
+/// count as such, so that removing a file never reproduces the fingerprint
+/// of a set that lacked it all along.
+fn churn_fingerprint(
+    compilation: &Compilation<'_>,
+    discovered: &DiscoveredInputs,
+    absent: &[PathBuf],
+) -> CacheDigest {
     let sources = compilation.invocation.source_fingerprint(discovered);
-    if discovered.environment.is_empty() {
+    if discovered.environment.is_empty() && absent.is_empty() {
         return sources;
     }
     let mut bytes = sources.key().into_bytes();
@@ -2062,6 +2071,12 @@ fn churn_fingerprint(compilation: &Compilation<'_>, discovered: &DiscoveredInput
             }
             None => bytes.push(0),
         }
+    }
+    for path in absent {
+        let path = path.as_os_str().as_encoded_bytes();
+        bytes.push(2);
+        bytes.extend_from_slice(&(path.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(path);
     }
     CacheDigest::blake3(&bytes)
 }
@@ -2088,7 +2103,7 @@ fn is_missing_compiler_input(error: &eyre::Report) -> bool {
 fn discover_for_churn(
     compilation: &Compilation<'_>,
     dep_info: &RustcDepInfo,
-) -> Result<DiscoveredInputs> {
+) -> Result<(DiscoveredInputs, Vec<PathBuf>)> {
     match compilation.invocation.discover_inputs_with_mappings(
         dep_info,
         compilation.working_dir,
@@ -2098,20 +2113,21 @@ fn discover_for_churn(
         Err(BypassReason::UnsupportedSearchPath(_) | BypassReason::InputRead { .. }) => {
             Ok(discover_churn_sources(compilation, dep_info)?)
         }
-        discovered => Ok(discovered?),
+        discovered => Ok((discovered?, Vec::new())),
     }
 }
 
-/// The sources the last compilation read, as they are now.
+/// The sources the last compilation read, as they are now, and those of them
+/// that no longer exist.
 ///
 /// A source that has since been deleted or renamed is left out instead of
-/// failing the decision. The fingerprint then differs from the recorded one,
-/// so the deletion counts as an edit like any other, rather than costing the
-/// crate a compilation without its private state.
+/// failing the decision. [`churn_fingerprint`] counts it as absent, so the
+/// deletion is an edit like any other, rather than costing the crate a
+/// compilation without its private state.
 fn discover_churn_sources(
     compilation: &Compilation<'_>,
     dep_info: &RustcDepInfo,
-) -> Result<DiscoveredInputs, BypassReason> {
+) -> Result<(DiscoveredInputs, Vec<PathBuf>), BypassReason> {
     let discover = |dep_info| {
         compilation.invocation.discover_source_inputs(
             dep_info,
@@ -2121,16 +2137,20 @@ fn discover_churn_sources(
     };
     let discovered = discover(dep_info);
     if !matches!(discovered, Err(BypassReason::InputRead { .. })) {
-        return discovered;
+        return discovered.map(|discovered| (discovered, Vec::new()));
     }
-    let mut present = dep_info.clone();
-    present
-        .files
-        .retain(|path| !matches!(compilation.working_dir.join(path).try_exists(), Ok(false)));
-    if present.files.len() == dep_info.files.len() {
-        return discovered;
+    let (present, absent): (Vec<_>, Vec<_>) =
+        dep_info.files.iter().cloned().partition(|path| {
+            !matches!(compilation.working_dir.join(path).try_exists(), Ok(false))
+        });
+    if absent.is_empty() {
+        return discovered.map(|discovered| (discovered, Vec::new()));
     }
-    discover(&present)
+    let present = RustcDepInfo {
+        files: present,
+        ..dep_info.clone()
+    };
+    Ok((discover(&present)?, absent))
 }
 
 /// [`plan_learned_reuse`] for a workspace unit whose action key could not be
@@ -2150,7 +2170,7 @@ fn plan_learned_without_action_key(
             Ok(discover_churn_sources(compilation, &dep_info)?)
         });
     match discovered {
-        Ok(discovered) => plan_learned_reuse(compilation, &discovered, true),
+        Ok((discovered, absent)) => plan_learned_reuse(compilation, &discovered, &absent, true),
         Err(error) => {
             session::report_shim_warning(&format!(
                 "churn was not tracked for this crate: {error:#}"
@@ -2258,8 +2278,8 @@ fn reuse_hot_workspace_plan(
         {
             return Ok(LearnedPlan::default());
         }
-        let discovered = discover_for_churn(compilation, &dep_info)?;
-        let sources = churn_fingerprint(compilation, &discovered);
+        let (discovered, absent) = discover_for_churn(compilation, &dep_info)?;
+        let sources = churn_fingerprint(compilation, &discovered, &absent);
         let changed = recorded.sources != sources.key();
         let edited = changed && recorded.streak >= WORKSPACE_HOT_STREAK_THRESHOLD;
         if !edited && !links_private_artifact(compilation) {
@@ -2372,7 +2392,7 @@ fn record_learned_baseline(compilation: &Compilation<'_>, discovered: &Discovere
         let Some(path) = churn_state_path(&unit) else {
             return Result::<()>::Ok(());
         };
-        let sources = churn_fingerprint(compilation, discovered);
+        let sources = churn_fingerprint(compilation, discovered, &[]);
         if read_churn_state(&path)
             .is_some_and(|recorded| recorded.sources == sources.key() && recorded.streak == 0)
         {
@@ -2659,7 +2679,7 @@ fn restore_prediction_payload(
             // A plan an earlier lookup already made carries this checkout's
             // churn record; replacing it would only repeat the work.
             if learned.record.is_none() {
-                *learned = plan_learned_reuse(compilation, &discovered, learned_enabled);
+                *learned = plan_learned_reuse(compilation, &discovered, &[], learned_enabled);
             }
             Ok(None)
         }

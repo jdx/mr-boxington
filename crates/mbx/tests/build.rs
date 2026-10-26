@@ -2729,6 +2729,40 @@ fn a_deleted_source_file_counts_as_an_edit() {
     ));
     let run = Command::new(&binary).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&run.stdout), "2\n");
+
+    // A module added in one build and moved in the next: the record of the
+    // first describes the crate without the module, and the move must not
+    // read as a return to it.
+    std::fs::write(
+        directory.join("src/main.rs"),
+        "mod added;\nmod other;\n\nfn main() {\n    println!(\"{} {}\", added::value(), other::value());\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/added.rs"),
+        "pub fn value() -> u32 { 3 }\n",
+    )
+    .unwrap();
+    build(directory, store.path(), &reports.path().join("added.json"));
+    std::fs::create_dir_all(directory.join("src/added")).unwrap();
+    std::fs::rename(
+        directory.join("src/added.rs"),
+        directory.join("src/added/mod.rs"),
+    )
+    .unwrap();
+    let (stats, stderr) = build_with(
+        directory,
+        store.path(),
+        &reports.path().join("moved.json"),
+        &[],
+    );
+    assert!(
+        compiled_incrementally(&stats) > 0,
+        "the move should have kept private state: {stats}\n{stderr}"
+    );
+    assert!(!stderr.contains("mbx[warning]"), "{stderr}");
+    let run = Command::new(&binary).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "3 2\n");
 }
 
 /// A workspace crate somebody is editing misses on every build no matter what
