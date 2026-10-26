@@ -276,7 +276,6 @@ pub(super) fn summary(model: &Model) -> Block {
             model.mix.unconsulted
         ))
         .dim(),
-        rimel::text("Savings estimate sums compiler work, not wall-clock time.").dim(),
     ];
     if model.testing {
         lines.push(rimel::text(format!(
