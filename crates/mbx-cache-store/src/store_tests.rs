@@ -2088,10 +2088,30 @@ fn keeps_an_unclaimed_manifest_another_process_has_locked() {
     let mut held = fslock::LockFile::open(&task_manifest_lock_path(store, &identity)).unwrap();
     held.lock().unwrap();
 
+    assert_eq!(
+        gc_dry_run(store, u64::MAX).unwrap().removed_task_manifests,
+        0
+    );
     let outcome = gc(store, u64::MAX).unwrap();
 
     assert_eq!(outcome.removed_task_manifests, 0);
     assert!(path.exists());
+}
+
+#[test]
+fn a_dry_run_does_not_create_task_manifest_locks() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    let identity = "6".repeat(64);
+    let path = write_manifest_aged(store, &identity, 10, Duration::from_secs(3 * 24 * 60 * 60));
+    std::fs::remove_file(task_manifest_lock_path(store, &identity)).unwrap();
+
+    assert_eq!(
+        gc_dry_run(store, u64::MAX).unwrap().removed_task_manifests,
+        1
+    );
+    assert!(path.exists());
+    assert!(!task_manifest_lock_path(store, &identity).exists());
 }
 
 #[test]

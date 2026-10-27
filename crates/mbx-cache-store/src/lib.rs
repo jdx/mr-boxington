@@ -1117,15 +1117,18 @@ struct ManifestPrune {
 ///
 /// A file younger than [`TASK_MANIFEST_GRACE`] is kept, and so is any manifest
 /// or lock another process holds.
-fn prune_task_manifests(
-    store: &Path,
-    live: &BTreeSet<String>,
-    dry_run: bool,
-) -> Result<ManifestPrune> {
+///
+/// This is housekeeping beside the size budget, so a failure is logged and the
+/// sweep carries on to the eviction that follows it.
+fn prune_task_manifests(store: &Path, live: &BTreeSet<String>, dry_run: bool) -> ManifestPrune {
     let mut prune = ManifestPrune::default();
     let root = store.join(TASK_MANIFESTS_DIR);
     let mut removed = BTreeSet::new();
-    for entry in read_dir_or_empty(&root)? {
+    let manifests = read_dir_or_empty(&root).unwrap_or_else(|error| {
+        log::warn!("could not list task manifests: {error}");
+        Vec::new()
+    });
+    for entry in manifests {
         let name = entry.file_name().to_string_lossy().into_owned();
         let Some(identity) = name.strip_suffix(".json") else {
             continue;
@@ -1139,22 +1142,39 @@ fn prune_task_manifests(
         if !metadata.is_file() || !task_manifest_is_idle(&metadata) {
             continue;
         }
+        let lock_path = task_manifest_lock_path(store, identity);
         if dry_run {
-            removed.insert(identity.to_string());
+            // A real run skips a manifest whose lock is held, so the preview
+            // does too. A lock that does not exist yet is free, and probing
+            // must not create it.
+            if lock_path.exists() && claim_task_manifest_lock(&lock_path).is_none() {
+                continue;
+            }
             prune.removed_manifests += 1;
             prune.removed_bytes += metadata.len();
             continue;
         }
         // Held across the removal so a build merging into this manifest finishes
         // first, and one that starts afterwards writes a fresh file.
-        let lock_path = task_manifest_lock_path(store, identity);
         let Some(guard) = claim_task_manifest_lock(&lock_path) else {
             continue;
         };
-        if matches!(remove(&entry.path())?, Removal::Removed) {
-            removed.insert(identity.to_string());
-            prune.removed_manifests += 1;
-            prune.removed_bytes += metadata.len();
+        // A merge that finished between the check above and the lock replaced
+        // the file with a fresh one, so look again before deleting.
+        let Ok(metadata) = std::fs::metadata(entry.path()) else {
+            continue;
+        };
+        if !metadata.is_file() || !task_manifest_is_idle(&metadata) {
+            continue;
+        }
+        match remove(&entry.path()) {
+            Ok(Removal::Removed) => {
+                removed.insert(identity.to_string());
+                prune.removed_manifests += 1;
+                prune.removed_bytes += metadata.len();
+            }
+            Ok(_) => {}
+            Err(error) => log::warn!("could not remove task manifest {name}: {error}"),
         }
         drop(guard);
         if removed.contains(identity) {
@@ -1166,7 +1186,11 @@ fn prune_task_manifests(
     // that ever built, including ones whose manifest this or an earlier sweep
     // removed.
     if !dry_run {
-        for entry in read_dir_or_empty(&root.join("locks"))? {
+        let locks = read_dir_or_empty(&root.join("locks")).unwrap_or_else(|error| {
+            log::warn!("could not list task manifest locks: {error}");
+            Vec::new()
+        });
+        for entry in locks {
             let name = entry.file_name().to_string_lossy().into_owned();
             let Some(identity) = name.strip_suffix(".lock") else {
                 continue;
@@ -1186,7 +1210,7 @@ fn prune_task_manifests(
             }
         }
     }
-    Ok(prune)
+    prune
 }
 
 fn task_manifest_is_idle(metadata: &std::fs::Metadata) -> bool {
@@ -1881,7 +1905,7 @@ fn gc_with_mode(
         }
     }
 
-    let manifests = prune_task_manifests(store, &checkouts.live_identities, dry_run)?;
+    let manifests = prune_task_manifests(store, &checkouts.live_identities, dry_run);
     outcome.removed_task_manifests += manifests.removed_manifests;
     outcome.removed_bytes += manifests.removed_bytes;
 
