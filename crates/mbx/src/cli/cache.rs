@@ -411,6 +411,7 @@ pub(super) struct GcActionStoreReport {
     pub(super) removed_objects: u64,
     pub(super) removed_action_results: u64,
     pub(super) removed_checkout_records: u64,
+    pub(super) removed_task_manifests: u64,
     pub(super) removed_session_streams: u64,
     pub(super) removed_bytes: u64,
     pub(super) remaining_bytes: u64,

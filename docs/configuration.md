@@ -205,6 +205,13 @@ conservatively gives the action store no remaining allowance. Use
 `mbx gc --dry-run` to inspect collection, or `mbx gc --json` for each
 component's logical sizes.
 
+Prediction manifests are outside the byte budget. `mbx gc` removes a
+manifest, and its lock file, once no live checkout claims its identity and it
+has gone a day untouched. The next build of that identity starts without
+prefetch hints and writes a new manifest. `mbx gc --dry-run` reports them as
+unclaimed task manifests, and `mbx gc --json` as
+`action_store.removed_task_manifests`.
+
 One budget applies even when managed targets live on a different disk from the
 cache directory; free-space safeguards still operate per disk. Setting
 `gc.max_total_size = "none"` restores the

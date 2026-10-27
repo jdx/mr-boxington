@@ -2016,6 +2016,102 @@ fn keeps_a_checkout_recorded_while_its_worktree_exists() {
     assert_eq!(stats(&store).unwrap().live_checkouts, 1);
 }
 
+fn write_manifest_aged(store: &Path, identity: &str, bytes: usize, age: Duration) -> PathBuf {
+    let path = task_manifest_path(store, identity);
+    let lock = task_manifest_lock_path(store, identity);
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    std::fs::write(&path, vec![b'x'; bytes]).unwrap();
+    std::fs::write(&lock, b"").unwrap();
+    let at = filetime::FileTime::from_system_time(SystemTime::now() - age);
+    filetime::set_file_mtime(&path, at).unwrap();
+    filetime::set_file_mtime(&lock, at).unwrap();
+    path
+}
+
+#[test]
+fn drops_manifests_and_locks_no_checkout_claims() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("store");
+    let live = directory.path().join("live");
+    std::fs::create_dir_all(&live).unwrap();
+    let claimed = "1".repeat(64);
+    let unclaimed = "2".repeat(64);
+    record_checkout(&store, &claimed, &live, &live.join("target")).unwrap();
+    let old = Duration::from_secs(3 * 24 * 60 * 60);
+    let kept = write_manifest_aged(&store, &claimed, 10, old);
+    let dropped = write_manifest_aged(&store, &unclaimed, 100, old);
+    // Left behind by a manifest that is already gone.
+    let orphan_lock = task_manifest_lock_path(&store, &"3".repeat(64));
+    std::fs::write(&orphan_lock, b"").unwrap();
+    filetime::set_file_mtime(
+        &orphan_lock,
+        filetime::FileTime::from_system_time(SystemTime::now() - old),
+    )
+    .unwrap();
+
+    let dry = gc_dry_run(&store, u64::MAX).unwrap();
+    assert_eq!(dry.removed_task_manifests, 1);
+    assert_eq!(dry.removed_bytes, 100);
+    assert!(dropped.exists());
+
+    let outcome = gc(&store, u64::MAX).unwrap();
+
+    assert_eq!(outcome.removed_task_manifests, 1);
+    assert_eq!(outcome.removed_bytes, 100);
+    assert!(kept.exists());
+    assert!(task_manifest_lock_path(&store, &claimed).exists());
+    assert!(!dropped.exists());
+    assert!(!task_manifest_lock_path(&store, &unclaimed).exists());
+    assert!(!orphan_lock.exists());
+}
+
+#[test]
+fn keeps_a_recent_unclaimed_manifest() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    let identity = "4".repeat(64);
+    let path = write_manifest_aged(store, &identity, 10, Duration::from_secs(60));
+
+    let outcome = gc(store, u64::MAX).unwrap();
+
+    assert_eq!(outcome.removed_task_manifests, 0);
+    assert!(path.exists());
+    assert!(task_manifest_lock_path(store, &identity).exists());
+}
+
+#[test]
+fn keeps_an_unclaimed_manifest_another_process_has_locked() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    let identity = "5".repeat(64);
+    let path = write_manifest_aged(store, &identity, 10, Duration::from_secs(3 * 24 * 60 * 60));
+    let mut held = fslock::LockFile::open(&task_manifest_lock_path(store, &identity)).unwrap();
+    held.lock().unwrap();
+
+    let outcome = gc(store, u64::MAX).unwrap();
+
+    assert_eq!(outcome.removed_task_manifests, 0);
+    assert!(path.exists());
+}
+
+#[test]
+fn ignores_what_it_did_not_write_beside_the_task_manifests() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    let root = store.join("task-manifests/v1");
+    std::fs::create_dir_all(&root).unwrap();
+    let stray = root.join("notes.json");
+    std::fs::write(&stray, b"mine").unwrap();
+    filetime::set_file_mtime(
+        &stray,
+        filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(10 * 86_400)),
+    )
+    .unwrap();
+
+    assert_eq!(gc(store, u64::MAX).unwrap().removed_task_manifests, 0);
+    assert!(stray.exists());
+}
+
 #[test]
 fn forgets_a_claim_no_build_has_renewed() {
     let directory = tempfile::tempdir().unwrap();

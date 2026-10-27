@@ -5,9 +5,10 @@
 //! for the prediction index, `checkouts/v1` for the checkouts that have built
 //! each identity, `build-receipts/v1` for exact completed build closures, and
 //! `sessions/v1` for per-build event streams. Only the first two are collected
-//! for size; manifests and receipts are small, checkout records expire with
-//! their checkout claims, and session streams are bounded by age and count
-//! because they are history rather than cache content.
+//! for size; receipts are small, checkout records expire with their checkout
+//! claims, a manifest goes once no live checkout claims its identity, and
+//! session streams are bounded by age and count because they are history
+//! rather than cache content.
 
 mod events;
 
@@ -26,6 +27,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CAS_DIR: &str = "cas/v1";
 const ACTION_RESULTS_DIR: &str = "action-results/v1";
+const TASK_MANIFESTS_DIR: &str = "task-manifests/v1";
 const CHECKOUTS_DIR: &str = "checkouts/v1";
 const SWEEP_STAMP: &str = "gc/v1/last-sweep";
 const SWEEP_LOCK: &str = "gc/v1/sweep.lock";
@@ -39,6 +41,16 @@ const LEGACY_EXPORT_VERSION: u8 = 1;
 
 const IMPORT_STAGING_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const SESSION_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// How long an unclaimed task manifest or its lock must sit untouched before a
+/// sweep removes it.
+///
+/// A manifest is claimed through the checkout record of the build that uses it,
+/// and that record is written when the build starts. An archive import or a
+/// build from another embedder can still leave a manifest before any record
+/// names it, and the collector has to leave that one for the build it was
+/// written for.
+const TASK_MANIFEST_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_SESSIONS: usize = 256;
 
 /// How long a checkout's claim outlives the last build that renewed it.
@@ -77,6 +89,10 @@ pub struct GcOutcome {
     pub removed_objects: u64,
     pub removed_action_results: u64,
     pub removed_checkout_records: u64,
+    /// Prediction manifests whose identity no live checkout claims. Their bytes
+    /// are counted in `removed_bytes` but not in `remaining_bytes`, because
+    /// manifests are not cache content.
+    pub removed_task_manifests: u64,
     /// Event streams dropped on age or count. These bytes are not included in
     /// `remaining_bytes` because session history is not cache content.
     pub removed_session_streams: u64,
@@ -1084,15 +1100,119 @@ fn require_parsed_object(
     Ok(path)
 }
 
+#[derive(Default)]
+struct ManifestPrune {
+    removed_manifests: u64,
+    removed_bytes: u64,
+}
+
+/// Drop prediction manifests, and their locks, for identities no live checkout
+/// claims.
+///
+/// A manifest has one file per task identity and nothing else removes it, so
+/// without this the directory only grows: a manifest can reach 15 MiB and every
+/// lockfile change mints a new identity. Rooting already ignores manifests of
+/// unclaimed identities, so removing one changes no eviction decision; the
+/// worst it costs is a cold prefetch the next time that identity is built.
+///
+/// A file younger than [`TASK_MANIFEST_GRACE`] is kept, and so is any manifest
+/// or lock another process holds.
+fn prune_task_manifests(
+    store: &Path,
+    live: &BTreeSet<String>,
+    dry_run: bool,
+) -> Result<ManifestPrune> {
+    let mut prune = ManifestPrune::default();
+    let root = store.join(TASK_MANIFESTS_DIR);
+    let mut removed = BTreeSet::new();
+    for entry in read_dir_or_empty(&root)? {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(identity) = name.strip_suffix(".json") else {
+            continue;
+        };
+        if !is_task_identity(identity) || live.contains(identity) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() || !task_manifest_is_idle(&metadata) {
+            continue;
+        }
+        if dry_run {
+            removed.insert(identity.to_string());
+            prune.removed_manifests += 1;
+            prune.removed_bytes += metadata.len();
+            continue;
+        }
+        // Held across the removal so a build merging into this manifest finishes
+        // first, and one that starts afterwards writes a fresh file.
+        let lock_path = task_manifest_lock_path(store, identity);
+        let Some(guard) = claim_task_manifest_lock(&lock_path) else {
+            continue;
+        };
+        if matches!(remove(&entry.path())?, Removal::Removed) {
+            removed.insert(identity.to_string());
+            prune.removed_manifests += 1;
+            prune.removed_bytes += metadata.len();
+        }
+        drop(guard);
+        if removed.contains(identity) {
+            let _ = std::fs::remove_file(&lock_path);
+        }
+    }
+
+    // A lock outlives its manifest, so the directory holds one per identity
+    // that ever built, including ones whose manifest this or an earlier sweep
+    // removed.
+    if !dry_run {
+        for entry in read_dir_or_empty(&root.join("locks"))? {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(identity) = name.strip_suffix(".lock") else {
+                continue;
+            };
+            if !is_task_identity(identity)
+                || live.contains(identity)
+                || task_manifest_path(store, identity).exists()
+            {
+                continue;
+            }
+            let idle = entry
+                .metadata()
+                .is_ok_and(|metadata| metadata.is_file() && task_manifest_is_idle(&metadata));
+            if idle && let Some(guard) = claim_task_manifest_lock(&entry.path()) {
+                drop(guard);
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    Ok(prune)
+}
+
+fn task_manifest_is_idle(metadata: &std::fs::Metadata) -> bool {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|at| SystemTime::now().duration_since(at).ok())
+        .is_some_and(|age| age > TASK_MANIFEST_GRACE)
+}
+
+/// The lock on a task manifest, if nothing else holds it.
+fn claim_task_manifest_lock(path: &Path) -> Option<fslock::LockFile> {
+    let mut lock = fslock::LockFile::open(path).ok()?;
+    lock.try_lock().ok()?.then_some(lock)
+}
+
 fn task_manifest_path(store: &Path, identity: &str) -> PathBuf {
     store
-        .join("task-manifests/v1")
+        .join(TASK_MANIFESTS_DIR)
         .join(format!("{identity}.json"))
 }
 
 fn task_manifest_lock_path(store: &Path, identity: &str) -> PathBuf {
     store
-        .join("task-manifests/v1/locks")
+        .join(TASK_MANIFESTS_DIR)
+        .join("locks")
         .join(format!("{identity}.lock"))
 }
 
@@ -1761,6 +1881,10 @@ fn gc_with_mode(
         }
     }
 
+    let manifests = prune_task_manifests(store, &checkouts.live_identities, dry_run)?;
+    outcome.removed_task_manifests += manifests.removed_manifests;
+    outcome.removed_bytes += manifests.removed_bytes;
+
     let mut virtually_removed = already_removed;
     if live_bytes > max_bytes {
         // Reachability costs a read per action result and per output tree, so
@@ -1937,6 +2061,7 @@ pub fn gc_dry_run_after_stale(
     stale.removed_objects += budget.removed_objects;
     stale.removed_action_results += budget.removed_action_results;
     stale.removed_checkout_records += budget.removed_checkout_records;
+    stale.removed_task_manifests += budget.removed_task_manifests;
     stale.removed_session_streams += budget.removed_session_streams;
     stale.removed_bytes += budget.removed_bytes;
     stale.remaining_bytes = budget.remaining_bytes;

@@ -289,6 +289,7 @@ pub(super) fn run(
                 removed_objects: report_outcome.removed_objects,
                 removed_action_results: report_outcome.removed_action_results,
                 removed_checkout_records: report_outcome.removed_checkout_records,
+                removed_task_manifests: report_outcome.removed_task_manifests,
                 removed_session_streams: report_outcome.removed_session_streams,
                 removed_bytes: report_outcome.removed_bytes,
                 remaining_bytes: report_outcome.remaining_bytes,
@@ -558,6 +559,12 @@ pub(super) fn print_gc_store_outcome(outcome: &store::GcOutcome, dry_run: bool) 
         println!(
             "{prefix}dropped {} stale checkout records",
             outcome.removed_checkout_records
+        );
+    }
+    if outcome.removed_task_manifests > 0 {
+        println!(
+            "{prefix}dropped {} unclaimed task manifests",
+            outcome.removed_task_manifests
         );
     }
     if outcome.removed_session_streams > 0 {
@@ -1428,6 +1435,9 @@ fn add_gc_outcome(total: &mut store::GcOutcome, outcome: store::GcOutcome) {
     total.removed_checkout_records = total
         .removed_checkout_records
         .saturating_add(outcome.removed_checkout_records);
+    total.removed_task_manifests = total
+        .removed_task_manifests
+        .saturating_add(outcome.removed_task_manifests);
     total.removed_session_streams = total
         .removed_session_streams
         .saturating_add(outcome.removed_session_streams);
