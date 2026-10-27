@@ -111,6 +111,26 @@ fn cargo_with_settings_bypass_log_and_roots(
     }
     crate::storage::check_cache(config)?;
     let working_dir = std::env::current_dir()?;
+    // Keep the Cargo argument resolution shared with other dispatch decisions:
+    // a supported alias may carry the effective global options after Cargo
+    // expands it, while unsupported aliases remain conservatively unresolved.
+    let expanded = super::cargo_invocation::expanded_arguments(&cargo, arguments);
+    let wrapper_environment = inherited_environment(|name| std::env::var(name).ok(), &working_dir);
+    let wrapper_config = expanded.as_ref().and_then(|expanded| {
+        let wrappers = super::launch::configured_wrappers(
+            &invocation_dir(&working_dir, expanded),
+            expanded,
+            &wrapper_environment,
+        );
+        if wrappers.is_none() {
+            // Delegated output must match plain Cargo, so the reason stays at debug level.
+            log::debug!(
+                "Cargo's compiler wrapper configuration cannot be resolved; running Cargo without the cache"
+            );
+        }
+        wrappers
+    });
+    let expanded = expanded.unwrap_or_else(|| arguments.to_vec());
     let mut roots = match roots {
         Some(roots) => roots,
         None => {
@@ -135,8 +155,6 @@ fn cargo_with_settings_bypass_log_and_roots(
     };
     // What Cargo will run, not what was typed: with an alias such as
     // `nt = "nextest run"`, `-j` belongs to nextest rather than to Cargo.
-    let expanded = super::cargo_invocation::expanded_arguments(&cargo, arguments)
-        .unwrap_or_else(|| arguments.to_vec());
     // Held until the command ends: Cargo builds in it and it is removed after.
     let install_scratch = remote_install_scratch(
         &expanded,
@@ -209,6 +227,35 @@ fn cargo_with_settings_bypass_log_and_roots(
             "CARGO_TARGET_DIR or build.target-dir",
         )?;
     }
+    let Some(wrapper_config) = wrapper_config else {
+        // Unknown aliases or wrapper overrides must stay with Cargo, but only
+        // after their actual output paths pass the local-storage checks.
+        crate::storage::require_local(
+            &roots.target_dir,
+            "Cargo target directory",
+            "CARGO_TARGET_DIR or build.target-dir",
+        )?;
+        if let Some(build_dir) = nested_build_dir {
+            require_local_build_dir(build_dir)?;
+        }
+        // A link an earlier placement left still sends Cargo into the view, so
+        // collection must wait for this command as it does for a managed one.
+        let _view_lease = target::is_recorded(&config.target.root, &roots.workspace_root)
+            .then(
+                || match target::ViewLease::acquire(&config.target.root, &roots.workspace_root) {
+                    Ok(lease) => Some(lease),
+                    Err(error) => {
+                        log::warn!(
+                            "the managed target directory is not protected from collection: {error:#}"
+                        );
+                        None
+                    }
+                },
+            )
+            .flatten();
+        // `arguments` carries any install scratch directory checked above.
+        return super::launch::plain_launch(&cargo, arguments, rustc.as_deref());
+    };
     let existing_target = manage_existing_target(config, &roots, arguments)?;
     let default_target = roots.workspace_root.join("target");
     let placing_editor = roots.target_dir_requested
@@ -462,9 +509,15 @@ fn cargo_with_settings_bypass_log_and_roots(
             }
             Err(error) => return Err(error),
         };
-        let mut environment = inherited_environment(|name| std::env::var(name).ok(), &working_dir);
+        let mut environment = wrapper_environment.clone();
         if let Some(rustc) = &rustc {
             environment.insert("RUSTC".into(), rustc.to_string_lossy().into_owned());
+        }
+        if let Some(wrapper) = &wrapper_config.rustc {
+            environment.insert("RUSTC_WRAPPER".into(), wrapper.clone());
+        }
+        if let Some(wrapper) = &wrapper_config.workspace {
+            environment.insert("RUSTC_WORKSPACE_WRAPPER".into(), wrapper.clone());
         }
         let _lease = super::launch::lease(session_dir.path(), &mut environment)?;
         if let Some(path) = bypass_log {

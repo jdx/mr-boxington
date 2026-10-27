@@ -92,6 +92,8 @@ touch "$EXTERNAL_MARKER"
             .env("REAL_CARGO", real)
             .env("CARGO", &self.cargo)
             .env("CARGO_HOME", self.root.join("cargo-home"))
+            .env("CARGO_BUILD_JOBS", "1")
+            .env("CARGO_INCREMENTAL", "0")
             .env("MBX_CACHE_DIR", self.root.join("cache"))
             .env("MBX_TARGET_ROOT", self.root.join("targets"))
             .env("MBX_GC_AUTO", "0")
@@ -103,6 +105,102 @@ touch "$EXTERNAL_MARKER"
             command.env("MBX_CARGO_SHIM_MODE", "1");
         }
         command
+    }
+
+    fn cargo_command(&self) -> Command {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let cargo = which::which(cargo).unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(self.root.join("bin"))
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        std::fs::create_dir_all(self.root.join("cargo-home")).unwrap();
+        let mut command = Command::new(&cargo);
+        command
+            .current_dir(&self.outside)
+            .env_clear()
+            .env("PATH", path)
+            .env("CARGO", cargo)
+            .env("CARGO_HOME", self.root.join("cargo-home"))
+            .env("CARGO_BUILD_JOBS", "1")
+            .env("CARGO_INCREMENTAL", "0")
+            .env("CARGO_TARGET_DIR", self.root.join("cargo-target"))
+            .env("EXTERNAL_MARKER", self.root.join("external-ran"));
+        for variable in ["RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "RUSTC"] {
+            if let Some(value) = std::env::var_os(variable) {
+                command.env(variable, value);
+            }
+        }
+        command
+    }
+
+    fn assert_behavior_matches_cargo(&self, arguments: &[&str]) {
+        self.assert_cargo_behavior(arguments, false);
+    }
+
+    fn assert_delegated_or_storage_rejected(&self, arguments: &[&str]) {
+        self.assert_cargo_behavior(arguments, true);
+    }
+
+    fn assert_cargo_behavior(&self, arguments: &[&str], allow_storage_refusal: bool) {
+        let cargo = self.cargo_command().args(arguments).output().unwrap();
+        let marker = self.root.join("external-ran");
+        let cargo_ran_external = marker.is_file();
+        let _ = std::fs::remove_file(&marker);
+
+        for shim in [false, true] {
+            let output = self
+                .command(shim)
+                .args(arguments)
+                .env("REJECT_METADATA", "1")
+                .output()
+                .unwrap();
+            if allow_storage_refusal
+                && !output.status.success()
+                && String::from_utf8_lossy(&output.stderr)
+                    .contains("could not verify Cargo build storage")
+            {
+                assert!(
+                    !marker.exists(),
+                    "a refused invocation ran an external command"
+                );
+                assert!(!String::from_utf8_lossy(&output.stderr).contains("Compiling"));
+                continue;
+            }
+            assert_eq!(
+                output.status.code(),
+                cargo.status.code(),
+                "mbx status differs from Cargo for {arguments:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                output.stdout, cargo.stdout,
+                "mbx stdout differs from Cargo for {arguments:?}"
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let cargo_stderr = String::from_utf8_lossy(&cargo.stderr);
+            // An external command outside a manifest gets mbx's documented
+            // informational note. The Cargo diagnostic must still be intact.
+            let stderr: String = stderr
+                .split_inclusive('\n')
+                .filter(|line| {
+                    !line.contains(
+                        "no Cargo manifest in scope; running `cargo probe` without the cache.",
+                    )
+                })
+                .collect();
+            assert_eq!(
+                stderr, cargo_stderr,
+                "mbx stderr differs from Cargo for {arguments:?}"
+            );
+            assert_eq!(
+                marker.is_file(),
+                cargo_ran_external,
+                "mbx external-command classification differs from Cargo for {arguments:?}"
+            );
+            let _ = std::fs::remove_file(&marker);
+        }
     }
 }
 
@@ -321,90 +419,57 @@ fn environment_and_hierarchical_aliases_keep_cargo_precedence() {
 }
 
 #[test]
-fn unsupported_configuration_and_recursive_aliases_are_not_guessed() {
+fn recursive_and_unsupported_aliases_are_not_guessed() {
     let f = Fixture::new();
     for config in [
         "[alias]\nx='y'\ny='x'\n",
         "[alias]\nx=['-Zscript','example.rs']\n",
         "[alias]\nx=['build','-C','somewhere']\n",
-        "[alias]\nx=['--config','alias.y=\"probe\"','y']\n",
     ] {
         f.config(config);
-        for shim in [false, true] {
-            rejected(
-                f.command(shim)
-                    .arg("x")
-                    .env("REJECT_METADATA", "1")
-                    .output()
-                    .unwrap(),
-            );
-        }
+        f.assert_delegated_or_storage_rejected(&["x"]);
     }
-    f.config("[alias]\nx='probe'\n");
-    rejected(
-        f.command(true)
-            .args(["--config", "term.quiet=true", "x"])
-            .env("REJECT_METADATA", "1")
-            .output()
-            .unwrap(),
-    );
-    assert!(!f.root.join("external-ran").exists());
 }
 
-/// An `include` is configuration this cannot read, but only aliases can come
-/// out of one, and Cargo's own listing reports the aliases it honours. So a
-/// command Cargo knows as an alias is refused rather than guessed, while a
-/// command that is no alias at all is untouched: an include cannot turn
-/// `cargo probe` into something else, and refusing it would put back the very
-/// failure outside a project that this change exists to remove.
 #[test]
-fn configuration_includes_refuse_aliases_without_refusing_everything() {
+fn cli_alias_overrides_match_cargo_after_initial_expansion() {
     let f = Fixture::new();
-    let include = |text: &str| {
-        std::fs::write(f.outside.join(".cargo/extra.toml"), text).unwrap();
-        f.config("include=['extra.toml']\n");
-    };
-    for shim in [false, true] {
-        // Cargo honours the alias and says so in its listing, so it is refused
-        // rather than read from configuration this cannot follow.
-        include("[alias]\nx='probe'\n");
-        rejected(
-            f.command(shim)
-                .arg("x")
-                .env("REJECT_METADATA", "1")
-                .output()
-                .unwrap(),
-        );
-        assert!(!f.root.join("external-ran").exists());
-        // The same configuration must not cost an ordinary external command
-        // its passthrough.
-        let stdout = succeeded(
-            f.command(shim)
-                .arg("probe")
-                .env("REJECT_METADATA", "1")
-                .output()
-                .unwrap(),
-        );
-        assert!(stdout.starts_with("probe\n"), "{stdout}");
-        std::fs::remove_file(f.root.join("external-ran")).unwrap();
-    }
-    // An include Cargo cannot load leaves it honouring no alias at all, and
-    // its own diagnostic is the one worth showing. Nothing is built either way.
-    f.config("include=['missing.toml']\n[alias]\nx='probe'\n");
-    for shim in [false, true] {
-        let output = f
-            .command(shim)
-            .arg("x")
-            .env("REJECT_METADATA", "1")
-            .output()
-            .unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(!stderr.contains("could not verify"), "{stderr}");
-        assert!(!stderr.contains("Compiling"), "{stderr}");
-        assert!(!f.root.join("external-ran").exists(), "{stderr}");
-    }
+    f.config("[alias]\nx='probe'\n");
+
+    // Cargo expands the existing alias before applying this CLI config. The
+    // real Cargo invocation is the oracle for both mbx dispatch paths.
+    f.assert_behavior_matches_cargo(&["x", "--config", "alias.x='build'"]);
 }
 
+#[test]
+fn unrelated_cli_config_keeps_external_alias_passthrough() {
+    let f = Fixture::new();
+    f.config("[alias]\nx='probe'\n");
+    f.assert_behavior_matches_cargo(&["x", "--config", "term.quiet=true"]);
+}
+
+#[test]
+fn inline_alias_config_matches_cargo_for_recursive_alias_lookup() {
+    let f = Fixture::new();
+    f.config("[alias]\nx=['--config','alias.y=\"probe\"','y']\n");
+
+    // Whether Cargo applies an inline alias config before resolving the next
+    // alias is version-sensitive. Compare both mbx paths to this Cargo binary.
+    f.assert_delegated_or_storage_rejected(&["x"]);
+}
+
+/// Unresolved aliases may be refused before wrapper resolution. Otherwise
+/// delegation must preserve Cargo's result and external-command behavior.
+#[test]
+fn configuration_includes_do_not_guess_aliases() {
+    let f = Fixture::new();
+    std::fs::write(f.outside.join(".cargo/extra.toml"), "[alias]\nx='probe'\n").unwrap();
+    f.config("include=['extra.toml']\n");
+    f.assert_delegated_or_storage_rejected(&["x"]);
+    f.assert_behavior_matches_cargo(&["probe"]);
+    f.config("include=['missing.toml']\n[alias]\nx='probe'\n");
+    f.assert_delegated_or_storage_rejected(&["x"]);
+}
 #[test]
 fn manifest_aliases_global_flags_and_builtin_shadowing_are_checked() {
     let f = Fixture::new();

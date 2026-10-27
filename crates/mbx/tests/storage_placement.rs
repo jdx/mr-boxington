@@ -388,6 +388,154 @@ fn an_aliased_path_install_is_still_checked() {
     }
 }
 
+/// Letting Cargo handle an unresolved wrapper override still has to validate
+/// its output paths, even when the target does not exist and its intermediate
+/// directory would normally be checked only after target placement.
+#[test]
+fn an_unresolved_wrapper_alias_still_checks_missing_and_nested_storage() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let fixture = Fixture::new();
+    let bin = fixture.root.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let cargo = bin.join("cargo");
+    std::fs::write(
+        &cargo,
+        r#"#!/bin/sh
+case " $* " in
+  *' metadata '*)
+    printf '{"workspace_root":"%s","target_directory":"%s","build_directory":"%s","packages":[]}\n' "$TEST_WORKSPACE" "$TEST_TARGET_DIR" "$TEST_BUILD_DIR"
+    exit 0;;
+esac
+touch "$TEST_CARGO_MARKER"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let outside = fixture.root.join("outside-wrapper-fallback");
+    std::fs::create_dir_all(outside.join(".cargo")).unwrap();
+    let wrapper = fixture.root.join("unused-wrapper");
+    let wrapper_config = format!(
+        "build.rustc-wrapper={}",
+        toml::Value::String(wrapper.to_string_lossy().into_owned())
+    );
+    let expansion = toml::Value::Array(vec![
+        toml::Value::String("build".into()),
+        toml::Value::String("--offline".into()),
+        toml::Value::String("--config".into()),
+        toml::Value::String(wrapper_config),
+    ]);
+    std::fs::write(
+        outside.join(".cargo/config.toml"),
+        format!("[alias]\ni = {expansion}\n"),
+    )
+    .unwrap();
+
+    let missing_target = fixture.nfs.join("missing-target");
+    let missing_nested = missing_target.join("intermediates");
+    let local_target = fixture.root.join("local-target");
+    std::fs::create_dir(&local_target).unwrap();
+    let nested_nfs = local_target.join("intermediates");
+    symlink(&fixture.nfs, &nested_nfs).unwrap();
+
+    let cases = [
+        (
+            "missing-target",
+            missing_target.clone(),
+            missing_nested,
+            missing_target.clone(),
+            "CARGO_TARGET_DIR",
+        ),
+        (
+            "nested-build-dir",
+            local_target,
+            nested_nfs.clone(),
+            nested_nfs,
+            "CARGO_BUILD_BUILD_DIR",
+        ),
+    ];
+    for shim in [false, true] {
+        for (name, target, build_dir, rejected_path, setting) in &cases {
+            let marker = fixture.root.join(format!("wrapper-fallback-{shim}-{name}"));
+            let inherited_path = std::env::var_os("PATH").unwrap();
+            let paths = std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited_path));
+            let mut command = fixture.command();
+            command
+                .arg("i")
+                .current_dir(&outside)
+                .env("PATH", std::env::join_paths(paths).unwrap())
+                .env("CARGO", &cargo)
+                .env("CARGO_TARGET_DIR", target)
+                .env("CARGO_BUILD_BUILD_DIR", build_dir)
+                .env("TEST_WORKSPACE", &fixture.project)
+                .env("TEST_TARGET_DIR", target)
+                .env("TEST_BUILD_DIR", build_dir)
+                .env("TEST_CARGO_MARKER", &marker);
+            if shim {
+                command.env("MBX_CARGO_SHIM_MODE", "1");
+            }
+            rejected(command.output().unwrap(), rejected_path, setting);
+            assert!(!marker.exists(), "shim={shim} {name} reached Cargo");
+        }
+    }
+}
+
+/// A remote install that leaves its wrapper to Cargo builds in the scratch
+/// directory whose storage was checked, not in a temporary one Cargo picks.
+#[test]
+fn a_delegated_remote_install_builds_where_storage_was_checked() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let bin = fixture.root.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let cargo = bin.join("cargo");
+    std::fs::write(
+        &cargo,
+        r#"#!/bin/sh
+case " $* " in
+  *' metadata '*) exit 1;;
+esac
+printf '%s\n' "$@" > "$TEST_CARGO_ARGUMENTS"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let recorded = fixture.root.join("delegated-install-arguments");
+    let inherited_path = std::env::var_os("PATH").unwrap();
+    let paths = std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited_path));
+    let output = fixture
+        .command()
+        .args([
+            "install",
+            "ripgrep",
+            "--config",
+            "build.rustc-wrapper='unused-wrapper'",
+        ])
+        .current_dir(&fixture.root)
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .env("CARGO", &cargo)
+        .env("TEST_CARGO_ARGUMENTS", &recorded)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let arguments = std::fs::read_to_string(&recorded).unwrap();
+    let arguments = arguments.lines().collect::<Vec<_>>();
+    let target = arguments
+        .iter()
+        .position(|argument| *argument == "--target-dir")
+        .and_then(|index| arguments.get(index + 1))
+        .unwrap_or_else(|| panic!("Cargo was not given the checked directory: {arguments:?}"));
+    assert!(
+        Path::new(target).starts_with(fixture.root.join("cache")),
+        "{target}"
+    );
+}
+
 /// An alias the first probe could not read still names a package, so asking
 /// again as Cargo will expand it recovers that package's roots and the build
 /// is managed rather than refused. The roots are the expansion's; the child

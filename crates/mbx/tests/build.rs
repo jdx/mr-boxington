@@ -6220,6 +6220,12 @@ mod target_views {
     /// program's own dynamic libraries.
     fn assert_gc_waits_for(project: &Path, arguments: &[&str]) {
         let store = tempfile::tempdir().unwrap();
+        assert_gc_waits_for_in(project, store.path(), arguments);
+    }
+
+    /// [`assert_gc_waits_for`] with a store an earlier build may have placed
+    /// the target directory in.
+    fn assert_gc_waits_for_in(project: &Path, store: &Path, arguments: &[&str]) {
         let reports = tempfile::tempdir().unwrap();
         // A file rather than a pipe, so that nothing has to drain it while the
         // test waits on standard output, and so a failure can quote it.
@@ -6227,7 +6233,7 @@ mod target_views {
         let mut child = isolated_cargo_command(
             mbx_command(),
             project,
-            store.path(),
+            store,
             &reports.path().join("run.json"),
             arguments,
             &[("MBX_TARGET_VIEWS", "1")],
@@ -6261,7 +6267,7 @@ mod target_views {
 
         let view = managed(project);
         assert!(
-            view.starts_with(store.path().join("targets/v1")),
+            view.starts_with(store.join("targets/v1")),
             "the target directory should be managed: {}",
             view.display()
         );
@@ -6274,7 +6280,7 @@ mod target_views {
         fields["updated_secs"] = 1.into();
         std::fs::write(&record, serde_json::to_vec(&fields).unwrap()).unwrap();
 
-        let (gc_stdout, gc_stderr) = gc_expired_targets(store.path());
+        let (gc_stdout, gc_stderr) = gc_expired_targets(store);
         assert!(
             view.is_dir() && record.is_file(),
             "gc should keep a target directory a running command uses:\ngc stdout: {gc_stdout}\ngc stderr: {gc_stderr}\nmbx stderr: {}",
@@ -6297,7 +6303,7 @@ mod target_views {
             child_stderr()
         );
 
-        let (gc_stdout, gc_stderr) = gc_expired_targets(store.path());
+        let (gc_stdout, gc_stderr) = gc_expired_targets(store);
         assert!(
             !view.exists(),
             "gc should remove the expired target directory once the command has exited:\ngc stdout: {gc_stdout}\ngc stderr: {gc_stderr}"
@@ -6338,6 +6344,36 @@ mod target_views {
         .unwrap();
 
         assert_gc_waits_for(project.path(), &["test", "--offline"]);
+    }
+
+    #[test]
+    fn gc_leaves_a_target_directory_alone_while_a_delegated_cargo_test_is_running() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+        std::fs::write(
+            project.path().join("src/lib.rs"),
+            format!(
+                "pub fn double(value: u32) -> u32 {{\n    value * 2\n}}\n\n#[test]\nfn waits_for_its_caller() {WAIT_FOR_STDIN}\n"
+            ),
+        )
+        .unwrap();
+        build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("place.json"),
+            &[("MBX_TARGET_VIEWS", "1")],
+        );
+
+        // mbx leaves a wrapper named on the command line to Cargo, which
+        // still writes through the link into the view; `env` runs the
+        // compiler it is handed.
+        assert_gc_waits_for_in(
+            project.path(),
+            store.path(),
+            &["test", "--offline", "--config", "build.rustc-wrapper='env'"],
+        );
     }
 
     #[test]

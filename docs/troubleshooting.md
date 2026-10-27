@@ -104,20 +104,34 @@ discovery for the package they name. This alias recovery supports:
 - recursive aliases
 - Cargo's built-in shorthand commands, such as `b` and `t`
 
-It does not support:
+Alias expansion follows Cargo's order: mbx expands the first alias from Cargo's
+file and environment configuration before applying command-line `--config`
+overrides. A CLI override cannot supply or replace that first alias. mbx keeps
+those options for Cargo to apply to the expanded command. If a command-line
+wrapper override cannot be resolved safely, mbx runs Cargo with the original
+invocation and caller environment, without an mbx cache session.
 
-- configuration `include` files
-- aliases with `--config` overrides
-- directory-changing options such as `-C`
-- unstable Cargo options (`-Z`)
+Alias recovery still does not support configuration `include` files, directory
+changes such as `-C`, or unstable Cargo options (`-Z`).
 
-When mbx cannot read an alias in full and cannot verify its storage, it refuses
-the alias rather than guessing. To diagnose it, spell out the build command
-with its manifest or path instead of using the alias. Commands that are not
-aliases keep passing through, so an `include` in your configuration does not
-stop `cargo binstall` from working outside a project. mbx never reconstructs
-alias arguments from `cargo --list`, which loses the boundaries of arguments
-that contain whitespace.
+An unresolved alias can still be refused during the initial storage probe.
+If the invocation reaches wrapper resolution but configuration cannot be read
+in full, or the alias itself introduces `--config`, mbx delegates the original
+invocation to Cargo without a cache session. This preserves Cargo's wrapper
+and alias behavior rather than guessing at configuration precedence.
+
+Wrapper resolution follows configuration `include` files. A build stays managed
+when the included files can be read and leave `build.rustc-wrapper` and
+`build.rustc-workspace-wrapper` unset; otherwise mbx delegates to Cargo without
+a cache session. Run with `MBX_LOG=debug` to see when that happens. For
+`cargo install`, wrappers come from the configuration Cargo reads there: the
+package that `--path` names, or `CARGO_HOME` without one.
+
+For invocations that remain managed, mbx still refuses a build whose storage
+cannot be verified. To diagnose it, spell out the build command with its
+manifest or path instead of using the alias. Commands that are not aliases
+keep passing through. mbx never reconstructs alias arguments from
+`cargo --list`, which loses the boundaries of arguments that contain whitespace.
 
 ## Inspect a build
 

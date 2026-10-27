@@ -164,6 +164,281 @@ pub(super) fn load_cargo_config() -> Result<cargo_config2::Config> {
     Ok(without_empty_wrappers(cargo_config2::Config::load()?))
 }
 
+#[derive(Default)]
+pub(super) struct ConfiguredWrappers {
+    pub rustc: Option<String>,
+    pub workspace: Option<String>,
+}
+
+/// Resolve only the two wrappers that the build session must preserve.
+///
+/// `None` means Cargo has a wrapper override this resolver cannot safely
+/// model; the caller should launch Cargo with its original arguments and
+/// environment. Cargo's `--config` overrides are intentionally inspected only
+/// for these keys. Other command-line configuration remains in the cached
+/// path.
+pub(super) fn configured_wrappers(
+    cwd: &Path,
+    arguments: &[String],
+    environment: &BTreeMap<String, String>,
+) -> Option<ConfiguredWrappers> {
+    let environment = effective_environment(environment);
+    if !wrapper_environment_is_supported(&environment) {
+        return None;
+    }
+    let rustc_masked = environment.contains_key(OsStr::new("RUSTC_WRAPPER"));
+    let workspace_masked = environment.contains_key(OsStr::new("RUSTC_WORKSPACE_WRAPPER"));
+    let rustc_needed = !rustc_masked;
+    let workspace_needed = !workspace_masked;
+
+    if cli_config_changes_wrappers(arguments, cwd, rustc_needed, workspace_needed) {
+        return None;
+    }
+
+    let cargo_home = cargo_home(cwd, &environment);
+    let root = config_root(cwd, arguments, cargo_home.as_deref());
+    if (rustc_needed || workspace_needed)
+        && !config_hierarchy_is_supported(&root, cargo_home.clone())
+    {
+        return None;
+    }
+
+    if !rustc_needed && !workspace_needed {
+        return Some(ConfiguredWrappers::default());
+    }
+
+    let options = cargo_config2::ResolveOptions::default()
+        .env(
+            environment
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone())),
+        )
+        .cargo_home(cargo_home);
+    let config = cargo_config2::Config::load_with_options(&root, options).ok()?;
+    let config = without_empty_wrappers(config);
+    let rustc = match config.build.rustc_wrapper {
+        Some(path) if rustc_needed => Some(wrapper_path_to_string(path)?),
+        None => None,
+        Some(_) => None,
+    };
+    let workspace = match config.build.rustc_workspace_wrapper {
+        Some(path) if workspace_needed => Some(wrapper_path_to_string(path)?),
+        None => None,
+        Some(_) => None,
+    };
+    Some(ConfiguredWrappers {
+        rustc: if rustc_needed { rustc } else { None },
+        workspace: if workspace_needed { workspace } else { None },
+    })
+}
+
+fn wrapper_path_to_string(path: PathBuf) -> Option<String> {
+    path.into_os_string().into_string().ok()
+}
+
+fn wrapper_environment_is_supported(environment: &Environment) -> bool {
+    ["RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"]
+        .iter()
+        .all(|key| {
+            environment
+                .get(OsStr::new(key))
+                .is_none_or(|value| value.to_str().is_some())
+        })
+}
+
+/// Build the exact environment Cargo inherits for a normal managed launch:
+/// the current process environment, with the same overlay passed to
+/// `Command::envs`. A recovered CLI has already restored its caller environment
+/// before dispatch, so this also follows Cargo's recovery path without reading
+/// a separate process snapshot or mutating `std::env`.
+fn effective_environment(overlay: &BTreeMap<String, String>) -> Environment {
+    let mut environment = current_environment();
+    for (name, value) in overlay {
+        let name = OsString::from(name);
+        #[cfg(windows)]
+        let name = name.to_ascii_uppercase();
+        environment.insert(name, OsString::from(value));
+    }
+    environment
+}
+
+fn cargo_home(cwd: &Path, environment: &Environment) -> Option<PathBuf> {
+    if let Some(home) = environment
+        .get(OsStr::new("CARGO_HOME"))
+        .filter(|home| !home.is_empty())
+    {
+        let home = PathBuf::from(home);
+        return Some(if home.is_absolute() {
+            home
+        } else {
+            cwd.join(home)
+        });
+    }
+
+    #[cfg(windows)]
+    let home = environment
+        .get(OsStr::new("USERPROFILE"))
+        .or_else(|| environment.get(OsStr::new("HOME")));
+    #[cfg(unix)]
+    let home = environment.get(OsStr::new("HOME"));
+    #[cfg(not(any(windows, unix)))]
+    let home = std::env::home_dir();
+
+    home.map(PathBuf::from).map(|home| home.join(".cargo"))
+}
+
+/// Where Cargo starts configuration discovery. `cargo install` skips the
+/// caller's directory: it starts at the package `--path` names, or at
+/// `CARGO_HOME` without one.
+fn config_root(cwd: &Path, arguments: &[String], cargo_home: Option<&Path>) -> PathBuf {
+    let Some((index, "install")) = cargo_subcommand_at(arguments) else {
+        return cwd.to_path_buf();
+    };
+    let mut options = arguments[index + 1..]
+        .iter()
+        .take_while(|argument| argument.as_str() != "--");
+    while let Some(argument) = options.next() {
+        let path = if argument == "--path" {
+            options.next().map(String::as_str)
+        } else {
+            argument.strip_prefix("--path=")
+        };
+        if let Some(path) = path {
+            return cwd.join(path);
+        }
+    }
+    cargo_home.map_or_else(|| cwd.to_path_buf(), Path::to_path_buf)
+}
+
+fn config_hierarchy_is_supported(cwd: &Path, cargo_home: Option<PathBuf>) -> bool {
+    cargo_config2::Walk::with_cargo_home(cwd, cargo_home)
+        .all(|path| config_file_is_supported(path.as_ref(), 0))
+}
+
+/// Cargo also reads the files a configuration `include`s, which the wrapper
+/// resolver does not. They are supported when they can be read and leave both
+/// wrapper keys alone, so an include of unrelated settings keeps the session.
+fn config_file_is_supported(path: &Path, depth: usize) -> bool {
+    const MAX_INCLUDE_DEPTH: usize = 16;
+    let Ok(source) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(config) = toml::from_str::<toml::Value>(&source) else {
+        return false;
+    };
+    if depth > 0 && config_wrapper_keys(&config) != (false, false) {
+        return false;
+    }
+    let Some(include) = config.get("include") else {
+        return true;
+    };
+    if depth == MAX_INCLUDE_DEPTH {
+        return false;
+    }
+    let entries = match include {
+        toml::Value::Array(entries) => entries.iter().collect::<Vec<_>>(),
+        entry => vec![entry],
+    };
+    let base = path.parent().unwrap_or(Path::new(""));
+    entries.into_iter().all(|entry| {
+        let (included, optional) = match entry {
+            toml::Value::String(included) => (included.as_str(), false),
+            toml::Value::Table(table) => match table.get("path").and_then(toml::Value::as_str) {
+                Some(included) => (
+                    included,
+                    table
+                        .get("optional")
+                        .and_then(toml::Value::as_bool)
+                        .unwrap_or(false),
+                ),
+                None => return false,
+            },
+            _ => return false,
+        };
+        let included = base.join(included);
+        if optional && !included.exists() {
+            return true;
+        }
+        config_file_is_supported(&included, depth + 1)
+    })
+}
+
+fn cli_config_changes_wrappers(
+    arguments: &[String],
+    cwd: &Path,
+    rustc_needed: bool,
+    workspace_needed: bool,
+) -> bool {
+    let mut arguments = arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--");
+    while let Some(argument) = arguments.next() {
+        let value = if argument == "--config" {
+            let Some(value) = arguments.next() else {
+                return rustc_needed || workspace_needed;
+            };
+            value.as_str()
+        } else if let Some(value) = argument.strip_prefix("--config=") {
+            value
+        } else {
+            continue;
+        };
+
+        let affected = if let Some((key, value)) = value.split_once('=') {
+            let source = format!("{key} = {value}");
+            match toml::from_str::<toml::Value>(&source) {
+                // An included file can set either wrapper, as for a configuration file.
+                Ok(config) if config.get("include").is_some() => {
+                    return rustc_needed || workspace_needed;
+                }
+                Ok(config) => config_wrapper_keys(&config),
+                Err(_) => (
+                    rustc_needed && key_is_wrapper(key, "rustc-wrapper"),
+                    workspace_needed && key_is_wrapper(key, "rustc-workspace-wrapper"),
+                ),
+            }
+        } else {
+            let path = PathBuf::from(value);
+            let path = if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            };
+            let Ok(source) = std::fs::read_to_string(path) else {
+                return rustc_needed || workspace_needed;
+            };
+            let Ok(config) = toml::from_str::<toml::Value>(&source) else {
+                return rustc_needed || workspace_needed;
+            };
+            if config.get("include").is_some() && (rustc_needed || workspace_needed) {
+                return true;
+            }
+            config_wrapper_keys(&config)
+        };
+        if (rustc_needed && affected.0) || (workspace_needed && affected.1) {
+            return true;
+        }
+    }
+    false
+}
+
+fn key_is_wrapper(key: &str, wrapper: &str) -> bool {
+    let key = key
+        .trim()
+        .trim_matches(|character| character == '\'' || character == '"');
+    key == format!("build.{wrapper}")
+}
+
+fn config_wrapper_keys(config: &toml::Value) -> (bool, bool) {
+    let Some(build) = config.get("build").and_then(toml::Value::as_table) else {
+        return (false, false);
+    };
+    (
+        build.contains_key("rustc-wrapper"),
+        build.contains_key("rustc-workspace-wrapper"),
+    )
+}
+
 pub(super) fn without_empty_wrappers(mut config: cargo_config2::Config) -> cargo_config2::Config {
     for wrapper in [
         &mut config.build.rustc_wrapper,
@@ -448,6 +723,120 @@ pub fn dispatch() -> Option<ExitCode> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn wrapper_paths_with_non_unicode_bytes_cannot_enter_the_managed_environment() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from(OsString::from_vec(vec![b'w', 0xff]));
+        assert_eq!(wrapper_path_to_string(path), None);
+        for key in ["RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"] {
+            let mut environment = Environment::new();
+            environment.insert(key.into(), OsString::new());
+            assert!(wrapper_environment_is_supported(&environment));
+            environment.insert(key.into(), OsString::from_vec(vec![b'w', 0xff]));
+            assert!(!wrapper_environment_is_supported(&environment));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn configured_wrappers_resolve_windows_paths_and_respect_empty_environment_masks() {
+        const CHILD_MODE: &str = "MBX_TEST_CONFIGURED_WRAPPERS_CHILD";
+        const EXPECTED_RUSTC: &str = "MBX_TEST_EXPECTED_RUSTC_WRAPPER";
+        const EXPECTED_WORKSPACE: &str = "MBX_TEST_EXPECTED_WORKSPACE_WRAPPER";
+
+        if let Some(mode) = std::env::var_os(CHILD_MODE) {
+            let mode = mode.to_str().expect("child mode should be Unicode");
+            let expected_rustc = std::env::var(EXPECTED_RUSTC).unwrap();
+            let expected_workspace = std::env::var(EXPECTED_WORKSPACE).unwrap();
+            let mut environment = BTreeMap::new();
+            let rustc_masked = mode == "mask";
+            assert!(rustc_masked || mode == "resolve");
+            if rustc_masked {
+                environment.insert("RUSTC_WRAPPER".into(), String::new());
+            }
+
+            let configured =
+                configured_wrappers(&std::env::current_dir().unwrap(), &[], &environment)
+                    .expect("private Cargo config should be supported");
+            assert_eq!(
+                configured.rustc.as_deref(),
+                (!rustc_masked).then_some(expected_rustc.as_str())
+            );
+            assert_eq!(
+                configured.workspace.as_deref(),
+                Some(expected_workspace.as_str())
+            );
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let cargo_home = temp.path().join("private cargo home");
+        let workspace = temp.path().join("workspace");
+        let user_profile = temp.path().join("private profile");
+        let temporary_directory = temp.path().join("private temporary");
+        std::fs::create_dir_all(&cargo_home).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&user_profile).unwrap();
+        std::fs::create_dir_all(&temporary_directory).unwrap();
+
+        let wrappers = temp.path().join("wrapper bin");
+        let rustc_wrapper = wrappers.join("rustc wrapper.exe");
+        let workspace_wrapper = wrappers.join("workspace wrapper.exe");
+        for path in [&rustc_wrapper, &workspace_wrapper] {
+            let path = path.to_str().expect("temporary paths should be Unicode");
+            assert!(Path::new(path).is_absolute());
+            assert!(path.contains('\\'));
+            assert!(path.contains(' '));
+        }
+
+        let config = format!(
+            "[build]\nrustc-wrapper = '{}'\nrustc-workspace-wrapper = '{}'\n",
+            rustc_wrapper.display(),
+            workspace_wrapper.display()
+        );
+        std::fs::write(cargo_home.join("config.toml"), config).unwrap();
+
+        let test_name = "cli::launch::tests::configured_wrappers_resolve_windows_paths_and_respect_empty_environment_masks";
+        for mode in ["resolve", "mask"] {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(test_name)
+                .arg("--nocapture")
+                .current_dir(&workspace)
+                .env_clear()
+                .env("SystemRoot", std::env::var_os("SystemRoot").unwrap())
+                .env("PATH", std::env::var_os("PATH").unwrap())
+                .env("TEMP", &temporary_directory)
+                .env("TMP", &temporary_directory)
+                .env("USERPROFILE", &user_profile)
+                .env("HOME", &user_profile)
+                .env("CARGO_HOME", &cargo_home)
+                .env(CHILD_MODE, mode)
+                .env(EXPECTED_RUSTC, &rustc_wrapper)
+                .env(EXPECTED_WORKSPACE, &workspace_wrapper)
+                .output()
+                .expect("configured-wrapper child should start");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let transcript = format!("{stdout}{stderr}");
+            assert!(
+                output.status.success(),
+                "configured-wrapper child {mode} failed:\n{transcript}"
+            );
+            assert!(
+                transcript.contains("running 1 test"),
+                "configured-wrapper child {mode} did not run exactly one test:\n{transcript}"
+            );
+            assert!(
+                transcript.contains("1 passed; 0 failed"),
+                "configured-wrapper child {mode} did not pass its test:\n{transcript}"
+            );
+            println!("configured-wrapper child {mode} output:\n{transcript}");
+        }
+    }
+
     #[test]
     fn run_values_do_not_disable_caching_for_other_commands() {
         for args in [
@@ -470,6 +859,84 @@ mod tests {
             "a.toml".into(),
             "run".into()
         ]));
+    }
+
+    #[test]
+    fn config_includes_keep_the_session_unless_they_change_wrappers() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let project = root.path().join("project");
+        let cargo = project.join(".cargo");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(cargo.join("nested")).unwrap();
+        let supported = |config: &str| {
+            std::fs::write(cargo.join("config.toml"), config).unwrap();
+            config_hierarchy_is_supported(&project, Some(home.clone()))
+        };
+        std::fs::write(cargo.join("plain.toml"), "[term]\nquiet = true\n").unwrap();
+        std::fs::write(
+            cargo.join("nested/wrapper.toml"),
+            "[build]\nrustc-wrapper = 'w'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            cargo.join("chain.toml"),
+            "include = 'nested/wrapper.toml'\n",
+        )
+        .unwrap();
+        std::fs::write(cargo.join("invalid.toml"), "[build\n").unwrap();
+
+        assert!(supported("include = 'plain.toml'\n"));
+        assert!(supported("include = ['plain.toml']\n"));
+        assert!(supported(
+            "include = [{ path = 'missing.toml', optional = true }, 'plain.toml']\n"
+        ));
+        assert!(!supported("include = 'missing.toml'\n"));
+        assert!(!supported("include = 'invalid.toml'\n"));
+        assert!(!supported("include = 'nested/wrapper.toml'\n"));
+        assert!(!supported("include = 'chain.toml'\n"));
+        assert!(!supported("include = [{ optional = true }]\n"));
+        std::fs::write(cargo.join("cycle.toml"), "include = 'cycle.toml'\n").unwrap();
+        assert!(!supported("include = 'cycle.toml'\n"));
+    }
+
+    #[test]
+    fn install_reads_configuration_where_cargo_does() {
+        let cwd = Path::new("caller");
+        let home = Path::new("home");
+        let arguments = |words: &[&str]| {
+            words
+                .iter()
+                .map(|word| (*word).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            config_root(cwd, &arguments(&["build"]), Some(home)),
+            cwd.to_path_buf()
+        );
+        assert_eq!(
+            config_root(cwd, &arguments(&["install", "ripgrep"]), Some(home)),
+            home.to_path_buf()
+        );
+        for install in [
+            &["install", "--path", "tool"][..],
+            &["install", "--path=tool"],
+            &["+stable", "install", "--locked", "--path", "tool"],
+        ] {
+            assert_eq!(
+                config_root(cwd, &arguments(install), Some(home)),
+                cwd.join("tool"),
+                "{install:?}"
+            );
+        }
+        assert_eq!(
+            config_root(
+                cwd,
+                &arguments(&["install", "ripgrep", "--", "--path", "tool"]),
+                Some(home)
+            ),
+            home.to_path_buf()
+        );
     }
 
     #[test]

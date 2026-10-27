@@ -142,20 +142,24 @@ fn config_override(arguments: &[OsString]) -> bool {
 /// cost a lookup on the path this exists to keep short. Only a shorthand such
 /// as `c` or a configured alias reads configuration.
 ///
-/// Cargo is never asked to classify what the expansion leaves. Its listing
-/// answers what kind of command that is, which no caller here needs, and an
-/// alias the configuration could not show is refused either way: the
-/// listing refuses it, and without the listing it stays unexpanded, so the
-/// caller sees the typed alias name rather than any command it might stand
-/// for. Skipping the listing keeps a `cargo --list` off every run of an
-/// external command such as `cargo nextest`.
+/// Cargo is asked to classify what the expansion leaves only when the
+/// configuration cannot be read in full. An alias the configuration could not
+/// show then reaches the listing, which refuses it, rather than staying
+/// unexpanded under its typed name while its options go unseen. Readable
+/// configuration already shows every alias, so skipping the listing there
+/// keeps a `cargo --list` off every run of an external command such as
+/// `cargo nextest`.
 pub(super) fn expanded_arguments(cargo: &OsStr, arguments: &[String]) -> Option<Vec<String>> {
     let typed = super::launch::cargo_subcommand(arguments)?;
     if builtin(typed) || typed == "clippy" {
         return Some(arguments.to_vec());
     }
     let typed_arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
-    let resolved = super::strings(&resolve_with(cargo, &typed_arguments, false)?.arguments).ok()?;
+    // An `include` can define the typed command as an alias that only Cargo's
+    // listing shows.
+    let classify = aliases(&std::env::current_dir().ok()?).is_none();
+    let resolved =
+        super::strings(&resolve_with(cargo, &typed_arguments, classify)?.arguments).ok()?;
     // An expansion that brings its own `--` would hand a flag added after the
     // alias to the compiler rather than to Cargo.
     let separator = |arguments: &[String]| arguments.iter().any(|argument| argument == "--");
@@ -225,13 +229,12 @@ fn resolve_with(cargo: &OsStr, arguments: &[OsString], classify: bool) -> Option
             }
         };
         if let Some(alias) = alias {
-            // Cargo applies CLI overrides at a different stage from alias
-            // expansion. Until that ordering is modeled, do not recover roots
-            // or authorize passthrough for aliases carrying overrides.
-            if config_override(&arguments)
-                || expanded.len() == 32
-                || !expanded.insert(command.to_owned())
-            {
+            // Cargo expands aliases before applying command-line `--config`
+            // overrides. Keep those options in the invocation for the later
+            // wrapper resolver; they must not disable an otherwise supported
+            // alias. Cargo's plain launch remains the fallback for wrapper
+            // overrides that resolver cannot model.
+            if expanded.len() == 32 || !expanded.insert(command.to_owned()) {
                 return None;
             }
             let expansion = alias.arguments();
