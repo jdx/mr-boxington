@@ -214,6 +214,10 @@ fn display_last(session: &RecordedSession, baselines: &Baselines) {
         crate::session::note("  raise MBX_EVENTS_MAX_SIZE and build again to record all of it");
     }
 
+    for line in bypass_hints(&counts, |name| std::env::var_os(name).is_some()) {
+        crate::session::note(&line);
+    }
+
     let misses = session.events.iter().filter_map(|event| match event {
         SessionEvent::Action {
             outcome: ActionOutcome::Miss,
@@ -267,6 +271,44 @@ fn display_last(session: &RecordedSession, baselines: &Baselines) {
     if !found {
         crate::session::note("\nno cache misses were recorded");
     }
+}
+
+/// What to say about bypassed compilations in a recorded build.
+///
+/// The recording keeps only each bypass's kind, since a full reason carries
+/// local paths, so the results line says that a compilation was bypassed but
+/// not which option or variable did it. `is_set` answers for the current
+/// environment, which is the best guide to the recorded build's when the same
+/// shell runs both.
+fn bypass_hints(counts: &BTreeMap<&str, u64>, is_set: impl Fn(&str) -> bool) -> Vec<String> {
+    const OUTCOMES: [&str; 4] = ["hit", "miss", "unconsulted", "verification"];
+    let bypassed: u64 = counts
+        .iter()
+        .filter(|(label, _)| !OUTCOMES.contains(label) && !guidance(label).starts_with("Expected"))
+        .map(|(_, count)| count)
+        .sum();
+    if bypassed == 0 {
+        return Vec::new();
+    }
+    let mut lines = vec![format!(
+        "\n{bypassed} compilations bypassed the cache, and the results above give only the cause of each; `mbx explain build` (or another Cargo command) runs the build and names the option, flag, or environment variable behind every bypass"
+    )];
+    if counts.contains_key("cc-unsupported-environment") {
+        let names = mbx_cache_cc::BYPASS_ENVIRONMENT;
+        let set: Vec<_> = names.iter().copied().filter(|name| is_set(name)).collect();
+        lines.push(if set.is_empty() {
+            format!(
+                "  cc-unsupported-environment: the C compiler ran with one of {} set, and none is set in this environment; the recorded build had a different one",
+                names.join(", ")
+            )
+        } else {
+            format!(
+                "  cc-unsupported-environment: set in this environment, and each makes C compiles uncacheable: {}",
+                set.join(", ")
+            )
+        });
+    }
+    lines
 }
 
 fn compilation_unit(diagnostic: &ActionDiagnostic) -> Option<String> {
@@ -703,6 +745,40 @@ mod tests {
         ] {
             assert_ne!(guidance(kind), generic, "{kind} has no guidance of its own");
         }
+    }
+
+    #[test]
+    fn last_build_points_a_bypass_at_the_command_that_names_it() {
+        let counts = BTreeMap::from([("hit", 7), ("cc-tool-passthrough", 3)]);
+        let lines = bypass_hints(&counts, |_| false);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("3 compilations bypassed"), "{lines:?}");
+        assert!(lines[0].contains("mbx explain build"), "{lines:?}");
+
+        let counts = BTreeMap::from([
+            ("hit", 7),
+            ("miss", 1),
+            ("unconsulted", 2),
+            ("compiler-query", 4),
+            ("cc-compiler-query", 1),
+            ("standard-input", 1),
+        ]);
+        assert!(bypass_hints(&counts, |_| true).is_empty());
+    }
+
+    /// `LIBRARY_PATH` only affects linking, so a reader who finds it set must
+    /// not be led to think it is the variable the C adapter refused.
+    #[test]
+    fn last_build_names_the_environment_variables_that_bypass_cc() {
+        let counts = BTreeMap::from([("cc-unsupported-environment", 344)]);
+        let lines = bypass_hints(&counts, |name| matches!(name, "CPATH" | "LIBRARY_PATH"));
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[1].contains("CPATH"), "{lines:?}");
+        assert!(!lines[1].contains("LIBRARY_PATH"), "{lines:?}");
+
+        let lines = bypass_hints(&counts, |name| name == "LIBRARY_PATH");
+        assert!(lines[1].contains("none is set"), "{lines:?}");
+        assert!(lines[1].contains("COMPILER_PATH"), "{lines:?}");
     }
 
     #[test]
