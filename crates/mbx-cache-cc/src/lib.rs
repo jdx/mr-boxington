@@ -77,6 +77,12 @@ pub const BYPASS_ENVIRONMENT: &[&str] = &[
     "SUNPRO_DEPENDENCIES",
 ];
 
+/// Environment variables that force a bypass when set and the compiler is MSVC.
+///
+/// `cl.exe` prepends their contents to the command line, so argv no longer
+/// describes the compile.
+pub const MSVC_BYPASS_ENVIRONMENT: &[&str] = &["CL", "_CL_"];
+
 /// Absolute roots whose contents are keyed verbatim rather than through a
 /// placeholder.
 ///
@@ -1275,9 +1281,9 @@ where
         ] {
             environment.insert(name.into(), lookup(name));
         }
-        for name in ["CL", "_CL_"] {
+        for name in MSVC_BYPASS_ENVIRONMENT {
             if lookup(name).is_some() {
-                return Err(CcBypassReason::UnsupportedEnvironment(name.into()));
+                return Err(CcBypassReason::UnsupportedEnvironment((*name).into()));
             }
         }
     }

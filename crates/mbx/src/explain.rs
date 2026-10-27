@@ -214,7 +214,12 @@ fn display_last(session: &RecordedSession, baselines: &Baselines) {
         crate::session::note("  raise MBX_EVENTS_MAX_SIZE and build again to record all of it");
     }
 
-    for line in bypass_hints(&counts, |name| std::env::var_os(name).is_some()) {
+    // Both lookups match the C adapter's, which reads a value it can decode.
+    let mut names = mbx_cache_cc::BYPASS_ENVIRONMENT.to_vec();
+    if cfg!(windows) {
+        names.extend(mbx_cache_cc::MSVC_BYPASS_ENVIRONMENT);
+    }
+    for line in bypass_hints(&counts, &names, |name| std::env::var(name).is_ok()) {
         crate::session::note(&line);
     }
 
@@ -280,7 +285,11 @@ fn display_last(session: &RecordedSession, baselines: &Baselines) {
 /// not which option or variable did it. `is_set` answers for the current
 /// environment, which is the best guide to the recorded build's when the same
 /// shell runs both.
-fn bypass_hints(counts: &BTreeMap<&str, u64>, is_set: impl Fn(&str) -> bool) -> Vec<String> {
+fn bypass_hints(
+    counts: &BTreeMap<&str, u64>,
+    names: &[&str],
+    is_set: impl Fn(&str) -> bool,
+) -> Vec<String> {
     const OUTCOMES: [&str; 4] = ["hit", "miss", "unconsulted", "verification"];
     let bypassed: u64 = counts
         .iter()
@@ -291,10 +300,9 @@ fn bypass_hints(counts: &BTreeMap<&str, u64>, is_set: impl Fn(&str) -> bool) -> 
         return Vec::new();
     }
     let mut lines = vec![format!(
-        "\n{bypassed} compilations bypassed the cache, and the results above give only the cause of each; `mbx explain build` (or another Cargo command) runs the build and names the option, flag, or environment variable behind every bypass"
+        "\n{bypassed} compilations bypassed the cache, and the results above give only the cause of each; `mbx explain build` (or another Cargo command) runs the build and names the option, flag, or environment variable behind every bypass; if Cargo considers every output fresh, run `mbx clean` first so the compilations run again"
     )];
     if counts.contains_key("cc-unsupported-environment") {
-        let names = mbx_cache_cc::BYPASS_ENVIRONMENT;
         let set: Vec<_> = names.iter().copied().filter(|name| is_set(name)).collect();
         lines.push(if set.is_empty() {
             format!(
@@ -747,10 +755,12 @@ mod tests {
         }
     }
 
+    const NAMES: &[&str] = &["CPATH", "COMPILER_PATH"];
+
     #[test]
     fn last_build_points_a_bypass_at_the_command_that_names_it() {
         let counts = BTreeMap::from([("hit", 7), ("cc-tool-passthrough", 3)]);
-        let lines = bypass_hints(&counts, |_| false);
+        let lines = bypass_hints(&counts, NAMES, |_| false);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("3 compilations bypassed"), "{lines:?}");
         assert!(lines[0].contains("mbx explain build"), "{lines:?}");
@@ -763,7 +773,7 @@ mod tests {
             ("cc-compiler-query", 1),
             ("standard-input", 1),
         ]);
-        assert!(bypass_hints(&counts, |_| true).is_empty());
+        assert!(bypass_hints(&counts, NAMES, |_| true).is_empty());
     }
 
     /// `LIBRARY_PATH` only affects linking, so a reader who finds it set must
@@ -771,14 +781,24 @@ mod tests {
     #[test]
     fn last_build_names_the_environment_variables_that_bypass_cc() {
         let counts = BTreeMap::from([("cc-unsupported-environment", 344)]);
-        let lines = bypass_hints(&counts, |name| matches!(name, "CPATH" | "LIBRARY_PATH"));
+        let lines = bypass_hints(&counts, NAMES, |name| {
+            matches!(name, "CPATH" | "LIBRARY_PATH")
+        });
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[1].contains("CPATH"), "{lines:?}");
         assert!(!lines[1].contains("LIBRARY_PATH"), "{lines:?}");
 
-        let lines = bypass_hints(&counts, |name| name == "LIBRARY_PATH");
+        let lines = bypass_hints(&counts, NAMES, |name| name == "LIBRARY_PATH");
         assert!(lines[1].contains("none is set"), "{lines:?}");
         assert!(lines[1].contains("COMPILER_PATH"), "{lines:?}");
+    }
+
+    #[test]
+    fn last_build_names_the_msvc_variables_it_is_given() {
+        let counts = BTreeMap::from([("cc-unsupported-environment", 2)]);
+        let names = ["CPATH", "CL", "_CL_"];
+        let lines = bypass_hints(&counts, &names, |name| name == "_CL_");
+        assert!(lines[1].ends_with("uncacheable: _CL_"), "{lines:?}");
     }
 
     #[test]
