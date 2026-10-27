@@ -300,14 +300,26 @@ fn bypass_hints(
         return Vec::new();
     }
     let mut lines = vec![format!(
-        "\n{bypassed} compilations bypassed the cache, and the results above give only the cause of each; `mbx explain build` (or another Cargo command) runs the build and names the option, flag, or environment variable behind every bypass; if Cargo considers every output fresh, run `mbx clean` first so the compilations run again"
+        "\n{bypassed} compilations bypassed the cache, and the results above give only the cause of each; rerun the command above under `mbx explain` (for example `mbx explain build` with the same arguments) to name the option, flag, or environment variable behind every bypass; if Cargo considers every output fresh, run `mbx clean` first so the compilations run again"
     )];
     if counts.contains_key("cc-unsupported-environment") {
-        let set: Vec<_> = names.iter().copied().filter(|name| is_set(name)).collect();
+        let label = |name: &str| {
+            if mbx_cache_cc::MSVC_BYPASS_ENVIRONMENT.contains(&name) {
+                format!("{name} (MSVC)")
+            } else {
+                name.to_string()
+            }
+        };
+        let set: Vec<_> = names
+            .iter()
+            .copied()
+            .filter(|name| is_set(name))
+            .map(label)
+            .collect();
         lines.push(if set.is_empty() {
             format!(
                 "  cc-unsupported-environment: the C compiler ran with one of {} set, and none is set in this environment; the recorded build had a different one",
-                names.join(", ")
+                names.iter().copied().map(label).collect::<Vec<_>>().join(", ")
             )
         } else {
             format!(
@@ -628,6 +640,9 @@ pub(crate) fn guidance(kind: &str) -> &'static str {
         "standard-input" => {
             "Expected for Cargo probes: source supplied on standard input cannot be rediscovered later."
         }
+        "cc-standard-input" => {
+            "Expected for build-script probes: source supplied on standard input cannot be rediscovered later."
+        }
         "incremental" => {
             "Cargo compiled this incrementally, which mbx cannot cache. `mbx settings set incremental false` (or `MBX_INCREMENTAL=0`) makes it cacheable again; mbx already gives a crate you are editing its own incremental state without giving up the rest of the cache."
         }
@@ -750,6 +765,7 @@ mod tests {
             "unknown-flag",
             "unknown-codegen-option",
             "unmapped-absolute-path",
+            "cc-standard-input",
         ] {
             assert_ne!(guidance(kind), generic, "{kind} has no guidance of its own");
         }
@@ -772,6 +788,7 @@ mod tests {
             ("compiler-query", 4),
             ("cc-compiler-query", 1),
             ("standard-input", 1),
+            ("cc-standard-input", 1),
         ]);
         assert!(bypass_hints(&counts, NAMES, |_| true).is_empty());
     }
@@ -798,7 +815,7 @@ mod tests {
         let counts = BTreeMap::from([("cc-unsupported-environment", 2)]);
         let names = ["CPATH", "CL", "_CL_"];
         let lines = bypass_hints(&counts, &names, |name| name == "_CL_");
-        assert!(lines[1].ends_with("uncacheable: _CL_"), "{lines:?}");
+        assert!(lines[1].ends_with("uncacheable: _CL_ (MSVC)"), "{lines:?}");
     }
 
     #[test]
