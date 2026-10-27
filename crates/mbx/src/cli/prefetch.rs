@@ -27,7 +27,7 @@ pub(super) fn run(
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let working_dir = std::env::current_dir()?;
     let roots = resolve_roots(&cargo, arguments, &working_dir);
-    let session_dir = tempfile::Builder::new().prefix("mbx-prefetch-").tempdir()?;
+    let session_dir = crate::session::create_session_dir("mbx-prefetch-")?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
