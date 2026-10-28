@@ -2526,3 +2526,142 @@ fn only_a_vanished_compiler_input_is_a_quiet_prediction_miss() {
         "the cache is unavailable"
     )));
 }
+
+#[test]
+fn mbx_incremental_safety_tracks_optimization_lto_and_codegen_units() {
+    let safe = |arguments: &[&str]| {
+        mbx_incremental_is_safe(&arguments.iter().map(OsString::from).collect::<Vec<_>>())
+    };
+    for level in ["0", "1"] {
+        assert!(safe(&["-C", &format!("opt-level={level}")]));
+    }
+    for level in ["2", "3", "s", "z"] {
+        assert!(!safe(&["-C", &format!("opt-level={level}")]));
+    }
+    assert!(!safe(&["-O"]));
+    assert!(safe(&[]));
+
+    let opt_level_spellings = [
+        vec!["-C", "opt-level=3"],
+        vec!["-Copt-level=3"],
+        vec!["--codegen", "opt-level=3"],
+        vec!["--codegen=opt-level=3"],
+    ];
+    for arguments in opt_level_spellings {
+        assert!(!safe(&arguments), "{arguments:?}");
+    }
+    let lto_off_spellings = [
+        vec!["-C", "lto=off", "-C", "opt-level=3"],
+        vec!["-Clto=n", "-Copt-level=3"],
+        vec!["--codegen", "lto=no", "-Copt-level=3"],
+        vec!["--codegen=lto=false", "-Copt-level=3"],
+    ];
+    for arguments in lto_off_spellings {
+        assert!(safe(&arguments), "{arguments:?}");
+    }
+    for value in ["thin", "fat", "true", "yes", "y", "on"] {
+        assert!(!safe(&["-Copt-level=0", &format!("-Clto={value}")]));
+    }
+    let lto_spellings = [
+        vec!["-C", "lto=thin"],
+        vec!["-Clto=fat"],
+        vec!["--codegen", "lto=true"],
+        vec!["--codegen=lto=yes"],
+        vec!["-C", "lto=y"],
+        vec!["-Clto=on"],
+        vec!["-C", "lto"],
+        vec!["-Clto"],
+        vec!["--codegen", "lto"],
+        vec!["--codegen=lto"],
+    ];
+    for arguments in lto_spellings {
+        assert!(!safe(&arguments), "{arguments:?}");
+    }
+    let one_cgu_spellings = [
+        vec!["-Copt-level=3", "-Ccodegen-units=1"],
+        vec!["--codegen", "opt-level=3", "--codegen", "codegen-units=1"],
+        vec!["--codegen=opt-level=3", "--codegen=codegen-units=1"],
+    ];
+    for arguments in one_cgu_spellings {
+        assert!(safe(&arguments), "{arguments:?}");
+    }
+    assert!(!safe(&[
+        "-Copt-level=3",
+        "-Ccodegen-units=1",
+        "-Ccodegen-units=2"
+    ]));
+    assert!(safe(&[
+        "-Copt-level=3",
+        "-Ccodegen-units=2",
+        "-Ccodegen-units=1"
+    ]));
+    assert!(safe(&["-Copt-level=3", "-Clto=thin", "-Clto=off"]));
+    assert!(!safe(&["-Copt-level=3", "-Clto=off", "-Clto=thin"]));
+    assert!(safe(&["-Copt-level=3", "-Clto=false"]));
+    assert!(!safe(&["-Copt-level=0", "-Clto=false", "-Clto=thin"]));
+    assert!(safe(&["-O", "-Copt-level=1"]));
+    assert!(!safe(&["-Copt-level=1", "-O"]));
+}
+
+#[cfg(unix)]
+#[test]
+fn mbx_incremental_safety_ignores_non_utf8_arguments() {
+    use std::os::unix::ffi::OsStringExt as _;
+    let arguments = vec![OsString::from_vec(vec![0xff]), "-Copt-level=0".into()];
+    assert!(mbx_incremental_is_safe(&arguments));
+    let arguments = vec![OsString::from_vec(vec![0xff]), "-Clto=thin".into()];
+    assert!(!mbx_incremental_is_safe(&arguments));
+}
+
+#[test]
+fn mbx_incremental_safety_expands_response_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let response = directory.path().join("profile arguments.rsp");
+    let mut argument = OsString::from("@");
+    argument.push(&response);
+    let safe = |contents: &str, overrides: &[&str]| {
+        std::fs::write(&response, contents).unwrap();
+        let mut arguments = vec![argument.clone()];
+        arguments.extend(overrides.iter().map(OsString::from));
+        mbx_incremental_is_safe(&arguments)
+    };
+
+    assert!(!safe("-C\nopt-level=3\n", &[]));
+    assert!(!safe("-Copt-level=0\n-Clto=thin\n", &[]));
+    assert!(safe("-Copt-level=3\n-Ccodegen-units=1\n", &[]));
+    assert!(safe("-Copt-level=3\n", &["-Clto=off"]));
+    assert!(safe("-Copt-level=3\n", &["-Copt-level=1"]));
+    assert!(!safe("-Copt-level=3\n-Ccodegen-units=1\n", &["-Clto=fat"]));
+    assert!(safe("-Copt-level=0\n", &[]));
+    assert!(safe("-Copt-level=1\n", &[]));
+}
+
+#[test]
+fn bypassed_library_incremental_gate_keeps_safe_and_rejects_optimized_invocations() {
+    let arguments = [
+        "--crate-type=staticlib",
+        "--crate-name=library",
+        "-Copt-level=3",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    assert!(bypassed_library_incremental_flag(&arguments).is_none());
+    assert!(!bypassed_library_incremental_is_enabled(
+        &arguments, true, false
+    ));
+
+    let safe = [
+        "--crate-type=staticlib",
+        "--crate-name=library",
+        "-Copt-level=0",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    assert!(bypassed_library_incremental_is_enabled(&safe, true, false));
+    assert!(!bypassed_library_incremental_is_enabled(
+        &safe, false, false
+    ));
+    assert!(!bypassed_library_incremental_is_enabled(&safe, true, true));
+}

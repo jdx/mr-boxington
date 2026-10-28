@@ -2683,6 +2683,141 @@ fn a_changed_build_script_environment_value_counts_as_an_edit() {
     assert_eq!(String::from_utf8_lossy(&run.stdout), "0\n");
 }
 
+#[test]
+fn learned_incremental_skips_optimized_compiles_and_keeps_dev_levels() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+
+    for (label, level, expected) in [("dev0", "0", true), ("dev1", "1", true)] {
+        let project = tempfile::tempdir().unwrap();
+        write_named_project(project.path(), label);
+        std::fs::write(
+            project.path().join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{label}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[profile.dev]\nopt-level = {level}\n"
+            ),
+        )
+        .unwrap();
+        generate_lockfile(project.path());
+        build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("{label}-cold.json")),
+            &[("MBX_LEARNED_INCREMENTAL", "1")],
+        );
+        std::fs::write(
+            project.path().join("src/lib.rs"),
+            "pub fn double(value: u32) -> u32 { value * 2 + 1 }\n",
+        )
+        .unwrap();
+        let (stats, stderr) = build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("{label}-edit.json")),
+            &[("MBX_LEARNED_INCREMENTAL", "1")],
+        );
+        assert_eq!(
+            compiled_incrementally(&stats) > 0,
+            expected,
+            "{stats}\n{stderr}"
+        );
+    }
+
+    let project = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    // The churn identity includes rustc's profile arguments. Seed and edit
+    // under the same release-derived profile so this tests the hot-unit gate.
+    let manifest = project.path().join("Cargo.toml");
+    let mut manifest_contents = std::fs::read_to_string(&manifest).unwrap();
+    manifest_contents
+        .push_str("\n[profile.measure]\ninherits = \"release\"\nopt-level = 3\nlto = false\n");
+    std::fs::write(&manifest, manifest_contents).unwrap();
+    generate_lockfile(project.path());
+    cargo_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("release-cold.json"),
+        &["build", "--profile", "measure", "--offline"],
+        &[("MBX_LEARNED_INCREMENTAL", "1")],
+    );
+    std::fs::write(
+        project.path().join("src/lib.rs"),
+        "pub fn double(value: u32) -> u32 { value * 2 + 1 }\n",
+    )
+    .unwrap();
+    let (stats, stderr) = cargo_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("release-edit.json"),
+        &["build", "--profile", "measure", "--offline"],
+        &[("MBX_LEARNED_INCREMENTAL", "1")],
+    );
+    assert_eq!(compiled_incrementally(&stats), 0, "{stats}\n{stderr}");
+}
+
+#[test]
+fn eager_incremental_skips_optimized_compiles() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    std::fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[profile.dev]\nopt-level = 3\n",
+    )
+    .unwrap();
+    generate_lockfile(project.path());
+    let (stats, stderr) = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("eager-optimized.json"),
+        &[("MBX_EAGER_INCREMENTAL", "1")],
+    );
+    assert_eq!(compiled_incrementally(&stats), 0, "{stats}\n{stderr}");
+}
+
+#[test]
+fn response_file_profiles_follow_incremental_safety_gates() {
+    for (mode, level, expected) in [
+        ("MBX_LEARNED_INCREMENTAL", "0", true),
+        ("MBX_LEARNED_INCREMENTAL", "3", false),
+        ("MBX_EAGER_INCREMENTAL", "0", true),
+        ("MBX_EAGER_INCREMENTAL", "3", false),
+    ] {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+        generate_lockfile(project.path());
+        let response = project.path().join("profile.rsp");
+        std::fs::write(&response, format!("-Copt-level={level}\n")).unwrap();
+        let flags = format!("@{}", response.display());
+        let environment = [(mode, "1"), ("RUSTFLAGS", flags.as_str())];
+        build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("cold.json"),
+            &environment,
+        );
+        std::fs::write(
+            project.path().join("src/lib.rs"),
+            "pub fn double(value: u32) -> u32 { value * 2 + 1 }\n",
+        )
+        .unwrap();
+        let (stats, stderr) = build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("edit.json"),
+            &environment,
+        );
+        assert_eq!(
+            compiled_incrementally(&stats) > 0,
+            expected,
+            "{mode} opt{level}: {stats}\n{stderr}"
+        );
+    }
+}
+
 /// Deleting a source file is an edit. The last compilation's dep-info still
 /// names the file, and the crate keeps its private incremental state rather
 /// than failing to read it.

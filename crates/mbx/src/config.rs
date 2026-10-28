@@ -190,8 +190,9 @@ pub(crate) struct RawConfig {
     /// It applies in CI too, and it overrides `incremental` and learned
     /// incremental reuse. Workspace crates then compile with that state
     /// instead of restoring or publishing shared results, and crates that link
-    /// them stay private as well. The first build can be slower. Ignored for
-    /// compilations selected for verification by `MBX_VERIFY` or
+    /// them stay private as well. It follows the same LTO and optimization
+    /// limits as `learned_incremental`. The first build can be slower. Ignored
+    /// for compilations selected for verification by `MBX_VERIFY` or
     /// `verify_sample_rate`. This may also be set in workspace `.mbx.toml`; the
     /// environment variable wins.
     #[usage(env = "MBX_EAGER_INCREMENTAL", default = false)]
@@ -204,6 +205,11 @@ pub(crate) struct RawConfig {
     /// shared cache. Off in CI (`CI` set to `1`, `true`, or `yes`), while
     /// `incremental` or `eager_incremental` is in effect, and for compilations
     /// selected for verification by `MBX_VERIFY` or `verify_sample_rate`.
+    /// Not used for compiles that use LTO or are optimized at opt-level 2 or
+    /// higher (including `s` and `z`), where rustc's incremental local ThinLTO
+    /// can produce rlibs that do not link. A profile with `lto = "off"` or
+    /// `codegen-units = 1` stays eligible; Cargo's default `lto = false` does
+    /// not.
     #[usage(
         key = "learned_incremental",
         env = "MBX_LEARNED_INCREMENTAL",

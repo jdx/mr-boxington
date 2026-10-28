@@ -287,7 +287,20 @@ pub(crate) fn compile(
     let verify = session::verify_requested();
     // A shadow compilation compares its result against a cached one, which an
     // incremental artifact would never match, so the two modes are exclusive.
-    let learned_enabled = session::learned_incremental_requested() && !verify;
+    let incremental_safe = mbx_incremental_is_safe(&arguments);
+    let learned_requested = session::learned_incremental_requested();
+    let eager_requested = session::eager_incremental_requested();
+    if !incremental_safe
+        && (learned_requested || eager_requested)
+        && let Some(reason) = mbx_incremental_unsafe_reason(&arguments)
+    {
+        let crate_name =
+            session::crate_name_argument(&arguments).unwrap_or_else(|| "unknown crate".to_owned());
+        session::report_shim_debug(&format!(
+            "mbx incremental reuse disabled for {crate_name}: {reason}"
+        ));
+    }
+    let learned_enabled = learned_requested && !verify && incremental_safe;
     let mut verification = None;
     let mut action_lookup_attempted = false;
     let mut current_diagnostic = None;
@@ -308,7 +321,7 @@ pub(crate) fn compile(
     // consumer must stay private even when it compiles without incremental state.
     let private_inputs = links_private_artifact(&compilation);
     let mut learned = if !verify
-        && (session::eager_incremental_requested() || (learned_enabled && private_inputs))
+        && ((eager_requested && incremental_safe) || (learned_enabled && private_inputs))
     {
         eager_incremental_plan(&compilation)
     } else {
@@ -1928,6 +1941,71 @@ fn private_incremental_flag(directory: &Path) -> OsString {
     flag
 }
 
+/// Whether mbx may add incremental state to this rustc invocation.
+///
+/// rustc runs local ThinLTO above opt-level 0 when LTO is unset and there are
+/// multiple codegen units. Incremental ThinLTO can leave an rlib whose units do
+/// not link. mbx blocks opt-level 2 and higher; opt-level 1 stays allowed for
+/// Cargo parity. `-C lto=n|no|off|false` and `codegen-units=1` avoid this mode.
+fn mbx_incremental_is_safe(arguments: &[OsString]) -> bool {
+    mbx_incremental_unsafe_reason(arguments).is_none()
+}
+
+fn mbx_incremental_unsafe_reason(arguments: &[OsString]) -> Option<&'static str> {
+    // Cargo uses response files for long compiler commands. Read the same
+    // effective code-generation options as the invocation parser and rustc.
+    let arguments = profile_arguments(arguments);
+    let mut opt_level: Option<String> = None;
+    let mut lto: Option<String> = None;
+    let mut codegen_units: Option<String> = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        let Some(argument) = arguments[index].to_str() else {
+            index += 1;
+            continue;
+        };
+        if argument == "-O" {
+            opt_level = Some("2".to_owned());
+        } else {
+            let option = match argument {
+                "-C" | "--codegen" => {
+                    index += 1;
+                    arguments.get(index).and_then(|value| value.to_str())
+                }
+                _ => argument
+                    .strip_prefix("-C")
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| argument.strip_prefix("--codegen=")),
+            };
+            if let Some((name, value)) = option.map(|value| {
+                value
+                    .split_once('=')
+                    .map_or((value, ""), |(name, value)| (name, value))
+            }) {
+                match name {
+                    "opt-level" => opt_level = Some(value.to_owned()),
+                    "lto" => lto = Some(value.to_owned()),
+                    "codegen-units" => codegen_units = Some(value.to_owned()),
+                    _ => {}
+                }
+            }
+        }
+        index += 1;
+    }
+    let lto_is_off = lto
+        .as_deref()
+        .is_some_and(|value| matches!(value, "n" | "no" | "off" | "false"));
+    if lto.is_some() && !lto_is_off {
+        return Some("an explicit LTO request");
+    }
+    let optimized = opt_level
+        .as_deref()
+        .is_some_and(|level| matches!(level, "2" | "3" | "s" | "z"));
+    let multiple_codegen_units = codegen_units.as_deref() != Some("1");
+    (optimized && lto.is_none() && multiple_codegen_units)
+        .then_some("optimized compile with local ThinLTO")
+}
+
 /// The incremental flag for a workspace library that mbx cannot cache.
 ///
 /// A `staticlib`, `cdylib`, or `dylib` bypasses the cache before any learned
@@ -1940,10 +2018,20 @@ fn private_incremental_flag(directory: &Path) -> OsString {
 /// Keyed on the whole argument list, which names the unit's output directory
 /// and metadata, so another profile, target, or feature set gets its own
 /// directory.
+fn bypassed_library_incremental_is_enabled(
+    arguments: &[OsString],
+    learned_requested: bool,
+    verify: bool,
+) -> bool {
+    learned_requested && !verify && mbx_incremental_is_safe(arguments)
+}
+
 pub(crate) fn bypassed_library_incremental_flag(arguments: &[OsString]) -> Option<OsString> {
-    if !session::learned_incremental_requested()
-        || session::verify_requested()
-        || !session::compiles_an_uncacheable_library(arguments)
+    if !bypassed_library_incremental_is_enabled(
+        arguments,
+        session::learned_incremental_requested(),
+        session::verify_requested(),
+    ) || !session::compiles_an_uncacheable_library(arguments)
         || arguments.iter().any(|argument| {
             argument
                 .to_str()
