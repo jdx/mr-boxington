@@ -135,9 +135,9 @@ fn cargo_with_settings_bypass_log_and_roots(
         Some(roots) => roots,
         None => {
             let target_dir_env = std::env::var_os(CARGO_TARGET_DIR_ENV);
-            match cargo_roots(&cargo, arguments, target_dir_env.as_deref()) {
-                Some(roots) => roots,
-                None => match super::shim::failed_probe(
+            match cargo_roots_reported(&cargo, arguments, target_dir_env.as_deref()) {
+                Ok(roots) => roots,
+                Err(reason) => match super::shim::failed_probe(
                     &cargo,
                     &os_arguments,
                     target_dir_env.as_deref(),
@@ -146,9 +146,12 @@ fn cargo_with_settings_bypass_log_and_roots(
                     super::shim::FailedProbe::Passthrough => {
                         return run_cargo(&cargo, arguments, BTreeMap::new());
                     }
-                    super::shim::FailedProbe::Reject => eyre::bail!(
-                        "could not verify Cargo build storage: metadata probing failed; run cargo metadata --no-deps --format-version 1 with the same manifest and configuration options to diagnose it"
-                    ),
+                    super::shim::FailedProbe::Reject(retry_reason) => {
+                        let reason = retry_reason.unwrap_or(reason);
+                        eyre::bail!(
+                            "could not verify Cargo build storage: metadata probing failed; run cargo metadata --no-deps --format-version 1 with the same manifest and configuration options to diagnose it: {reason}"
+                        )
+                    }
                 },
             }
         }
@@ -1530,17 +1533,26 @@ pub(super) fn cargo_roots(
     arguments: &[String],
     target_dir_env: Option<&std::ffi::OsStr>,
 ) -> Option<Roots> {
-    let working_dir = std::env::current_dir().ok()?;
+    cargo_roots_reported(cargo, arguments, target_dir_env).ok()
+}
+
+pub(super) fn cargo_roots_reported(
+    cargo: &std::ffi::OsStr,
+    arguments: &[String],
+    target_dir_env: Option<&std::ffi::OsStr>,
+) -> Result<Roots> {
+    let working_dir = std::env::current_dir()?;
     if mbx_cache_cargo::is_remote_install(arguments) {
-        return remote_install_roots(arguments, &working_dir, target_dir_env);
+        return remote_install_roots(arguments, &working_dir, target_dir_env)
+            .ok_or_else(|| eyre::eyre!("could not resolve remote install storage"));
     }
-    let resolved = mbx_cache_cargo::resolve_reported(
+    let resolved = mbx_cache_cargo::try_resolve_reported(
         cargo,
         arguments,
         &working_dir,
         target_dir_env.map(std::ffi::OsStr::to_os_string),
     )?;
-    Some(Roots {
+    Ok(Roots {
         workspace_root: resolved.workspace_root,
         target_dir: resolved.target_dir,
         build_dir: resolved.build_dir,

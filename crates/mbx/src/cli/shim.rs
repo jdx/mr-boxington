@@ -146,17 +146,22 @@ fn run_cargo_shim_inner() -> Result<ExitCode> {
         )?;
     }
     let target_dir_env = std::env::var_os(CARGO_TARGET_DIR_ENV);
-    let roots = match cargo_roots(&real_cargo, &string_arguments, target_dir_env.as_deref()) {
-        Some(roots) => roots,
-        None => match failed_probe(&real_cargo, &arguments, target_dir_env.as_deref()) {
+    let roots = match super::cargo::cargo_roots_reported(
+        &real_cargo,
+        &string_arguments,
+        target_dir_env.as_deref(),
+    ) {
+        Ok(roots) => roots,
+        Err(reason) => match failed_probe(&real_cargo, &arguments, target_dir_env.as_deref()) {
             FailedProbe::Roots(roots) => *roots,
             FailedProbe::Passthrough => return run_real_cargo(&real_cargo, &arguments),
-            FailedProbe::Reject => {
+            FailedProbe::Reject(retry_reason) => {
+                let reason = retry_reason.unwrap_or(reason);
                 let hint = take_loop_note()
                     .map(|hint| format!(" ({hint})"))
                     .unwrap_or_default();
                 eyre::bail!(
-                    "could not verify Cargo build storage: metadata probing failed{hint}; run cargo metadata --no-deps --format-version 1 with the same manifest and configuration options to diagnose it"
+                    "could not verify Cargo build storage: metadata probing failed{hint}; run cargo metadata --no-deps --format-version 1 with the same manifest and configuration options to diagnose it: {reason}"
                 )
             }
         },
@@ -434,8 +439,8 @@ pub(super) enum FailedProbe {
     Roots(Box<super::cargo::Roots>),
     /// Hand the invocation to Cargo as it was typed.
     Passthrough,
-    /// Refuse it: the build storage cannot be verified.
-    Reject,
+    /// Refuse it, carrying the expanded probe's failure if it was retried.
+    Reject(Option<eyre::Report>),
 }
 
 /// Decide what a failed roots probe leaves the caller able to do.
@@ -455,18 +460,21 @@ pub(super) fn failed_probe(
     // Ask again as Cargo will read it: the roots belong to the package the
     // expansion names, though the child still receives the command line as it
     // was typed, since Cargo expands the alias itself.
+    let mut retry_reason = None;
     if let Some(resolved) = &invocation
         && resolved.arguments != arguments
         && let Ok(expanded) = super::strings(&resolved.arguments)
-        && let Some(roots) = super::cargo::cargo_roots(cargo, &expanded, target_dir_env)
     {
-        return FailedProbe::Roots(Box::new(roots));
+        match super::cargo::cargo_roots_reported(cargo, &expanded, target_dir_env) {
+            Ok(roots) => return FailedProbe::Roots(Box::new(roots)),
+            Err(reason) => retry_reason = Some(reason),
+        }
     }
     if metadata_failure_passthrough(invocation.as_ref()) {
         note_uncached_passthrough(invocation.as_ref());
         return FailedProbe::Passthrough;
     }
-    FailedProbe::Reject
+    FailedProbe::Reject(retry_reason)
 }
 
 /// Say that a command is running without a cache session. An external

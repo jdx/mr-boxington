@@ -16,6 +16,52 @@ const CARGO_TARGET_DIR_ENV: &str = "CARGO_TARGET_DIR";
 const PROBE_GLOBAL_FLAGS: [&str; 3] = ["-C", "--config", "-Z"];
 const PROBE_MANIFEST_TOGGLES: [&str; 3] = ["--offline", "--frozen", "--locked"];
 
+/// Why Cargo could not report the storage roots for an invocation.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ProbeFailure {
+    /// Cargo could not be started or its output could not be read.
+    Io(std::io::Error),
+    /// Cargo exited unsuccessfully; stderr contains a bounded tail of its output.
+    Exit {
+        /// Cargo's process exit status.
+        status: std::process::ExitStatus,
+        /// The last five non-empty stderr lines, limited to 1 KiB.
+        stderr: String,
+    },
+    /// Cargo's stdout was not valid metadata JSON.
+    Json(serde_json::Error),
+    /// A required metadata field was missing or was not a string.
+    Schema(&'static str),
+}
+
+impl std::fmt::Display for ProbeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "cargo metadata I/O error: {error}"),
+            Self::Exit { status, stderr } => {
+                write!(f, "cargo metadata failed with {status}")?;
+                if !stderr.is_empty() {
+                    write!(f, ":\n{stderr}")?;
+                }
+                Ok(())
+            }
+            Self::Json(error) => write!(f, "invalid cargo metadata JSON: {error}"),
+            Self::Schema(field) => write!(f, "cargo metadata {field} missing or not a string"),
+        }
+    }
+}
+
+impl std::error::Error for ProbeFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Json(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 /// Cargo-resolved roots and the stable prediction-manifest identity for one invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CargoInvocation {
@@ -62,7 +108,8 @@ fn resolve_in(
         cargo_args,
         working_dir,
         target_dir_env.as_deref(),
-    );
+    )
+    .ok();
     resolve_with_reported(arguments, working_dir, target_dir_env, reported)
 }
 
@@ -77,8 +124,29 @@ pub fn resolve_reported(
     working_dir: &Path,
     target_dir_env: Option<OsString>,
 ) -> Option<CargoInvocation> {
-    resolve_reported_in(
+    try_resolve_reported(cargo, arguments, working_dir, target_dir_env).ok()
+}
+
+/// Resolve Cargo's reported roots, preserving the reason a metadata probe failed.
+///
+/// Like [`resolve_reported`], this reuses successful metadata records while
+/// their inputs remain valid. Failures are never cached. An unsuccessful exit
+/// includes Cargo's status and the last five non-empty stderr lines, limited
+/// to 1 KiB; the full stderr is also logged at debug level.
+///
+/// # Errors
+///
+/// Returns an error if Cargo cannot be run, exits unsuccessfully, or reports
+/// invalid JSON or missing/non-string required metadata fields.
+pub fn try_resolve_reported(
+    cargo: &OsStr,
+    arguments: &[String],
+    working_dir: &Path,
+    target_dir_env: Option<OsString>,
+) -> Result<CargoInvocation, ProbeFailure> {
+    try_resolve_reported_from_home(
         cache_root().as_deref(),
+        effective_cargo_home().as_deref(),
         cargo,
         arguments,
         working_dir,
@@ -86,6 +154,7 @@ pub fn resolve_reported(
     )
 }
 
+#[cfg(test)]
 fn resolve_reported_in(
     cache: Option<&Path>,
     cargo: &OsStr,
@@ -112,6 +181,7 @@ fn effective_cargo_home() -> Option<PathBuf> {
         .or_else(|| dirs::home_dir().map(|home| home.join(".cargo")))
 }
 
+#[cfg(test)]
 fn resolve_reported_from_home(
     cache: Option<&Path>,
     cargo_home: Option<&Path>,
@@ -120,6 +190,25 @@ fn resolve_reported_from_home(
     working_dir: &Path,
     target_dir_env: Option<OsString>,
 ) -> Option<CargoInvocation> {
+    try_resolve_reported_from_home(
+        cache,
+        cargo_home,
+        cargo,
+        arguments,
+        working_dir,
+        target_dir_env,
+    )
+    .ok()
+}
+
+fn try_resolve_reported_from_home(
+    cache: Option<&Path>,
+    cargo_home: Option<&Path>,
+    cargo: &OsStr,
+    arguments: &[String],
+    working_dir: &Path,
+    target_dir_env: Option<OsString>,
+) -> Result<CargoInvocation, ProbeFailure> {
     let reported = recalled_cargo_roots(
         cache,
         cargo_home,
@@ -128,7 +217,7 @@ fn resolve_reported_from_home(
         working_dir,
         target_dir_env.as_deref(),
     )?;
-    Some(resolve_with_reported(
+    Ok(resolve_with_reported(
         arguments,
         working_dir,
         target_dir_env,
@@ -592,7 +681,7 @@ fn recalled_cargo_roots(
     arguments: &[String],
     working_dir: &Path,
     target_dir_env: Option<&OsStr>,
-) -> Option<(PathBuf, PathBuf, Option<PathBuf>)> {
+) -> Result<(PathBuf, PathBuf, Option<PathBuf>), ProbeFailure> {
     if let Some(source) = path_install_dir(arguments, working_dir) {
         // `install --path` reads configuration from the source directory,
         // whereas metadata normally reads it from the caller's directory.
@@ -673,13 +762,13 @@ fn recalled_cargo_roots(
         )
     });
     if let Some(recalled) = probe.as_ref().and_then(ProbeRecord::recall) {
-        return Some(recalled);
+        return Ok(recalled);
     }
     let roots = cargo_roots(cargo, arguments, working_dir, target_dir_env)?;
     if let Some(probe) = probe {
         probe.remember(&roots);
     }
-    Some(roots)
+    Ok(roots)
 }
 
 const PROBE_RECORD_VERSION: u8 = 2;
@@ -949,7 +1038,7 @@ fn cargo_roots(
     arguments: &[String],
     working_dir: &Path,
     target_dir_env: Option<&OsStr>,
-) -> Option<(PathBuf, PathBuf, Option<PathBuf>)> {
+) -> Result<(PathBuf, PathBuf, Option<PathBuf>), ProbeFailure> {
     let mut command = Command::new(cargo);
     match target_dir_argument(arguments)
         .map(OsStr::new)
@@ -961,19 +1050,53 @@ fn cargo_roots(
     command
         .current_dir(working_dir)
         .args(probe_arguments(arguments));
-    let output = command.output().ok()?;
+    let output = command.output().map_err(ProbeFailure::Io)?;
+    log::debug!(
+        "cargo metadata stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     if !output.status.success() {
-        return None;
+        return Err(ProbeFailure::Exit {
+            status: output.status,
+            stderr: stderr_tail(&output.stderr),
+        });
     }
-    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    Some((
-        PathBuf::from(metadata.get("workspace_root")?.as_str()?),
-        PathBuf::from(metadata.get("target_directory")?.as_str()?),
+    parse_metadata(&output.stdout)
+}
+
+fn parse_metadata(bytes: &[u8]) -> Result<(PathBuf, PathBuf, Option<PathBuf>), ProbeFailure> {
+    let metadata: serde_json::Value = serde_json::from_slice(bytes).map_err(ProbeFailure::Json)?;
+    let required = |field: &'static str| {
+        metadata
+            .get(field)
+            .and_then(|value| value.as_str())
+            .map(PathBuf::from)
+            .ok_or(ProbeFailure::Schema(field))
+    };
+    Ok((
+        required("workspace_root")?,
+        required("target_directory")?,
         metadata
             .get("build_directory")
             .and_then(|value| value.as_str())
             .map(PathBuf::from),
     ))
+}
+
+fn stderr_tail(bytes: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(bytes);
+    let lines: Vec<_> = stderr
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .rev()
+        .take(5)
+        .collect();
+    let tail = lines.into_iter().rev().collect::<Vec<_>>().join("\n");
+    let mut start = tail.len().saturating_sub(1024);
+    while !tail.is_char_boundary(start) {
+        start += 1;
+    }
+    tail[start..].to_owned()
 }
 
 fn target_dir_argument(arguments: &[String]) -> Option<&str> {
@@ -1913,6 +2036,96 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn missing_cargo_reports_the_io_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing-cargo");
+        let error = try_resolve_reported(
+            missing.as_os_str(),
+            &["build".into()],
+            directory.path(),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ProbeFailure::Io(_)));
+        assert!(error.to_string().contains("I/O error"));
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn invalid_metadata_reports_the_json_error() {
+        let error = parse_metadata(b"not json").unwrap_err();
+        assert!(matches!(error, ProbeFailure::Json(_)));
+        assert!(error.to_string().contains("invalid cargo metadata JSON"));
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn metadata_requires_string_roots() {
+        for (metadata, field) in [
+            (r#"{}"#, "workspace_root"),
+            (r#"{"workspace_root":3}"#, "workspace_root"),
+            (r#"{"workspace_root":"/project"}"#, "target_directory"),
+            (
+                r#"{"workspace_root":"/project","target_directory":null}"#,
+                "target_directory",
+            ),
+        ] {
+            let error = parse_metadata(metadata.as_bytes()).unwrap_err();
+            assert!(matches!(error, ProbeFailure::Schema(name) if name == field));
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("{field} missing or not a string"))
+            );
+        }
+    }
+
+    #[test]
+    fn stderr_tail_is_bounded_and_skips_empty_lines() {
+        assert_eq!(
+            stderr_tail(b"one\n\ntwo\nthree\nfour\n  \nfive\nsix\n"),
+            "two\nthree\nfour\nfive\nsix"
+        );
+        let text = "é".repeat(2000);
+        let tail = stderr_tail(text.as_bytes());
+        assert!(tail.len() <= 1024);
+        assert!(text.ends_with(&tail));
+        assert_eq!(stderr_tail(b"\n \n"), "");
+        assert!(stderr_tail(b"invalid \xff").contains('�'));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unsuccessful_cargo_reports_status_and_stderr_without_caching_failure() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = cargo_fixture();
+        let root = directory.path();
+        let cache = tempfile::tempdir().unwrap();
+        let script = root.join("cargo");
+        let log = root.join("probes");
+        std::fs::write(&script, format!("#!/bin/sh\necho metadata >> '{}'\nprintf 'old\\n1\\n2\\n3\\n4\\n\\ncomponent download failed\\n' >&2\nexit 17\n", log.display())).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for _ in 0..2 {
+            let error = try_resolve_reported_from_home(
+                Some(cache.path()),
+                None,
+                script.as_os_str(),
+                &["build".into()],
+                root,
+                None,
+            )
+            .unwrap_err();
+            assert!(matches!(error, ProbeFailure::Exit { .. }));
+            let message = error.to_string();
+            assert!(message.contains("exit status: 17"), "{message}");
+            assert!(message.contains("component download failed"), "{message}");
+            assert!(!message.contains("old"), "{message}");
+        }
+        assert_eq!(probes(&log), 2);
+        assert!(!cache.path().join("cargo-roots").exists());
     }
 
     fn git(directory: &Path, arguments: &[&str]) {

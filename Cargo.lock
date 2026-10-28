@@ -1493,6 +1493,7 @@ name = "mbx-cache-cargo"
 version = "0.3.18"
 dependencies = [
  "dirs",
+ "log",
  "mbx-cache-core",
  "serde",
  "serde_json",
