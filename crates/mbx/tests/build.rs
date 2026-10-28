@@ -4049,6 +4049,20 @@ fn build_script_restores_a_wide_nested_out_dir() {
 /// caching.
 #[test]
 fn a_build_script_watching_git_metadata_keeps_each_checkout_s_commit() {
+    build_checkouts_of_a_commit_baking_script(false);
+}
+
+/// The same, for worktrees of a bare repository, whose git directory has no
+/// `.git` in its path.
+#[test]
+fn a_build_script_watching_a_bare_repository_keeps_each_checkout_s_commit() {
+    build_checkouts_of_a_commit_baking_script(true);
+}
+
+/// Builds two linked worktrees on different commits, and the checkout they
+/// were made from unless `bare` makes them worktrees of a bare clone, with a
+/// build script that bakes in the commit and watches git metadata for it.
+fn build_checkouts_of_a_commit_baking_script(bare: bool) {
     let store = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
@@ -4104,11 +4118,20 @@ fn main() {
     git(&main, &["init", "-q", "-b", "main"]);
     git(&main, &["add", "-A"]);
     git(&main, &["commit", "-q", "-m", "initial"]);
+    let repository = if bare {
+        git(
+            root.path(),
+            &["clone", "-q", "--bare", "main", "repository"],
+        );
+        root.path().join("repository")
+    } else {
+        main.clone()
+    };
     let first = root.path().join("first");
     let second = root.path().join("second");
     for (worktree, branch) in [(&first, "first"), (&second, "second")] {
         git(
-            &main,
+            &repository,
             &[
                 "worktree",
                 "add",
@@ -4127,7 +4150,8 @@ fn main() {
             std::env::consts::EXE_SUFFIX
         ))
     };
-    for (name, checkout) in [("main", &main), ("first", &first), ("second", &second)] {
+    let checkouts = [("main", &main), ("first", &first), ("second", &second)];
+    for (name, checkout) in &checkouts[usize::from(bare)..] {
         let (_, stderr) = build_with(
             checkout,
             store.path(),

@@ -706,6 +706,7 @@ fn build_action(
     let working_dir = std::env::current_dir()?;
     let mappings = build_script_mappings();
     let mut inputs = BTreeMap::new();
+    let mut checkout_local = false;
     for declared in &prediction.inputs {
         let resolved_name =
             String::from_utf8(denormalize_output_text(declared.as_bytes(), &mappings))
@@ -716,6 +717,7 @@ fn build_action(
         } else {
             working_dir.join(path)
         };
+        checkout_local = checkout_local || is_git_metadata(&resolved);
         let state = if prediction.default_package {
             package_input_state(&resolved, &mappings)?
         } else {
@@ -739,7 +741,7 @@ fn build_action(
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
     let cargo_environment = cargo_environment(&mappings);
-    let out_dir = (!prediction.portable_out_dir || watches_git_metadata(prediction))
+    let out_dir = (!prediction.portable_out_dir || checkout_local)
         .then(|| std::env::var("OUT_DIR"))
         .transpose()?;
     let archive_timestamps = archive_timestamp_key();
@@ -1200,20 +1202,25 @@ fn input_state(path: &Path, mappings: &[PathMapping]) -> Result<InputState> {
     input_state_at(path, mappings, &[], 0)
 }
 
-/// Whether the script watches a checkout's git metadata, as one that bakes in
-/// the commit watches `.git/HEAD` and the branch it names.
+/// Whether a watched input is a checkout's git metadata, as a script that
+/// bakes in the commit watches `HEAD` and the branch it names.
 ///
 /// What it read there belongs to one checkout: a linked worktree keeps its own
 /// `HEAD` under the shared git directory, at a path every other checkout can
 /// read, so a result keyed on those files alone would restore one worktree's
-/// commit into another. Decided whenever a key is built rather than recorded
-/// in the prediction, so it also holds for predictions published before it.
-fn watches_git_metadata(prediction: &Prediction) -> bool {
-    prediction.inputs.iter().any(|input| {
-        Path::new(input)
-            .components()
-            .any(|component| component.as_os_str() == ".git")
-    })
+/// commit into another. A git directory is recognized by its contents, since a
+/// bare repository or a separate git directory need not be called `.git`, and
+/// by a `.git` component, since in a linked worktree that is a file. Decided
+/// whenever a key is built rather than recorded in the prediction, so it also
+/// holds for predictions published before it.
+fn is_git_metadata(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == ".git")
+        || path.ancestors().any(|directory| {
+            directory.join("HEAD").is_file()
+                && directory.join("objects").is_dir()
+                && directory.join("refs").is_dir()
+        })
 }
 
 /// Hash Cargo's implicit package input while omitting package build directories.
