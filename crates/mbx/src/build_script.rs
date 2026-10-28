@@ -1037,12 +1037,18 @@ impl InputTree {
     ) -> Result<Self> {
         let metadata = match std::fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self::Missing),
             // A path through a file, such as another checkout's `.git/HEAD` read
             // from a linked worktree, where `.git` is a file. It is as absent as
             // a missing path, but kept apart from one in the key.
             Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {
                 return Ok(Self::BlockedByFile);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(if runs_through_a_file(path) {
+                    Self::BlockedByFile
+                } else {
+                    Self::Missing
+                });
             }
             Err(error) => return Err(error.into()),
         };
@@ -1126,17 +1132,21 @@ impl InputTree {
         }
     }
 
-    /// Whether a declared directory holds a git directory, by the same signs
-    /// [`is_git_metadata`] looks for above a path: a `.git` directory, or
-    /// `HEAD` beside `objects` and `refs`. A script watching it can read one
-    /// checkout's `HEAD` among the others it holds.
+    /// Whether a declared directory holds git metadata, by the signs
+    /// [`is_git_metadata`] looks for above a path: a `.git` entry, or `HEAD`
+    /// beside `objects` and `refs`. A script watching it can read one
+    /// checkout's `HEAD` among the others it holds. A `.git` file counts too:
+    /// a linked worktree's or a submodule's can point elsewhere by a relative
+    /// path that reads the same in every checkout.
     fn holds_git_metadata(&self) -> bool {
         match self {
             Self::Directory(children) => {
-                matches!(children.get(".git"), Some(Self::Directory(_)))
-                    || (matches!(children.get("HEAD"), Some(Self::File(_)))
-                        && matches!(children.get("objects"), Some(Self::Directory(_)))
-                        && matches!(children.get("refs"), Some(Self::Directory(_))))
+                matches!(
+                    children.get(".git"),
+                    Some(Self::Directory(_) | Self::File(_) | Self::Symlink { .. })
+                ) || (matches!(children.get("HEAD"), Some(Self::File(_)))
+                    && matches!(children.get("objects"), Some(Self::Directory(_)))
+                    && matches!(children.get("refs"), Some(Self::Directory(_))))
                     || children.values().any(Self::holds_git_metadata)
             }
             Self::Symlink { referent, .. } => referent.holds_git_metadata(),
@@ -1275,6 +1285,25 @@ fn is_git_metadata(path: &Path) -> bool {
         })
 }
 
+/// Whether the nearest existing ancestor of a missing path is not a directory.
+///
+/// Unix reports such a path as "not a directory", but Windows reports it as
+/// not found, the same as any missing path.
+fn runs_through_a_file(path: &Path) -> bool {
+    for ancestor in path.ancestors().skip(1) {
+        match std::fs::metadata(ancestor) {
+            Ok(metadata) => return !metadata.is_dir(),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) => {}
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
 /// Hash Cargo's implicit package input while omitting package build directories.
 #[cfg(test)]
 fn package_input_state(path: &Path, mappings: &[PathMapping]) -> Result<InputState> {
@@ -1328,19 +1357,26 @@ fn run_start_stamp() -> SystemTime {
     stamp.map_or(now, |stamp| stamp.min(now))
 }
 
-/// Whether a declared input runs through a regular file, so it can never exist.
+/// Whether a declared input, or anything a link in it leads to, runs through a
+/// regular file, so it can never exist.
 fn declares_a_path_through_a_file(prediction: &Prediction) -> Result<bool> {
     let mappings = build_script_mappings();
     let working_dir = std::env::current_dir()?;
-    Ok(prediction.inputs.iter().any(|declared| {
+    for declared in &prediction.inputs {
         let resolved_name =
             String::from_utf8(denormalize_output_text(declared.as_bytes(), &mappings))
                 .expect("denormalizing UTF-8 paths preserves UTF-8");
-        matches!(
-            std::fs::symlink_metadata(working_dir.join(resolved_name)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotADirectory
-        )
-    }))
+        let path = working_dir.join(resolved_name);
+        let excluded = if prediction.default_package {
+            default_package_exclusions(&path)?
+        } else {
+            Vec::new()
+        };
+        if InputTree::read(&path, &mappings, &excluded, &[], 0)?.blocked_by_file() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Whether anything a prediction declares as an input was modified at or after
@@ -2060,6 +2096,36 @@ mod tests {
         let state = |path: &str| input_state(&directory.path().join(path), &[]).unwrap();
         assert_eq!(state("file/child"), InputState::BlockedByFile);
         assert_eq!(state("absent/child"), InputState::Missing);
+        // Windows reports both as not found, so the ancestor decides.
+        assert!(runs_through_a_file(
+            &directory.path().join("file/child/more")
+        ));
+        assert!(!runs_through_a_file(&directory.path().join("absent/child")));
+    }
+
+    /// A declared link whose target runs through a file, as `head -> .git/HEAD`
+    /// in a linked worktree, leaves the execution uncached like the path itself.
+    #[cfg(unix)]
+    #[test]
+    fn a_declared_link_through_a_file_is_a_path_through_a_file() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join(".git"), "gitdir: elsewhere\n").unwrap();
+        std::fs::write(directory.path().join("plain"), "").unwrap();
+        std::os::unix::fs::symlink(".git/HEAD", directory.path().join("head")).unwrap();
+        let declares = |name: &str| {
+            declares_a_path_through_a_file(&Prediction {
+                default_package: false,
+                environment: Vec::new(),
+                inputs: vec![directory.path().join(name).to_string_lossy().into_owned()],
+                portable_out_dir: true,
+                version: 3,
+            })
+            .unwrap()
+        };
+        assert!(declares("head"));
+        assert!(declares(".git/HEAD"));
+        assert!(!declares("plain"));
+        assert!(!declares("absent"));
     }
 
     #[test]
@@ -2106,9 +2172,9 @@ mod tests {
         );
     }
 
-    /// A git directory anywhere in a declared tree makes the result belong to
-    /// one checkout, a nested repository included; a worktree's `.git` file,
-    /// whose contents already differ between checkouts, does not.
+    /// Git metadata anywhere in a declared tree makes the result belong to one
+    /// checkout: a nested repository, a bare layout, or a worktree's or
+    /// submodule's `.git` file. A lone `HEAD` does not.
     #[test]
     fn a_tree_holds_git_metadata_by_a_git_directory_or_its_layout() {
         let holds = |build: &dyn Fn(&Path)| {
@@ -2128,7 +2194,7 @@ mod tests {
             std::fs::create_dir_all(bare.join("refs")).unwrap();
             std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
         }));
-        assert!(!holds(&|root| std::fs::write(
+        assert!(holds(&|root| std::fs::write(
             root.join(".git"),
             "gitdir: elsewhere\n"
         )
