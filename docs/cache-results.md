@@ -120,7 +120,10 @@ name the environment variable to unset.
 option or variable behind it. When a recorded build has bypasses beyond Cargo's
 own probes, it tells you to rerun the recorded command under `mbx explain`,
 which names them. That command explains only compilations that run, so run
-`mbx clean` first when Cargo considers every output fresh. For `cc-unsupported-environment`, `explain --last`
+`mbx clean` first when Cargo considers every output fresh, or pass a new
+`--target-dir`, which `mbx clean` does not remove. A restored build script runs
+no C compiler, so set `MBX_BUILD_SCRIPT_EXECUTION=0` to see C compilation
+bypasses. Build-script bypasses are not part of that detail. For `cc-unsupported-environment`, `explain --last`
 also lists which of `CPATH`, `COMPILER_PATH`, `C_INCLUDE_PATH`,
 `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`, `GCC_EXEC_PREFIX`,
 `DEPENDENCIES_OUTPUT`, and `SUNPRO_DEPENDENCIES` are set in the current

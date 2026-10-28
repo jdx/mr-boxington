@@ -4,6 +4,7 @@ use crate::config::{CliSettings, Config};
 use crate::events::{ActionOutcome, SessionEvent};
 use eyre::{Context, Result};
 use mbx_cache_core::ActionDiagnostic;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::ExitCode;
@@ -183,11 +184,31 @@ pub(crate) fn is_truncated(session: &RecordedSession) -> bool {
         .any(|event| matches!(event, SessionEvent::Truncated { .. }))
 }
 
+/// One argument as a shell reads it back as the same word, so a copied command
+/// keeps its argument boundaries.
+fn shell_word(argument: &str) -> Cow<'_, str> {
+    let plain =
+        |character: char| character.is_ascii_alphanumeric() || "_@%+=:,./-".contains(character);
+    if !argument.is_empty() && argument.chars().all(plain) {
+        Cow::Borrowed(argument)
+    } else {
+        Cow::Owned(format!("'{}'", argument.replace('\'', "'\\''")))
+    }
+}
+
 fn display_last(session: &RecordedSession, baselines: &Baselines) {
     let command = if session.command.is_empty() {
         "cargo".to_string()
     } else {
-        format!("cargo {}", session.command.join(" "))
+        format!(
+            "cargo {}",
+            session
+                .command
+                .iter()
+                .map(|argument| shell_word(argument))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
     };
     let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
     for event in &session.events {
@@ -293,15 +314,26 @@ fn bypass_hints(
     const OUTCOMES: [&str; 4] = ["hit", "miss", "unconsulted", "verification"];
     let bypassed: u64 = counts
         .iter()
-        .filter(|(label, _)| !OUTCOMES.contains(label) && !guidance(label).starts_with("Expected"))
+        .filter(|(label, _)| {
+            // Build-script bypasses reach the session but not the log that
+            // `mbx explain` reads, so a replay has nothing more to say about them.
+            !OUTCOMES.contains(label)
+                && !label.starts_with("build-script-")
+                && !guidance(label).starts_with("Expected")
+        })
         .map(|(_, count)| count)
         .sum();
     if bypassed == 0 {
         return Vec::new();
     }
     let mut lines = vec![format!(
-        "\n{bypassed} compilations bypassed the cache, and the results above give only the cause of each; rerun the command above under `mbx explain` (for example `mbx explain build` with the same arguments) to name the option, flag, or environment variable behind every bypass; if Cargo considers every output fresh, run `mbx clean` first so the compilations run again"
+        "\n{bypassed} compilations bypassed the cache, and the results above give only the cause of each; rerun the command above under `mbx explain` (for example `mbx explain build` with the same arguments) to name the option, flag, or environment variable behind every bypass\n  the replay reports only compilations that run: if Cargo considers every output fresh, run `mbx clean` first, or pass a new `--target-dir`, which `mbx clean` does not remove"
     )];
+    if counts.keys().any(|label| label.starts_with("cc-")) {
+        lines[0].push_str(
+            "\n  a restored build script runs no C compiler, so set `MBX_BUILD_SCRIPT_EXECUTION=0` to see C compilation bypasses",
+        );
+    }
     if counts.contains_key("cc-unsupported-environment") {
         let label = |name: &str| {
             if mbx_cache_cc::MSVC_BYPASS_ENVIRONMENT.contains(&name) {
@@ -775,11 +807,15 @@ mod tests {
 
     #[test]
     fn last_build_points_a_bypass_at_the_command_that_names_it() {
-        let counts = BTreeMap::from([("hit", 7), ("cc-tool-passthrough", 3)]);
+        let counts = BTreeMap::from([("hit", 7), ("unsupported-crate-type", 3)]);
         let lines = bypass_hints(&counts, NAMES, |_| false);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("3 compilations bypassed"), "{lines:?}");
         assert!(lines[0].contains("mbx explain build"), "{lines:?}");
+        assert!(
+            !lines[0].contains("MBX_BUILD_SCRIPT_EXECUTION"),
+            "{lines:?}"
+        );
 
         let counts = BTreeMap::from([
             ("hit", 7),
@@ -802,12 +838,31 @@ mod tests {
             matches!(name, "CPATH" | "LIBRARY_PATH")
         });
         assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].contains("MBX_BUILD_SCRIPT_EXECUTION=0"),
+            "{lines:?}"
+        );
         assert!(lines[1].contains("CPATH"), "{lines:?}");
         assert!(!lines[1].contains("LIBRARY_PATH"), "{lines:?}");
 
         let lines = bypass_hints(&counts, NAMES, |name| name == "LIBRARY_PATH");
         assert!(lines[1].contains("none is set"), "{lines:?}");
         assert!(lines[1].contains("COMPILER_PATH"), "{lines:?}");
+    }
+
+    #[test]
+    fn build_script_bypasses_have_no_replay_detail_to_point_to() {
+        let counts = BTreeMap::from([("build-script-always-rerun", 3)]);
+        assert!(bypass_hints(&counts, NAMES, |_| false).is_empty());
+    }
+
+    #[test]
+    fn displayed_arguments_keep_their_boundaries() {
+        assert_eq!(shell_word("--features"), "--features");
+        assert_eq!(shell_word("+stable"), "+stable");
+        assert_eq!(shell_word("foo bar"), "'foo bar'");
+        assert_eq!(shell_word(""), "''");
+        assert_eq!(shell_word("it's"), "'it'\\''s'");
     }
 
     #[test]
