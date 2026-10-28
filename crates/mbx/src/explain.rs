@@ -184,13 +184,21 @@ pub(crate) fn is_truncated(session: &RecordedSession) -> bool {
         .any(|event| matches!(event, SessionEvent::Truncated { .. }))
 }
 
-/// One argument as a shell reads it back as the same word, so a copied command
-/// keeps its argument boundaries.
-fn shell_word(argument: &str) -> Cow<'_, str> {
-    let plain =
-        |character: char| character.is_ascii_alphanumeric() || "_@%+=:,./-".contains(character);
+/// One argument as the platform's shell reads it back as the same word, so a
+/// copied command keeps its argument boundaries.
+///
+/// Windows shells do not understand POSIX single quotes: Command Prompt keeps
+/// them in the word, and both it and PowerShell accept double quotes.
+fn shell_word(argument: &str, windows: bool) -> Cow<'_, str> {
+    let plain = |character: char| {
+        character.is_ascii_alphanumeric()
+            || "_@%+=:,./-".contains(character)
+            || (windows && character == '\\')
+    };
     if !argument.is_empty() && argument.chars().all(plain) {
         Cow::Borrowed(argument)
+    } else if windows {
+        Cow::Owned(format!("\"{}\"", argument.replace('"', "\\\"")))
     } else {
         Cow::Owned(format!("'{}'", argument.replace('\'', "'\\''")))
     }
@@ -205,7 +213,7 @@ fn display_last(session: &RecordedSession, baselines: &Baselines) {
             session
                 .command
                 .iter()
-                .map(|argument| shell_word(argument))
+                .map(|argument| shell_word(argument, cfg!(windows)))
                 .collect::<Vec<_>>()
                 .join(" ")
         )
@@ -327,7 +335,7 @@ fn bypass_hints(
         return Vec::new();
     }
     let mut lines = vec![format!(
-        "\n{bypassed} compilations bypassed the cache, and the results above give only the cause of each; rerun the command above under `mbx explain` (for example `mbx explain build` with the same arguments) to name the option, flag, or environment variable behind every bypass\n  the replay reports only compilations that run: if Cargo considers every output fresh, run `mbx clean` first, or pass a new `--target-dir`, which `mbx clean` does not remove"
+        "\n{bypassed} compilations bypassed the cache, and the results above give only the cause of each; rerun the command above under `mbx explain` (for example `mbx explain build` with the same arguments), from the directory it originally ran in, to name the option, flag, or environment variable behind every bypass\n  the replay reports only compilations that run: if Cargo considers every output fresh, run `mbx clean` first, or pass a new `--target-dir`, which `mbx clean` does not remove"
     )];
     if counts.keys().any(|label| label.starts_with("cc-")) {
         lines[0].push_str(
@@ -858,11 +866,24 @@ mod tests {
 
     #[test]
     fn displayed_arguments_keep_their_boundaries() {
-        assert_eq!(shell_word("--features"), "--features");
-        assert_eq!(shell_word("+stable"), "+stable");
-        assert_eq!(shell_word("foo bar"), "'foo bar'");
-        assert_eq!(shell_word(""), "''");
-        assert_eq!(shell_word("it's"), "'it'\\''s'");
+        assert_eq!(shell_word("--features", false), "--features");
+        assert_eq!(shell_word("+stable", false), "+stable");
+        assert_eq!(shell_word("foo bar", false), "'foo bar'");
+        assert_eq!(shell_word("", false), "''");
+        assert_eq!(shell_word("it's", false), "'it'\\''s'");
+    }
+
+    /// Command Prompt keeps POSIX single quotes in the word, so the Windows
+    /// form uses double quotes and leaves a path's backslashes alone.
+    #[test]
+    fn windows_arguments_use_double_quotes() {
+        assert_eq!(
+            shell_word(r"C:\build\Cargo.toml", true),
+            r"C:\build\Cargo.toml"
+        );
+        assert_eq!(shell_word("foo bar", true), "\"foo bar\"");
+        assert_eq!(shell_word("say \"hi\"", true), "\"say \\\"hi\\\"\"");
+        assert_eq!(shell_word("", true), "\"\"");
     }
 
     #[test]
