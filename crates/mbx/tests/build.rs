@@ -4049,20 +4049,28 @@ fn build_script_restores_a_wide_nested_out_dir() {
 /// caching.
 #[test]
 fn a_build_script_watching_git_metadata_keeps_each_checkout_s_commit() {
-    build_checkouts_of_a_commit_baking_script(false);
+    build_checkouts_of_a_commit_baking_script(false, false);
+}
+
+/// The same, for checkouts sharing one target directory, where `OUT_DIR` does
+/// not tell them apart.
+#[test]
+fn a_build_script_watching_git_metadata_keeps_each_commit_in_a_shared_target() {
+    build_checkouts_of_a_commit_baking_script(false, true);
 }
 
 /// The same, for worktrees of a bare repository, whose git directory has no
 /// `.git` in its path.
 #[test]
 fn a_build_script_watching_a_bare_repository_keeps_each_checkout_s_commit() {
-    build_checkouts_of_a_commit_baking_script(true);
+    build_checkouts_of_a_commit_baking_script(true, false);
 }
 
 /// Builds two linked worktrees on different commits, and the checkout they
 /// were made from unless `bare` makes them worktrees of a bare clone, with a
 /// build script that bakes in the commit and watches git metadata for it.
-fn build_checkouts_of_a_commit_baking_script(bare: bool) {
+/// `shared_target` builds them all into one `CARGO_TARGET_DIR`.
+fn build_checkouts_of_a_commit_baking_script(bare: bool, shared_target: bool) {
     let store = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
@@ -4143,10 +4151,19 @@ fn main() {
         );
         git(worktree, &["commit", "-q", "--allow-empty", "-m", branch]);
     }
-    let settings = [("MBX_BUILD_SCRIPT_EXECUTION", "1")];
+    let shared = root.path().join("shared-target");
+    let mut settings = vec![("MBX_BUILD_SCRIPT_EXECUTION", "1")];
+    if shared_target {
+        settings.push(("CARGO_TARGET_DIR", shared.to_str().unwrap()));
+    }
     let binary = |checkout: &Path| {
-        checkout.join(format!(
-            "target/debug/commit-fixture{}",
+        let target = if shared_target {
+            shared.clone()
+        } else {
+            checkout.join("target")
+        };
+        target.join(format!(
+            "debug/commit-fixture{}",
             std::env::consts::EXE_SUFFIX
         ))
     };

@@ -40,6 +40,11 @@ struct Action<'a> {
     archive_timestamps: Option<&'a str>,
     binary_action: &'a CacheDigest,
     cargo_environment: &'a BTreeMap<String, Option<String>>,
+    /// The package directory of a result kept per checkout. Checkouts that
+    /// share one target directory share `OUT_DIR` too, so that alone does not
+    /// tell them apart. Absent from every other key, which stays as it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkout: Option<&'a str>,
     environment: &'a BTreeMap<String, Option<String>>,
     inputs: &'a BTreeMap<String, InputState>,
     kind: &'static str,
@@ -746,11 +751,15 @@ fn build_action(
     let out_dir = (!prediction.portable_out_dir || checkout_local)
         .then(|| std::env::var("OUT_DIR"))
         .transpose()?;
+    let checkout = checkout_local
+        .then(|| std::env::var("CARGO_MANIFEST_DIR"))
+        .transpose()?;
     let archive_timestamps = archive_timestamp_key();
     let bytes = canonical_json(&Action {
         archive_timestamps: archive_timestamps.as_deref(),
         binary_action,
         cargo_environment: &cargo_environment,
+        checkout: checkout.as_deref(),
         environment: &environment,
         inputs: &inputs,
         kind: ADAPTER,
