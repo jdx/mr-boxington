@@ -1314,7 +1314,14 @@ fn modified_since(
 ) -> Result<bool> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        // A path through a file, such as `.git/HEAD` in a linked worktree, is
+        // missing too, and its nearest existing ancestor is that file.
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
             // A missing input may have been there when the script started.
             // Removing it changed its parent directory.
             // Look at the nearest directory that still exists, following a

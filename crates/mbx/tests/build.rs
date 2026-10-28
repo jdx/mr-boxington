@@ -4066,6 +4066,86 @@ fn a_build_script_watching_a_bare_repository_keeps_each_checkout_s_commit() {
     build_checkouts_of_a_commit_baking_script(true, false);
 }
 
+/// A script that watches `.git/HEAD` beside its package declares a path
+/// through a file in a linked worktree, where `.git` is one. Its result is
+/// still stored, and restored once the target is gone.
+#[test]
+fn a_build_script_watching_git_head_through_a_worktree_file_is_cached() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let main = root.path().join("main");
+    std::fs::create_dir_all(main.join("src")).unwrap();
+    std::fs::write(
+        main.join("Cargo.toml"),
+        "[package]\nname = \"head-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        main.join("build.rs"),
+        r#"fn main() {
+    println!("cargo::rerun-if-changed=.git/HEAD");
+    let runs = std::fs::read_to_string("runs").unwrap_or_default();
+    std::fs::write("runs", format!("{runs}ran\n")).unwrap();
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(main.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(main.join(".gitignore"), "target\nruns\n").unwrap();
+    generate_lockfile(&main);
+    let git = |directory: &Path, arguments: &[&str]| {
+        let status = Command::new("git")
+            .current_dir(directory)
+            .args([
+                "-c",
+                "user.name=mbx",
+                "-c",
+                "user.email=mbx@example.invalid",
+            ])
+            .args(arguments)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {arguments:?}");
+    };
+    git(&main, &["init", "-q", "-b", "main"]);
+    git(&main, &["add", "-A"]);
+    git(&main, &["commit", "-q", "-m", "initial"]);
+    let worktree = root.path().join("worktree");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "worktree",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let settings = [("MBX_BUILD_SCRIPT_EXECUTION", "1")];
+    let (_, stderr) = build_with(
+        &worktree,
+        store.path(),
+        &reports.path().join("cold.json"),
+        &settings,
+    );
+    assert!(!stderr.contains("mbx[warning]"), "{stderr}");
+    wipe_target(&worktree);
+    let (_, stderr) = build_with(
+        &worktree,
+        store.path(),
+        &reports.path().join("warm.json"),
+        &settings,
+    );
+    assert!(!stderr.contains("mbx[warning]"), "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("runs")).unwrap(),
+        "ran\n",
+        "the build script ran again instead of being restored"
+    );
+}
+
 /// Builds two linked worktrees on different commits, and the checkout they
 /// were made from unless `bare` makes them worktrees of a bare clone, with a
 /// build script that bakes in the commit and watches git metadata for it.
