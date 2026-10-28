@@ -94,7 +94,7 @@ fn is_nfs(path: &Path) -> io::Result<bool> {
     let stats = unsafe { stats.assume_init() };
     #[cfg(target_os = "linux")]
     {
-        Ok(stats.f_type as u64 == 0x6969)
+        Ok(stats.f_type == 0x6969)
     }
     #[cfg(target_os = "macos")]
     {
