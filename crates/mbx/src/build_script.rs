@@ -915,12 +915,6 @@ impl CompilationInputs {
                     &self.compiler_directories,
                     0,
                 )?;
-                // Cargo reruns the script on every build for such a path, and
-                // a macro may read what lies behind it, a linked worktree's
-                // real `HEAD`, which no key covers.
-                if tree.blocked_by_file() {
-                    bail!("build-script input runs through a file: {path}");
-                }
                 inputs.insert(normalize_environment_value(path, &self.mappings), tree);
             } else if let Some(name) = directive.strip_prefix("rerun-if-env-changed=")
                 && !name.is_empty()
@@ -960,6 +954,12 @@ impl CompilationInputs {
                     0,
                 )?,
             );
+        }
+        // Cargo reruns the script on every build for a path through a file,
+        // and a macro may read what lies behind it, a linked worktree's real
+        // `HEAD`, which no key covers.
+        if let Some((path, _)) = inputs.iter().find(|(_, tree)| tree.blocked_by_file()) {
+            bail!("build-script input runs through a file: {path}");
         }
         let mut paths = BTreeSet::new();
         for tree in inputs.values() {
@@ -2083,6 +2083,60 @@ mod tests {
                 .contains("build-script input runs through a file: .git/HEAD"),
             "{error:#}"
         );
+    }
+
+    /// The implicit package input reaches such a path through a symlink.
+    #[cfg(unix)]
+    #[test]
+    fn a_package_link_through_a_file_keeps_compilations_uncached() {
+        let package = tempfile::tempdir().unwrap();
+        let out_dir = package.path().join("target/debug/build/fixture/out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(package.path().join(".git"), "gitdir: elsewhere\n").unwrap();
+        std::os::unix::fs::symlink(".git/HEAD", package.path().join("head")).unwrap();
+        std::fs::write(out_dir.parent().unwrap().join("output"), "").unwrap();
+        let error = CompilationInputs::read(&out_dir, package.path())
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("build-script input runs through a file"),
+            "{error:#}"
+        );
+    }
+
+    /// A git directory anywhere in a declared tree makes the result belong to
+    /// one checkout, a nested repository included; a worktree's `.git` file,
+    /// whose contents already differ between checkouts, does not.
+    #[test]
+    fn a_tree_holds_git_metadata_by_a_git_directory_or_its_layout() {
+        let holds = |build: &dyn Fn(&Path)| {
+            let directory = tempfile::tempdir().unwrap();
+            build(directory.path());
+            InputTree::read(directory.path(), &[], &[], &[], 0)
+                .unwrap()
+                .holds_git_metadata()
+        };
+        assert!(holds(&|root| std::fs::create_dir_all(
+            root.join("vendor/nested/.git")
+        )
+        .unwrap()));
+        assert!(holds(&|root| {
+            let bare = root.join("repository");
+            std::fs::create_dir_all(bare.join("objects")).unwrap();
+            std::fs::create_dir_all(bare.join("refs")).unwrap();
+            std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        }));
+        assert!(!holds(&|root| std::fs::write(
+            root.join(".git"),
+            "gitdir: elsewhere\n"
+        )
+        .unwrap()));
+        assert!(!holds(&|root| {
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            std::fs::write(root.join("HEAD"), "not a repository\n").unwrap();
+        }));
     }
 
     #[test]

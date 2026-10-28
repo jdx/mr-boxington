@@ -4230,6 +4230,8 @@ fn git(arguments: &[&str]) -> String {
 }
 
 fn main() {
+    let runs = std::fs::read_to_string("runs").unwrap_or_default();
+    std::fs::write("runs", format!("{runs}ran\n")).unwrap();
     println!("cargo::rustc-env=COMMIT={}", git(&["rev-parse", "HEAD"]));
     let own = git(&["rev-parse", "--absolute-git-dir"]);
     let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"]);
@@ -4250,7 +4252,7 @@ fn main() {
         "fn main() { println!(\"{}\", env!(\"COMMIT\")); }\n",
     )
     .unwrap();
-    std::fs::write(main.join(".gitignore"), "target\n").unwrap();
+    std::fs::write(main.join(".gitignore"), "target\nruns\n").unwrap();
     generate_lockfile(&main);
     let git = fixture_git;
     git(&main, &["init", "-q", "-b", "main"]);
@@ -4322,6 +4324,31 @@ fn main() {
             "{name} embedded another checkout's commit"
         );
     }
+
+    // Kept per checkout, the result is still cached: with its target gone,
+    // a checkout restores its own commit without running the script.
+    if shared_target {
+        std::fs::remove_dir_all(&shared).unwrap();
+    } else {
+        wipe_target(&second);
+    }
+    let runs = std::fs::read_to_string(second.join("runs")).unwrap();
+    let (warm, stderr) = build_with(
+        &second,
+        store.path(),
+        &reports.path().join("warm.json"),
+        &settings,
+    );
+    assert_eq!(
+        std::fs::read_to_string(second.join("runs")).unwrap(),
+        runs,
+        "the build script ran again instead of being restored: {warm}\n{stderr}"
+    );
+    let run = Command::new(binary(&second)).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        git(&second, &["rev-parse", "HEAD"])
+    );
 
     // A new commit in one worktree reaches its binary, not its sibling's.
     git(&first, &["commit", "-q", "--allow-empty", "-m", "moved"]);
