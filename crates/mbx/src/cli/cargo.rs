@@ -588,7 +588,7 @@ fn cargo_with_settings_bypass_log_and_roots(
         );
 
         if let Some(launch) = &launch {
-            launch.environment(&mut environment)?;
+            launch.environment(&mut environment, &cargo)?;
         }
         if let Some(test_runner) = &test_runner {
             test_runner.environment(&mut environment)?;

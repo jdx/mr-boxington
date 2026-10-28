@@ -8,6 +8,7 @@ use std::process::{Command, ExitCode};
 
 const SHIM: &str = "mbx-launch";
 const CAPTURE: &str = "MBX_LAUNCH_CAPTURE";
+const FORWARD: &str = "MBX_LAUNCH_FORWARD";
 const RESTORE: &str = "MBX_SESSION_RESTORE";
 const LEASE: &str = "MBX_SESSION_LEASE";
 const BUILD_PATH: &str = "MBX_SESSION_PATH";
@@ -95,7 +96,9 @@ pub fn recover_cli() -> Result<Option<ExitCode>> {
     let live = std::env::var_os(LEASE)
         .and_then(|path| std::fs::File::open(path).ok())
         .is_some_and(|file| matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
-    if live && !launching {
+    // Only the shim selected for this Cargo command may keep its launch
+    // runner. A build script's explicit shim run needs its own capture.
+    if live && (!launching || forwarding_launch()) {
         return Ok(None);
     }
     let mut command = Command::new(std::env::current_exe()?);
@@ -108,6 +111,25 @@ pub fn recover_cli() -> Result<Option<ExitCode>> {
     }
     let status = command.status()?;
     Ok(Some(super::cargo::exit_code(status)))
+}
+
+/// Bind the handoff to the selected executable: when it is real Cargo, an
+/// inherited marker must not authorize a build script's unrelated shim run.
+fn forwarding_launch() -> bool {
+    if !super::is_cargo_shim() {
+        return false;
+    }
+    let Some(expected) = std::env::var(FORWARD)
+        .ok()
+        .and_then(|value| serde_json::from_str::<OsString>(&value).ok())
+    else {
+        return false;
+    };
+    let shim = std::env::var_os("MBX_CARGO_SHIM_PATH")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_exe().ok());
+    shim.and_then(|path| path.canonicalize().ok())
+        .is_some_and(|path| path.as_os_str() == expected)
 }
 
 /// Config overrides cannot be resolved by cargo-config2. Let Cargo handle
@@ -524,10 +546,26 @@ pub(super) fn record_overlay(environment: &mut BTreeMap<String, String>) -> Resu
         restore.insert(name.clone(), caller.get(&name).cloned());
     }
     restore.insert(RESTORE.into(), None);
+    restore.insert(FORWARD.into(), None);
     environment.insert(
         RESTORE.into(),
         serde_json::to_string(&Restore(restore.into_iter().collect()))?,
     );
+    Ok(())
+}
+
+/// A forwarding Cargo shim removes its directory from PATH. Track that new
+/// inherited suffix so application launch can still restore the caller's PATH
+/// while keeping any runtime library paths Cargo adds ahead of it.
+pub(super) fn forward_cargo_environment(command: &mut Command) -> Result<()> {
+    // Consume the handoff before real Cargo can pass it to build scripts.
+    command.env_remove(FORWARD);
+    if std::env::var_os(BUILD_PATH).is_some() {
+        command.env(
+            BUILD_PATH,
+            serde_json::to_string(&std::env::var_os("PATH"))?,
+        );
+    }
     Ok(())
 }
 
@@ -547,6 +585,7 @@ fn restored_environment() -> Result<Environment> {
         }
     }
     environment.remove(OsStr::new(CAPTURE));
+    environment.remove(OsStr::new(FORWARD));
     Ok(environment)
 }
 
@@ -592,7 +631,11 @@ impl Launch {
         }))
     }
 
-    pub(super) fn environment(&self, environment: &mut BTreeMap<String, String>) -> Result<()> {
+    pub(super) fn environment(
+        &self,
+        environment: &mut BTreeMap<String, String>,
+        cargo: &OsStr,
+    ) -> Result<()> {
         // Cargo splits environment runner strings on whitespace. Resolve the
         // shim through PATH so a temporary directory containing spaces works.
         let path = std::env::var_os("PATH").unwrap_or_default();
@@ -603,6 +646,17 @@ impl Launch {
         environment.insert("PATH".into(), path.to_string_lossy().into_owned());
         environment.insert(self.runner_key.clone(), SHIM.into());
         environment.insert(CAPTURE.into(), self.capture.to_string_lossy().into_owned());
+        // Without a resolvable Cargo the launch still runs; a shim then just
+        // starts a fresh scope, as before the handoff existed.
+        if let Some(cargo) = which::which(cargo)
+            .ok()
+            .and_then(|path| path.canonicalize().ok())
+        {
+            environment.insert(
+                FORWARD.into(),
+                serde_json::to_string(&cargo.into_os_string())?,
+            );
+        }
         Ok(())
     }
 
