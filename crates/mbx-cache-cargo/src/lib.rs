@@ -100,17 +100,15 @@ fn resolve_in(
     working_dir: &Path,
     target_dir_env: Option<OsString>,
 ) -> CargoInvocation {
-    let cargo_args = cargo_arguments(arguments);
-    let reported = recalled_cargo_roots(
+    let (reported, arguments) = probed_roots(
         cache,
         effective_cargo_home().as_deref(),
         cargo,
-        cargo_args,
+        arguments,
         working_dir,
         target_dir_env.as_deref(),
-    )
-    .ok();
-    resolve_with_reported(arguments, working_dir, target_dir_env, reported)
+    );
+    resolve_with_reported(arguments, working_dir, target_dir_env, reported.ok())
 }
 
 /// Resolve one Cargo invocation only when Cargo successfully reports its roots.
@@ -209,20 +207,115 @@ fn try_resolve_reported_from_home(
     working_dir: &Path,
     target_dir_env: Option<OsString>,
 ) -> Result<CargoInvocation, ProbeFailure> {
-    let reported = recalled_cargo_roots(
+    let (reported, arguments) = probed_roots(
         cache,
         cargo_home,
         cargo,
-        cargo_arguments(arguments),
+        arguments,
         working_dir,
         target_dir_env.as_deref(),
-    )?;
+    );
     Ok(resolve_with_reported(
         arguments,
         working_dir,
         target_dir_env,
-        Some(reported),
+        Some(reported?),
     ))
+}
+
+/// The workspace root, target directory, and build directory Cargo reported.
+type ReportedRoots = (PathBuf, PathBuf, Option<PathBuf>);
+
+/// Probe the roots for `arguments`, and report which of them the answer is for.
+///
+/// Cargo hands everything after an external subcommand to it untouched, so
+/// `cargo kani -Z autoharness` gives `-Z` to kani, not to Cargo, and a probe
+/// that forwards it fails. Whether a word is an external subcommand or an alias
+/// for a builtin is not known here, and flags after an alias belong to Cargo,
+/// so the full command line is tried first. Only when that fails are the
+/// arguments cut back to those Cargo reads, and the cut-back ones are the ones
+/// every later step must read too.
+fn probed_roots<'a>(
+    cache: Option<&Path>,
+    cargo_home: Option<&Path>,
+    cargo: &OsStr,
+    arguments: &'a [String],
+    working_dir: &Path,
+    target_dir_env: Option<&OsStr>,
+) -> (Result<ReportedRoots, ProbeFailure>, &'a [String]) {
+    let probe = |arguments: &[String]| {
+        recalled_cargo_roots(
+            cache,
+            cargo_home,
+            cargo,
+            cargo_arguments(arguments),
+            working_dir,
+            target_dir_env,
+        )
+    };
+    let full = probe(arguments);
+    if full.is_ok() {
+        return (full, arguments);
+    }
+    match owned_arguments(arguments) {
+        Some(owned) => (probe(owned), owned),
+        None => (full, arguments),
+    }
+}
+
+/// The arguments up to and including a subcommand that is not a Cargo builtin,
+/// when any follow it. `None` where nothing would be dropped.
+fn owned_arguments(arguments: &[String]) -> Option<&[String]> {
+    let arguments = cargo_arguments(arguments);
+    let (index, command) = subcommand(arguments)?;
+    (!is_builtin_command(command) && index + 1 < arguments.len()).then(|| &arguments[..=index])
+}
+
+/// Whether `command` is one of Cargo's own subcommands, which Cargo parses the
+/// rest of the command line for, as opposed to an alias or an external command.
+pub fn is_builtin_command(command: &str) -> bool {
+    matches!(
+        command,
+        "build"
+            | "check"
+            | "test"
+            | "run"
+            | "bench"
+            | "doc"
+            | "rustc"
+            | "rustdoc"
+            | "fix"
+            | "install"
+            | "help"
+            | "new"
+            | "init"
+            | "add"
+            | "remove"
+            | "update"
+            | "fetch"
+            | "clean"
+            | "config"
+            | "tree"
+            | "search"
+            | "info"
+            | "login"
+            | "logout"
+            | "owner"
+            | "package"
+            | "publish"
+            | "uninstall"
+            | "yank"
+            | "locate-project"
+            | "metadata"
+            | "generate-lockfile"
+            | "pkgid"
+            | "read-manifest"
+            | "report"
+            | "vendor"
+            | "verify-project"
+            | "version"
+            | "git-checkout"
+    )
 }
 
 fn resolve_with_reported(
@@ -1743,6 +1836,80 @@ mod tests {
             .lines()
             .filter(|line| line.contains("metadata"))
             .count()
+    }
+
+    /// A stand-in Cargo that, like the real one for `metadata`, refuses the
+    /// unstable `-Z` and `-C` flags it was not told to expect.
+    #[cfg(unix)]
+    fn stable_cargo(directory: &Path, project: &Path, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let script = directory.join("cargo");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\ncase \" $* \" in *' -Z'*|*' -C'*) exit 101;; esac\ncase \" $* \" in *' metadata '*) printf '{{\"workspace_root\":\"{root}\",\"target_directory\":\"{root}/target\",\"packages\":[]}}';; esac\n",
+                log = log.display(),
+                root = project.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn flags_after_an_external_subcommand_stay_out_of_the_probe() {
+        let directory = cargo_fixture();
+        let root = directory.path();
+        let scratch = tempfile::tempdir().unwrap();
+        let log = scratch.path().join("log");
+        let cargo = stable_cargo(scratch.path(), root, &log);
+        let resolve = |words: &[&str]| {
+            let arguments = words
+                .iter()
+                .map(|word| (*word).to_owned())
+                .collect::<Vec<_>>();
+            resolve_reported_in(None, cargo.as_os_str(), &arguments, root, None)
+        };
+
+        for words in [
+            &["foo", "-Z", "x"][..],
+            &["foo", "-Zx"],
+            &["foo", "-C", "dir"],
+            &["foo", "autoharness", "-Z", "autoharness"],
+            &["+stable", "foo", "-Z", "x"],
+        ] {
+            let resolved = resolve(words).unwrap_or_else(|| panic!("{words:?} was refused"));
+            assert_eq!(resolved.workspace_root, root, "{words:?}");
+            // The directory option is the plugin's, so it moves nothing.
+            assert_eq!(resolved.target_dir, root.join("target"), "{words:?}");
+        }
+
+        // Cargo's own flags, before the subcommand, still reach the probe, and a
+        // failure there is not retried into success.
+        assert!(resolve(&["-Z", "x", "foo"]).is_none());
+        // A builtin parses its whole command line: a bad flag is Cargo's to report.
+        assert!(resolve(&["build", "-Z", "x"]).is_none());
+        assert!(resolve(&["build", "-C", "dir"]).is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn flags_after_an_alias_or_external_subcommand_still_reach_a_probe_that_accepts_them() {
+        let directory = cargo_fixture();
+        let root = directory.path();
+        let scratch = tempfile::tempdir().unwrap();
+        let log = scratch.path().join("log");
+        let cargo = logging_cargo(scratch.path(), root, &log);
+        let arguments = ["b", "--config", "net.offline=true"].map(str::to_owned);
+        resolve_reported_in(None, cargo.as_os_str(), &arguments, root, None).unwrap();
+        let logged = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            logged.contains("--config net.offline=true"),
+            "an alias is Cargo's to parse: {logged}"
+        );
+        assert_eq!(probes(&log), 1, "{logged}");
     }
 
     #[test]
