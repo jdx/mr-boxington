@@ -739,7 +739,7 @@ fn build_action(
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
     let cargo_environment = cargo_environment(&mappings);
-    let out_dir = (!prediction.portable_out_dir)
+    let out_dir = (!prediction.portable_out_dir || watches_git_metadata(prediction))
         .then(|| std::env::var("OUT_DIR"))
         .transpose()?;
     let archive_timestamps = archive_timestamp_key();
@@ -1009,7 +1009,17 @@ impl InputTree {
     ) -> Result<Self> {
         let metadata = match std::fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self::Missing),
+            // A path through a file, such as another checkout's `.git/HEAD` read
+            // from a linked worktree, where `.git` is a file, is as absent as
+            // a path that never existed.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(Self::Missing);
+            }
             Err(error) => return Err(error.into()),
         };
         if metadata.file_type().is_symlink() {
@@ -1188,6 +1198,22 @@ fn compilation_file_digests(
 /// Hash all files in an explicit build-script execution input without exclusions.
 fn input_state(path: &Path, mappings: &[PathMapping]) -> Result<InputState> {
     input_state_at(path, mappings, &[], 0)
+}
+
+/// Whether the script watches a checkout's git metadata, as one that bakes in
+/// the commit watches `.git/HEAD` and the branch it names.
+///
+/// What it read there belongs to one checkout: a linked worktree keeps its own
+/// `HEAD` under the shared git directory, at a path every other checkout can
+/// read, so a result keyed on those files alone would restore one worktree's
+/// commit into another. Decided whenever a key is built rather than recorded
+/// in the prediction, so it also holds for predictions published before it.
+fn watches_git_metadata(prediction: &Prediction) -> bool {
+    prediction.inputs.iter().any(|input| {
+        Path::new(input)
+            .components()
+            .any(|component| component.as_os_str() == ".git")
+    })
 }
 
 /// Hash Cargo's implicit package input while omitting package build directories.

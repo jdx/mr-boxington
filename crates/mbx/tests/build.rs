@@ -4040,6 +4040,127 @@ fn build_script_restores_a_wide_nested_out_dir() {
     assert_eq!(restored(second.path()), published);
 }
 
+/// A build script that bakes in the commit watches its checkout's git
+/// metadata. A linked worktree keeps its `HEAD` where every other checkout can
+/// read it, so a result shared across checkouts would hand one worktree
+/// another's commit, and in a worktree, where `.git` is a file, the main
+/// checkout's `.git/HEAD` cannot be read at all. Each checkout gets its own
+/// result, and the main checkout's result does not stop a worktree from
+/// caching.
+#[test]
+fn a_build_script_watching_git_metadata_keeps_each_checkout_s_commit() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let main = root.path().join("main");
+    std::fs::create_dir_all(main.join("src")).unwrap();
+    std::fs::write(
+        main.join("Cargo.toml"),
+        "[package]\nname = \"commit-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        main.join("build.rs"),
+        r#"use std::process::Command;
+
+fn git(arguments: &[&str]) -> String {
+    let output = Command::new("git").args(arguments).output().unwrap();
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+fn main() {
+    println!("cargo::rustc-env=COMMIT={}", git(&["rev-parse", "HEAD"]));
+    let own = git(&["rev-parse", "--absolute-git-dir"]);
+    let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    println!("cargo::rerun-if-changed={own}/HEAD");
+    println!("cargo::rerun-if-changed={common}/packed-refs");
+    println!("cargo::rerun-if-changed={common}/{}", git(&["symbolic-ref", "-q", "HEAD"]));
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        main.join("src/main.rs"),
+        "fn main() { println!(\"{}\", env!(\"COMMIT\")); }\n",
+    )
+    .unwrap();
+    std::fs::write(main.join(".gitignore"), "target\n").unwrap();
+    generate_lockfile(&main);
+    let git = |directory: &Path, arguments: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(directory)
+            .args([
+                "-c",
+                "user.name=mbx",
+                "-c",
+                "user.email=mbx@example.invalid",
+            ])
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {arguments:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    git(&main, &["init", "-q", "-b", "main"]);
+    git(&main, &["add", "-A"]);
+    git(&main, &["commit", "-q", "-m", "initial"]);
+    let first = root.path().join("first");
+    let second = root.path().join("second");
+    for (worktree, branch) in [(&first, "first"), (&second, "second")] {
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                worktree.to_str().unwrap(),
+            ],
+        );
+        git(worktree, &["commit", "-q", "--allow-empty", "-m", branch]);
+    }
+    let settings = [("MBX_BUILD_SCRIPT_EXECUTION", "1")];
+    let binary = |checkout: &Path| {
+        checkout.join(format!(
+            "target/debug/commit-fixture{}",
+            std::env::consts::EXE_SUFFIX
+        ))
+    };
+    for (name, checkout) in [("main", &main), ("first", &first), ("second", &second)] {
+        let (_, stderr) = build_with(
+            checkout,
+            store.path(),
+            &reports.path().join(format!("{name}.json")),
+            &settings,
+        );
+        assert!(
+            !stderr.contains("build-script cache bypassed"),
+            "{name}: {stderr}"
+        );
+        let run = Command::new(binary(checkout)).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout).trim(),
+            git(checkout, &["rev-parse", "HEAD"]),
+            "{name} embedded another checkout's commit"
+        );
+    }
+
+    // A new commit in one worktree reaches its binary, not its sibling's.
+    git(&first, &["commit", "-q", "--allow-empty", "-m", "moved"]);
+    build_with(
+        &first,
+        store.path(),
+        &reports.path().join("moved.json"),
+        &settings,
+    );
+    let run = Command::new(binary(&first)).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        git(&first, &["rev-parse", "HEAD"])
+    );
+}
+
 /// Canonical OUT_DIR strings in directives must follow the receiving checkout,
 /// even though Cargo's target path names a symlink to a different managed view.
 #[cfg(unix)]
