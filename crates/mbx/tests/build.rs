@@ -4054,21 +4054,28 @@ fn build_script_restores_a_wide_nested_out_dir() {
 /// caching.
 #[test]
 fn a_build_script_watching_git_metadata_keeps_each_checkout_s_commit() {
-    build_checkouts_of_a_commit_baking_script(false, false);
+    build_checkouts_of_a_commit_baking_script(GitLayout::Worktrees);
 }
 
 /// The same, for checkouts sharing one target directory, where `OUT_DIR` does
 /// not tell them apart.
 #[test]
 fn a_build_script_watching_git_metadata_keeps_each_commit_in_a_shared_target() {
-    build_checkouts_of_a_commit_baking_script(false, true);
+    build_checkouts_of_a_commit_baking_script(GitLayout::SharedTarget);
 }
 
 /// The same, for worktrees of a bare repository, whose git directory has no
 /// `.git` in its path.
 #[test]
 fn a_build_script_watching_a_bare_repository_keeps_each_checkout_s_commit() {
-    build_checkouts_of_a_commit_baking_script(true, false);
+    build_checkouts_of_a_commit_baking_script(GitLayout::Bare);
+}
+
+/// The same, for a script that watches the directory holding a bare
+/// repository rather than files inside it.
+#[test]
+fn a_build_script_watching_a_directory_of_repositories_keeps_each_checkout_s_commit() {
+    build_checkouts_of_a_commit_baking_script(GitLayout::BareWatchingItsDirectory);
 }
 
 /// Run `git` in a fixture repository, whatever repository the test process
@@ -4095,8 +4102,9 @@ fn fixture_git(directory: &Path, arguments: &[&str]) -> String {
 /// A script that watches `.git/HEAD` beside its package declares a path
 /// through a file in a linked worktree, where `.git` is one. Cargo reruns such
 /// a script on every build, and what it reads is the worktree's real `HEAD`,
-/// so its result is not stored: a new commit reaches the binary, and no build
-/// warns about it.
+/// so neither its result nor the package's compilations are stored: a new
+/// commit reaches the binary. The execution is left quietly; the compilation
+/// says which input kept it uncached.
 #[test]
 fn a_build_script_watching_git_head_through_a_worktree_file_follows_its_commits() {
     let store = tempfile::tempdir().unwrap();
@@ -4160,7 +4168,16 @@ fn a_build_script_watching_git_head_through_a_worktree_file_follows_its_commits(
             &reports.path().join(format!("{revision}.json")),
             &settings,
         );
-        assert!(!stderr.contains("mbx[warning]"), "{revision}: {stderr}");
+        assert!(
+            !stderr.contains("mbx[warning]: build-script"),
+            "{revision}: {stderr}"
+        );
+        assert!(
+            stderr.contains(
+                "rustc cache bypassed: build-script input runs through a file: .git/HEAD"
+            ),
+            "{revision}: {stderr}"
+        );
         let run = Command::new(&binary).output().unwrap();
         assert_eq!(
             String::from_utf8_lossy(&run.stdout).trim(),
@@ -4170,11 +4187,29 @@ fn a_build_script_watching_git_head_through_a_worktree_file_follows_its_commits(
     }
 }
 
+/// Where [`build_checkouts_of_a_commit_baking_script`] keeps its checkouts'
+/// git metadata and output, and what the script watches.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GitLayout {
+    /// Worktrees of an ordinary checkout, each with its own target.
+    Worktrees,
+    /// The same, building into one `CARGO_TARGET_DIR`.
+    SharedTarget,
+    /// Worktrees of a bare clone, whose git directory has no `.git` in its path.
+    Bare,
+    /// The same, with the script watching the directory holding the clone.
+    BareWatchingItsDirectory,
+}
+
 /// Builds two linked worktrees on different commits, and the checkout they
-/// were made from unless `bare` makes them worktrees of a bare clone, with a
-/// build script that bakes in the commit and watches git metadata for it.
-/// `shared_target` builds them all into one `CARGO_TARGET_DIR`.
-fn build_checkouts_of_a_commit_baking_script(bare: bool, shared_target: bool) {
+/// were made from unless they are worktrees of a bare clone, with a build
+/// script that bakes in the commit and watches git metadata for it.
+fn build_checkouts_of_a_commit_baking_script(layout: GitLayout) {
+    let bare = matches!(
+        layout,
+        GitLayout::Bare | GitLayout::BareWatchingItsDirectory
+    );
+    let shared_target = layout == GitLayout::SharedTarget;
     let store = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
@@ -4198,6 +4233,11 @@ fn main() {
     println!("cargo::rustc-env=COMMIT={}", git(&["rev-parse", "HEAD"]));
     let own = git(&["rev-parse", "--absolute-git-dir"]);
     let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    if std::env::var_os("WATCH_DIRECTORY").is_some() {
+        let holder = std::path::Path::new(&common).parent().unwrap();
+        println!("cargo::rerun-if-changed={}", holder.display());
+        return;
+    }
     println!("cargo::rerun-if-changed={own}/HEAD");
     println!("cargo::rerun-if-changed={common}/packed-refs");
     println!("cargo::rerun-if-changed={common}/{}", git(&["symbolic-ref", "-q", "HEAD"]));
@@ -4217,11 +4257,14 @@ fn main() {
     git(&main, &["add", "-A"]);
     git(&main, &["commit", "-q", "-m", "initial"]);
     let repository = if bare {
+        // Alone in its directory, so watching that directory reads nothing
+        // a build writes.
+        std::fs::create_dir(root.path().join("storage")).unwrap();
         git(
             root.path(),
-            &["clone", "-q", "--bare", "main", "repository"],
+            &["clone", "-q", "--bare", "main", "storage/repository"],
         );
-        root.path().join("repository")
+        root.path().join("storage/repository")
     } else {
         main.clone()
     };
@@ -4245,6 +4288,9 @@ fn main() {
     let mut settings = vec![("MBX_BUILD_SCRIPT_EXECUTION", "1")];
     if shared_target {
         settings.push(("CARGO_TARGET_DIR", shared.to_str().unwrap()));
+    }
+    if layout == GitLayout::BareWatchingItsDirectory {
+        settings.push(("WATCH_DIRECTORY", "1"));
     }
     let binary = |checkout: &Path| {
         let target = if shared_target {
