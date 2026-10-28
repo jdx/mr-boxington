@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.7](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.20.6...mbx-cache-cc-v0.20.7) - 2026-10-28
+
+### Added
+
+- *(explain)* name the variables behind recorded C compile bypasses ([#857](https://github.com/jdx/mr-boxington/pull/857))
+
+### Fixed
+
+- *(cache)* catch same-length edits made within one timestamp tick ([#860](https://github.com/jdx/mr-boxington/pull/860))
+
+### Other
+
+- add regression tests for fixed target, GC, cache and scheduler bugs ([#854](https://github.com/jdx/mr-boxington/pull/854))
+- stop seven tests from depending on ZFS timestamps and the caller's environment ([#853](https://github.com/jdx/mr-boxington/pull/853))
+
 ## [0.20.4](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.20.3...mbx-cache-cc-v0.20.4) - 2026-10-20
 
 ### Other

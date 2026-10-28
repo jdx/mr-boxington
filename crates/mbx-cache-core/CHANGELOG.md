@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.7](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.20.6...mbx-cache-core-v0.20.7) - 2026-10-28
+
+### Fixed
+
+- *(cache)* catch same-length edits made within one timestamp tick ([#860](https://github.com/jdx/mr-boxington/pull/860))
+
+### Other
+
+- add regression tests for fixed target, GC, cache and scheduler bugs ([#854](https://github.com/jdx/mr-boxington/pull/854))
+
 ## [0.20.6](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.20.5...mbx-cache-core-v0.20.6) - 2026-10-26
 
 ### Fixed

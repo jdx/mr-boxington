@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.29.0](https://github.com/jdx/mr-boxington/compare/v1.28.0...v1.29.0) - 2026-10-28
+
+### Added
+
+- *(explain)* name the variables behind recorded C compile bypasses ([#857](https://github.com/jdx/mr-boxington/pull/857))
+- *(doctor)* warn when filesystems do not track access times ([#855](https://github.com/jdx/mr-boxington/pull/855))
+- *(gc)* remove cached Rust results for a named compiler version ([#845](https://github.com/jdx/mr-boxington/pull/845))
+
+### Fixed
+
+- *(cargo)* pass flags after an external subcommand through untouched ([#868](https://github.com/jdx/mr-boxington/pull/868))
+- *(rustc)* prevent broken rlibs from optimized incremental reuse ([#867](https://github.com/jdx/mr-boxington/pull/867))
+- *(build-script)* keep each worktree's commit when a build script watches git metadata ([#865](https://github.com/jdx/mr-boxington/pull/865))
+- *(session)* keep mbx run builds cached when cargo is an mbx shim ([#863](https://github.com/jdx/mr-boxington/pull/863))
+- *(cargo)* say why the cargo metadata probe failed ([#862](https://github.com/jdx/mr-boxington/pull/862))
+- *(scheduler)* stop builds queueing behind an in-flight compile they cannot reuse ([#859](https://github.com/jdx/mr-boxington/pull/859))
+- *(cache)* stop restored outputs on ZFS from triggering needless Cargo rebuilds ([#861](https://github.com/jdx/mr-boxington/pull/861))
+- *(cache-store)* collect task manifests no live checkout claims ([#852](https://github.com/jdx/mr-boxington/pull/852))
+- *(cargo)* keep compiler wrappers configured in Cargo config ([#846](https://github.com/jdx/mr-boxington/pull/846))
+- *(pretty)* drop the savings-estimate footnote from the build summary ([#849](https://github.com/jdx/mr-boxington/pull/849))
+- *(incremental)* keep private state when a source file is deleted ([#847](https://github.com/jdx/mr-boxington/pull/847))
+- *(pretty)* show build errors instead of raw JSON on Windows ([#844](https://github.com/jdx/mr-boxington/pull/844))
+- *(cache-cargo)* match Config for empty or non-Unicode MBX_CACHE_DIR ([#837](https://github.com/jdx/mr-boxington/pull/837))
+
+### Other
+
+- isolate tests from MBX_LINKER, RUSTC and the host mbx config ([#864](https://github.com/jdx/mr-boxington/pull/864))
+- add regression tests for fixed target, GC, cache and scheduler bugs ([#854](https://github.com/jdx/mr-boxington/pull/854))
+- stop seven tests from depending on ZFS timestamps and the caller's environment ([#853](https://github.com/jdx/mr-boxington/pull/853))
+
 ## [1.28.0](https://github.com/jdx/mr-boxington/compare/v1.27.0...v1.28.0) - 2026-10-26
 
 ### Added
