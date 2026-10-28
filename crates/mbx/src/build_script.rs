@@ -40,6 +40,11 @@ struct Action<'a> {
     archive_timestamps: Option<&'a str>,
     binary_action: &'a CacheDigest,
     cargo_environment: &'a BTreeMap<String, Option<String>>,
+    /// The package directory of a result kept per checkout. Checkouts that
+    /// share one target directory share `OUT_DIR` too, so that alone does not
+    /// tell them apart. Absent from every other key, which stays as it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkout: Option<&'a str>,
     environment: &'a BTreeMap<String, Option<String>>,
     inputs: &'a BTreeMap<String, InputState>,
     kind: &'static str,
@@ -51,6 +56,8 @@ struct Action<'a> {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum InputState {
     Missing,
+    /// A path through a regular file, which can never exist.
+    BlockedByFile,
     File {
         digest: CacheDigest,
     },
@@ -387,6 +394,14 @@ pub(crate) fn run() -> Result<ExitCode> {
             record_bypass("build-script-always-rerun");
             return Ok(());
         };
+        if declares_a_path_through_a_file(&prediction)? {
+            // Cargo cannot stat such a path, `.git/HEAD` in a linked worktree
+            // for one, so it reruns the script on every build. What the script
+            // reads behind it, the worktree's real `HEAD`, is in no key, so a
+            // stored result would come back after the commit moved.
+            record_bypass("build-script-always-rerun");
+            return Ok(());
+        }
         if declared_inputs_changed_since(&prediction, started_at)? {
             // The result is keyed to the inputs as the run left them, but the
             // script read them as they were before. Cargo runs it again, and
@@ -706,6 +721,7 @@ fn build_action(
     let working_dir = std::env::current_dir()?;
     let mappings = build_script_mappings();
     let mut inputs = BTreeMap::new();
+    let mut checkout_local = false;
     for declared in &prediction.inputs {
         let resolved_name =
             String::from_utf8(denormalize_output_text(declared.as_bytes(), &mappings))
@@ -716,11 +732,14 @@ fn build_action(
         } else {
             working_dir.join(path)
         };
-        let state = if prediction.default_package {
-            package_input_state(&resolved, &mappings)?
+        let excluded = if prediction.default_package {
+            default_package_exclusions(&resolved)?
         } else {
-            input_state(&resolved, &mappings)?
+            Vec::new()
         };
+        let tree = InputTree::read(&resolved, &mappings, &excluded, &[], 0)?;
+        checkout_local = checkout_local || is_git_metadata(&resolved) || tree.holds_git_metadata();
+        let state = tree.state(&mut |path| CacheDigest::blake3_file(path))?;
         inputs.insert(declared.clone(), state);
     }
     let environment = prediction
@@ -739,14 +758,18 @@ fn build_action(
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
     let cargo_environment = cargo_environment(&mappings);
-    let out_dir = (!prediction.portable_out_dir)
+    let out_dir = (!prediction.portable_out_dir || checkout_local)
         .then(|| std::env::var("OUT_DIR"))
+        .transpose()?;
+    let checkout = checkout_local
+        .then(|| std::env::var("CARGO_MANIFEST_DIR"))
         .transpose()?;
     let archive_timestamps = archive_timestamp_key();
     let bytes = canonical_json(&Action {
         archive_timestamps: archive_timestamps.as_deref(),
         binary_action,
         cargo_environment: &cargo_environment,
+        checkout: checkout.as_deref(),
         environment: &environment,
         inputs: &inputs,
         kind: ADAPTER,
@@ -885,16 +908,14 @@ impl CompilationInputs {
                 if path.is_empty() {
                     bail!("build script declares an always-changing input");
                 }
-                inputs.insert(
-                    normalize_environment_value(path, &self.mappings),
-                    InputTree::read(
-                        &self.manifest_dir.join(path),
-                        &self.mappings,
-                        &[],
-                        &self.compiler_directories,
-                        0,
-                    )?,
-                );
+                let tree = InputTree::read(
+                    &self.manifest_dir.join(path),
+                    &self.mappings,
+                    &[],
+                    &self.compiler_directories,
+                    0,
+                )?;
+                inputs.insert(normalize_environment_value(path, &self.mappings), tree);
             } else if let Some(name) = directive.strip_prefix("rerun-if-env-changed=")
                 && !name.is_empty()
             {
@@ -933,6 +954,12 @@ impl CompilationInputs {
                     0,
                 )?,
             );
+        }
+        // Cargo reruns the script on every build for a path through a file,
+        // and a macro may read what lies behind it, a linked worktree's real
+        // `HEAD`, which no key covers.
+        if let Some((path, _)) = inputs.iter().find(|(_, tree)| tree.blocked_by_file()) {
+            bail!("build-script input runs through a file: {path}");
         }
         let mut paths = BTreeSet::new();
         for tree in inputs.values() {
@@ -973,6 +1000,7 @@ impl CompilationInputs {
 /// regular-file contents in one ledger request for the entire declared tree.
 enum InputTree {
     Missing,
+    BlockedByFile,
     File(PathBuf),
     Directory(BTreeMap<String, Self>),
     Symlink { target: String, referent: Box<Self> },
@@ -1009,7 +1037,19 @@ impl InputTree {
     ) -> Result<Self> {
         let metadata = match std::fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self::Missing),
+            // A path through a file, such as another checkout's `.git/HEAD` read
+            // from a linked worktree, where `.git` is a file. It is as absent as
+            // a missing path, but kept apart from one in the key.
+            Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {
+                return Ok(Self::BlockedByFile);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(if runs_through_a_file(path) {
+                    Self::BlockedByFile
+                } else {
+                    Self::Missing
+                });
+            }
             Err(error) => return Err(error.into()),
         };
         if metadata.file_type().is_symlink() {
@@ -1082,10 +1122,42 @@ impl InputTree {
         )
     }
 
+    /// Whether some path in the tree runs through a regular file.
+    fn blocked_by_file(&self) -> bool {
+        match self {
+            Self::BlockedByFile => true,
+            Self::Missing | Self::File(_) => false,
+            Self::Directory(children) => children.values().any(Self::blocked_by_file),
+            Self::Symlink { referent, .. } => referent.blocked_by_file(),
+        }
+    }
+
+    /// Whether a declared directory holds git metadata, by the signs
+    /// [`is_git_metadata`] looks for above a path: a `.git` entry, or `HEAD`
+    /// beside `objects` and `refs`. A script watching it can read one
+    /// checkout's `HEAD` among the others it holds. A `.git` file counts too:
+    /// a linked worktree's or a submodule's can point elsewhere by a relative
+    /// path that reads the same in every checkout.
+    fn holds_git_metadata(&self) -> bool {
+        match self {
+            Self::Directory(children) => {
+                matches!(
+                    children.get(".git"),
+                    Some(Self::Directory(_) | Self::File(_) | Self::Symlink { .. })
+                ) || (matches!(children.get("HEAD"), Some(Self::File(_)))
+                    && matches!(children.get("objects"), Some(Self::Directory(_)))
+                    && matches!(children.get("refs"), Some(Self::Directory(_))))
+                    || children.values().any(Self::holds_git_metadata)
+            }
+            Self::Symlink { referent, .. } => referent.holds_git_metadata(),
+            Self::Missing | Self::BlockedByFile | Self::File(_) => false,
+        }
+    }
+
     /// Collect regular files across declarations for one batched ledger lookup.
     fn files(&self, paths: &mut BTreeSet<PathBuf>) {
         match self {
-            Self::Missing => {}
+            Self::Missing | Self::BlockedByFile => {}
             Self::File(path) => {
                 paths.insert(path.clone());
             }
@@ -1105,6 +1177,7 @@ impl InputTree {
     ) -> Result<InputState> {
         Ok(match self {
             Self::Missing => InputState::Missing,
+            Self::BlockedByFile => InputState::BlockedByFile,
             Self::File(path) => InputState::File {
                 digest: digest_file(&path)?,
             },
@@ -1186,11 +1259,53 @@ fn compilation_file_digests(
 }
 
 /// Hash all files in an explicit build-script execution input without exclusions.
+#[cfg(test)]
 fn input_state(path: &Path, mappings: &[PathMapping]) -> Result<InputState> {
     input_state_at(path, mappings, &[], 0)
 }
 
+/// Whether a watched input is a checkout's git metadata, as a script that
+/// bakes in the commit watches `HEAD` and the branch it names.
+///
+/// What it read there belongs to one checkout: a linked worktree keeps its own
+/// `HEAD` under the shared git directory, at a path every other checkout can
+/// read, so a result keyed on those files alone would restore one worktree's
+/// commit into another. A git directory is recognized by its contents, since a
+/// bare repository or a separate git directory need not be called `.git`, and
+/// by a `.git` component, since in a linked worktree that is a file. Decided
+/// whenever a key is built rather than recorded in the prediction, so it also
+/// holds for predictions published before it.
+fn is_git_metadata(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == ".git")
+        || path.ancestors().any(|directory| {
+            directory.join("HEAD").is_file()
+                && directory.join("objects").is_dir()
+                && directory.join("refs").is_dir()
+        })
+}
+
+/// Whether the nearest existing ancestor of a missing path is not a directory.
+///
+/// Unix reports such a path as "not a directory", but Windows reports it as
+/// not found, the same as any missing path.
+fn runs_through_a_file(path: &Path) -> bool {
+    for ancestor in path.ancestors().skip(1) {
+        match std::fs::metadata(ancestor) {
+            Ok(metadata) => return !metadata.is_dir(),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) => {}
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
 /// Hash Cargo's implicit package input while omitting package build directories.
+#[cfg(test)]
 fn package_input_state(path: &Path, mappings: &[PathMapping]) -> Result<InputState> {
     let excluded = default_package_exclusions(path)?;
     input_state_at(path, mappings, &excluded, 0)
@@ -1210,6 +1325,7 @@ fn default_package_exclusions(package: &Path) -> Result<Vec<PathBuf>> {
 
 /// Preserve the execution adapter's direct content reads using the same tree
 /// representation as compilation-input discovery.
+#[cfg(test)]
 fn input_state_at(
     path: &Path,
     mappings: &[PathMapping],
@@ -1239,6 +1355,28 @@ fn run_start_stamp() -> SystemTime {
         modified
     });
     stamp.map_or(now, |stamp| stamp.min(now))
+}
+
+/// Whether a declared input, or anything a link in it leads to, runs through a
+/// regular file, so it can never exist.
+fn declares_a_path_through_a_file(prediction: &Prediction) -> Result<bool> {
+    let mappings = build_script_mappings();
+    let working_dir = std::env::current_dir()?;
+    for declared in &prediction.inputs {
+        let resolved_name =
+            String::from_utf8(denormalize_output_text(declared.as_bytes(), &mappings))
+                .expect("denormalizing UTF-8 paths preserves UTF-8");
+        let path = working_dir.join(resolved_name);
+        let excluded = if prediction.default_package {
+            default_package_exclusions(&path)?
+        } else {
+            Vec::new()
+        };
+        if InputTree::read(&path, &mappings, &excluded, &[], 0)?.blocked_by_file() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Whether anything a prediction declares as an input was modified at or after
@@ -1949,6 +2087,122 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn a_path_through_a_file_is_absent_but_not_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("file"), "").unwrap();
+        let state = |path: &str| input_state(&directory.path().join(path), &[]).unwrap();
+        assert_eq!(state("file/child"), InputState::BlockedByFile);
+        assert_eq!(state("absent/child"), InputState::Missing);
+        // Windows reports both as not found, so the ancestor decides.
+        assert!(runs_through_a_file(
+            &directory.path().join("file/child/more")
+        ));
+        assert!(!runs_through_a_file(&directory.path().join("absent/child")));
+    }
+
+    /// A declared link whose target runs through a file, as `head -> .git/HEAD`
+    /// in a linked worktree, leaves the execution uncached like the path itself.
+    #[cfg(unix)]
+    #[test]
+    fn a_declared_link_through_a_file_is_a_path_through_a_file() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join(".git"), "gitdir: elsewhere\n").unwrap();
+        std::fs::write(directory.path().join("plain"), "").unwrap();
+        std::os::unix::fs::symlink(".git/HEAD", directory.path().join("head")).unwrap();
+        let declares = |name: &str| {
+            declares_a_path_through_a_file(&Prediction {
+                default_package: false,
+                environment: Vec::new(),
+                inputs: vec![directory.path().join(name).to_string_lossy().into_owned()],
+                portable_out_dir: true,
+                version: 3,
+            })
+            .unwrap()
+        };
+        assert!(declares("head"));
+        assert!(declares(".git/HEAD"));
+        assert!(!declares("plain"));
+        assert!(!declares("absent"));
+    }
+
+    #[test]
+    fn a_declaration_through_a_file_keeps_compilations_uncached() {
+        let package = tempfile::tempdir().unwrap();
+        let out_dir = package.path().join("target/debug/build/fixture/out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        // As `.git/HEAD` reads in a linked worktree, where `.git` is a file.
+        std::fs::write(package.path().join(".git"), "gitdir: elsewhere\n").unwrap();
+        std::fs::write(
+            out_dir.parent().unwrap().join("output"),
+            "cargo::rerun-if-changed=.git/HEAD\n",
+        )
+        .unwrap();
+        let error = CompilationInputs::read(&out_dir, package.path())
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("build-script input runs through a file: .git/HEAD"),
+            "{error:#}"
+        );
+    }
+
+    /// The implicit package input reaches such a path through a symlink.
+    #[cfg(unix)]
+    #[test]
+    fn a_package_link_through_a_file_keeps_compilations_uncached() {
+        let package = tempfile::tempdir().unwrap();
+        let out_dir = package.path().join("target/debug/build/fixture/out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(package.path().join(".git"), "gitdir: elsewhere\n").unwrap();
+        std::os::unix::fs::symlink(".git/HEAD", package.path().join("head")).unwrap();
+        std::fs::write(out_dir.parent().unwrap().join("output"), "").unwrap();
+        let error = CompilationInputs::read(&out_dir, package.path())
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("build-script input runs through a file"),
+            "{error:#}"
+        );
+    }
+
+    /// Git metadata anywhere in a declared tree makes the result belong to one
+    /// checkout: a nested repository, a bare layout, or a worktree's or
+    /// submodule's `.git` file. A lone `HEAD` does not.
+    #[test]
+    fn a_tree_holds_git_metadata_by_a_git_directory_or_its_layout() {
+        let holds = |build: &dyn Fn(&Path)| {
+            let directory = tempfile::tempdir().unwrap();
+            build(directory.path());
+            InputTree::read(directory.path(), &[], &[], &[], 0)
+                .unwrap()
+                .holds_git_metadata()
+        };
+        assert!(holds(&|root| std::fs::create_dir_all(
+            root.join("vendor/nested/.git")
+        )
+        .unwrap()));
+        assert!(holds(&|root| {
+            let bare = root.join("repository");
+            std::fs::create_dir_all(bare.join("objects")).unwrap();
+            std::fs::create_dir_all(bare.join("refs")).unwrap();
+            std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        }));
+        assert!(holds(&|root| std::fs::write(
+            root.join(".git"),
+            "gitdir: elsewhere\n"
+        )
+        .unwrap()));
+        assert!(!holds(&|root| {
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            std::fs::write(root.join("HEAD"), "not a repository\n").unwrap();
+        }));
     }
 
     #[test]

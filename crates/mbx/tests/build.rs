@@ -812,6 +812,11 @@ fn isolated_cargo_command(
         // Cargo's own environment for this test would otherwise redirect the
         // fixture's output into this crate's target directory.
         .env_remove("CARGO_TARGET_DIR")
+        // A fixture's build script may run `git`, which must find the
+        // fixture's repository rather than one the test process was given.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         // All three decide whether cargo compiles incrementally, so a test that
         // says nothing about it must not inherit an answer from the machine it
         // runs on. CARGO_INCREMENTAL is the one that bites: an enabled build
@@ -4050,6 +4055,342 @@ fn build_script_restores_a_wide_nested_out_dir() {
     let published = restored(first.path());
     assert_eq!(published.len(), DIRECTORIES.len() * 13 + 5000);
     assert_eq!(restored(second.path()), published);
+}
+
+/// A build script that bakes in the commit watches its checkout's git
+/// metadata. A linked worktree keeps its `HEAD` where every other checkout can
+/// read it, so a result shared across checkouts would hand one worktree
+/// another's commit, and in a worktree, where `.git` is a file, the main
+/// checkout's `.git/HEAD` cannot be read at all. Each checkout gets its own
+/// result, and the main checkout's result does not stop a worktree from
+/// caching.
+#[test]
+fn a_build_script_watching_git_metadata_keeps_each_checkout_s_commit() {
+    build_checkouts_of_a_commit_baking_script(GitLayout::Worktrees);
+}
+
+/// The same, for checkouts sharing one target directory, where `OUT_DIR` does
+/// not tell them apart.
+#[test]
+fn a_build_script_watching_git_metadata_keeps_each_commit_in_a_shared_target() {
+    build_checkouts_of_a_commit_baking_script(GitLayout::SharedTarget);
+}
+
+/// The same, for worktrees of a bare repository, whose git directory has no
+/// `.git` in its path.
+#[test]
+fn a_build_script_watching_a_bare_repository_keeps_each_checkout_s_commit() {
+    build_checkouts_of_a_commit_baking_script(GitLayout::Bare);
+}
+
+/// The same, for a script that watches the directory holding a bare
+/// repository rather than files inside it.
+#[test]
+fn a_build_script_watching_a_directory_of_repositories_keeps_each_checkout_s_commit() {
+    build_checkouts_of_a_commit_baking_script(GitLayout::BareWatchingItsDirectory);
+}
+
+/// Run `git` in a fixture repository, whatever repository the test process
+/// itself was pointed at, and return what it printed.
+fn fixture_git(directory: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(directory)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .args([
+            "-c",
+            "user.name=mbx",
+            "-c",
+            "user.email=mbx@example.invalid",
+        ])
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {arguments:?}: {output:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// A script that watches `.git/HEAD` beside its package declares a path
+/// through a file in a linked worktree, where `.git` is one. Cargo reruns such
+/// a script on every build, and what it reads is the worktree's real `HEAD`,
+/// so neither its result nor the package's compilations are stored: a new
+/// commit reaches the binary. The execution is left quietly; the compilation
+/// says which input kept it uncached.
+#[test]
+fn a_build_script_watching_git_head_through_a_worktree_file_follows_its_commits() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let main = root.path().join("main");
+    std::fs::create_dir_all(main.join("src")).unwrap();
+    std::fs::write(
+        main.join("Cargo.toml"),
+        "[package]\nname = \"head-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        main.join("build.rs"),
+        r#"fn main() {
+    println!("cargo::rerun-if-changed=.git/HEAD");
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let commit = String::from_utf8(output.stdout).unwrap();
+    println!("cargo::rustc-env=COMMIT={}", commit.trim());
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        main.join("src/main.rs"),
+        "fn main() { println!(\"{}\", env!(\"COMMIT\")); }\n",
+    )
+    .unwrap();
+    std::fs::write(main.join(".gitignore"), "target\n").unwrap();
+    generate_lockfile(&main);
+    fixture_git(&main, &["init", "-q", "-b", "main"]);
+    fixture_git(&main, &["add", "-A"]);
+    fixture_git(&main, &["commit", "-q", "-m", "initial"]);
+    let worktree = root.path().join("worktree");
+    fixture_git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "worktree",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let settings = [("MBX_BUILD_SCRIPT_EXECUTION", "1")];
+    let binary = worktree.join(format!(
+        "target/debug/head-fixture{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    for revision in ["initial", "moved"] {
+        if revision == "moved" {
+            fixture_git(&worktree, &["commit", "-q", "--allow-empty", "-m", "moved"]);
+        }
+        let (_, stderr) = build_with(
+            &worktree,
+            store.path(),
+            &reports.path().join(format!("{revision}.json")),
+            &settings,
+        );
+        assert!(
+            !stderr.contains("mbx[warning]: build-script"),
+            "{revision}: {stderr}"
+        );
+        assert!(
+            stderr.contains(
+                "rustc cache bypassed: build-script input runs through a file: .git/HEAD"
+            ),
+            "{revision}: {stderr}"
+        );
+        let run = Command::new(&binary).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout).trim(),
+            fixture_git(&worktree, &["rev-parse", "HEAD"]),
+            "{revision}: the binary carries a stale commit"
+        );
+    }
+}
+
+/// Where [`build_checkouts_of_a_commit_baking_script`] keeps its checkouts'
+/// git metadata and output, and what the script watches.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GitLayout {
+    /// Worktrees of an ordinary checkout, each with its own target.
+    Worktrees,
+    /// The same, building into one `CARGO_TARGET_DIR`.
+    SharedTarget,
+    /// Worktrees of a bare clone, whose git directory has no `.git` in its path.
+    Bare,
+    /// The same, with the script watching the directory holding the clone.
+    BareWatchingItsDirectory,
+}
+
+/// Builds two linked worktrees on different commits, and the checkout they
+/// were made from unless they are worktrees of a bare clone, with a build
+/// script that bakes in the commit and watches git metadata for it.
+fn build_checkouts_of_a_commit_baking_script(layout: GitLayout) {
+    let bare = matches!(
+        layout,
+        GitLayout::Bare | GitLayout::BareWatchingItsDirectory
+    );
+    let shared_target = layout == GitLayout::SharedTarget;
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let main = root.path().join("main");
+    std::fs::create_dir_all(main.join("src")).unwrap();
+    std::fs::write(
+        main.join("Cargo.toml"),
+        "[package]\nname = \"commit-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        main.join("build.rs"),
+        r#"use std::process::Command;
+
+fn git(arguments: &[&str]) -> String {
+    let output = Command::new("git").args(arguments).output().unwrap();
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+fn main() {
+    let runs = std::fs::read_to_string("runs").unwrap_or_default();
+    std::fs::write("runs", format!("{runs}ran\n")).unwrap();
+    println!("cargo::rustc-env=COMMIT={}", git(&["rev-parse", "HEAD"]));
+    let own = git(&["rev-parse", "--absolute-git-dir"]);
+    let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    if std::env::var_os("WATCH_DIRECTORY").is_some() {
+        let holder = std::path::Path::new(&common).parent().unwrap();
+        println!("cargo::rerun-if-changed={}", holder.display());
+        return;
+    }
+    println!("cargo::rerun-if-changed={own}/HEAD");
+    println!("cargo::rerun-if-changed={common}/packed-refs");
+    println!("cargo::rerun-if-changed={common}/{}", git(&["symbolic-ref", "-q", "HEAD"]));
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        main.join("src/main.rs"),
+        "fn main() { println!(\"{}\", env!(\"COMMIT\")); }\n",
+    )
+    .unwrap();
+    std::fs::write(main.join(".gitignore"), "target\nruns\n").unwrap();
+    generate_lockfile(&main);
+    let git = fixture_git;
+    git(&main, &["init", "-q", "-b", "main"]);
+    git(&main, &["add", "-A"]);
+    git(&main, &["commit", "-q", "-m", "initial"]);
+    let repository = if bare {
+        // Alone in its directory, so watching that directory reads nothing
+        // a build writes.
+        std::fs::create_dir(root.path().join("storage")).unwrap();
+        git(
+            root.path(),
+            &["clone", "-q", "--bare", "main", "storage/repository"],
+        );
+        root.path().join("storage/repository")
+    } else {
+        main.clone()
+    };
+    let first = root.path().join("first");
+    let second = root.path().join("second");
+    for (worktree, branch) in [(&first, "first"), (&second, "second")] {
+        git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                worktree.to_str().unwrap(),
+            ],
+        );
+        git(worktree, &["commit", "-q", "--allow-empty", "-m", branch]);
+    }
+    let shared = root.path().join("shared-target");
+    let mut settings = vec![("MBX_BUILD_SCRIPT_EXECUTION", "1")];
+    if shared_target {
+        settings.push(("CARGO_TARGET_DIR", shared.to_str().unwrap()));
+    }
+    if layout == GitLayout::BareWatchingItsDirectory {
+        settings.push(("WATCH_DIRECTORY", "1"));
+    }
+    let binary = |checkout: &Path| {
+        let target = if shared_target {
+            shared.clone()
+        } else {
+            checkout.join("target")
+        };
+        target.join(format!(
+            "debug/commit-fixture{}",
+            std::env::consts::EXE_SUFFIX
+        ))
+    };
+    let checkouts = [("main", &main), ("first", &first), ("second", &second)];
+    for (name, checkout) in &checkouts[usize::from(bare)..] {
+        let (_, stderr) = build_with(
+            checkout,
+            store.path(),
+            &reports.path().join(format!("{name}.json")),
+            &settings,
+        );
+        assert!(
+            !stderr.contains("build-script cache bypassed"),
+            "{name}: {stderr}"
+        );
+        let run = Command::new(binary(checkout)).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout).trim(),
+            git(checkout, &["rev-parse", "HEAD"]),
+            "{name} embedded another checkout's commit"
+        );
+    }
+
+    // Kept per checkout, the result is still cached: with the script's
+    // recorded run gone, a checkout restores its own commit without running
+    // it. The compiled script stays, so this asks only about the execution,
+    // not about sharing the script's compilation between checkouts.
+    let target = if shared_target {
+        shared.clone()
+    } else {
+        second.join("target")
+    };
+    let runs_recorded = find_files(&target.join("debug/build"), |path| {
+        path.ends_with("output") || path.ends_with("run/stdout")
+    });
+    assert!(!runs_recorded.is_empty(), "no recorded build-script run");
+    for record in runs_recorded {
+        let unit = if record.ends_with("run/stdout") {
+            record.parent().unwrap().parent().unwrap()
+        } else {
+            record.parent().unwrap()
+        };
+        if unit.exists() {
+            std::fs::remove_dir_all(unit).unwrap();
+        }
+    }
+    let runs = std::fs::read_to_string(second.join("runs")).unwrap();
+    let (warm, stderr) = build_with(
+        &second,
+        store.path(),
+        &reports.path().join("warm.json"),
+        &settings,
+    );
+    assert_eq!(
+        std::fs::read_to_string(second.join("runs")).unwrap(),
+        runs,
+        "the build script ran again instead of being restored: {warm}\n{stderr}"
+    );
+    let run = Command::new(binary(&second)).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        git(&second, &["rev-parse", "HEAD"])
+    );
+
+    // A new commit in one worktree reaches its binary, not its sibling's.
+    git(&first, &["commit", "-q", "--allow-empty", "-m", "moved"]);
+    build_with(
+        &first,
+        store.path(),
+        &reports.path().join("moved.json"),
+        &settings,
+    );
+    let run = Command::new(binary(&first)).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        git(&first, &["rev-parse", "HEAD"])
+    );
 }
 
 /// Canonical OUT_DIR strings in directives must follow the receiving checkout,
