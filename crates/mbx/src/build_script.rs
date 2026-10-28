@@ -1328,8 +1328,6 @@ fn run_start_stamp() -> SystemTime {
     stamp.map_or(now, |stamp| stamp.min(now))
 }
 
-/// Whether anything a prediction declares as an input was modified at or after
-/// `started`.
 /// Whether a declared input runs through a regular file, so it can never exist.
 fn declares_a_path_through_a_file(prediction: &Prediction) -> Result<bool> {
     let mappings = build_script_mappings();
@@ -1345,6 +1343,8 @@ fn declares_a_path_through_a_file(prediction: &Prediction) -> Result<bool> {
     }))
 }
 
+/// Whether anything a prediction declares as an input was modified at or after
+/// `started`.
 fn declared_inputs_changed_since(prediction: &Prediction, started: SystemTime) -> Result<bool> {
     let since = started;
     let mappings = build_script_mappings();
