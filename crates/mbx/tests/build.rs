@@ -4325,12 +4325,28 @@ fn main() {
         );
     }
 
-    // Kept per checkout, the result is still cached: with its target gone,
-    // a checkout restores its own commit without running the script.
-    if shared_target {
-        std::fs::remove_dir_all(&shared).unwrap();
+    // Kept per checkout, the result is still cached: with the script's
+    // recorded run gone, a checkout restores its own commit without running
+    // it. The compiled script stays, so this asks only about the execution,
+    // not about sharing the script's compilation between checkouts.
+    let target = if shared_target {
+        shared.clone()
     } else {
-        wipe_target(&second);
+        second.join("target")
+    };
+    let runs_recorded = find_files(&target.join("debug/build"), |path| {
+        path.ends_with("output") || path.ends_with("run/stdout")
+    });
+    assert!(!runs_recorded.is_empty(), "no recorded build-script run");
+    for record in runs_recorded {
+        let unit = if record.ends_with("run/stdout") {
+            record.parent().unwrap().parent().unwrap()
+        } else {
+            record.parent().unwrap()
+        };
+        if unit.exists() {
+            std::fs::remove_dir_all(unit).unwrap();
+        }
     }
     let runs = std::fs::read_to_string(second.join("runs")).unwrap();
     let (warm, stderr) = build_with(
