@@ -615,3 +615,32 @@ fn failed_alias_metadata_reports_the_expanded_projects_reason() {
         assert!(!stderr.contains("could not find `Cargo.toml`"), "{stderr}");
     }
 }
+
+#[test]
+fn flags_after_an_external_command_go_to_it_untouched() {
+    let f = Fixture::new();
+    let project = f.project("project");
+    for shim in [false, true] {
+        for flags in [
+            &["-Z", "x"][..],
+            &["-Zx"],
+            &["-C", "dir"],
+            &["--config", "x=1", "-Z", "x"],
+        ] {
+            let stdout = succeeded(
+                f.command(shim)
+                    .current_dir(&project)
+                    .arg("probe")
+                    .args(flags)
+                    .output()
+                    .unwrap(),
+            );
+            let expected = std::iter::once("probe")
+                .chain(flags.iter().copied())
+                .map(|word| format!("{word}\n"))
+                .collect::<String>();
+            assert_eq!(stdout, expected);
+            std::fs::remove_file(f.root.join("external-ran")).unwrap();
+        }
+    }
+}

@@ -62,48 +62,7 @@ fn aliases(cwd: &Path) -> Option<BTreeMap<String, Alias>> {
 }
 
 fn builtin(command: &str) -> bool {
-    matches!(
-        command,
-        "build"
-            | "check"
-            | "test"
-            | "run"
-            | "bench"
-            | "doc"
-            | "rustc"
-            | "rustdoc"
-            | "fix"
-            | "install"
-            | "help"
-            | "new"
-            | "init"
-            | "add"
-            | "remove"
-            | "update"
-            | "fetch"
-            | "clean"
-            | "config"
-            | "tree"
-            | "search"
-            | "info"
-            | "login"
-            | "logout"
-            | "owner"
-            | "package"
-            | "publish"
-            | "uninstall"
-            | "yank"
-            | "locate-project"
-            | "metadata"
-            | "generate-lockfile"
-            | "pkgid"
-            | "read-manifest"
-            | "report"
-            | "vendor"
-            | "verify-project"
-            | "version"
-            | "git-checkout"
-    )
+    mbx_cache_cargo::is_builtin_command(command)
 }
 
 fn default_alias(command: &str) -> Option<&'static str> {
