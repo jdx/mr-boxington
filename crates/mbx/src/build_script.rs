@@ -51,6 +51,8 @@ struct Action<'a> {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum InputState {
     Missing,
+    /// A path through a regular file, which can never exist.
+    BlockedByFile,
     File {
         digest: CacheDigest,
     },
@@ -975,6 +977,7 @@ impl CompilationInputs {
 /// regular-file contents in one ledger request for the entire declared tree.
 enum InputTree {
     Missing,
+    BlockedByFile,
     File(PathBuf),
     Directory(BTreeMap<String, Self>),
     Symlink { target: String, referent: Box<Self> },
@@ -1011,16 +1014,12 @@ impl InputTree {
     ) -> Result<Self> {
         let metadata = match std::fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self::Missing),
             // A path through a file, such as another checkout's `.git/HEAD` read
-            // from a linked worktree, where `.git` is a file, is as absent as
-            // a path that never existed.
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok(Self::Missing);
+            // from a linked worktree, where `.git` is a file. It is as absent as
+            // a missing path, but kept apart from one in the key.
+            Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {
+                return Ok(Self::BlockedByFile);
             }
             Err(error) => return Err(error.into()),
         };
@@ -1097,7 +1096,7 @@ impl InputTree {
     /// Collect regular files across declarations for one batched ledger lookup.
     fn files(&self, paths: &mut BTreeSet<PathBuf>) {
         match self {
-            Self::Missing => {}
+            Self::Missing | Self::BlockedByFile => {}
             Self::File(path) => {
                 paths.insert(path.clone());
             }
@@ -1117,6 +1116,7 @@ impl InputTree {
     ) -> Result<InputState> {
         Ok(match self {
             Self::Missing => InputState::Missing,
+            Self::BlockedByFile => InputState::BlockedByFile,
             Self::File(path) => InputState::File {
                 digest: digest_file(&path)?,
             },
@@ -1982,6 +1982,15 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn a_path_through_a_file_is_absent_but_not_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("file"), "").unwrap();
+        let state = |path: &str| input_state(&directory.path().join(path), &[]).unwrap();
+        assert_eq!(state("file/child"), InputState::BlockedByFile);
+        assert_eq!(state("absent/child"), InputState::Missing);
     }
 
     #[test]
