@@ -800,6 +800,11 @@ fn isolated_cargo_command(
         // Cargo's own environment for this test would otherwise redirect the
         // fixture's output into this crate's target directory.
         .env_remove("CARGO_TARGET_DIR")
+        // A fixture's build script may run `git`, which must find the
+        // fixture's repository rather than one the test process was given.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         // All three decide whether cargo compiles incrementally, so a test that
         // says nothing about it must not inherit an answer from the machine it
         // runs on. CARGO_INCREMENTAL is the one that bites: an enabled build
@@ -4066,11 +4071,34 @@ fn a_build_script_watching_a_bare_repository_keeps_each_checkout_s_commit() {
     build_checkouts_of_a_commit_baking_script(true, false);
 }
 
+/// Run `git` in a fixture repository, whatever repository the test process
+/// itself was pointed at, and return what it printed.
+fn fixture_git(directory: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(directory)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .args([
+            "-c",
+            "user.name=mbx",
+            "-c",
+            "user.email=mbx@example.invalid",
+        ])
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {arguments:?}: {output:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
 /// A script that watches `.git/HEAD` beside its package declares a path
-/// through a file in a linked worktree, where `.git` is one. Its result is
-/// still stored, and restored once the target is gone.
+/// through a file in a linked worktree, where `.git` is one. Cargo reruns such
+/// a script on every build, and what it reads is the worktree's real `HEAD`,
+/// so its result is not stored: a new commit reaches the binary, and no build
+/// warns about it.
 #[test]
-fn a_build_script_watching_git_head_through_a_worktree_file_is_cached() {
+fn a_build_script_watching_git_head_through_a_worktree_file_follows_its_commits() {
     let store = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
@@ -4085,34 +4113,28 @@ fn a_build_script_watching_git_head_through_a_worktree_file_is_cached() {
         main.join("build.rs"),
         r#"fn main() {
     println!("cargo::rerun-if-changed=.git/HEAD");
-    let runs = std::fs::read_to_string("runs").unwrap_or_default();
-    std::fs::write("runs", format!("{runs}ran\n")).unwrap();
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let commit = String::from_utf8(output.stdout).unwrap();
+    println!("cargo::rustc-env=COMMIT={}", commit.trim());
 }
 "#,
     )
     .unwrap();
-    std::fs::write(main.join("src/main.rs"), "fn main() {}\n").unwrap();
-    std::fs::write(main.join(".gitignore"), "target\nruns\n").unwrap();
+    std::fs::write(
+        main.join("src/main.rs"),
+        "fn main() { println!(\"{}\", env!(\"COMMIT\")); }\n",
+    )
+    .unwrap();
+    std::fs::write(main.join(".gitignore"), "target\n").unwrap();
     generate_lockfile(&main);
-    let git = |directory: &Path, arguments: &[&str]| {
-        let status = Command::new("git")
-            .current_dir(directory)
-            .args([
-                "-c",
-                "user.name=mbx",
-                "-c",
-                "user.email=mbx@example.invalid",
-            ])
-            .args(arguments)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {arguments:?}");
-    };
-    git(&main, &["init", "-q", "-b", "main"]);
-    git(&main, &["add", "-A"]);
-    git(&main, &["commit", "-q", "-m", "initial"]);
+    fixture_git(&main, &["init", "-q", "-b", "main"]);
+    fixture_git(&main, &["add", "-A"]);
+    fixture_git(&main, &["commit", "-q", "-m", "initial"]);
     let worktree = root.path().join("worktree");
-    git(
+    fixture_git(
         &main,
         &[
             "worktree",
@@ -4124,26 +4146,28 @@ fn a_build_script_watching_git_head_through_a_worktree_file_is_cached() {
         ],
     );
     let settings = [("MBX_BUILD_SCRIPT_EXECUTION", "1")];
-    let (_, stderr) = build_with(
-        &worktree,
-        store.path(),
-        &reports.path().join("cold.json"),
-        &settings,
-    );
-    assert!(!stderr.contains("mbx[warning]"), "{stderr}");
-    wipe_target(&worktree);
-    let (_, stderr) = build_with(
-        &worktree,
-        store.path(),
-        &reports.path().join("warm.json"),
-        &settings,
-    );
-    assert!(!stderr.contains("mbx[warning]"), "{stderr}");
-    assert_eq!(
-        std::fs::read_to_string(worktree.join("runs")).unwrap(),
-        "ran\n",
-        "the build script ran again instead of being restored"
-    );
+    let binary = worktree.join(format!(
+        "target/debug/head-fixture{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    for revision in ["initial", "moved"] {
+        if revision == "moved" {
+            fixture_git(&worktree, &["commit", "-q", "--allow-empty", "-m", "moved"]);
+        }
+        let (_, stderr) = build_with(
+            &worktree,
+            store.path(),
+            &reports.path().join(format!("{revision}.json")),
+            &settings,
+        );
+        assert!(!stderr.contains("mbx[warning]"), "{revision}: {stderr}");
+        let run = Command::new(&binary).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout).trim(),
+            fixture_git(&worktree, &["rev-parse", "HEAD"]),
+            "{revision}: the binary carries a stale commit"
+        );
+    }
 }
 
 /// Builds two linked worktrees on different commits, and the checkout they
@@ -4188,21 +4212,7 @@ fn main() {
     .unwrap();
     std::fs::write(main.join(".gitignore"), "target\n").unwrap();
     generate_lockfile(&main);
-    let git = |directory: &Path, arguments: &[&str]| {
-        let output = Command::new("git")
-            .current_dir(directory)
-            .args([
-                "-c",
-                "user.name=mbx",
-                "-c",
-                "user.email=mbx@example.invalid",
-            ])
-            .args(arguments)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "git {arguments:?}: {output:?}");
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
-    };
+    let git = fixture_git;
     git(&main, &["init", "-q", "-b", "main"]);
     git(&main, &["add", "-A"]);
     git(&main, &["commit", "-q", "-m", "initial"]);

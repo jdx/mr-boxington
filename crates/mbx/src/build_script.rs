@@ -394,6 +394,14 @@ pub(crate) fn run() -> Result<ExitCode> {
             record_bypass("build-script-always-rerun");
             return Ok(());
         };
+        if declares_a_path_through_a_file(&prediction)? {
+            // Cargo cannot stat such a path, `.git/HEAD` in a linked worktree
+            // for one, so it reruns the script on every build. What the script
+            // reads behind it, the worktree's real `HEAD`, is in no key, so a
+            // stored result would come back after the commit moved.
+            record_bypass("build-script-always-rerun");
+            return Ok(());
+        }
         if declared_inputs_changed_since(&prediction, started_at)? {
             // The result is keyed to the inputs as the run left them, but the
             // script read them as they were before. Cargo runs it again, and
@@ -1285,6 +1293,21 @@ fn run_start_stamp() -> SystemTime {
 
 /// Whether anything a prediction declares as an input was modified at or after
 /// `started`.
+/// Whether a declared input runs through a regular file, so it can never exist.
+fn declares_a_path_through_a_file(prediction: &Prediction) -> Result<bool> {
+    let mappings = build_script_mappings();
+    let working_dir = std::env::current_dir()?;
+    Ok(prediction.inputs.iter().any(|declared| {
+        let resolved_name =
+            String::from_utf8(denormalize_output_text(declared.as_bytes(), &mappings))
+                .expect("denormalizing UTF-8 paths preserves UTF-8");
+        matches!(
+            std::fs::symlink_metadata(working_dir.join(resolved_name)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotADirectory
+        )
+    }))
+}
+
 fn declared_inputs_changed_since(prediction: &Prediction, started: SystemTime) -> Result<bool> {
     let since = started;
     let mappings = build_script_mappings();
@@ -1314,14 +1337,7 @@ fn modified_since(
 ) -> Result<bool> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        // A path through a file, such as `.git/HEAD` in a linked worktree, is
-        // missing too, and its nearest existing ancestor is that file.
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-            ) =>
-        {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             // A missing input may have been there when the script started.
             // Removing it changed its parent directory.
             // Look at the nearest directory that still exists, following a
