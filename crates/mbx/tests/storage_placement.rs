@@ -1,6 +1,8 @@
 //! Exercise startup rejection without requiring an NFS mount or mount privileges.
 #![cfg(all(target_os = "linux", target_env = "gnu"))]
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -78,6 +80,7 @@ impl Fixture {
 
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_mbx"));
+        support::isolate_host(&mut command);
         command
             .current_dir(&self.project)
             .env("LD_PRELOAD", interposer())
@@ -88,6 +91,7 @@ impl Fixture {
             .env("MBX_GC_AUTO", "0")
             .env("MBX_INCREMENTAL", "0")
             .env("MBX_SUMMARY", "off")
+            .env("MBX_LINKER", "system")
             .env_remove("CARGO_TARGET_DIR")
             .env_remove("CARGO_BUILD_TARGET_DIR")
             .env_remove("CARGO_BUILD_BUILD_DIR")
@@ -118,15 +122,14 @@ fn rejects_tools_symlink_before_initializing_storage() {
     let cache = fixture.root.join("cache");
     std::fs::create_dir(&cache).unwrap();
     std::os::unix::fs::symlink(&fixture.nfs, cache.join("tools")).unwrap();
-    rejected(
-        fixture
-            .command()
-            .args(["build", "--offline"])
-            .output()
-            .unwrap(),
-        &cache.join("tools"),
-        "MBX_CACHE_DIR",
-    );
+    let output = fixture
+        .command()
+        .args(["build", "--offline"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(stderr.contains("mbx cache directory"), "{stderr}");
+    rejected(output, &cache.join("tools"), "MBX_CACHE_DIR");
     assert!(!cache.join("actions").exists());
 }
 

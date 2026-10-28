@@ -29,10 +29,24 @@ pub(crate) fn resolve(
     http: &HttpSettings,
     cargo_arguments: &[String],
 ) -> Result<Option<Selection>> {
+    resolve_with_environment(
+        settings,
+        cache_dir,
+        http,
+        cargo_arguments,
+        std::env::var(LINKER_ENV).ok(),
+    )
+}
+
+fn resolve_with_environment(
+    settings: &LinkerSettings,
+    cache_dir: &Path,
+    http: &HttpSettings,
+    cargo_arguments: &[String],
+    environment: Option<String>,
+) -> Result<Option<Selection>> {
     let profile = cargo_profile(cargo_arguments);
-    let environment = std::env::var(LINKER_ENV)
-        .ok()
-        .filter(|value| !value.trim().is_empty());
+    let environment = environment.filter(|value| !value.trim().is_empty());
     let targets = cargo_targets(cargo_arguments);
     if !targets.is_empty() {
         let mut selections = BTreeMap::new();
@@ -641,11 +655,12 @@ mod tests {
         ]
         .map(str::to_owned);
         assert!(
-            resolve(
+            resolve_with_environment(
                 &LinkerSettings::default(),
                 cache.path(),
                 &HttpSettings::default(),
-                &arguments
+                &arguments,
+                None,
             )
             .unwrap()
             .is_none()
@@ -676,11 +691,12 @@ mod tests {
             "--target=x86_64-apple-darwin",
         ]
         .map(str::to_owned);
-        let Some(Selection::Targets(selections)) = resolve(
+        let Some(Selection::Targets(selections)) = resolve_with_environment(
             &settings,
             cache.path(),
             &HttpSettings::default(),
             &arguments,
+            None,
         )
         .unwrap() else {
             panic!("expected target-specific selection");
@@ -725,11 +741,12 @@ mod tests {
             )]),
             ..Default::default()
         };
-        let Some(Selection::Targets(selections)) = resolve(
+        let Some(Selection::Targets(selections)) = resolve_with_environment(
             &settings,
             cache.path(),
             &HttpSettings::default(),
             &["build".into(), "--target=host-tuple".into()],
+            None,
         )
         .unwrap() else {
             panic!("expected target-specific selection");
@@ -756,11 +773,12 @@ mod tests {
             )]),
             ..Default::default()
         };
-        let Some(Selection::Targets(selections)) = resolve(
+        let Some(Selection::Targets(selections)) = resolve_with_environment(
             &settings,
             directory.path(),
             &HttpSettings::default(),
             &["build".into(), "--target".into(), relative],
+            None,
         )
         .unwrap() else {
             panic!("expected target-specific selection");
