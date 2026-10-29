@@ -230,7 +230,20 @@ pub(super) fn cache_import(config: &Config, archive: &Path) -> Result<()> {
                 roots.target_dir_requested,
                 &lease,
             ) {
-                Ok(restored) => restored,
+                Ok(restored) => {
+                    if restored.is_some()
+                        && let Err(error) = store::record_restored_predictions(
+                            &store,
+                            &roots.workspace_root,
+                            &imported.tasks,
+                        )
+                    {
+                        log::warn!(
+                            "the restored Cargo workspace state will not be carried into a grouped export: {error}"
+                        );
+                    }
+                    restored
+                }
                 Err(error) => {
                     log::warn!("cache imported without restoring Cargo workspace state: {error}");
                     None
@@ -243,6 +256,9 @@ pub(super) fn cache_import(config: &Config, archive: &Path) -> Result<()> {
     } else {
         None
     };
+    if restored.is_none() {
+        forget_stale_restore(config, &store);
+    }
     let outcome = imported.transfer;
     println!(
         "imported {} actions and {} objects from {} ({})",
@@ -259,6 +275,43 @@ pub(super) fn cache_import(config: &Config, archive: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Drop a pending restore record whose target no longer exists.
+///
+/// An import that restores nothing leaves the record from an earlier one in
+/// place, and a grouped build would carry its actions even though the target
+/// that made them fresh has since been removed. A target that still has
+/// contents may be that restore, so its record stays.
+fn forget_stale_restore(config: &Config, store: &Path) {
+    if !store::restored_predictions_pending(store) {
+        return;
+    }
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let Some(roots) = cargo_roots(&cargo, &[], None) else {
+        return;
+    };
+    // The lease is what a restore holds while it fills the target and writes
+    // its record, so holding it here keeps the check and the removal from
+    // straddling a newer restore. A busy target is being used by something
+    // that may be exactly that, so the record stays.
+    let Ok(Some(_lease)) =
+        crate::target::ViewLease::reserve(&config.target.root, &roots.workspace_root)
+    else {
+        return;
+    };
+    // Only a target that is definitely absent or empty is gone. One that cannot
+    // be read may be there, so the record stays.
+    let populated = match std::fs::read_dir(&roots.target_dir) {
+        Ok(mut entries) => entries.next().is_some(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => return,
+    };
+    if !populated
+        && let Err(error) = store::clear_restored_predictions(store, &roots.workspace_root)
+    {
+        log::warn!("a stale restored-state record could not be cleared: {error}");
+    }
 }
 
 pub(super) fn cache_stats(config: &Config, json: bool) -> Result<()> {
