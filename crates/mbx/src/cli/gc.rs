@@ -150,7 +150,7 @@ pub(super) fn run(
     let reserved_bytes = incremental
         .remaining_bytes
         .saturating_add(generated.remaining_bytes);
-    let target_budget = target_limit(
+    let (target_budget, keep_recent) = target_limit(
         config,
         retention,
         store_reserve,
@@ -173,7 +173,7 @@ pub(super) fn run(
         target_budget,
         retention.target_max_age,
         &retention.target_precedence,
-        low_disk.is_some().then_some(target::LOW_DISK_RECENT_USE),
+        keep_recent,
         dry_run,
     );
     let projected_target_bytes = match &pruned {
@@ -423,6 +423,7 @@ pub(super) fn merged_target_report(
         remaining_directories: last.remaining_views,
         remaining_bytes: last.remaining_bytes,
         kept_active_directories: last.kept_active_views,
+        kept_recent_directories: last.kept_recent_views,
     }
 }
 
@@ -1191,7 +1192,7 @@ pub(super) fn prune_targets(
     }
     let incremental_bytes = incremental_bytes.saturating_add(generated.removed_bytes);
     let incremental_remaining = incremental_remaining.saturating_add(generated.remaining_bytes);
-    let target_budget = target_limit(
+    let (target_budget, keep_recent) = target_limit(
         config,
         retention,
         store_reserve,
@@ -1203,7 +1204,7 @@ pub(super) fn prune_targets(
         target_budget,
         retention.target_max_age,
         &retention.target_precedence,
-        low_disk.is_some().then_some(target::LOW_DISK_RECENT_USE),
+        keep_recent,
         false,
     ) {
         Ok(pruned) => {
@@ -1706,15 +1707,17 @@ fn target_limit(
     store_reserve: u64,
     incremental_reserve: u64,
     low: &mut Option<LowDisk>,
-) -> Option<u64> {
+) -> (Option<u64>, Option<Duration>) {
     let budget = target_budget(retention, store_reserve, incremental_reserve);
     let Some(disk) = low_disk(retention, &config.target.root) else {
-        return budget;
+        return (budget, None);
     };
     let usage = target::stats(&config.target.root).map_or(0, |stats| stats.bytes);
     let limit = relieve(budget, usage, disk.shortfall());
     low.get_or_insert(disk);
-    limit
+    // Only the target disk's own shortage spares recent builds: a short cache
+    // disk elsewhere leaves the target budget as it is.
+    (limit, Some(target::LOW_DISK_RECENT_USE))
 }
 
 /// Say when collection could not bring a disk back above its minimum.

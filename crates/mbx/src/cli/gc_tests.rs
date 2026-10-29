@@ -386,6 +386,34 @@ fn json_report_includes_low_disk_target_removals() {
 }
 
 #[test]
+fn a_short_disk_keeps_a_target_built_within_the_last_hour() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = super::cargo_tests::managed_target_config(directory.path());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let [idle, recent] = [("idle", 1), ("recent", now)].map(|(name, updated_secs)| {
+        low_disk_view(
+            &config,
+            directory.path(),
+            name,
+            updated_secs,
+            &[("artifact", 64)],
+            false,
+        )
+    });
+
+    let low_disk = collect_low_disk(&config, &always_short());
+
+    assert!(!idle.exists(), "a target idle for longer still goes");
+    assert!(recent.exists(), "the target just built stays");
+    let report = low_disk.target_report(&Default::default());
+    assert_eq!(report.removed_directories, 1);
+    assert_eq!(report.kept_recent_directories, 1);
+}
+
+#[test]
 fn a_short_disk_reaches_the_store_after_private_collections() {
     let directory = tempfile::tempdir().unwrap();
     let config = super::cargo_tests::managed_target_config(directory.path());

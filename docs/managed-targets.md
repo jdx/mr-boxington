@@ -470,7 +470,7 @@ private state and shared cache data regardless of the budgets:
    `target.evict_first` checkouts ahead of the rest and `target.keep` checkouts
    left alone. A checkout that built within the last hour keeps its target
    directory, so a program can still run from `target/` right after the build
-   that produced it.
+   that produced it. A `target.max_age` shorter than an hour still applies.
 3. Shared cache objects on the cache disk, after collecting private state and
    managed targets stops removing anything.
 

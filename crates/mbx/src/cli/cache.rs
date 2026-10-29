@@ -433,6 +433,9 @@ pub(super) struct GcTargetReport {
     /// Selected for removal but kept, because a running command was using
     /// them or a build claimed them after the selection.
     pub(super) kept_active_directories: u64,
+    /// Not removed while the disk was short, because their checkout built
+    /// within the last hour.
+    pub(super) kept_recent_directories: u64,
 }
 
 #[derive(serde::Serialize)]
