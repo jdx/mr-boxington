@@ -1342,6 +1342,7 @@ fn grouped_export_keeps_each_commands_predictions_and_newest_conflicts() {
         identity: identity.clone(),
         completed_nanos,
         group: Some("job".into()),
+        restored: None,
         predictions,
     };
     let archive = source.path().join("job.tar");
@@ -1525,6 +1526,7 @@ fn equal_timestamp_exports_ignore_receipt_enumeration_order() {
         identity: identity.clone(),
         completed_nanos: 1,
         group: Some("job".into()),
+        restored: None,
         predictions: vec![ActionPrediction {
             invocation: CacheDigest::blake3(b"shared invocation"),
             action: store_result(source.path(), name, &[]),
@@ -3367,4 +3369,161 @@ fn a_grouped_receipt_carries_restored_actions_the_build_did_not_recompile() {
     .unwrap();
     let receipt = read_build_receipt(&latest_receipt_path(source.path(), &workspace)).unwrap();
     assert_eq!(receipt.predictions, vec![edited_after]);
+}
+
+fn restored_fixture(
+    store: &Path,
+    workspace: &Path,
+    identity: &str,
+    predictions: Vec<ActionPrediction>,
+) {
+    record_restored_predictions(
+        store,
+        workspace,
+        &[TaskActionManifest {
+            version: 1,
+            task: identity.to_owned(),
+            predictions,
+        }],
+    )
+    .unwrap();
+}
+
+fn grouped_receipt(
+    store: &Path,
+    workspace: &Path,
+    identity: &str,
+    group: &str,
+    run: &str,
+    predictions: Vec<ActionPrediction>,
+) {
+    record_build_receipt(
+        store,
+        &CacheDigest::blake3(run.as_bytes()).hash,
+        identity,
+        workspace,
+        Some(group),
+        predictions,
+    )
+    .unwrap();
+}
+
+fn stored_prediction(store: &Path, invocation: &str, action: &str) -> ActionPrediction {
+    ActionPrediction {
+        invocation: CacheDigest::blake3(invocation.as_bytes()),
+        action: store_result(store, action, &[]),
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    }
+}
+
+#[test]
+fn a_fresh_build_after_an_edit_does_not_bring_back_the_restored_action() {
+    let source = tempfile::tempdir().unwrap();
+    let workspace = source.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let identity = "e".repeat(64);
+    let dependency = stored_prediction(source.path(), "dependency", "dependency");
+    let before = stored_prediction(source.path(), "root", "root before");
+    let after = stored_prediction(source.path(), "root", "root after");
+    restored_fixture(
+        source.path(),
+        &workspace,
+        &identity,
+        vec![dependency.clone(), before],
+    );
+    let group = "github-run-42/test";
+    grouped_receipt(
+        source.path(),
+        &workspace,
+        &identity,
+        group,
+        "edit",
+        vec![after.clone()],
+    );
+    // The same build again is now fresh and records nothing.
+    grouped_receipt(
+        source.path(),
+        &workspace,
+        &identity,
+        group,
+        "fresh",
+        Vec::new(),
+    );
+
+    let receipt = read_build_receipt(&latest_receipt_path(source.path(), &workspace)).unwrap();
+    assert_eq!(receipt.predictions, vec![dependency, after]);
+}
+
+#[test]
+fn exporting_an_older_group_keeps_a_newer_restore() {
+    let source = tempfile::tempdir().unwrap();
+    let workspace = source.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let identity = "e".repeat(64);
+    let old = stored_prediction(source.path(), "old", "old restore");
+    let new = stored_prediction(source.path(), "new", "new restore");
+    restored_fixture(source.path(), &workspace, &identity, vec![old.clone()]);
+    grouped_receipt(
+        source.path(),
+        &workspace,
+        &identity,
+        "older",
+        "older",
+        Vec::new(),
+    );
+    // A later job restores another bundle before the older group is exported.
+    restored_fixture(source.path(), &workspace, &identity, vec![new.clone()]);
+
+    export_group(source.path(), "older", &source.path().join("older.tar")).unwrap();
+
+    grouped_receipt(
+        source.path(),
+        &workspace,
+        &identity,
+        "newer",
+        "newer",
+        Vec::new(),
+    );
+    let receipt = read_build_receipt(&latest_receipt_path(source.path(), &workspace)).unwrap();
+    assert_eq!(receipt.predictions, vec![new]);
+    let exported = export_group(source.path(), "newer", &source.path().join("newer.tar")).unwrap();
+    assert_eq!(exported.actions, 1);
+    assert!(!restored_predictions_path(source.path(), &workspace).exists());
+}
+
+#[test]
+fn restored_predictions_over_the_limit_give_way_oldest_first() {
+    let source = tempfile::tempdir().unwrap();
+    let workspace = source.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let identity = "e".repeat(64);
+    let limit = 16 * 1024;
+    // One stored result stands in for every restored action: only the
+    // predictions' count matters to the bound.
+    let action = store_result(source.path(), "shared result", &[]);
+    let restored = (0..limit)
+        .map(|index| ActionPrediction {
+            invocation: CacheDigest::blake3(format!("restored-{index}").as_bytes()),
+            action: action.clone(),
+            adapter: "rustc".into(),
+            payload: "{}".into(),
+        })
+        .collect::<Vec<_>>();
+    restored_fixture(source.path(), &workspace, &identity, restored.clone());
+    let current = stored_prediction(source.path(), "current", "current");
+
+    grouped_receipt(
+        source.path(),
+        &workspace,
+        &identity,
+        "job",
+        "run",
+        vec![current.clone()],
+    );
+
+    let receipt = read_build_receipt(&latest_receipt_path(source.path(), &workspace)).unwrap();
+    assert_eq!(receipt.predictions.len(), limit);
+    assert_eq!(receipt.predictions.last(), Some(&current));
+    assert_eq!(receipt.predictions[0], restored[1], "the oldest went first");
 }
