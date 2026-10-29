@@ -302,13 +302,26 @@ pub fn build_identity(workspace_root: &Path, _command: &[String]) -> String {
 /// request's merge commit is the base branch, then the copy each commit that
 /// touched the file replaced. A shallow clone offers what it can reach, which
 /// on a `fetch-depth: 1` checkout is nothing beyond `HEAD` itself. A checkout
-/// that is not under Git, or a lockfile it does not track, yields nothing.
+/// that is not under Git, or a lockfile it does not track, has no history to
+/// offer.
+///
+/// Releases before line endings were normalized digested the lockfile bytes
+/// as they were, so a CRLF lockfile, or a CRLF copy in history, was recorded
+/// under an identity of its own. Those identities are offered too, each after
+/// the normalized one for the same state.
+///
 /// Every prediction a manifest holds is rehashed before it is trusted, so an
 /// inherited one can only fail to match, never restore the wrong result.
 pub fn previous_build_identities(workspace_root: &Path) -> Vec<String> {
     let Ok(lock) = std::fs::read(workspace_root.join("Cargo.lock")) else {
         return Vec::new();
     };
+    let mut seen = BTreeSet::from([lockfile_marker(&lock)]);
+    let mut identities = Vec::new();
+    let checked_out = CacheDigest::blake3(&lock).hash;
+    if seen.insert(checked_out.clone()) {
+        identities.push(identity_for_workspace(&checked_out));
+    }
     // History belongs to the tracked file. A lockfile Cargo generated after a
     // tracked one was deleted has none, whatever the deleted one's was.
     if git_output(
@@ -317,14 +330,14 @@ pub fn previous_build_identities(workspace_root: &Path) -> Vec<String> {
     )
     .is_none()
     {
-        return Vec::new();
+        return identities;
     }
     let limit = PREVIOUS_LOCKFILE_STATES.to_string();
     let Some(revisions) = git_output(
         workspace_root,
         &["rev-list", "-n", &limit, "HEAD", "--", "Cargo.lock"],
     ) else {
-        return Vec::new();
+        return identities;
     };
     // A commit's own copy of the lockfile is what its successor replaced, so
     // the parent of each commit that touched the file is one state further
@@ -335,15 +348,6 @@ pub fn previous_build_identities(workspace_root: &Path) -> Vec<String> {
             .lines()
             .map(|revision| format!("{}^", revision.trim())),
     );
-    let mut seen = BTreeSet::from([lockfile_marker(&lock)]);
-    let mut identities = Vec::new();
-    // Releases before line endings were normalized digested the lockfile as
-    // checked out, so on a CRLF checkout they recorded this same state under
-    // another identity.
-    let checked_out = CacheDigest::blake3(&lock).hash;
-    if seen.insert(checked_out.clone()) {
-        identities.push(identity_for_workspace(&checked_out));
-    }
     for revision in candidates {
         let Some(lock) = git_output(
             workspace_root,
@@ -351,11 +355,12 @@ pub fn previous_build_identities(workspace_root: &Path) -> Vec<String> {
         ) else {
             continue;
         };
-        let marker = lockfile_marker(&lock);
-        if seen.insert(marker.clone()) {
-            identities.push(identity_for_workspace(&marker));
+        for marker in [lockfile_marker(&lock), CacheDigest::blake3(&lock).hash] {
+            if seen.insert(marker.clone()) {
+                identities.push(identity_for_workspace(&marker));
+            }
         }
-        if identities.len() == PREVIOUS_LOCKFILE_STATES {
+        if identities.len() >= PREVIOUS_LOCKFILE_STATES {
             break;
         }
     }
@@ -2219,6 +2224,30 @@ mod tests {
     }
 
     #[test]
+    fn crlf_states_in_history_also_offer_their_earlier_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let command = Vec::new();
+        git(root, &["init", "-q"]);
+        git(root, &["config", "core.autocrlf", "false"]);
+        for state in ["one\r\n", "two\r\n"] {
+            std::fs::write(root.join("Cargo.lock"), state).unwrap();
+            git(root, &["add", "Cargo.lock"]);
+            git(root, &["commit", "-q", "-m", state]);
+        }
+        let raw = |state: &[u8]| identity_for_workspace(&CacheDigest::blake3(state).hash);
+        // "two" as checked out is the current state, so only its raw identity
+        // is offered; "one" offers its normalized identity, then its raw one.
+        std::fs::write(root.join("Cargo.lock"), "one\n").unwrap();
+        let one = build_identity(root, &command);
+        std::fs::write(root.join("Cargo.lock"), "two\r\n").unwrap();
+        assert_eq!(
+            previous_build_identities(root),
+            vec![raw(b"two\r\n"), one, raw(b"one\r\n")]
+        );
+    }
+
+    #[test]
     fn lockfile_markers_ignore_only_crlf_line_endings() {
         assert_eq!(lockfile_marker(b"a\r\nb\r\n"), lockfile_marker(b"a\nb\n"));
         assert_ne!(lockfile_marker(b"a\rb"), lockfile_marker(b"ab"));
@@ -2278,5 +2307,13 @@ mod tests {
         let directory = cargo_fixture();
         std::fs::write(directory.path().join("Cargo.lock"), "one").unwrap();
         assert!(previous_build_identities(directory.path()).is_empty());
+        // Only the identity earlier releases gave a CRLF lockfile's bytes.
+        std::fs::write(directory.path().join("Cargo.lock"), "one\r\n").unwrap();
+        assert_eq!(
+            previous_build_identities(directory.path()),
+            vec![identity_for_workspace(
+                &CacheDigest::blake3(b"one\r\n").hash
+            )]
+        );
     }
 }
