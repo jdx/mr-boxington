@@ -1429,6 +1429,108 @@ fn a_cache_bundle_restores_cargo_workspace_state() {
 }
 
 #[test]
+fn a_group_export_after_a_workspace_state_restore_keeps_cargo_fresh_actions() {
+    let source_store = tempfile::tempdir().unwrap();
+    let restored_store = tempfile::tempdir().unwrap();
+    let next_store = tempfile::tempdir().unwrap();
+    let restored_targets = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let group = "github-run-42/baseline";
+    build_with(
+        project.path(),
+        source_store.path(),
+        &reports.path().join("source.json"),
+        &[
+            (mbx::session::CACHE_EXPORT_GROUP_ENV, group),
+            ("MBX_LEARNED_INCREMENTAL", "0"),
+        ],
+    );
+    let archive = reports.path().join("baseline.tar");
+    let export = mbx_command()
+        .current_dir(project.path())
+        .args(["cache", "export", "--group", group])
+        .arg(&archive)
+        .env("MBX_CACHE_DIR", source_store.path())
+        .output()
+        .unwrap();
+    assert!(export.status.success());
+    wipe_target(project.path());
+
+    let import = mbx_command()
+        .current_dir(project.path())
+        .args(["cache", "import"])
+        .arg(&archive)
+        .env("MBX_CACHE_DIR", restored_store.path())
+        .env("MBX_TARGET_ROOT", restored_targets.path())
+        .output()
+        .unwrap();
+    assert!(import.status.success());
+    assert!(
+        String::from_utf8_lossy(&import.stdout).contains("restored Cargo workspace state"),
+        "import did not report a workspace restore: {}",
+        String::from_utf8_lossy(&import.stdout)
+    );
+
+    // Cargo finds every unit fresh, so no compiler wrapper runs; the target is
+    // then removed the way the action's clean-before-export step does.
+    let restored_group = "github-run-43/restored";
+    let (_, cargo_stderr) = cargo_with(
+        project.path(),
+        restored_store.path(),
+        &reports.path().join("restored.json"),
+        &["build", "--offline", "--verbose"],
+        &[
+            ("MBX_TARGET_ROOT", restored_targets.path().to_str().unwrap()),
+            (mbx::session::CACHE_EXPORT_GROUP_ENV, restored_group),
+            ("MBX_LEARNED_INCREMENTAL", "0"),
+        ],
+    );
+    assert!(
+        !cargo_stderr.contains("Compiling fixture"),
+        "Cargo should accept the restored target as fresh: {cargo_stderr}"
+    );
+    wipe_target(project.path());
+    let archive = reports.path().join("restored.tar");
+    let export = mbx_command()
+        .current_dir(project.path())
+        .args(["cache", "export", "--group", restored_group])
+        .arg(&archive)
+        .env("MBX_CACHE_DIR", restored_store.path())
+        .env("MBX_TARGET_ROOT", restored_targets.path())
+        .output()
+        .unwrap();
+    assert!(
+        export.status.success(),
+        "export failed: {}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&export.stdout).contains("exported 0 actions"),
+        "the export dropped the actions Cargo found fresh: {}",
+        String::from_utf8_lossy(&export.stdout)
+    );
+
+    let import = mbx_command()
+        .current_dir(project.path())
+        .args(["cache", "import"])
+        .arg(&archive)
+        .env("MBX_CACHE_DIR", next_store.path())
+        .output()
+        .unwrap();
+    assert!(import.status.success());
+    let (next, _) = build_with(
+        project.path(),
+        next_store.path(),
+        &reports.path().join("next.json"),
+        &[("MBX_LEARNED_INCREMENTAL", "0")],
+    );
+    assert!(count(&next, "hits") > 0, "{next}");
+    assert_eq!(count(&next, "misses"), 0, "{next}");
+}
+
+#[test]
 fn incremental_is_opt_in_and_reaches_cargo() {
     let store = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();

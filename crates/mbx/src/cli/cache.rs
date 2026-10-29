@@ -230,7 +230,20 @@ pub(super) fn cache_import(config: &Config, archive: &Path) -> Result<()> {
                 roots.target_dir_requested,
                 &lease,
             ) {
-                Ok(restored) => restored,
+                Ok(restored) => {
+                    if restored.is_some()
+                        && let Err(error) = store::record_restored_predictions(
+                            &store,
+                            &roots.workspace_root,
+                            &imported.tasks,
+                        )
+                    {
+                        log::warn!(
+                            "the restored Cargo workspace state will not be carried into a grouped export: {error}"
+                        );
+                    }
+                    restored
+                }
                 Err(error) => {
                     log::warn!("cache imported without restoring Cargo workspace state: {error}");
                     None

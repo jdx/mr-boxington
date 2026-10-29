@@ -141,6 +141,8 @@ pub struct TransferOutcome {
 pub struct ImportOutcome {
     pub transfer: TransferOutcome,
     pub attachments: BTreeMap<String, CacheDigest>,
+    /// The predictions the bundle recorded for each build command.
+    pub tasks: Vec<TaskActionManifest>,
 }
 
 /// Extra CAS roots carried by a cache export for a higher-level transport.
@@ -222,6 +224,11 @@ pub fn record_build_receipt(
     {
         return Ok(());
     }
+    let predictions = if group.is_some() {
+        with_restored_predictions(store, workspace_root, identity, predictions)
+    } else {
+        predictions
+    };
     let key = workspace_key(workspace_root);
     let lock_path = store
         .join(BUILD_RECEIPTS_DIR)
@@ -248,6 +255,94 @@ pub fn record_build_receipt(
         write_atomic(&group_receipt_path(store, group, run), &bytes)?;
     }
     Ok(())
+}
+
+/// The predictions a restored Cargo target stands for.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestoredPredictions {
+    version: u8,
+    workspace_root: PathBuf,
+    tasks: Vec<TaskActionManifest>,
+}
+
+/// Remember which actions the Cargo workspace state restored into a checkout
+/// stands for.
+///
+/// Cargo skips every unit its restored fingerprints call fresh, so no compiler
+/// runs for them and a grouped build would otherwise report none of the
+/// actions that produced them. The next grouped receipt for this checkout
+/// carries the ones the build did not recompile; the grouped export retires
+/// the record.
+pub fn record_restored_predictions(
+    store: &Path,
+    workspace_root: &Path,
+    tasks: &[TaskActionManifest],
+) -> Result<()> {
+    let bytes = serde_json::to_vec(&RestoredPredictions {
+        version: 1,
+        workspace_root: workspace_root.to_path_buf(),
+        tasks: tasks.to_vec(),
+    })?;
+    write_atomic(&restored_predictions_path(store, workspace_root), &bytes)
+}
+
+fn restored_predictions_path(store: &Path, workspace_root: &Path) -> PathBuf {
+    store
+        .join(BUILD_RECEIPTS_DIR)
+        .join("restored")
+        .join(format!("{}.json", workspace_key(workspace_root)))
+}
+
+/// Add the restored predictions this build did not supersede to its own.
+///
+/// A prediction for an invocation the build recompiled is replaced by the
+/// build's, so an edited crate does not keep its old action. One whose result
+/// is no longer in the store cannot be exported and is left out.
+fn with_restored_predictions(
+    store: &Path,
+    workspace_root: &Path,
+    identity: &str,
+    predictions: Vec<ActionPrediction>,
+) -> Vec<ActionPrediction> {
+    let Some(restored) = std::fs::read(restored_predictions_path(store, workspace_root))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<RestoredPredictions>(&bytes).ok())
+        .filter(|restored| restored.version == 1 && restored.workspace_root == workspace_root)
+    else {
+        return predictions;
+    };
+    let Some(task) = restored
+        .tasks
+        .into_iter()
+        .find(|task| task.task == identity)
+    else {
+        return predictions;
+    };
+    let action_cache = mbx_cache_core::LocalActionCache::new(store);
+    let recompiled = predictions
+        .iter()
+        .map(|prediction| &prediction.invocation)
+        .collect::<BTreeSet<_>>();
+    let mut combined = task
+        .predictions
+        .iter()
+        .filter(|prediction| !recompiled.contains(&prediction.invocation))
+        .filter(|prediction| {
+            action_cache
+                .path_for(&prediction.action)
+                .is_ok_and(|path| path.is_file())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    combined.extend(predictions.iter().cloned());
+    let valid = TaskActionManifest {
+        version: 1,
+        task: identity.to_owned(),
+        predictions: combined.clone(),
+    }
+    .validate();
+    if valid { combined } else { predictions }
 }
 
 fn workspace_key(workspace_root: &Path) -> String {
@@ -472,10 +567,17 @@ pub fn export_group_as(
     // consumed, and only after its complete archive has been published. A
     // concurrent build can add another uniquely named receipt to the group
     // without this cleanup deleting work the archive did not include.
-    for (path, _) in receipts {
+    let mut workspaces = BTreeSet::new();
+    for (path, receipt) in receipts {
         std::fs::remove_file(path)?;
+        workspaces.insert(receipt.workspace_root);
     }
     let _ = std::fs::remove_dir(root);
+    // The export carried what the restored state stood for, so the record has
+    // done its job. Left behind, it would feed a later group in this store.
+    for workspace_root in workspaces {
+        let _ = std::fs::remove_file(restored_predictions_path(store, &workspace_root));
+    }
     Ok(outcome)
 }
 
@@ -817,7 +919,7 @@ pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<I
             "cache import kept {kept_existing} intact existing results that differed from the bundle"
         );
     }
-    for task in manifest.tasks {
+    for task in manifest.tasks.iter().cloned() {
         merge_imported_manifest(store, task)?;
     }
     let bytes = match bundle_bytes {
@@ -838,6 +940,7 @@ pub fn import_archive_with_attachments(store: &Path, archive: &Path) -> Result<I
             bytes,
         },
         attachments: manifest.attachments,
+        tasks: manifest.tasks,
     })
 }
 

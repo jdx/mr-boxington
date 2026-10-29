@@ -3291,3 +3291,80 @@ fn a_dry_run_after_stale_does_not_walk_trees_a_real_run_would_skip() {
     );
     assert!(read_action_result(dir.path(), &broken).is_some());
 }
+
+#[test]
+fn a_grouped_receipt_carries_restored_actions_the_build_did_not_recompile() {
+    let source = tempfile::tempdir().unwrap();
+    let workspace = source.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let identity = "e".repeat(64);
+    let group = "github-run-42/test";
+    let prediction = |invocation: &str, action: &str| ActionPrediction {
+        invocation: CacheDigest::blake3(invocation.as_bytes()),
+        action: store_result(source.path(), action, &[]),
+        adapter: "rustc".into(),
+        payload: "{}".into(),
+    };
+    let fresh = prediction("dependency", "fresh dependency");
+    let edited_before = prediction("root", "root before the edit");
+    let edited_after = prediction("root", "root after the edit");
+    let mut missing = prediction("missing", "missing result");
+    missing.action = CacheDigest::blake3(b"never stored");
+    let restored = TaskActionManifest {
+        version: 1,
+        task: identity.clone(),
+        predictions: vec![fresh.clone(), edited_before.clone(), missing],
+    };
+    let other = TaskActionManifest {
+        version: 1,
+        task: "f".repeat(64),
+        predictions: vec![prediction("other", "another command")],
+    };
+    record_restored_predictions(source.path(), &workspace, &[restored, other]).unwrap();
+
+    record_build_receipt(
+        source.path(),
+        &CacheDigest::blake3(b"run").hash,
+        &identity,
+        &workspace,
+        Some(group),
+        vec![edited_after.clone()],
+    )
+    .unwrap();
+
+    let receipt = read_build_receipt(&latest_receipt_path(source.path(), &workspace)).unwrap();
+    assert_eq!(
+        receipt.predictions,
+        vec![fresh.clone(), edited_after.clone()]
+    );
+    let archive = source.path().join("job.tar");
+    let exported = export_group(source.path(), group, &archive).unwrap();
+    assert_eq!(exported.actions, 2);
+    assert!(
+        !restored_predictions_path(source.path(), &workspace).exists(),
+        "a group export retires the restored record"
+    );
+
+    // A build that is not exported with a group never carries them.
+    record_restored_predictions(
+        source.path(),
+        &workspace,
+        &[TaskActionManifest {
+            version: 1,
+            task: identity.clone(),
+            predictions: vec![fresh],
+        }],
+    )
+    .unwrap();
+    record_build_receipt(
+        source.path(),
+        &CacheDigest::blake3(b"ungrouped").hash,
+        &identity,
+        &workspace,
+        None,
+        vec![edited_after.clone()],
+    )
+    .unwrap();
+    let receipt = read_build_receipt(&latest_receipt_path(source.path(), &workspace)).unwrap();
+    assert_eq!(receipt.predictions, vec![edited_after]);
+}
