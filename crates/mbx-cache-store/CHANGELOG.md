@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.44...mbx-cache-store-v0.2.0) - 2026-10-28
+
+### Added
+
+- *(gc)* remove cached Rust results for a named compiler version ([#845](https://github.com/jdx/mr-boxington/pull/845))
+
+### Fixed
+
+- *(cache-store)* collect task manifests no live checkout claims ([#852](https://github.com/jdx/mr-boxington/pull/852))
+
 ## [0.1.44](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.43...mbx-cache-store-v0.1.44) - 2026-10-26
 
 ### Added

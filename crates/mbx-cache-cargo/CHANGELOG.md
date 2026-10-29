@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.19](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.3.18...mbx-cache-cargo-v0.3.19) - 2026-10-28
+
+### Fixed
+
+- *(cargo)* pass flags after an external subcommand through untouched ([#868](https://github.com/jdx/mr-boxington/pull/868))
+- *(cargo)* say why the cargo metadata probe failed ([#862](https://github.com/jdx/mr-boxington/pull/862))
+- *(cache-cargo)* match Config for empty or non-Unicode MBX_CACHE_DIR ([#837](https://github.com/jdx/mr-boxington/pull/837))
+
 ## [0.3.18](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.3.17...mbx-cache-cargo-v0.3.18) - 2026-10-26
 
 ### Fixed
