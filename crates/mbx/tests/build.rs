@@ -1531,6 +1531,69 @@ fn a_group_export_after_a_workspace_state_restore_keeps_cargo_fresh_actions() {
 }
 
 #[test]
+fn an_import_that_restores_nothing_forgets_a_restore_whose_target_is_gone() {
+    let source_store = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let targets = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let group = "github-run-42/baseline";
+    build_with(
+        project.path(),
+        source_store.path(),
+        &reports.path().join("source.json"),
+        &[
+            (mbx::session::CACHE_EXPORT_GROUP_ENV, group),
+            ("MBX_LEARNED_INCREMENTAL", "0"),
+        ],
+    );
+    let with_state = reports.path().join("with-state.tar");
+    let plain = reports.path().join("plain.tar");
+    let export = |args: &[&str], archive: &Path| {
+        let output = mbx_command()
+            .current_dir(project.path())
+            .args(["cache", "export"])
+            .args(args)
+            .arg(archive)
+            .env("MBX_CACHE_DIR", source_store.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    };
+    export(&["--group", group], &with_state);
+    wipe_target(project.path());
+    export(&[], &plain);
+    let import = |archive: &Path| {
+        let output = mbx_command()
+            .current_dir(project.path())
+            .args(["cache", "import"])
+            .arg(archive)
+            .env("MBX_CACHE_DIR", store.path())
+            .env("MBX_TARGET_ROOT", targets.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let pending = || {
+        std::fs::read_dir(store.path().join("actions/build-receipts/v1/restored"))
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    };
+    assert!(import(&with_state).contains("restored Cargo workspace state"));
+    assert_eq!(pending(), 1);
+
+    // The restored target is still there, so it may still be what is fresh.
+    assert!(!import(&plain).contains("restored Cargo workspace state"));
+    assert_eq!(pending(), 1);
+
+    wipe_target(project.path());
+    assert!(!import(&plain).contains("restored Cargo workspace state"));
+    assert_eq!(pending(), 0, "the restore's target is gone");
+}
+
+#[test]
 fn incremental_is_opt_in_and_reaches_cargo() {
     let store = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();

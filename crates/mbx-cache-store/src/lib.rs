@@ -313,6 +313,22 @@ pub fn record_restored_predictions(
     write_atomic(&restored_predictions_path(store, workspace_root), &bytes)
 }
 
+/// Forget what a restored target stood for, because that target is gone.
+pub fn clear_restored_predictions(store: &Path, workspace_root: &Path) -> Result<()> {
+    let mut lock = lock_receipts(store, workspace_root)?;
+    lock.lock()?;
+    match std::fs::remove_file(restored_predictions_path(store, workspace_root)) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+        _ => Ok(()),
+    }
+}
+
+/// Whether any checkout in this store has a restored record waiting.
+pub fn restored_predictions_pending(store: &Path) -> bool {
+    walk_files(&store.join(BUILD_RECEIPTS_DIR).join("restored"))
+        .is_ok_and(|files| !files.is_empty())
+}
+
 fn restored_predictions_path(store: &Path, workspace_root: &Path) -> PathBuf {
     store
         .join(BUILD_RECEIPTS_DIR)

@@ -256,6 +256,9 @@ pub(super) fn cache_import(config: &Config, archive: &Path) -> Result<()> {
     } else {
         None
     };
+    if restored.is_none() {
+        forget_stale_restore(&store);
+    }
     let outcome = imported.transfer;
     println!(
         "imported {} actions and {} objects from {} ({})",
@@ -272,6 +275,29 @@ pub(super) fn cache_import(config: &Config, archive: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Drop a pending restore record whose target no longer exists.
+///
+/// An import that restores nothing leaves the record from an earlier one in
+/// place, and a grouped build would carry its actions even though the target
+/// that made them fresh has since been removed. A target that still has
+/// contents may be that restore, so its record stays.
+fn forget_stale_restore(store: &Path) {
+    if !store::restored_predictions_pending(store) {
+        return;
+    }
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let Some(roots) = cargo_roots(&cargo, &[], None) else {
+        return;
+    };
+    let populated =
+        std::fs::read_dir(&roots.target_dir).is_ok_and(|mut entries| entries.next().is_some());
+    if !populated
+        && let Err(error) = store::clear_restored_predictions(store, &roots.workspace_root)
+    {
+        log::warn!("a stale restored-state record could not be cleared: {error}");
+    }
 }
 
 pub(super) fn cache_stats(config: &Config, json: bool) -> Result<()> {

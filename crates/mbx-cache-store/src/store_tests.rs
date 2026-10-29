@@ -3527,3 +3527,31 @@ fn restored_predictions_over_the_limit_give_way_oldest_first() {
     assert_eq!(receipt.predictions.last(), Some(&current));
     assert_eq!(receipt.predictions[0], restored[1], "the oldest went first");
 }
+
+#[test]
+fn a_cleared_restore_is_not_carried_into_later_receipts() {
+    let source = tempfile::tempdir().unwrap();
+    let workspace = source.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let identity = "e".repeat(64);
+    let restored = stored_prediction(source.path(), "restored", "restored");
+    let current = stored_prediction(source.path(), "current", "current");
+    assert!(!restored_predictions_pending(source.path()));
+    restored_fixture(source.path(), &workspace, &identity, vec![restored]);
+    assert!(restored_predictions_pending(source.path()));
+
+    clear_restored_predictions(source.path(), &workspace).unwrap();
+    clear_restored_predictions(source.path(), &workspace).unwrap();
+
+    assert!(!restored_predictions_pending(source.path()));
+    grouped_receipt(
+        source.path(),
+        &workspace,
+        &identity,
+        "job",
+        "run",
+        vec![current.clone()],
+    );
+    let receipt = read_build_receipt(&latest_receipt_path(source.path(), &workspace)).unwrap();
+    assert_eq!(receipt.predictions, vec![current]);
+}
