@@ -335,8 +335,15 @@ pub fn previous_build_identities(workspace_root: &Path) -> Vec<String> {
             .lines()
             .map(|revision| format!("{}^", revision.trim())),
     );
-    let mut seen = BTreeSet::from([CacheDigest::blake3(&lock).hash]);
+    let mut seen = BTreeSet::from([lockfile_marker(&lock)]);
     let mut identities = Vec::new();
+    // Releases before line endings were normalized digested the lockfile as
+    // checked out, so on a CRLF checkout they recorded this same state under
+    // another identity.
+    let checked_out = CacheDigest::blake3(&lock).hash;
+    if seen.insert(checked_out.clone()) {
+        identities.push(identity_for_workspace(&checked_out));
+    }
     for revision in candidates {
         let Some(lock) = git_output(
             workspace_root,
@@ -344,7 +351,7 @@ pub fn previous_build_identities(workspace_root: &Path) -> Vec<String> {
         ) else {
             continue;
         };
-        let marker = CacheDigest::blake3(&lock).hash;
+        let marker = lockfile_marker(&lock);
         if seen.insert(marker.clone()) {
             identities.push(identity_for_workspace(&marker));
         }
@@ -398,8 +405,26 @@ fn workspace_marker(workspace_root: &Path) -> String {
                 .to_string_lossy()
                 .into_owned()
         },
-        |lock| CacheDigest::blake3(&lock).hash,
+        |lock| lockfile_marker(&lock),
     )
+}
+
+/// The digest that names a lockfile's contents, with CRLF line endings read
+/// as LF.
+///
+/// Git for Windows checks text files out with CRLF by default, while history
+/// keeps the LF it was committed with. Digesting the bytes as they are would
+/// give such a checkout an identity no earlier state of its lockfile can
+/// match, so it could never inherit their predictions.
+fn lockfile_marker(lock: &[u8]) -> String {
+    let mut normalized = Vec::with_capacity(lock.len());
+    let mut bytes = lock.iter().copied().peekable();
+    while let Some(byte) = bytes.next() {
+        if byte != b'\r' || bytes.peek() != Some(&b'\n') {
+            normalized.push(byte);
+        }
+    }
+    CacheDigest::blake3(&normalized).hash
 }
 
 /// Resolve the shared mbx cache root from the environment, machine config, or platform default.
@@ -2166,6 +2191,38 @@ mod tests {
         // its own fallback.
         git(root, &["commit", "-q", "-am", "four"]);
         assert_eq!(previous_build_identities(root), committed);
+    }
+
+    #[test]
+    fn a_crlf_checkout_matches_the_lf_states_in_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let command = Vec::new();
+        git(root, &["init", "-q"]);
+        let mut committed = Vec::new();
+        for state in ["one\n", "two\n"] {
+            std::fs::write(root.join("Cargo.lock"), state).unwrap();
+            committed.push(build_identity(root, &command));
+            git(root, &["add", "Cargo.lock"]);
+            git(root, &["commit", "-q", "-m", state]);
+        }
+        // What Git for Windows writes for the committed "two".
+        std::fs::write(root.join("Cargo.lock"), "two\r\n").unwrap();
+        assert_eq!(build_identity(root, &command), committed[1]);
+        // The identity earlier releases gave these bytes comes first, then
+        // the states before this one.
+        let checked_out = identity_for_workspace(&CacheDigest::blake3(b"two\r\n").hash);
+        assert_eq!(
+            previous_build_identities(root),
+            vec![checked_out, committed[0].clone()]
+        );
+    }
+
+    #[test]
+    fn lockfile_markers_ignore_only_crlf_line_endings() {
+        assert_eq!(lockfile_marker(b"a\r\nb\r\n"), lockfile_marker(b"a\nb\n"));
+        assert_ne!(lockfile_marker(b"a\rb"), lockfile_marker(b"ab"));
+        assert_eq!(lockfile_marker(b"a\nb"), CacheDigest::blake3(b"a\nb").hash);
     }
 
     #[test]
