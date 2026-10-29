@@ -173,6 +173,7 @@ pub(super) fn run(
         target_budget,
         retention.target_max_age,
         &retention.target_precedence,
+        low_disk.is_some().then_some(target::LOW_DISK_RECENT_USE),
         dry_run,
     );
     let projected_target_bytes = match &pruned {
@@ -681,6 +682,14 @@ pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool
         }
     }
     lines.extend(kept_alone);
+    if outcome.kept_recent_views > 0 {
+        // Last, like the line above, for the same reason.
+        lines.push(format!(
+            "{} {} target directories built within the last hour, though the disk is short",
+            if dry_run { "would keep" } else { "kept" },
+            outcome.kept_recent_views
+        ));
+    }
     lines
 }
 
@@ -1194,6 +1203,7 @@ pub(super) fn prune_targets(
         target_budget,
         retention.target_max_age,
         &retention.target_precedence,
+        low_disk.is_some().then_some(target::LOW_DISK_RECENT_USE),
         false,
     ) {
         Ok(pruned) => {
@@ -1416,6 +1426,7 @@ pub(super) fn collect_low_disk_targets(
         Some(limit),
         retention.target_max_age,
         &retention.target_precedence,
+        Some(target::LOW_DISK_RECENT_USE),
         false,
     ) {
         Ok(outcome) => outcome,
@@ -1540,6 +1551,7 @@ impl LowDiskCollection {
             .removed_live_views
             .saturating_add(outcome.removed_live_views);
         total.kept_active_views = outcome.kept_active_views;
+        total.kept_recent_views = outcome.kept_recent_views;
         total.removed_units = total.removed_units.saturating_add(outcome.removed_units);
         total.removed_unit_bytes = total
             .removed_unit_bytes
@@ -1707,9 +1719,9 @@ fn target_limit(
 
 /// Say when collection could not bring a disk back above its minimum.
 ///
-/// Active state and explicitly kept targets are protected, so a disk filled by
-/// something else can stay short after collection has removed everything it
-/// is allowed to remove.
+/// Active state, recently built targets, and explicitly kept targets are
+/// protected, so a disk filled by something else can stay short after
+/// collection has removed everything it is allowed to remove.
 fn warn_if_still_low(config: &Config, retention: &RetentionSettings) {
     let cache = low_disk(retention, &config.cache_dir);
     // The target root is its own disk only when it is not the cache's, and
@@ -1719,7 +1731,7 @@ fn warn_if_still_low(config: &Config, retention: &RetentionSettings) {
         .flatten();
     for disk in cache.into_iter().chain(target) {
         log::warn!(
-            "the disk holding {} still has {} free after collection, under the {} minimum; collection removed everything it is allowed to remove (active state and explicitly kept targets are retained), so something else may be using the disk",
+            "the disk holding {} still has {} free after collection, under the {} minimum; collection removed everything it is allowed to remove (active state, targets built within the last hour, and explicitly kept targets are retained), so something else may be using the disk",
             disk.path.display(),
             ByteSize::b(disk.available).display().iec(),
             ByteSize::b(disk.min_free).display().iec(),

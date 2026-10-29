@@ -56,6 +56,12 @@ const VIEW_RECORD_VERSION: u8 = 1;
 /// refresh in the same second as the selection is invisible to a comparison;
 /// a record this fresh is a build starting, whatever the selection said.
 const RECENTLY_CLAIMED: u64 = 2;
+/// How recently a live checkout must have built for collection on a short
+/// disk to leave its target directory alone. The build that just finished is
+/// usually about to run what it built, and a disk filled by something else
+/// stays short once the directory is gone: the next build recreates it, and
+/// the next collection removes it again.
+pub(crate) const LOW_DISK_RECENT_USE: Duration = Duration::from_secs(60 * 60);
 
 /// The clock records and collection share: whole seconds since the epoch.
 fn now_secs() -> u64 {
@@ -177,6 +183,9 @@ pub(crate) struct CollectionOutcome {
     /// Selected for removal, then found in use by a running command, or
     /// claimed by a build that started after the selection was made.
     pub kept_active_views: u64,
+    /// Live directories a build used within the recent-use window, left out
+    /// of the selection while the disk is short.
+    pub kept_recent_views: u64,
     /// Units no build had used for the age limit, removed from target
     /// directories that were kept.
     pub removed_units: u64,
@@ -1410,16 +1419,25 @@ pub(crate) fn collect(
     max_age: Option<Duration>,
     dry_run: bool,
 ) -> Result<CollectionOutcome> {
-    collect_by(root, max_bytes, max_age, &Precedence::default(), dry_run)
+    collect_by(
+        root,
+        max_bytes,
+        max_age,
+        &Precedence::default(),
+        None,
+        dry_run,
+    )
 }
 
 /// [`collect`], keeping the checkouts `precedence` keeps and taking the ones
-/// it evicts first ahead of the rest.
+/// it evicts first ahead of the rest. With `keep_recent`, a live directory a
+/// build used within that window is not removed to meet `max_bytes`.
 pub(crate) fn collect_by(
     root: &Path,
     max_bytes: Option<u64>,
     max_age: Option<Duration>,
     precedence: &Precedence,
+    keep_recent: Option<Duration>,
     dry_run: bool,
 ) -> Result<CollectionOutcome> {
     collect_with(
@@ -1427,6 +1445,7 @@ pub(crate) fn collect_by(
         max_bytes,
         max_age,
         precedence,
+        keep_recent,
         dry_run,
         now_secs(),
         || {},
@@ -1447,6 +1466,7 @@ fn collect_with(
     max_bytes: Option<u64>,
     max_age: Option<Duration>,
     precedence: &Precedence,
+    keep_recent: Option<Duration>,
     dry_run: bool,
     now: u64,
     before_removal: impl FnOnce(),
@@ -1598,6 +1618,11 @@ fn collect_with(
         for entry in candidates {
             if remaining <= max_bytes {
                 break;
+            }
+            // Every candidate is live: the rest were selected above.
+            if keep_recent.is_some_and(|window| now.saturating_sub(entry.2) < window.as_secs()) {
+                outcome.kept_recent_views += 1;
+                continue;
             }
             if selected.insert(entry.0.clone()) {
                 remaining = remaining.saturating_sub(projection.release(&entry.3).logical);

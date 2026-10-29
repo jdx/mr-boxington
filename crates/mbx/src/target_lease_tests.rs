@@ -259,6 +259,7 @@ fn a_lease_taken_after_the_selection_is_kept() {
         None,
         Some(Duration::from_secs(10)),
         &Precedence::default(),
+        None,
         false,
         now_secs(),
         || {
@@ -303,6 +304,7 @@ fn a_command_arriving_during_the_removal_waits_and_finds_the_view_gone() {
         None,
         Some(Duration::from_secs(10)),
         &Precedence::default(),
+        None,
         false,
         now_secs(),
         || {},
@@ -633,6 +635,7 @@ fn a_command_waiting_on_the_removal_keeps_the_record_it_writes() {
         None,
         Some(Duration::from_secs(10)),
         &Precedence::default(),
+        None,
         false,
         now_secs(),
         || {},

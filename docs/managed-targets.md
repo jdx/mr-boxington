@@ -468,11 +468,15 @@ private state and shared cache data regardless of the budgets:
    sessions, including those used in the last hour.
 2. Managed target directories, least recently used first, with
    `target.evict_first` checkouts ahead of the rest and `target.keep` checkouts
-   left alone.
+   left alone. A checkout that built within the last hour keeps its target
+   directory, so a program can still run from `target/` right after the build
+   that produced it.
 3. Shared cache objects on the cache disk, after collecting private state and
    managed targets stops removing anything.
 
-Running commands' state and explicitly kept targets stay. The shared action
+Running commands' state, targets built within the last hour, and explicitly
+kept targets stay. When something else fills the disk, removing a target that
+was just built frees nothing for long: the next build recreates it. The shared action
 store can go below `gc.max_size` when the cache disk is short, because keeping the build machine usable takes
 precedence over retaining every shared result. If collection cannot free
 enough, mbx logs a warning and leaves the rest to you. The next build reports

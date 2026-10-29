@@ -904,6 +904,30 @@ fn the_released_figure_never_lands_on_the_line_about_kept_directories() {
 }
 
 #[test]
+fn targets_kept_for_recent_builds_are_reported_after_the_removals() {
+    let outcome = crate::target::CollectionOutcome {
+        removed_views: 1,
+        removed_live_views: 1,
+        removed_bytes: 2048,
+        released_bytes: 1024,
+        remaining_bytes: 4096,
+        kept_recent_views: 2,
+        ..Default::default()
+    };
+    assert_eq!(
+        target_removals(&outcome, false),
+        [
+            "removed 1 target directories (2.0 KiB logical, 0 abandoned and 1 live); 4.0 KiB logical remain, 1.0 KiB released on disk",
+            "kept 2 target directories built within the last hour, though the disk is short",
+        ]
+    );
+    assert_eq!(
+        target_removals(&outcome, true)[1],
+        "would keep 2 target directories built within the last hour, though the disk is short"
+    );
+}
+
+#[test]
 fn the_released_figure_sits_beside_the_total_when_several_removals_print() {
     let outcome = crate::target::CollectionOutcome {
         removed_views: 1,
