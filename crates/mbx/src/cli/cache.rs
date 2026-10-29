@@ -300,8 +300,13 @@ fn forget_stale_restore(config: &Config, store: &Path) {
     else {
         return;
     };
-    let populated =
-        std::fs::read_dir(&roots.target_dir).is_ok_and(|mut entries| entries.next().is_some());
+    // Only a target that is definitely absent or empty is gone. One that cannot
+    // be read may be there, so the record stays.
+    let populated = match std::fs::read_dir(&roots.target_dir) {
+        Ok(mut entries) => entries.next().is_some(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => return,
+    };
     if !populated
         && let Err(error) = store::clear_restored_predictions(store, &roots.workspace_root)
     {
