@@ -257,7 +257,7 @@ pub(super) fn cache_import(config: &Config, archive: &Path) -> Result<()> {
         None
     };
     if restored.is_none() {
-        forget_stale_restore(&store);
+        forget_stale_restore(config, &store);
     }
     let outcome = imported.transfer;
     println!(
@@ -283,12 +283,21 @@ pub(super) fn cache_import(config: &Config, archive: &Path) -> Result<()> {
 /// place, and a grouped build would carry its actions even though the target
 /// that made them fresh has since been removed. A target that still has
 /// contents may be that restore, so its record stays.
-fn forget_stale_restore(store: &Path) {
+fn forget_stale_restore(config: &Config, store: &Path) {
     if !store::restored_predictions_pending(store) {
         return;
     }
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let Some(roots) = cargo_roots(&cargo, &[], None) else {
+        return;
+    };
+    // The lease is what a restore holds while it fills the target and writes
+    // its record, so holding it here keeps the check and the removal from
+    // straddling a newer restore. A busy target is being used by something
+    // that may be exactly that, so the record stays.
+    let Ok(Some(_lease)) =
+        crate::target::ViewLease::reserve(&config.target.root, &roots.workspace_root)
+    else {
         return;
     };
     let populated =

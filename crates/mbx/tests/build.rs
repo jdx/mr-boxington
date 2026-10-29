@@ -1589,6 +1589,11 @@ fn an_import_that_restores_nothing_forgets_a_restore_whose_target_is_gone() {
     assert_eq!(pending(), 1);
 
     wipe_target(project.path());
+    // Something else holds the target, perhaps a restore still writing its record.
+    let lease = hold_target_lease(targets.path(), project.path());
+    assert!(!import(&plain).contains("restored Cargo workspace state"));
+    assert_eq!(pending(), 1, "a busy target keeps the record");
+    drop(lease);
     assert!(!import(&plain).contains("restored Cargo workspace state"));
     assert_eq!(pending(), 0, "the restore's target is gone");
 }
