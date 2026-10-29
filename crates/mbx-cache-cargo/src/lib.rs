@@ -306,9 +306,10 @@ pub fn build_identity(workspace_root: &Path, _command: &[String]) -> String {
 /// offer.
 ///
 /// Releases before line endings were normalized digested the lockfile bytes
-/// as they were, so a CRLF lockfile, or a CRLF copy in history, was recorded
-/// under an identity of its own. Those identities are offered too, each after
-/// the normalized one for the same state.
+/// as they were, so a CRLF lockfile, a CRLF copy in history, or on a checkout
+/// that converts line endings any earlier state as it was checked out, was
+/// recorded under an identity of its own. Those identities are offered too,
+/// each after the normalized one for the same state.
 ///
 /// Every prediction a manifest holds is rehashed before it is trusted, so an
 /// inherited one can only fail to match, never restore the wrong result.
@@ -316,9 +317,12 @@ pub fn previous_build_identities(workspace_root: &Path) -> Vec<String> {
     let Ok(lock) = std::fs::read(workspace_root.join("Cargo.lock")) else {
         return Vec::new();
     };
-    let mut seen = BTreeSet::from([lockfile_marker(&lock)]);
-    let mut identities = Vec::new();
+    let current = lockfile_marker(&lock);
     let checked_out = CacheDigest::blake3(&lock).hash;
+    // A checkout that converted this lockfile converted the earlier ones too.
+    let converts = current != checked_out;
+    let mut seen = BTreeSet::from([current]);
+    let mut identities = Vec::new();
     if seen.insert(checked_out.clone()) {
         identities.push(identity_for_workspace(&checked_out));
     }
@@ -348,6 +352,7 @@ pub fn previous_build_identities(workspace_root: &Path) -> Vec<String> {
             .lines()
             .map(|revision| format!("{}^", revision.trim())),
     );
+    let mut states = 0;
     for revision in candidates {
         let Some(lock) = git_output(
             workspace_root,
@@ -355,12 +360,19 @@ pub fn previous_build_identities(workspace_root: &Path) -> Vec<String> {
         ) else {
             continue;
         };
-        for marker in [lockfile_marker(&lock), CacheDigest::blake3(&lock).hash] {
+        let normalized = lockfile_marker(&lock);
+        let new_state = !seen.contains(&normalized);
+        let mut markers = vec![normalized, CacheDigest::blake3(&lock).hash];
+        if converts {
+            markers.push(CacheDigest::blake3(&crlf_checkout(&lock)).hash);
+        }
+        for marker in markers {
             if seen.insert(marker.clone()) {
                 identities.push(identity_for_workspace(&marker));
             }
         }
-        if identities.len() >= PREVIOUS_LOCKFILE_STATES {
+        states += usize::from(new_state);
+        if states == PREVIOUS_LOCKFILE_STATES {
             break;
         }
     }
@@ -369,10 +381,10 @@ pub fn previous_build_identities(workspace_root: &Path) -> Vec<String> {
 
 /// How many earlier lockfile states are offered as prediction sources.
 ///
-/// Each one costs a manifest lookup when it is consulted, which only happens
-/// once nothing was recorded under the current identity, and a run of
-/// dependency bumps rarely goes deeper than this before a build of the trunk
-/// records the newest state.
+/// Each one costs a manifest lookup per identity it offers when it is
+/// consulted, which only happens once nothing was recorded under the current
+/// identity, and a run of dependency bumps rarely goes deeper than this before
+/// a build of the trunk records the newest state.
 const PREVIOUS_LOCKFILE_STATES: usize = 8;
 
 /// Git's standard output for a command run in `workspace_root`, or nothing
@@ -430,6 +442,20 @@ fn lockfile_marker(lock: &[u8]) -> String {
         }
     }
     CacheDigest::blake3(&normalized).hash
+}
+
+/// A lockfile as a checkout that converts line endings writes it.
+fn crlf_checkout(lock: &[u8]) -> Vec<u8> {
+    let mut converted = Vec::with_capacity(lock.len() + lock.len() / 32);
+    let mut previous = None;
+    for &byte in lock {
+        if byte == b'\n' && previous != Some(b'\r') {
+            converted.push(b'\r');
+        }
+        converted.push(byte);
+        previous = Some(byte);
+    }
+    converted
 }
 
 /// Resolve the shared mbx cache root from the environment, machine config, or platform default.
@@ -2215,11 +2241,12 @@ mod tests {
         std::fs::write(root.join("Cargo.lock"), "two\r\n").unwrap();
         assert_eq!(build_identity(root, &command), committed[1]);
         // The identity earlier releases gave these bytes comes first, then
-        // the states before this one.
-        let checked_out = identity_for_workspace(&CacheDigest::blake3(b"two\r\n").hash);
+        // each earlier state, followed by the identity they gave it as this
+        // checkout wrote it.
+        let raw = |state: &[u8]| identity_for_workspace(&CacheDigest::blake3(state).hash);
         assert_eq!(
             previous_build_identities(root),
-            vec![checked_out, committed[0].clone()]
+            vec![raw(b"two\r\n"), committed[0].clone(), raw(b"one\r\n")]
         );
     }
 
@@ -2230,6 +2257,8 @@ mod tests {
         let command = Vec::new();
         git(root, &["init", "-q"]);
         git(root, &["config", "core.autocrlf", "false"]);
+        // Commit the CRLF bytes even where global attributes say otherwise.
+        std::fs::write(root.join(".gitattributes"), "Cargo.lock -text\n").unwrap();
         for state in ["one\r\n", "two\r\n"] {
             std::fs::write(root.join("Cargo.lock"), state).unwrap();
             git(root, &["add", "Cargo.lock"]);
@@ -2252,6 +2281,7 @@ mod tests {
         assert_eq!(lockfile_marker(b"a\r\nb\r\n"), lockfile_marker(b"a\nb\n"));
         assert_ne!(lockfile_marker(b"a\rb"), lockfile_marker(b"ab"));
         assert_eq!(lockfile_marker(b"a\nb"), CacheDigest::blake3(b"a\nb").hash);
+        assert_eq!(crlf_checkout(b"a\nb\r\nc\n"), b"a\r\nb\r\nc\r\n");
     }
 
     #[test]
