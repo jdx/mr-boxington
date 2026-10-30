@@ -1941,9 +1941,23 @@ mod tests {
     }
 
     /// Wait out the timestamp tick of the files just written, so a probe
-    /// taken next is old enough to be remembered.
+    /// taken next is old enough to be remembered. The fixtures live in the
+    /// temporary directory, so a file written there shows which window a
+    /// pin taken from them falls under.
     fn settle() {
-        std::thread::sleep(FINE_TIMESTAMP_RACE_WINDOW * 2);
+        let probe = tempfile::NamedTempFile::new().unwrap();
+        let coarse = probe
+            .as_file()
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .is_none_or(|since| since.subsec_nanos() == 0);
+        std::thread::sleep(if coarse {
+            COARSE_TIMESTAMP_RACE_WINDOW + FINE_TIMESTAMP_RACE_WINDOW
+        } else {
+            FINE_TIMESTAMP_RACE_WINDOW * 2
+        });
     }
 
     /// A stand-in Cargo that, like the real one for `metadata`, refuses the
