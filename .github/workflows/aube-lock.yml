@@ -1,0 +1,31 @@
+name: aube-lock
+
+# Regenerates docs/aube-lock.yaml on Renovate branches. Renovate's npm manager
+# updates package.json but has no aube support, leaving the lockfile stale and
+# breaking `aube install --frozen-lockfile` in CI. The hosted Mend app this org
+# uses does not run postUpgradeTasks, so the regeneration happens here. See
+# jdx/renovate-config for the workflow implementation.
+
+on:
+  push:
+    branches: ["renovate/**"]
+
+permissions: {}
+
+# The called workflow has its own group of the shape <workflow>-<ref>; sharing that
+# name with the caller would cancel it, so this group is named differently.
+concurrency:
+  group: ${{ github.workflow }}-caller-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  aube-lock:
+    permissions:
+      # Pushes the regenerated lockfile back onto the Renovate branch. The
+      # shared workflow gates itself on the sender being renovate[bot], so our
+      # own fix-up push cannot re-enter it.
+      contents: write
+    uses: jdx/renovate-config/.github/workflows/aube-lock.yml@d0f85cba63adc5a26194009e76eebcf5bc1ee823 # v1.0.2
+    secrets:
+      AUBE_LOCK_APP_ID: ${{ secrets.AUBE_LOCK_APP_ID }}
+      AUBE_LOCK_APP_PRIVATE_KEY: ${{ secrets.AUBE_LOCK_APP_PRIVATE_KEY }}
