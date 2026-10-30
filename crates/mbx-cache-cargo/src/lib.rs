@@ -1008,10 +1008,10 @@ impl Pin {
     }
 }
 
-/// Timestamp tick of a filesystem that keeps sub-second times: the kernel
-/// stamps files from a clock that advances once per scheduler tick, at most
-/// 10 ms, so twice that leaves a margin. Matches the window `mbx-cache-core`
-/// applies to file digests.
+/// Timestamp tick of a filesystem that keeps sub-second times: Linux stamps
+/// files from a clock that advances once per scheduler tick, at most 10 ms,
+/// and Windows from its 15.6 ms timer tick, both inside this window. Matches
+/// the window `mbx-cache-core` applies to file digests.
 const FINE_TIMESTAMP_RACE_WINDOW: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// Timestamp tick of a filesystem that keeps whole seconds (ext3, HFS+) or two
@@ -2329,23 +2329,29 @@ mod tests {
             .unwrap()
             .target_dir
         };
+        let stamp = |at: SystemTime| {
+            std::fs::File::options()
+                .write(true)
+                .open(&extra)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        };
+        // A modification time ahead of the clock is racy however slowly the
+        // test runs.
+        let ahead = SystemTime::now() + std::time::Duration::from_secs(3600);
         settle();
 
         std::fs::write(&extra, config(&before)).unwrap();
-        let written = std::fs::metadata(&extra).unwrap().modified().unwrap();
+        stamp(ahead);
         assert_eq!(resolve(), before);
         std::fs::write(&extra, config(&after)).unwrap();
-        std::fs::File::options()
-            .write(true)
-            .open(&extra)
-            .unwrap()
-            .set_modified(written)
-            .unwrap();
+        stamp(ahead);
         assert_eq!(resolve(), after);
         assert_eq!(probes(&log), 2);
 
         // Once the write is older than a tick, the probe is remembered.
-        settle();
+        stamp(SystemTime::now() - std::time::Duration::from_secs(3600));
         assert_eq!(resolve(), after);
         assert_eq!(resolve(), after);
         assert_eq!(probes(&log), 3);
