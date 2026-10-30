@@ -117,7 +117,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
           cache: false
         env:
@@ -380,7 +380,7 @@ jobs:
           chmod +x "$RUNNER_TEMP/mbx-bin/mbx"
           echo "$RUNNER_TEMP/mbx-bin" >> "$GITHUB_PATH"
       - if: matrix.tool == 'rust-cache'
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}
           add-job-id-key: "false"
@@ -469,7 +469,7 @@ jobs:
         run: echo "SMALL_EDIT_STARTED_NS=$(date +%s%N)" >> "$GITHUB_ENV"
       - if: matrix.tool == 'rust-cache'
         id: rust_cache_restore
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: gha-small-edit-${{ github.run_id }}-${{ matrix.trial }}
           add-job-id-key: "false"
