@@ -379,6 +379,16 @@ pub(crate) fn repair_launchers(profile: &Path) {
     if !shims.is_dir() || std::fs::read(&marker).is_ok_and(|recorded| recorded == current) {
         return;
     }
+    // Cargo holds this lock while it builds, and `install` replaces launchers
+    // with freshly compiled scripts under it. Rewriting launchers without it
+    // could overwrite a script another build has just compiled. A busy
+    // profile is left for the next build to repair.
+    let Ok(Some(_lock)) = try_lock(&profile.join(".cargo-lock")) else {
+        return;
+    };
+    if std::fs::read(&marker).is_ok_and(|recorded| recorded == current) {
+        return;
+    }
     match retarget_launchers(&profile.join("build"), profile, 1) {
         Ok(()) => {
             let _ = std::fs::write(&marker, current);
