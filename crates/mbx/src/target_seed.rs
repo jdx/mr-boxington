@@ -362,6 +362,7 @@ fn copy_unit(
 
 /// The file in a profile directory that records where its profile was when
 /// the launchers were last written, so a moved target directory is noticed.
+#[cfg(unix)]
 pub(crate) const LAUNCHER_ROOT_MARKER: &str = ".mbx-launcher-root";
 
 /// Repair the build-script launchers of a profile whose target directory has
