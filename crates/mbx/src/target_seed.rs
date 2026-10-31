@@ -381,11 +381,16 @@ pub(crate) fn repair_launchers(profile: &Path) {
     }
     // Cargo holds this lock while it builds, and `install` replaces launchers
     // with freshly compiled scripts under it. Rewriting launchers without it
-    // could overwrite a script another build has just compiled. A busy
-    // profile is left for the next build to repair.
-    let Ok(Some(_lock)) = try_lock(&profile.join(".cargo-lock")) else {
+    // could overwrite a script another build has just compiled. Wait for it,
+    // as Cargo would: this build is about to wait for the same lock, and runs
+    // a launcher that still names the old path as soon as it has it. The lock
+    // is released on return, before Cargo asks for it.
+    let Ok(mut lock) = fslock::LockFile::open(&profile.join(".cargo-lock")) else {
         return;
     };
+    if lock.lock().is_err() {
+        return;
+    }
     if std::fs::read(&marker).is_ok_and(|recorded| recorded == current) {
         return;
     }
