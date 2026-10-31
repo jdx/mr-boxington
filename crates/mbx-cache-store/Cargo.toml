@@ -1,6 +1,6 @@
 [package]
 name = "mbx-cache-store"
-version = "0.2.0"
+version = "0.2.1"
 description = "Unstable shared action-store retention and inspection for mbx embedders"
 edition.workspace = true
 rust-version.workspace = true
