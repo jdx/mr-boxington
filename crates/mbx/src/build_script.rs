@@ -184,10 +184,9 @@ fn install_launcher(mbx: &Path, executable: &Path) -> std::io::Result<()> {
     // taken for a profile whose launchers are all current. Written on every
     // install: rewriting a few bytes is cheaper than reading them first, and
     // it keeps a moved profile's marker current.
-    let _ = std::fs::write(
-        profile.join(crate::target_seed::LAUNCHER_ROOT_MARKER),
-        std::path::absolute(profile)?.as_os_str().as_encoded_bytes(),
-    );
+    if let Some(root) = crate::target_seed::launcher_root(profile) {
+        let _ = std::fs::write(profile.join(crate::target_seed::LAUNCHER_ROOT_MARKER), root);
+    }
     Ok(())
 }
 
@@ -2117,7 +2116,7 @@ mod tests {
 
         std::fs::create_dir_all(new.parent().unwrap()).unwrap();
         std::fs::rename(&old, &new).unwrap();
-        crate::target_seed::repair_launchers(&new);
+        crate::target_seed::repair_launchers(&new, true);
 
         let launcher = std::fs::read_to_string(
             new.join("build/fixture/0123456789abcdef/out/build_script_build"),

@@ -368,20 +368,39 @@ pub(crate) const LAUNCHER_ROOT_MARKER: &str = ".mbx-launcher-root";
 /// Repair the launchers of every profile below `root`, whether it sits there
 /// directly (`debug`) or below a target triple (`<triple>/debug`). Profiles are
 /// found on disk rather than from the command line, since Cargo configuration
-/// can choose a target the arguments never name.
+/// can choose a target the arguments never name. Only a profile in `wanted`,
+/// relative to `root` and written by this build, is waited for. Another may be
+/// held by a Cargo that is waiting on this very build, as when a build script
+/// starts a build in the same workspace, so it is repaired only if it is free.
 #[cfg(unix)]
-pub(crate) fn repair_all_launchers(root: &Path) {
+pub(crate) fn repair_all_launchers(root: &Path, wanted: &[PathBuf]) {
     let has_shims = |directory: &Path| directory.join(".mbx-build-script-shims").is_dir();
+    let repair = |profile: &Path| {
+        let wait = profile
+            .strip_prefix(root)
+            .is_ok_and(|relative| wanted.iter().any(|wanted| wanted == relative));
+        repair_launchers(profile, wait);
+    };
     for child in subdirectories(root) {
         if has_shims(&child) {
-            repair_launchers(&child);
+            repair(&child);
         }
         for grandchild in subdirectories(&child) {
             if has_shims(&grandchild) {
-                repair_launchers(&grandchild);
+                repair(&grandchild);
             }
         }
     }
+}
+
+/// Where a profile is, spelled the same however it was reached: the checkout's
+/// `target` link and the managed directory it points at name one directory.
+#[cfg(unix)]
+pub(crate) fn launcher_root(profile: &Path) -> Option<Vec<u8>> {
+    let resolved = std::fs::canonicalize(profile)
+        .or_else(|_| std::path::absolute(profile))
+        .ok()?;
+    Some(resolved.as_os_str().as_encoded_bytes().to_vec())
 }
 
 /// Repair the build-script launchers of a profile whose target directory has
@@ -389,13 +408,13 @@ pub(crate) fn repair_all_launchers(root: &Path) {
 /// path and Cargo reruns a script without compiling it again. Costs one small
 /// read for a profile that has not moved.
 #[cfg(unix)]
-pub(crate) fn repair_launchers(profile: &Path) {
+pub(crate) fn repair_launchers(profile: &Path, wait: bool) {
     let shims = profile.join(".mbx-build-script-shims");
-    let Ok(absolute) = std::path::absolute(profile) else {
+    let Some(current) = launcher_root(profile) else {
         return;
     };
+    let current = current.as_slice();
     let marker = profile.join(LAUNCHER_ROOT_MARKER);
-    let current = absolute.as_os_str().as_encoded_bytes();
     if !shims.is_dir() || std::fs::read(&marker).is_ok_and(|recorded| recorded == current) {
         return;
     }
@@ -408,7 +427,12 @@ pub(crate) fn repair_launchers(profile: &Path) {
     let Ok(mut lock) = fslock::LockFile::open(&profile.join(".cargo-lock")) else {
         return;
     };
-    if lock.lock().is_err() {
+    let locked = if wait {
+        lock.lock().is_ok()
+    } else {
+        lock.try_lock().unwrap_or(false)
+    };
+    if !locked {
         return;
     }
     if std::fs::read(&marker).is_ok_and(|recorded| recorded == current) {
