@@ -12,7 +12,7 @@
   },
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",
-    "@types/node": "^24",
+    "@types/node": "^26.0.0",
     "esbuild": "^0.28.0",
     "playwright-core": "^1.63.0",
     "typescript": "^7.0.2",
