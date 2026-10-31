@@ -1430,8 +1430,18 @@ fn build_script_launch() -> Option<(PathBuf, usize)> {
         .and_then(Path::parent)
         .and_then(Path::file_name)
         == Some(OsStr::new(".mbx-build-script-shims"));
-    if pinned && let Some(launcher) = arguments.next() {
+    let second = arguments.next();
+    if pinned && let Some(launcher) = &second {
         return Some((PathBuf::from(launcher), 2));
+    }
+    // A kernel that names the launcher in both argv[0] and argv[1] has added
+    // the script path once more, ahead of Cargo's arguments.
+    if is_build_script_executable(&program)
+        && second
+            .as_ref()
+            .is_some_and(|launcher| Path::new(launcher) == program)
+    {
+        return Some((program, 2));
     }
     Some((program, 1))
 }

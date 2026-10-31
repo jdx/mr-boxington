@@ -170,13 +170,6 @@ fn install_launcher(mbx: &Path, executable: &Path) -> std::io::Result<()> {
         .join("mbx");
     let pinned = profile.join(&relative);
     install_pinned_binary(mbx, &pinned)?;
-    // Written on every install: rewriting a few bytes is cheaper than reading
-    // them first, and it keeps a moved profile's marker current.
-    let _ = std::fs::write(
-        profile.join(crate::target_seed::LAUNCHER_ROOT_MARKER),
-        std::path::absolute(profile)?.as_os_str().as_encoded_bytes(),
-    );
-
     // Name the pinned binary as the interpreter when the kernel can take it
     // from a shebang. A shell launcher drops every variable whose name is not
     // a shell identifier (dash does), and Cargo passes some, such as tauri's
@@ -186,7 +179,16 @@ fn install_launcher(mbx: &Path, executable: &Path) -> std::io::Result<()> {
     let launcher = absolute_shebang(&profile.join(&relative))
         .unwrap_or_else(|| shell_launcher(&relative, depth));
     std::fs::write(executable, launcher)?;
-    std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755))
+    std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755))?;
+    // Recorded only once the launcher is in place, so a failed install is not
+    // taken for a profile whose launchers are all current. Written on every
+    // install: rewriting a few bytes is cheaper than reading them first, and
+    // it keeps a moved profile's marker current.
+    let _ = std::fs::write(
+        profile.join(crate::target_seed::LAUNCHER_ROOT_MARKER),
+        std::path::absolute(profile)?.as_os_str().as_encoded_bytes(),
+    );
+    Ok(())
 }
 
 /// The launcher for a path no shebang can name: a shell script that reaches the

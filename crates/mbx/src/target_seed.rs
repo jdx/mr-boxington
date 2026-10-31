@@ -365,6 +365,25 @@ fn copy_unit(
 #[cfg(unix)]
 pub(crate) const LAUNCHER_ROOT_MARKER: &str = ".mbx-launcher-root";
 
+/// Repair the launchers of every profile below `root`, whether it sits there
+/// directly (`debug`) or below a target triple (`<triple>/debug`). Profiles are
+/// found on disk rather than from the command line, since Cargo configuration
+/// can choose a target the arguments never name.
+#[cfg(unix)]
+pub(crate) fn repair_all_launchers(root: &Path) {
+    let has_shims = |directory: &Path| directory.join(".mbx-build-script-shims").is_dir();
+    for child in subdirectories(root) {
+        if has_shims(&child) {
+            repair_launchers(&child);
+        }
+        for grandchild in subdirectories(&child) {
+            if has_shims(&grandchild) {
+                repair_launchers(&grandchild);
+            }
+        }
+    }
+}
+
 /// Repair the build-script launchers of a profile whose target directory has
 /// moved since they were written, since each names the pinned mbx by absolute
 /// path and Cargo reruns a script without compiling it again. Costs one small
