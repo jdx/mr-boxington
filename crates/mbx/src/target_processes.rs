@@ -244,20 +244,26 @@ fn for_each_process_path(
     const PID_SIZE: usize = std::mem::size_of::<libc::pid_t>();
     // SAFETY: `geteuid` takes no arguments and cannot fail.
     let uid = unsafe { libc::geteuid() };
+    // `proc_listpids` returns 0, not -1, when the call fails, with `errno`
+    // set. A list that worked is never empty: it holds this process.
+    let listed = |count: libc::c_int| {
+        usize::try_from(count)
+            .ok()
+            .filter(|count| *count > 0)
+            .ok_or_else(|| Incomplete::Unreadable(std::io::Error::last_os_error()))
+    };
     // SAFETY: a null buffer asks only for the size the list needs.
-    let needed = unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, std::ptr::null_mut(), 0) };
-    let needed = usize::try_from(needed)
-        .map_err(|_| Incomplete::Unreadable(std::io::Error::last_os_error()))?;
+    let needed =
+        listed(unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, std::ptr::null_mut(), 0) })?;
     // Room for processes started between the two calls.
     let mut pids = vec![0 as libc::pid_t; needed / PID_SIZE + 64];
     let capacity = libc::c_int::try_from(pids.len() * PID_SIZE)
         .map_err(|_| Incomplete::Unreadable(std::io::Error::other("too many processes to list")))?;
     // SAFETY: `pids` is writable for `capacity` bytes, and the call writes no
     // more than that.
-    let written =
-        unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, pids.as_mut_ptr().cast(), capacity) };
-    let written = usize::try_from(written)
-        .map_err(|_| Incomplete::Unreadable(std::io::Error::last_os_error()))?;
+    let written = listed(unsafe {
+        libc::proc_listpids(PROC_UID_ONLY, uid, pids.as_mut_ptr().cast(), capacity)
+    })?;
     pids.truncate(written / PID_SIZE);
     let mut buffer = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     for pid in pids {
