@@ -67,19 +67,39 @@ pub(crate) fn scan_by(proc_root: &Path, views_root: &Path, deadline: Instant) ->
         return InUse::default();
     };
     let mut views = HashSet::new();
-    let finished = for_each_process_path(proc_root, deadline, &mut |path| {
+    let walked = for_each_process_path(proc_root, deadline, &mut |path| {
         if let Some(view) = view_name(&views_root, path) {
             views.insert(view);
         }
     });
-    if !finished {
-        log::warn!(
-            "gave up looking for programs running from managed target directories after {}s; this collection does not protect them",
-            SCAN_LIMIT.as_secs()
-        );
-        return InUse::default();
+    match walked {
+        Ok(()) => InUse { views },
+        Err(Incomplete::TimedOut) => {
+            log::warn!(
+                "gave up looking for programs running from managed target directories after {}s; this collection does not protect them",
+                SCAN_LIMIT.as_secs()
+            );
+            InUse::default()
+        }
+        // Where the process table is never readable, a sandbox or a container
+        // without `/proc`, every collection would say so: not a warning.
+        Err(Incomplete::Unreadable(error)) => {
+            log::debug!(
+                "could not list processes to find programs running from managed target directories ({error}); this collection does not protect them"
+            );
+            InUse::default()
+        }
     }
-    InUse { views }
+}
+
+/// Why a walk of the process table did not finish. Windows has no walk.
+#[derive(Debug)]
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+enum Incomplete {
+    /// The deadline passed first.
+    TimedOut,
+    /// The processes could not be listed at all.
+    Unreadable(std::io::Error),
 }
 
 /// The name of the view `path` lies in, if it is inside one.
@@ -106,27 +126,24 @@ const PROC_ROOT: &str = "/proc";
 const PROC_ROOT: &str = "";
 
 /// Call `found` with every path a process of this user executes, maps or has
-/// open. Returns false when `deadline` passed first, or the process table
-/// could not be read at all.
+/// open, unless `deadline` passes first or the process table cannot be read.
 #[cfg(target_os = "linux")]
 fn for_each_process_path(
     proc_root: &Path,
     deadline: Instant,
     found: &mut dyn FnMut(&Path),
-) -> bool {
+) -> Result<(), Incomplete> {
     use std::ffi::OsStr;
     use std::io::{BufRead, BufReader};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
 
-    let Ok(processes) = std::fs::read_dir(proc_root) else {
-        return false;
-    };
+    let processes = std::fs::read_dir(proc_root).map_err(Incomplete::Unreadable)?;
     // SAFETY: `geteuid` takes no arguments and cannot fail.
     let uid = unsafe { libc::geteuid() };
     for process in processes.flatten() {
         if Instant::now() > deadline {
-            return false;
+            return Err(Incomplete::TimedOut);
         }
         if !process
             .file_name()
@@ -155,7 +172,7 @@ fn for_each_process_path(
                 let mut line = Vec::new();
                 loop {
                     if Instant::now() > deadline {
-                        return false;
+                        return Err(Incomplete::TimedOut);
                     }
                     line.clear();
                     match maps.read_until(b'\n', &mut line) {
@@ -185,7 +202,7 @@ fn for_each_process_path(
         };
         for descriptor in descriptors.flatten() {
             if Instant::now() > deadline {
-                return false;
+                return Err(Incomplete::TimedOut);
             }
             match std::fs::read_link(descriptor.path()) {
                 Ok(file) => found(&file),
@@ -194,7 +211,10 @@ fn for_each_process_path(
         }
     }
     // The last process may have taken the walk past its limit.
-    Instant::now() <= deadline
+    if Instant::now() > deadline {
+        return Err(Incomplete::TimedOut);
+    }
+    Ok(())
 }
 
 /// Say why a process of this user could not be read, unless it simply exited
@@ -207,14 +227,14 @@ fn note_unreadable(process: &Path, entry: &str, error: &std::io::Error) {
     }
 }
 
-/// Call `found` with the executable of every process of this user. Returns
-/// false when `deadline` passed first, or the processes could not be listed.
+/// Call `found` with the executable of every process of this user, unless
+/// `deadline` passes first or the processes cannot be listed.
 #[cfg(target_os = "macos")]
 fn for_each_process_path(
     _proc_root: &Path,
     deadline: Instant,
     found: &mut dyn FnMut(&Path),
-) -> bool {
+) -> Result<(), Incomplete> {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
 
@@ -226,26 +246,23 @@ fn for_each_process_path(
     let uid = unsafe { libc::geteuid() };
     // SAFETY: a null buffer asks only for the size the list needs.
     let needed = unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, std::ptr::null_mut(), 0) };
-    let Ok(needed) = usize::try_from(needed) else {
-        return false;
-    };
+    let needed = usize::try_from(needed)
+        .map_err(|_| Incomplete::Unreadable(std::io::Error::last_os_error()))?;
     // Room for processes started between the two calls.
     let mut pids = vec![0 as libc::pid_t; needed / PID_SIZE + 64];
-    let Ok(capacity) = libc::c_int::try_from(pids.len() * PID_SIZE) else {
-        return false;
-    };
+    let capacity = libc::c_int::try_from(pids.len() * PID_SIZE)
+        .map_err(|_| Incomplete::Unreadable(std::io::Error::other("too many processes to list")))?;
     // SAFETY: `pids` is writable for `capacity` bytes, and the call writes no
     // more than that.
     let written =
         unsafe { libc::proc_listpids(PROC_UID_ONLY, uid, pids.as_mut_ptr().cast(), capacity) };
-    let Ok(written) = usize::try_from(written) else {
-        return false;
-    };
+    let written = usize::try_from(written)
+        .map_err(|_| Incomplete::Unreadable(std::io::Error::last_os_error()))?;
     pids.truncate(written / PID_SIZE);
     let mut buffer = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     for pid in pids {
         if Instant::now() > deadline {
-            return false;
+            return Err(Incomplete::TimedOut);
         }
         if pid <= 0 {
             continue;
@@ -260,7 +277,10 @@ fn for_each_process_path(
             found(Path::new(OsStr::from_bytes(&buffer[..length])));
         }
     }
-    Instant::now() <= deadline
+    if Instant::now() > deadline {
+        return Err(Incomplete::TimedOut);
+    }
+    Ok(())
 }
 
 /// Nothing to read: on Windows the rename collection moves a view aside with
@@ -270,8 +290,8 @@ fn for_each_process_path(
     _proc_root: &Path,
     _deadline: Instant,
     _found: &mut dyn FnMut(&Path),
-) -> bool {
-    true
+) -> Result<(), Incomplete> {
+    Ok(())
 }
 
 #[cfg(test)]
