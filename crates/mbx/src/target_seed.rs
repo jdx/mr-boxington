@@ -348,6 +348,9 @@ fn copy_unit(
         donor,
     };
     let copied = copy_tree(unit, &staging, &links).and_then(|()| {
+        #[cfg(unix)]
+        // The unit ends up at `build/<package>/<hash>` below the profile.
+        retarget_launchers(&staging, profile, 3)?;
         std::fs::create_dir_all(profile.join("build").join(package))?;
         std::fs::rename(&staging, &final_path)
     });
@@ -355,6 +358,117 @@ fn copy_unit(
         let _ = std::fs::remove_dir_all(&staging);
     }
     copied
+}
+
+/// The file in a profile directory that records where its profile was when
+/// the launchers were last written, so a moved target directory is noticed.
+#[cfg(unix)]
+pub(crate) const LAUNCHER_ROOT_MARKER: &str = ".mbx-launcher-root";
+
+/// Repair the launchers of every profile below `root`, whether it sits there
+/// directly (`debug`) or below a target triple (`<triple>/debug`). Profiles are
+/// found on disk rather than from the command line, since Cargo configuration
+/// can choose a target the arguments never name. Only a profile in `wanted`,
+/// relative to `root` and written by this build, is waited for. Another may be
+/// held by a Cargo that is waiting on this very build, as when a build script
+/// starts a build in the same workspace, so it is repaired only if it is free.
+#[cfg(unix)]
+pub(crate) fn repair_all_launchers(root: &Path, wanted: &[PathBuf]) {
+    let has_shims = |directory: &Path| directory.join(".mbx-build-script-shims").is_dir();
+    let repair = |profile: &Path| {
+        let wait = profile
+            .strip_prefix(root)
+            .is_ok_and(|relative| wanted.iter().any(|wanted| wanted == relative));
+        repair_launchers(profile, wait);
+    };
+    for child in subdirectories(root) {
+        if has_shims(&child) {
+            repair(&child);
+        }
+        for grandchild in subdirectories(&child) {
+            if has_shims(&grandchild) {
+                repair(&grandchild);
+            }
+        }
+    }
+}
+
+/// Where a profile is, spelled the same however it was reached: the checkout's
+/// `target` link and the managed directory it points at name one directory.
+#[cfg(unix)]
+pub(crate) fn launcher_root(profile: &Path) -> Option<Vec<u8>> {
+    let resolved = std::fs::canonicalize(profile)
+        .or_else(|_| std::path::absolute(profile))
+        .ok()?;
+    Some(resolved.as_os_str().as_encoded_bytes().to_vec())
+}
+
+/// Repair the build-script launchers of a profile whose target directory has
+/// moved since they were written, since each names the pinned mbx by absolute
+/// path and Cargo reruns a script without compiling it again. Costs one small
+/// read for a profile that has not moved.
+#[cfg(unix)]
+pub(crate) fn repair_launchers(profile: &Path, wait: bool) {
+    let shims = profile.join(".mbx-build-script-shims");
+    let Some(current) = launcher_root(profile) else {
+        return;
+    };
+    let current = current.as_slice();
+    let marker = profile.join(LAUNCHER_ROOT_MARKER);
+    if !shims.is_dir() || std::fs::read(&marker).is_ok_and(|recorded| recorded == current) {
+        return;
+    }
+    // Cargo holds this lock while it builds, and `install` replaces launchers
+    // with freshly compiled scripts under it. Rewriting launchers without it
+    // could overwrite a script another build has just compiled. Wait for it,
+    // as Cargo would: this build is about to wait for the same lock, and runs
+    // a launcher that still names the old path as soon as it has it. The lock
+    // is released on return, before Cargo asks for it.
+    let Ok(mut lock) = fslock::LockFile::open(&profile.join(".cargo-lock")) else {
+        return;
+    };
+    let locked = if wait {
+        lock.lock().is_ok()
+    } else {
+        lock.try_lock().unwrap_or(false)
+    };
+    if !locked {
+        return;
+    }
+    if std::fs::read(&marker).is_ok_and(|recorded| recorded == current) {
+        return;
+    }
+    match retarget_launchers(&profile.join("build"), profile, 1) {
+        Ok(()) => {
+            let _ = std::fs::write(&marker, current);
+        }
+        Err(error) => log::debug!(
+            "could not repair the build-script launchers in {}: {error}",
+            profile.display()
+        ),
+    }
+}
+
+/// Point the build-script launchers in a copied unit at the mbx pinned in the
+/// receiving profile, since a launcher names it by absolute path.
+#[cfg(unix)]
+fn retarget_launchers(directory: &Path, profile: &Path, depth: usize) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            retarget_launchers(&path, profile, depth + 1)?;
+        } else if kind.is_file()
+            && entry.file_name().to_str().is_some_and(|name| {
+                (name.starts_with("build-script-") || name.starts_with("build_script_"))
+                    && !name.ends_with(crate::session::BUILD_SCRIPT_REAL_SUFFIX)
+            })
+        {
+            crate::build_script::retarget_launcher(&path, profile, depth + 1)?;
+        }
+    }
+    Ok(())
 }
 
 /// A path into the donor's target directory in a build script's recorded

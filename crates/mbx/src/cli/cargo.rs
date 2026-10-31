@@ -412,9 +412,7 @@ fn cargo_with_settings_bypass_log_and_roots(
             ByteSize::b(bytes).display().iec()
         ));
     }
-    if config.target.seed
-        && let Some(view) = placement.directory.as_deref()
-    {
+    if let Some(view) = placement.directory.as_deref() {
         // A check lane and the editor's checks keep profiles of their own below
         // the managed target, so they start from the same lane in another
         // checkout rather than from its build profiles.
@@ -435,14 +433,23 @@ fn cargo_with_settings_bypass_log_and_roots(
         } else {
             view.to_path_buf()
         };
-        seed_target_view(
-            config,
-            &cargo,
-            &roots.workspace_root,
-            &view,
-            lane,
-            arguments,
+        // Launchers name their pinned mbx by absolute path, so a profile that
+        // has moved needs them rewritten whether or not it is also seeded.
+        #[cfg(unix)]
+        crate::target_seed::repair_all_launchers(
+            &view.join(lane),
+            &crate::target_seed::profile_directories(arguments),
         );
+        if config.target.seed {
+            seed_target_view(
+                config,
+                &cargo,
+                &roots.workspace_root,
+                &view,
+                lane,
+                arguments,
+            );
+        }
     }
     if placement.directory.is_none() {
         // Placement declined, but an earlier one may have left a link this
