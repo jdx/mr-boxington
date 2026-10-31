@@ -142,46 +142,69 @@ fn for_each_process_path(
         if !std::fs::metadata(&process).is_ok_and(|metadata| metadata.uid() == uid) {
             continue;
         }
-        if let Ok(executable) = std::fs::read_link(process.join("exe")) {
-            found(&executable);
+        match std::fs::read_link(process.join("exe")) {
+            Ok(executable) => found(&executable),
+            Err(error) => note_unreadable(&process, "exe", &error),
         }
-        if let Ok(maps) = std::fs::File::open(process.join("maps")) {
-            // Read a line at a time: the kernel produces the file as it is
-            // read, so a process with many mappings costs time here, and the
-            // deadline has to be able to stop it partway.
-            let mut maps = BufReader::new(maps);
-            let mut line = Vec::new();
-            loop {
-                if Instant::now() > deadline {
-                    return false;
-                }
-                line.clear();
-                match maps.read_until(b'\n', &mut line) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
-                }
-                // `address perms offset dev inode path`: only the path holds
-                // a slash, and anonymous mappings have none.
-                if let Some(start) = line.iter().position(|byte| *byte == b'/') {
-                    let path = line[start..].strip_suffix(b"\n").unwrap_or(&line[start..]);
-                    found(Path::new(OsStr::from_bytes(path)));
+        match std::fs::File::open(process.join("maps")) {
+            Ok(maps) => {
+                // Read a line at a time: the kernel produces the file as it
+                // is read, so a process with many mappings costs time here,
+                // and the deadline has to be able to stop it partway.
+                let mut maps = BufReader::new(maps);
+                let mut line = Vec::new();
+                loop {
+                    if Instant::now() > deadline {
+                        return false;
+                    }
+                    line.clear();
+                    match maps.read_until(b'\n', &mut line) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(error) => {
+                            note_unreadable(&process, "maps", &error);
+                            break;
+                        }
+                    }
+                    // `address perms offset dev inode path`: only the path
+                    // holds a slash, and anonymous mappings have none.
+                    if let Some(start) = line.iter().position(|byte| *byte == b'/') {
+                        let path = line[start..].strip_suffix(b"\n").unwrap_or(&line[start..]);
+                        found(Path::new(OsStr::from_bytes(path)));
+                    }
                 }
             }
+            Err(error) => note_unreadable(&process, "maps", &error),
         }
-        let Ok(descriptors) = std::fs::read_dir(process.join("fd")) else {
-            continue;
+        let descriptors = match std::fs::read_dir(process.join("fd")) {
+            Ok(descriptors) => descriptors,
+            Err(error) => {
+                note_unreadable(&process, "fd", &error);
+                continue;
+            }
         };
         for descriptor in descriptors.flatten() {
             if Instant::now() > deadline {
                 return false;
             }
-            if let Ok(file) = std::fs::read_link(descriptor.path()) {
-                found(&file);
+            match std::fs::read_link(descriptor.path()) {
+                Ok(file) => found(&file),
+                Err(error) => note_unreadable(&process, "fd", &error),
             }
         }
     }
     // The last process may have taken the walk past its limit.
     Instant::now() <= deadline
+}
+
+/// Say why a process of this user could not be read, unless it simply exited
+/// mid-walk. A security policy refusing the read leaves that process's views
+/// unprotected, and this is the only trace of it.
+#[cfg(target_os = "linux")]
+fn note_unreadable(process: &Path, entry: &str, error: &std::io::Error) {
+    if error.kind() != std::io::ErrorKind::NotFound && error.raw_os_error() != Some(libc::ESRCH) {
+        log::debug!("could not read {}/{entry}: {error}", process.display());
+    }
 }
 
 /// Call `found` with the executable of every process of this user. Returns
