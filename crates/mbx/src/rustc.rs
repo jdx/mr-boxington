@@ -3045,7 +3045,19 @@ fn base_action_context(
 /// accepted, and how diagnostics describe them. Cargo sets it for every
 /// standard library unit under `-Zbuild-std`, alongside
 /// `-Zforce-unstable-if-unmarked`.
-const COMPILER_ENVIRONMENT: [&str; 1] = ["RUSTC_BOOTSTRAP"];
+///
+/// The Apple deployment targets are read while rustc resolves the target spec
+/// and set the minimum OS version stamped into every object it emits, so an
+/// artifact built for one target must not answer for another. The C compiler
+/// cache keys the same variables.
+const COMPILER_ENVIRONMENT: [&str; 6] = [
+    "IPHONEOS_DEPLOYMENT_TARGET",
+    "MACOSX_DEPLOYMENT_TARGET",
+    "RUSTC_BOOTSTRAP",
+    "TVOS_DEPLOYMENT_TARGET",
+    "WATCHOS_DEPLOYMENT_TARGET",
+    "XROS_DEPLOYMENT_TARGET",
+];
 
 /// The [`COMPILER_ENVIRONMENT`] values this compilation runs with.
 ///
