@@ -920,7 +920,9 @@ fn recalled_cargo_roots(
     Ok(roots)
 }
 
-const PROBE_RECORD_VERSION: u8 = 2;
+/// Version 3 stopped remembering probes whose pins were taken within a
+/// timestamp tick of a write; records from before may rest on such pins.
+const PROBE_RECORD_VERSION: u8 = 3;
 
 /// Everything a probe's answer was a function of, and the answer.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -932,6 +934,9 @@ struct ProbeRecord {
     pins: Vec<Pin>,
     #[serde(skip)]
     path: PathBuf,
+    /// When the pins were taken, against which a recent write is judged.
+    #[serde(skip)]
+    observed_at: Option<SystemTime>,
     workspace_root: PathBuf,
     target_dir: PathBuf,
     build_dir: Option<PathBuf>,
@@ -981,7 +986,37 @@ impl Pin {
     fn holds(&self) -> bool {
         Pin::describe(self.path.clone()).as_ref() == Some(self)
     }
+
+    /// Whether the file was written so shortly before `observed_at` that a
+    /// second write could still land in the same timestamp tick, keeping its
+    /// length and modification time while changing what Cargo reads. A
+    /// modification time after `observed_at` counts as recent too. An absent
+    /// file is never racy: creating it changes the pin.
+    fn is_racy(&self, observed_at: SystemTime) -> bool {
+        let Some((_, seconds, nanos)) = self.state else {
+            return false;
+        };
+        let window = if nanos == 0 {
+            COARSE_TIMESTAMP_RACE_WINDOW
+        } else {
+            FINE_TIMESTAMP_RACE_WINDOW
+        };
+        let modified = SystemTime::UNIX_EPOCH + std::time::Duration::new(seconds, nanos);
+        observed_at
+            .duration_since(modified)
+            .map_or(true, |age| age < window)
+    }
 }
+
+/// Timestamp tick of a filesystem that keeps sub-second times: Linux stamps
+/// files from a clock that advances once per scheduler tick, at most 10 ms,
+/// and Windows from its 15.6 ms timer tick, both inside this window. Matches
+/// the window `mbx-cache-core` applies to file digests.
+const FINE_TIMESTAMP_RACE_WINDOW: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Timestamp tick of a filesystem that keeps whole seconds (ext3, HFS+) or two
+/// (FAT).
+const COARSE_TIMESTAMP_RACE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl ProbeRecord {
     /// Describe the probe about to run, or nothing when some input cannot be
@@ -1055,6 +1090,7 @@ impl ProbeRecord {
         {
             return None;
         }
+        let observed_at = SystemTime::now();
         let pins = watched
             .into_iter()
             .map(Pin::describe)
@@ -1069,6 +1105,7 @@ impl ProbeRecord {
             key,
             pins,
             path,
+            observed_at: Some(observed_at),
             workspace_root: PathBuf::new(),
             target_dir: PathBuf::new(),
             build_dir: None,
@@ -1101,6 +1138,15 @@ impl ProbeRecord {
                 return;
             };
             self.pins.push(pin);
+        }
+        // A pin taken within a timestamp tick of the file's last write cannot
+        // show a second write in that tick that kept the length, so a record
+        // resting on it could keep answering for a file Cargo no longer reads.
+        // The answer is still used; it just is not remembered.
+        if let Some(observed_at) = self.observed_at
+            && self.pins.iter().any(|pin| pin.is_racy(observed_at))
+        {
+            return;
         }
         self.workspace_root = roots.0.clone();
         self.target_dir = roots.1.clone();
@@ -1894,6 +1940,26 @@ mod tests {
             .count()
     }
 
+    /// Wait out the timestamp tick of the files just written, so a probe
+    /// taken next is old enough to be remembered. The fixtures live in the
+    /// temporary directory, so a file written there shows which window a
+    /// pin taken from them falls under.
+    fn settle() {
+        let probe = tempfile::NamedTempFile::new().unwrap();
+        let coarse = probe
+            .as_file()
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .is_none_or(|since| since.subsec_nanos() == 0);
+        std::thread::sleep(if coarse {
+            COARSE_TIMESTAMP_RACE_WINDOW + FINE_TIMESTAMP_RACE_WINDOW
+        } else {
+            FINE_TIMESTAMP_RACE_WINDOW * 2
+        });
+    }
+
     /// A stand-in Cargo that, like the real one for `metadata`, refuses the
     /// unstable `-Z` and `-C` flags it was not told to expect.
     #[cfg(unix)]
@@ -1992,6 +2058,7 @@ mod tests {
             )
             .unwrap()
         };
+        settle();
         describe().remember(&roots);
         assert_eq!(describe().recall(), Some(roots.clone()));
         let old_cargo =
@@ -2052,6 +2119,7 @@ mod tests {
             .unwrap()
         };
         let build = ["build".to_string()];
+        settle();
 
         // What Cargo reported is what resolution carries.
         let first = resolve(&build);
@@ -2110,6 +2178,7 @@ mod tests {
             )
             .unwrap()
         };
+        settle();
 
         let first = resolve(None);
         assert_eq!(first.workspace_root, root);
@@ -2124,6 +2193,7 @@ mod tests {
             "[package]\nname = \"fixture\"\nversion = \"0.2.0\"\nedition = \"2021\"\n",
         )
         .unwrap();
+        settle();
         assert_eq!(resolve(None), first);
         assert_eq!(probes(&log), 2);
         assert_eq!(resolve(None), first);
@@ -2132,6 +2202,7 @@ mod tests {
         // So does a configuration file appearing where Cargo would look.
         std::fs::create_dir_all(root.join(".cargo")).unwrap();
         std::fs::write(root.join(".cargo/config.toml"), "[build]\njobs = 2\n").unwrap();
+        settle();
         assert_eq!(resolve(None), first);
         assert_eq!(probes(&log), 3);
 
@@ -2177,6 +2248,7 @@ mod tests {
             "include = \"other.toml\"\n",
         )
         .unwrap();
+        settle();
         assert_eq!(resolve(None).workspace_root, first.workspace_root);
         assert_eq!(resolve(None).workspace_root, first.workspace_root);
         assert_eq!(probes(&log), 8);
@@ -2207,19 +2279,121 @@ mod tests {
             )
             .unwrap()
         };
+        settle();
 
         let first = resolve();
         assert_eq!(resolve(), first);
         assert_eq!(probes(&log), 1);
         // The file is watched like any other configuration.
         std::fs::write(&extra, "[build]\njobs = 3\n").unwrap();
+        settle();
+        assert_eq!(resolve(), first);
         assert_eq!(resolve(), first);
         assert_eq!(probes(&log), 2);
         // Until it includes something that cannot be.
         std::fs::write(&extra, "include = \"more.toml\"\n").unwrap();
+        settle();
         resolve();
         resolve();
         assert_eq!(probes(&log), 4);
+    }
+
+    /// A second write in the timestamp tick of the first keeps the file's
+    /// length and modification time, so nothing a pin records can show it.
+    /// The record must not be left behind in the first place. The test
+    /// stands for that second write by putting the first one's time back.
+    #[test]
+    #[cfg(unix)]
+    fn a_probe_taken_within_a_timestamp_tick_of_a_write_is_not_remembered() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = cargo_fixture();
+        let root = directory.path();
+        let cache = tempfile::tempdir().unwrap();
+        let log = root.join("cargo.log");
+        let extra = root.join("extra.toml");
+        // A stand-in Cargo whose target directory is the one the file names,
+        // so a record that outlived an edit reports the old directory.
+        let cargo = root.join("cargo");
+        std::fs::write(
+            &cargo,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\ncase \" $* \" in *' metadata '*) target=$(sed -n 's/^target-dir = \"\\(.*\\)\"$/\\1/p' {extra}); printf '{{\"workspace_root\":\"{root}\",\"target_directory\":\"%s\",\"packages\":[]}}' \"$target\";; esac\n",
+                log = log.display(),
+                extra = extra.display(),
+                root = root.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = |target: &Path| format!("[build]\ntarget-dir = \"{}\"\n", target.display());
+        let (before, after) = (root.join("aaa"), root.join("bbb"));
+        let arguments = [
+            "build".to_string(),
+            "--config".to_string(),
+            extra.display().to_string(),
+        ];
+        let resolve = || {
+            resolve_reported_in(
+                Some(cache.path()),
+                cargo.as_os_str(),
+                &arguments,
+                root,
+                None,
+            )
+            .unwrap()
+            .target_dir
+        };
+        let stamp = |at: SystemTime| {
+            std::fs::File::options()
+                .write(true)
+                .open(&extra)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        };
+        // A modification time ahead of the clock is racy however slowly the
+        // test runs.
+        let ahead = SystemTime::now() + std::time::Duration::from_secs(3600);
+        settle();
+
+        std::fs::write(&extra, config(&before)).unwrap();
+        stamp(ahead);
+        assert_eq!(resolve(), before);
+        std::fs::write(&extra, config(&after)).unwrap();
+        stamp(ahead);
+        assert_eq!(resolve(), after);
+        assert_eq!(probes(&log), 2);
+
+        // Once the write is older than a tick, the probe is remembered.
+        stamp(SystemTime::now() - std::time::Duration::from_secs(3600));
+        assert_eq!(resolve(), after);
+        assert_eq!(resolve(), after);
+        assert_eq!(probes(&log), 3);
+    }
+
+    #[test]
+    fn a_pin_is_racy_within_its_filesystems_timestamp_tick() {
+        let at = |seconds, nanos| SystemTime::UNIX_EPOCH + std::time::Duration::new(seconds, nanos);
+        let pin = |seconds, nanos| Pin {
+            path: PathBuf::new(),
+            state: Some((0, seconds, nanos)),
+        };
+        let now = at(1_000, 500_000_000);
+        assert!(pin(1_000, 495_000_000).is_racy(now));
+        assert!(!pin(1_000, 470_000_000).is_racy(now));
+        // A modification time after the observation is racy too.
+        assert!(pin(1_000, 600_000_000).is_racy(now));
+        // Whole-second times leave a whole tick of doubt.
+        assert!(pin(999, 0).is_racy(now));
+        assert!(!pin(998, 0).is_racy(now));
+        // An absent file has no timestamp to share.
+        assert!(
+            !Pin {
+                path: PathBuf::new(),
+                state: None,
+            }
+            .is_racy(now)
+        );
     }
 
     #[test]
