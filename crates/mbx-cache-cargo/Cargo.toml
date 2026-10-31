@@ -1,6 +1,6 @@
 [package]
 name = "mbx-cache-cargo"
-version = "0.3.19"
+version = "0.3.20"
 description = "Unstable Cargo invocation integration for mbx cache embedders"
 edition.workspace = true
 rust-version.workspace = true

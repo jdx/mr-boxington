@@ -1443,7 +1443,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "mbx"
-version = "1.29.0"
+version = "1.29.1"
 dependencies = [
  "bytesize",
  "cargo-config2",
@@ -1490,7 +1490,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-cargo"
-version = "0.3.19"
+version = "0.3.20"
 dependencies = [
  "dirs",
  "log",
@@ -1574,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-store"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "eyre",
  "filetime",
