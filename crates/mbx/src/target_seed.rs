@@ -349,7 +349,8 @@ fn copy_unit(
     };
     let copied = copy_tree(unit, &staging, &links).and_then(|()| {
         #[cfg(unix)]
-        retarget_launchers(&staging, profile)?;
+        // The unit ends up at `build/<package>/<hash>` below the profile.
+        retarget_launchers(&staging, profile, 3)?;
         std::fs::create_dir_all(profile.join("build").join(package))?;
         std::fs::rename(&staging, &final_path)
     });
@@ -362,20 +363,20 @@ fn copy_unit(
 /// Point the build-script launchers in a copied unit at the mbx pinned in the
 /// receiving profile, since a launcher names it by absolute path.
 #[cfg(unix)]
-fn retarget_launchers(directory: &Path, profile: &Path) -> std::io::Result<()> {
+fn retarget_launchers(directory: &Path, profile: &Path, depth: usize) -> std::io::Result<()> {
     for entry in std::fs::read_dir(directory)? {
         let entry = entry?;
         let path = entry.path();
         let kind = entry.file_type()?;
         if kind.is_dir() {
-            retarget_launchers(&path, profile)?;
+            retarget_launchers(&path, profile, depth + 1)?;
         } else if kind.is_file()
             && entry.file_name().to_str().is_some_and(|name| {
                 (name.starts_with("build-script-") || name.starts_with("build_script_"))
                     && !name.ends_with(crate::session::BUILD_SCRIPT_REAL_SUFFIX)
             })
         {
-            crate::build_script::retarget_launcher(&path, profile)?;
+            crate::build_script::retarget_launcher(&path, profile, depth + 1)?;
         }
     }
     Ok(())

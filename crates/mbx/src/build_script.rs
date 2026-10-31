@@ -177,17 +177,22 @@ fn install_launcher(mbx: &Path, executable: &Path) -> std::io::Result<()> {
     // `DEP_TAURI_CORE:PATH__...`, to the build script. The kernel hands the
     // interpreter the script's path as its first argument, which is how the
     // shim learns which build script it stands in for.
-    let launcher = match absolute_shebang(&profile.join(&relative)) {
-        Some(shebang) => shebang,
-        None => format!(
-            "#!/bin/sh\n{}=\"$0\" exec \"$(dirname \"$0\")/{}{}\" \"$@\"\n",
-            session::BUILD_SCRIPT_SHIM_PATH_ENV,
-            "../".repeat(depth - 1),
-            relative.to_string_lossy(),
-        ),
-    };
+    let launcher = absolute_shebang(&profile.join(&relative))
+        .unwrap_or_else(|| shell_launcher(&relative, depth));
     std::fs::write(executable, launcher)?;
     std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755))
+}
+
+/// The launcher for a path no shebang can name: a shell script that reaches the
+/// pinned binary by a path relative to itself, `depth` levels below the profile.
+#[cfg(unix)]
+fn shell_launcher(relative: &Path, depth: usize) -> String {
+    format!(
+        "#!/bin/sh\n{}=\"$0\" exec \"$(dirname \"$0\")/{}{}\" \"$@\"\n",
+        session::BUILD_SCRIPT_SHIM_PATH_ENV,
+        "../".repeat(depth - 1),
+        relative.to_string_lossy(),
+    )
 }
 
 /// The longest shebang line Linux has historically accepted, `#!` included.
@@ -208,13 +213,18 @@ fn absolute_shebang(interpreter: &Path) -> Option<String> {
 }
 
 /// Point a launcher copied from another target directory at the mbx pinned in
-/// `profile`. A launcher that is not a direct shebang one is left alone, since
-/// its relative path already resolves in the copy.
+/// `profile`, which the launcher sits `depth` levels below. A launcher that is
+/// not a direct shebang one is left alone, since its relative path already
+/// resolves in the copy.
 ///
 /// The launcher is replaced rather than edited, because the copy may share its
 /// inode with the donor's.
 #[cfg(unix)]
-pub(crate) fn retarget_launcher(launcher: &Path, profile: &Path) -> std::io::Result<()> {
+pub(crate) fn retarget_launcher(
+    launcher: &Path,
+    profile: &Path,
+    depth: usize,
+) -> std::io::Result<()> {
     const MARKER: &str = "/.mbx-build-script-shims/";
     let metadata = std::fs::metadata(launcher)?;
     if metadata.len() > 4096 {
@@ -235,12 +245,14 @@ pub(crate) fn retarget_launcher(launcher: &Path, profile: &Path) -> std::io::Res
     let interpreter = std::path::absolute(profile)?
         .join(".mbx-build-script-shims")
         .join(rest.trim_end());
-    let Some(shebang) = absolute_shebang(&interpreter) else {
-        return Err(std::io::Error::other(format!(
-            "a launcher for {} would not fit in a shebang",
-            interpreter.display()
-        )));
-    };
+    // The receiving profile's path may be too long for a shebang even though
+    // the donor's was not, so fall back to the relative shell launcher.
+    let shebang = absolute_shebang(&interpreter).unwrap_or_else(|| {
+        shell_launcher(
+            &Path::new(".mbx-build-script-shims").join(rest.trim_end()),
+            depth,
+        )
+    });
     let modified = metadata.modified()?;
     let temporary = tempfile::NamedTempFile::new_in(launcher.parent().unwrap_or(profile))?;
     std::fs::write(temporary.path(), shebang)?;
@@ -2096,7 +2108,7 @@ mod tests {
         filetime::set_file_mtime(&launcher, filetime::FileTime::from_system_time(modified))
             .unwrap();
 
-        retarget_launcher(&launcher, &receiver).unwrap();
+        retarget_launcher(&launcher, &receiver, 3).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&launcher).unwrap(),
@@ -2108,6 +2120,28 @@ mod tests {
         assert_eq!(
             std::fs::metadata(&launcher).unwrap().modified().unwrap(),
             modified
+        );
+
+        // A receiving path too long for a shebang gets the relative launcher.
+        let long = directory
+            .path()
+            .join("a".repeat(SHEBANG_LIMIT))
+            .join("debug");
+        let launcher = long.join("build/fixture/hash/out/build_script_build");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::write(
+            &launcher,
+            format!("#!{}/.mbx-build-script-shims/0123/mbx\n", donor.display()),
+        )
+        .unwrap();
+
+        retarget_launcher(&launcher, &long, 5).unwrap();
+
+        let rewritten = std::fs::read_to_string(&launcher).unwrap();
+        assert!(rewritten.starts_with("#!/bin/sh\n"), "{rewritten}");
+        assert!(
+            rewritten.contains("/../../../../.mbx-build-script-shims/0123/mbx"),
+            "{rewritten}"
         );
     }
 
