@@ -170,6 +170,12 @@ fn install_launcher(mbx: &Path, executable: &Path) -> std::io::Result<()> {
         .join("mbx");
     let pinned = profile.join(&relative);
     install_pinned_binary(mbx, &pinned)?;
+    // Written on every install: rewriting a few bytes is cheaper than reading
+    // them first, and it keeps a moved profile's marker current.
+    let _ = std::fs::write(
+        profile.join(crate::target_seed::LAUNCHER_ROOT_MARKER),
+        std::path::absolute(profile)?.as_os_str().as_encoded_bytes(),
+    );
 
     // Name the pinned binary as the interpreter when the kernel can take it
     // from a shebang. A shell launcher drops every variable whose name is not
@@ -253,6 +259,9 @@ pub(crate) fn retarget_launcher(
             depth,
         )
     });
+    if shebang == content {
+        return Ok(());
+    }
     let modified = metadata.modified()?;
     let temporary = tempfile::NamedTempFile::new_in(launcher.parent().unwrap_or(profile))?;
     std::fs::write(temporary.path(), shebang)?;
@@ -2044,7 +2053,10 @@ mod tests {
                 "{unit} should pin mbx beside its profile"
             );
             let launcher = std::fs::read_to_string(&executable).unwrap();
-            let pinned = if let Some(path) = launcher.strip_prefix("#!") {
+            let pinned = if let Some(path) = launcher
+                .strip_prefix("#!")
+                .filter(|path| !path.starts_with("/bin/sh\n"))
+            {
                 PathBuf::from(path.trim_end())
             } else {
                 let relative = launcher
@@ -2064,7 +2076,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn build_script_launcher_runs_mbx_without_a_shell() {
-        let directory = tempfile::tempdir().unwrap();
+        // A short root with no whitespace, since a long or spaced `TMPDIR`
+        // correctly gets the shell launcher instead.
+        let directory = tempfile::Builder::new()
+            .prefix("m")
+            .tempdir_in("/tmp")
+            .unwrap();
         let executable = directory
             .path()
             .join("target/debug/build/fixture-0123456789abcdef/build-script-build");
@@ -2080,6 +2097,36 @@ mod tests {
             "launcher should name the pinned mbx directly: {launcher:?}"
         );
         assert!(launcher.len() <= SHEBANG_LIMIT + 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_moved_profile_gets_its_launchers_repaired() {
+        let directory = tempfile::Builder::new()
+            .prefix("m")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let old = directory.path().join("old/debug");
+        let new = directory.path().join("new/debug");
+        let executable = old.join("build/fixture/0123456789abcdef/out/build_script_build");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"compiled build script").unwrap();
+        install(&executable, &CacheDigest::blake3(b"action")).unwrap();
+
+        std::fs::create_dir_all(new.parent().unwrap()).unwrap();
+        std::fs::rename(&old, &new).unwrap();
+        crate::target_seed::repair_launchers(&new);
+
+        let launcher = std::fs::read_to_string(
+            new.join("build/fixture/0123456789abcdef/out/build_script_build"),
+        )
+        .unwrap();
+        let pinned = launcher.strip_prefix("#!").expect("a shebang launcher");
+        assert!(
+            Path::new(pinned.trim_end()).starts_with(&new)
+                && Path::new(pinned.trim_end()).is_file(),
+            "launcher should name the moved profile's pinned binary: {launcher:?}"
+        );
     }
 
     #[cfg(unix)]

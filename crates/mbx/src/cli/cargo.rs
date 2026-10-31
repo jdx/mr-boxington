@@ -892,6 +892,10 @@ fn seed_target_view(
     arguments: &[String],
 ) {
     let profiles = crate::target_seed::profile_directories(arguments);
+    #[cfg(unix)]
+    for profile in &profiles {
+        crate::target_seed::repair_launchers(&view.join(lane).join(profile));
+    }
     if profiles
         .iter()
         .all(|profile| view.join(lane).join(profile).join("build").exists())

@@ -360,6 +360,36 @@ fn copy_unit(
     copied
 }
 
+/// The file in a profile directory that records where its profile was when
+/// the launchers were last written, so a moved target directory is noticed.
+pub(crate) const LAUNCHER_ROOT_MARKER: &str = ".mbx-launcher-root";
+
+/// Repair the build-script launchers of a profile whose target directory has
+/// moved since they were written, since each names the pinned mbx by absolute
+/// path and Cargo reruns a script without compiling it again. Costs one small
+/// read for a profile that has not moved.
+#[cfg(unix)]
+pub(crate) fn repair_launchers(profile: &Path) {
+    let shims = profile.join(".mbx-build-script-shims");
+    let Ok(absolute) = std::path::absolute(profile) else {
+        return;
+    };
+    let marker = profile.join(LAUNCHER_ROOT_MARKER);
+    let current = absolute.as_os_str().as_encoded_bytes();
+    if !shims.is_dir() || std::fs::read(&marker).is_ok_and(|recorded| recorded == current) {
+        return;
+    }
+    match retarget_launchers(&profile.join("build"), profile, 1) {
+        Ok(()) => {
+            let _ = std::fs::write(&marker, current);
+        }
+        Err(error) => log::debug!(
+            "could not repair the build-script launchers in {}: {error}",
+            profile.display()
+        ),
+    }
+}
+
 /// Point the build-script launchers in a copied unit at the mbx pinned in the
 /// receiving profile, since a launcher names it by absolute path.
 #[cfg(unix)]
