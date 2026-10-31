@@ -114,3 +114,36 @@ fn unreadable_processes_are_skipped() {
 
     assert!(found.holds(&view));
 }
+
+/// A library mapped from a view, such as a proc-macro an editor's
+/// rust-analyzer loaded, marks it like an open file does. Lines without a
+/// path, and paths elsewhere, do not.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_mapped_file_marks_its_view() {
+    let (directory, root, view) = view_with_file();
+    let other = root.join("fedcba9876543210");
+    let process = directory.path().join("proc").join("7");
+    std::fs::create_dir_all(&process).unwrap();
+    let library = view.join("debug/deps/libmacro.so");
+    std::fs::write(
+        process.join("maps"),
+        format!(
+            "55d0c0000000-55d0c0001000 r--p 00000000 08:01 1 /usr/lib/libc.so.6\n\
+             7f0000000000-7f0000001000 rw-p 00000000 00:00 0 \n\
+             7f0000002000-7f0000003000 r-xp 00001000 08:01 2 {}\n\
+             7fff00000000-7fff00001000 rw-p 00000000 00:00 0 [stack]",
+            library.display()
+        ),
+    )
+    .unwrap();
+
+    let found = scan_by(
+        &directory.path().join("proc"),
+        &root,
+        Instant::now() + SCAN_LIMIT,
+    );
+
+    assert!(found.holds(&view));
+    assert!(!found.holds(&other));
+}

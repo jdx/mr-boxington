@@ -115,6 +115,7 @@ fn for_each_process_path(
     found: &mut dyn FnMut(&Path),
 ) -> bool {
     use std::ffi::OsStr;
+    use std::io::{BufRead, BufReader};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
 
@@ -144,12 +145,26 @@ fn for_each_process_path(
         if let Ok(executable) = std::fs::read_link(process.join("exe")) {
             found(&executable);
         }
-        if let Ok(maps) = std::fs::read(process.join("maps")) {
-            // `address perms offset dev inode path`: only the path holds a
-            // slash, and anonymous mappings have none.
-            for line in maps.split(|byte| *byte == b'\n') {
+        if let Ok(maps) = std::fs::File::open(process.join("maps")) {
+            // Read a line at a time: the kernel produces the file as it is
+            // read, so a process with many mappings costs time here, and the
+            // deadline has to be able to stop it partway.
+            let mut maps = BufReader::new(maps);
+            let mut line = Vec::new();
+            loop {
+                if Instant::now() > deadline {
+                    return false;
+                }
+                line.clear();
+                match maps.read_until(b'\n', &mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                // `address perms offset dev inode path`: only the path holds
+                // a slash, and anonymous mappings have none.
                 if let Some(start) = line.iter().position(|byte| *byte == b'/') {
-                    found(Path::new(OsStr::from_bytes(&line[start..])));
+                    let path = line[start..].strip_suffix(b"\n").unwrap_or(&line[start..]);
+                    found(Path::new(OsStr::from_bytes(path)));
                 }
             }
         }
@@ -165,7 +180,8 @@ fn for_each_process_path(
             }
         }
     }
-    true
+    // The last process may have taken the walk past its limit.
+    Instant::now() <= deadline
 }
 
 /// Call `found` with the executable of every process of this user. Returns
@@ -221,7 +237,7 @@ fn for_each_process_path(
             found(Path::new(OsStr::from_bytes(&buffer[..length])));
         }
     }
-    true
+    Instant::now() <= deadline
 }
 
 /// Nothing to read: on Windows the rename collection moves a view aside with
