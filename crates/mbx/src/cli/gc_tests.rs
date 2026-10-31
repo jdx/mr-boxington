@@ -1154,3 +1154,61 @@ fn a_short_disk_retries_targets_after_sparse_files_release_little_space() {
     );
     assert_eq!(collection.targets.unwrap().removed_views, 2);
 }
+
+/// A budget sweep keeps a target a program is using without a lease, and
+/// says so; a sweep on a short disk takes it anyway, in its first pass and in
+/// the low-disk rounds after it (jdx/mr-boxington#872).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_program_keeps_its_target_from_the_budget_but_not_from_a_short_disk() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = super::cargo_tests::managed_target_config(directory.path());
+    let view = low_disk_view(
+        &config,
+        directory.path(),
+        "busy",
+        1,
+        &[("artifact", 64)],
+        false,
+    );
+    let budget = RetentionSettings {
+        target_max_bytes: Some(0),
+        min_free: None,
+        ..always_short()
+    };
+    let _open = std::fs::File::open(view.join("artifact")).unwrap();
+
+    let report = prune_targets(&config, &budget, config.gc.max_bytes);
+
+    assert!(view.exists());
+    assert_eq!(report.freed_bytes, 0);
+    assert!(
+        report
+            .removals
+            .iter()
+            .any(|line| line == "kept 1 target directories in use by running commands"),
+        "{:?}",
+        report.removals
+    );
+
+    let report = prune_targets(&config, &always_short(), config.gc.max_bytes);
+    assert!(!view.exists(), "{:?}", report.removals);
+
+    let view = low_disk_view(
+        &config,
+        directory.path(),
+        "busy",
+        1,
+        &[("artifact", 64)],
+        false,
+    );
+    let _open = std::fs::File::open(view.join("artifact")).unwrap();
+    let mut collection = LowDiskCollection::default();
+    assert!(collect_low_disk_targets(
+        &config,
+        &always_short(),
+        u64::MAX,
+        &mut collection
+    ));
+    assert!(!view.exists());
+}

@@ -259,6 +259,7 @@ fn a_lease_taken_after_the_selection_is_kept() {
         None,
         Some(Duration::from_secs(10)),
         &Precedence::default(),
+        RunningPrograms::Spare,
         false,
         now_secs(),
         || {
@@ -303,6 +304,7 @@ fn a_command_arriving_during_the_removal_waits_and_finds_the_view_gone() {
         None,
         Some(Duration::from_secs(10)),
         &Precedence::default(),
+        RunningPrograms::Spare,
         false,
         now_secs(),
         || {},
@@ -633,6 +635,7 @@ fn a_command_waiting_on_the_removal_keeps_the_record_it_writes() {
         None,
         Some(Duration::from_secs(10)),
         &Precedence::default(),
+        RunningPrograms::Spare,
         false,
         now_secs(),
         || {},
@@ -1196,4 +1199,156 @@ fn dropping_a_lease_unlocks_descriptors_that_share_its_open_file() {
         "dropping the command's lease must unlock even while another descriptor lives"
     );
     drop(inherited);
+}
+
+/// Copy `sleep` into `view` and start it there, the way a benchmark harness
+/// runs `target/debug/app` with no mbx command around it: no lease, and no
+/// Cargo lock once the build is over.
+///
+/// The copy keeps its name, since `sleep` can be a multi-call binary that
+/// reads which tool it is from how it was invoked.
+#[cfg(target_os = "linux")]
+fn run_from_view(view: &Path) -> Program {
+    let sleep = ["/bin/sleep", "/usr/bin/sleep"]
+        .into_iter()
+        .map(Path::new)
+        .find(|path| path.exists())
+        .expect("a sleep binary to run");
+    let binary = view.join("debug/sleep");
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    std::fs::copy(sleep, &binary).unwrap();
+    // Not on the test's own output: `in_own_process` reads that to its end,
+    // which a program left running would hold open.
+    let child = Command::new(&binary)
+        .arg("600")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    Program(child)
+}
+
+/// A program started by [`run_from_view`], stopped when dropped, so a failed
+/// assertion does not leave it running.
+#[cfg(target_os = "linux")]
+struct Program(std::process::Child);
+
+#[cfg(target_os = "linux")]
+impl Program {
+    fn stop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Program {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// A budget collection with nothing else holding the view: the checkout is
+/// live and its record old, so only the budget selects it.
+#[cfg(target_os = "linux")]
+fn collect_to_nothing(root: &Path, programs: RunningPrograms) -> CollectionOutcome {
+    collect_by(root, Some(0), None, &Precedence::default(), programs, false).unwrap()
+}
+
+/// The original report: a harness ran `target/debug/<bin>` for a long time,
+/// a build elsewhere triggered collection, and every later run of the binary
+/// failed because its target directory was gone.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_program_running_from_a_view_keeps_it_from_a_budget() {
+    if !in_own_process(
+        module_path!(),
+        "a_program_running_from_a_view_keeps_it_from_a_budget",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let (workspace, view) = expired_view(directory.path(), &config, "project");
+    let (_idle_workspace, idle) = expired_view(directory.path(), &config, "idle");
+    let mut program = run_from_view(&view);
+
+    let preview = collect_by(
+        &config.target.root,
+        Some(0),
+        None,
+        &Precedence::default(),
+        RunningPrograms::Spare,
+        true,
+    )
+    .unwrap();
+    let outcome = collect_to_nothing(&config.target.root, RunningPrograms::Spare);
+
+    assert_eq!(preview.kept_active_views, 1, "{preview:?}");
+    assert_eq!(outcome.kept_active_views, 1, "{outcome:?}");
+    assert_eq!(outcome.removed_views, 1, "an unrelated view still goes");
+    assert!(!idle.exists());
+    assert!(view.join("debug/sleep").exists());
+    assert!(is_recorded(&config.target.root, &workspace));
+
+    program.stop();
+    let outcome = collect_to_nothing(&config.target.root, RunningPrograms::Spare);
+
+    assert_eq!(outcome.kept_active_views, 0, "{outcome:?}");
+    assert_eq!(outcome.removed_live_views, 1);
+    assert!(!view.exists());
+}
+
+/// A disk short of `gc.min_free_size` outranks a program run by hand, as it
+/// outranks a target built a moment ago: the view goes, and on Linux the
+/// program itself keeps running from the unlinked file.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_short_disk_collects_a_view_a_program_runs_from() {
+    if !in_own_process(
+        module_path!(),
+        "a_short_disk_collects_a_view_a_program_runs_from",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let (_workspace, view) = expired_view(directory.path(), &config, "project");
+    let mut program = run_from_view(&view);
+
+    let outcome = collect_to_nothing(&config.target.root, RunningPrograms::Ignore);
+
+    assert_eq!(outcome.kept_active_views, 0, "{outcome:?}");
+    assert_eq!(outcome.removed_live_views, 1);
+    assert!(!view.exists());
+    assert!(program.0.try_wait().unwrap().is_none(), "still running");
+}
+
+/// A program can use a view without running from it: a suite reading
+/// fixtures it built there, or a tool holding a log open. Open is enough.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_view_with_a_file_a_program_has_open_is_kept() {
+    if !in_own_process(
+        module_path!(),
+        "a_view_with_a_file_a_program_has_open_is_kept",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let (_workspace, view) = expired_view(directory.path(), &config, "project");
+    let open = std::fs::File::open(view.join("artifact")).unwrap();
+
+    let outcome = collect_to_nothing(&config.target.root, RunningPrograms::Spare);
+
+    assert_eq!(outcome.kept_active_views, 1, "{outcome:?}");
+    assert!(view.join("artifact").exists());
+
+    drop(open);
+    let outcome = collect_to_nothing(&config.target.root, RunningPrograms::Spare);
+
+    assert_eq!(outcome.removed_live_views, 1, "{outcome:?}");
+    assert!(!view.exists());
 }

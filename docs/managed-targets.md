@@ -317,14 +317,28 @@ Every command you run through mbx, such as `mbx test`, `mbx run`, or
 exit. Collection does not remove a directory while any command holds its lease.
 `mbx gc` and the next build's report list such directories as kept, for
 example `kept 1 target directories in use by running commands`. The lease ends
-when the mbx process exits or is killed, and the usual rules then apply. The
-lease does not protect:
+when the mbx process exits or is killed, and the usual rules then apply.
 
-- a binary you start directly from `target/` in a separate command, including
-  test binaries built earlier with `--no-run`
-- Cargo run through the `target` link without mbx, protected only while Cargo
-  holds its build lock
-- a child process that keeps running after only its mbx process was killed
+A program that takes no lease is protected by what it uses instead. This covers
+a binary you start directly from `target/`, such as `target/debug/app` in a
+benchmark loop or test binaries built earlier with `--no-run`, and a child
+process that keeps running after its mbx process was killed. Before removing
+target directories to meet a budget or an age limit, collection checks your
+own processes once. On Linux, it keeps a directory while any of them executes
+a file in it, maps one (a shared library, for example), or has one open. On
+macOS, only the executable a process runs is checked. Windows refuses to
+remove a directory that holds a running program or an open file, and
+collection counts that directory as in use. Such directories are reported with
+the leased ones as `kept N target directories in use by running commands`. If
+the check cannot finish within two seconds, that collection protects nothing
+this way.
+
+This protection does not apply while the disk is short of `gc.min_free_size`
+(see [When the disk runs low](#when-the-disk-runs-low)). On a short disk, only
+a lease or Cargo's build lock keeps a directory, so a program started by hand
+can lose its target directory. On Linux and macOS it keeps running, but it
+cannot be started again until the next build. Cargo run through the `target`
+link without mbx is protected while Cargo holds its build lock.
 
 Ctrl-C stops the whole process group, so it ends the command and its lease
 together.
@@ -472,7 +486,9 @@ private state and shared cache data regardless of the budgets:
 3. Shared cache objects on the cache disk, after collecting private state and
    managed targets stops removing anything.
 
-Running commands' state and explicitly kept targets stay. The shared action
+Running commands' state and explicitly kept targets stay. A program started
+directly from `target/` without mbx does not keep its target directory here.
+The shared action
 store can go below `gc.max_size` when the cache disk is short, because keeping the build machine usable takes
 precedence over retaining every shared result. If collection cannot free
 enough, mbx logs a warning and leaves the rest to you. The next build reports
