@@ -150,7 +150,7 @@ pub(super) fn run(
     let reserved_bytes = incremental
         .remaining_bytes
         .saturating_add(generated.remaining_bytes);
-    let target_budget = target_limit(
+    let (target_budget, running_programs) = target_limit(
         config,
         retention,
         store_reserve,
@@ -173,6 +173,7 @@ pub(super) fn run(
         target_budget,
         retention.target_max_age,
         &retention.target_precedence,
+        running_programs,
         dry_run,
     );
     let projected_target_bytes = match &pruned {
@@ -1182,7 +1183,7 @@ pub(super) fn prune_targets(
     }
     let incremental_bytes = incremental_bytes.saturating_add(generated.removed_bytes);
     let incremental_remaining = incremental_remaining.saturating_add(generated.remaining_bytes);
-    let target_budget = target_limit(
+    let (target_budget, running_programs) = target_limit(
         config,
         retention,
         store_reserve,
@@ -1194,6 +1195,7 @@ pub(super) fn prune_targets(
         target_budget,
         retention.target_max_age,
         &retention.target_precedence,
+        running_programs,
         false,
     ) {
         Ok(pruned) => {
@@ -1411,11 +1413,15 @@ pub(super) fn collect_low_disk_targets(
         return false;
     };
     let limit = usage.saturating_sub(shortfall);
+    // A short disk outranks a program running from a target, the same as it
+    // outranks a target built a moment ago (jdx/mr-boxington#872): only a
+    // lease or Cargo's lock keeps a view here.
     let outcome = match target::collect_by(
         &config.target.root,
         Some(limit),
         retention.target_max_age,
         &retention.target_precedence,
+        target::RunningPrograms::Ignore,
         false,
     ) {
         Ok(outcome) => outcome,
@@ -1688,21 +1694,27 @@ fn incremental_limit(
 /// would free is not credited either: removing a reflinked copy frees less
 /// than its logical size, by an amount nothing short of removing it can tell.
 /// The preview is the most a real run could remove.
+///
+/// Also says whether a program running from a target keeps it. Under the
+/// budget alone it does; once the target disk is short of `gc.min_free_size`
+/// it does not, as jdx/mr-boxington#872 settled for recently built targets:
+/// a full disk fails every build on it, while the program can be started
+/// again after a rebuild.
 fn target_limit(
     config: &Config,
     retention: &RetentionSettings,
     store_reserve: u64,
     incremental_reserve: u64,
     low: &mut Option<LowDisk>,
-) -> Option<u64> {
+) -> (Option<u64>, target::RunningPrograms) {
     let budget = target_budget(retention, store_reserve, incremental_reserve);
     let Some(disk) = low_disk(retention, &config.target.root) else {
-        return budget;
+        return (budget, target::RunningPrograms::Spare);
     };
     let usage = target::stats(&config.target.root).map_or(0, |stats| stats.bytes);
     let limit = relieve(budget, usage, disk.shortfall());
     low.get_or_insert(disk);
-    limit
+    (limit, target::RunningPrograms::Ignore)
 }
 
 /// Say when collection could not bring a disk back above its minimum.

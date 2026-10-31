@@ -47,6 +47,7 @@ pub(crate) mod stats;
 pub mod store;
 #[doc(hidden)]
 pub mod target;
+mod target_processes;
 mod target_seed;
 mod target_units;
 #[doc(hidden)]

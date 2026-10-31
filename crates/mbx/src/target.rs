@@ -33,7 +33,10 @@
 //! not yet locked it, and unlinking it then would let that command lock a file
 //! nobody else can find. Cargo's own `.cargo-lock` and the record refresh at
 //! placement still count as in use, for a build that runs Cargo directly
-//! through the `target` link and so takes no lease.
+//! through the `target` link and so takes no lease. A program started from
+//! `target/` by hand takes none either; a budget collection finds it by
+//! asking the operating system which processes run, map or hold open files
+//! inside a view (see [`crate::target_processes`]).
 
 use crate::config::Config;
 use crate::disk_usage::{Ledger, Removal};
@@ -1410,7 +1413,52 @@ pub(crate) fn collect(
     max_age: Option<Duration>,
     dry_run: bool,
 ) -> Result<CollectionOutcome> {
-    collect_by(root, max_bytes, max_age, &Precedence::default(), dry_run)
+    collect_by(
+        root,
+        max_bytes,
+        max_age,
+        &Precedence::default(),
+        RunningPrograms::Spare,
+        dry_run,
+    )
+}
+
+/// Whether collection leaves alone a view a running program is using, found
+/// by [`crate::target_processes`] rather than by a lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RunningPrograms {
+    /// Keep such a view, as a budget collection does.
+    Spare,
+    /// Treat it like any other. A disk short of `gc.min_free_size` outranks
+    /// a binary someone started from `target/` by hand: builds failing with
+    /// "No space left on device" is the worse outcome.
+    Ignore,
+}
+
+/// The process scan behind [`RunningPrograms::Spare`], taken the first time
+/// collection asks, so a collection with nothing to remove never walks the
+/// process table.
+struct Running<'a> {
+    root: &'a Path,
+    programs: RunningPrograms,
+    scanned: Option<crate::target_processes::InUse>,
+}
+
+impl Running<'_> {
+    fn holds(&mut self, directory: &Path) -> bool {
+        self.programs == RunningPrograms::Spare
+            && self
+                .scanned
+                .get_or_insert_with(|| crate::target_processes::scan(&views_root(self.root)))
+                .holds(directory)
+    }
+}
+
+/// Whether Windows refused to move a view aside because a program inside it is
+/// running or a file in it is open: the same answer as a view in use.
+fn refused_while_open(error: &std::io::Error) -> bool {
+    // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION.
+    cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32 | 33))
 }
 
 /// [`collect`], keeping the checkouts `precedence` keeps and taking the ones
@@ -1420,6 +1468,7 @@ pub(crate) fn collect_by(
     max_bytes: Option<u64>,
     max_age: Option<Duration>,
     precedence: &Precedence,
+    programs: RunningPrograms,
     dry_run: bool,
 ) -> Result<CollectionOutcome> {
     collect_with(
@@ -1427,6 +1476,7 @@ pub(crate) fn collect_by(
         max_bytes,
         max_age,
         precedence,
+        programs,
         dry_run,
         now_secs(),
         || {},
@@ -1447,6 +1497,7 @@ fn collect_with(
     max_bytes: Option<u64>,
     max_age: Option<Duration>,
     precedence: &Precedence,
+    programs: RunningPrograms,
     dry_run: bool,
     now: u64,
     before_removal: impl FnOnce(),
@@ -1454,6 +1505,11 @@ fn collect_with(
     mut after_removal: impl FnMut(),
 ) -> Result<CollectionOutcome> {
     let mut outcome = CollectionOutcome::default();
+    let mut running = Running {
+        root,
+        programs,
+        scanned: None,
+    };
     // One ledger for the sweep, so a file several views link is counted once,
     // and is freed only by removing the last of them.
     let mut ledger = Ledger::default();
@@ -1518,6 +1574,11 @@ fn collect_with(
             // A kept target keeps what it holds: one built for a bisect or a
             // release and left alone is exactly one whose units look unused.
             if !*live || *standing == Standing::Keep || expired(*updated, *standing) {
+                continue;
+            }
+            // A program run from `target/` by hand takes no lease, but its
+            // binary is a unit whose fingerprint looks as unused as any.
+            if running.holds(directory) {
                 continue;
             }
             // Cargo's lock ends with compilation, but a command can keep
@@ -1635,6 +1696,17 @@ fn collect_with(
         // checkout deleted and cloned again at the same path has the same
         // view, and the clone can start building it before its predecessor's
         // directory is gone.
+        //
+        // A program started from `target/` by hand takes no lease either, and
+        // once its build is over nothing else marks the view. The process
+        // scan finds it, kept the same as a lease would keep it, so a budget
+        // stays over until the program exits rather than costing another
+        // checkout its target. The scan is a snapshot: a program that starts
+        // after it can lose the view, as it could before.
+        if running.holds(&directory) {
+            outcome.kept_active_views += 1;
+            continue;
+        }
         let reservation = if dry_run {
             // Told, not taken: a real run would keep this view, and a preview
             // that listed it for removal would be wrong about it.
@@ -1719,6 +1791,14 @@ fn collect_with(
                     outcome.removed_stale_views += 1;
                 }
                 None
+            }
+            Err(error) if refused_while_open(&error) => {
+                log::debug!(
+                    "kept the target directory {}, which something is using: {error}",
+                    directory.display()
+                );
+                outcome.kept_active_views += 1;
+                continue;
             }
             Err(error) => {
                 log::warn!(

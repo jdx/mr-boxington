@@ -1153,6 +1153,7 @@ fn a_view_claimed_since_the_selection_is_kept() {
         None,
         Some(Duration::from_secs(10)),
         &Precedence::default(),
+        RunningPrograms::Spare,
         false,
         now_secs(),
         move || {
@@ -1205,6 +1206,7 @@ fn a_checkout_recreated_since_the_selection_is_kept() {
         None,
         None,
         &Precedence::default(),
+        RunningPrograms::Spare,
         false,
         now_secs(),
         move || {
@@ -1248,6 +1250,7 @@ fn a_view_refreshed_within_the_last_seconds_is_kept() {
         None,
         Some(Duration::ZERO),
         &Precedence::default(),
+        RunningPrograms::Spare,
         false,
         now,
         || {},
@@ -1285,6 +1288,7 @@ fn a_record_rewritten_during_the_removal_is_kept() {
         None,
         None,
         &Precedence::default(),
+        RunningPrograms::Spare,
         false,
         now_secs(),
         || {},
@@ -1381,7 +1385,15 @@ fn a_kept_most_recent_target_does_not_spare_an_older_one() {
 
     // Only the kept, most recent target fits: sparing `human` as well would
     // leave the budget unmet for nothing.
-    let outcome = collect_by(&config.target.root, Some(1), None, &precedence, false).unwrap();
+    let outcome = collect_by(
+        &config.target.root,
+        Some(1),
+        None,
+        &precedence,
+        RunningPrograms::Spare,
+        false,
+    )
+    .unwrap();
 
     assert_eq!(outcome.removed_views, 3);
     assert_eq!(outcome.remaining_bytes, 1);
@@ -1418,7 +1430,15 @@ fn over_budget_takes_evict_first_targets_before_older_ones_and_never_kept_ones()
     };
 
     // 31 bytes against 21: one 10-byte target has to go.
-    let outcome = collect_by(&config.target.root, Some(21), None, &precedence, false).unwrap();
+    let outcome = collect_by(
+        &config.target.root,
+        Some(21),
+        None,
+        &precedence,
+        RunningPrograms::Spare,
+        false,
+    )
+    .unwrap();
 
     assert_eq!(outcome.removed_views, 1);
     assert!(!agent.1.exists(), "evict-first goes before an older target");
@@ -1427,7 +1447,15 @@ fn over_budget_takes_evict_first_targets_before_older_ones_and_never_kept_ones()
     assert!(newest.1.exists());
 
     // Only the explicitly kept target survives a zero-byte budget.
-    let outcome = collect_by(&config.target.root, Some(0), None, &precedence, false).unwrap();
+    let outcome = collect_by(
+        &config.target.root,
+        Some(0),
+        None,
+        &precedence,
+        RunningPrograms::Spare,
+        false,
+    )
+    .unwrap();
     assert_eq!(outcome.removed_views, 2);
     assert!(!human.1.exists());
     assert!(kept.1.exists(), "a kept target is never collected for size");
@@ -1444,7 +1472,15 @@ fn the_most_recent_target_is_collected_when_it_is_evict_first() {
         ..Precedence::default()
     };
 
-    let outcome = collect_by(&config.target.root, Some(0), None, &precedence, false).unwrap();
+    let outcome = collect_by(
+        &config.target.root,
+        Some(0),
+        None,
+        &precedence,
+        RunningPrograms::Spare,
+        false,
+    )
+    .unwrap();
 
     assert_eq!(outcome.removed_views, 4);
     assert!(!agent.1.exists());
@@ -1469,6 +1505,7 @@ fn a_kept_target_outlives_its_age_but_not_its_checkout() {
         None,
         Some(Duration::from_secs(60)),
         &precedence,
+        RunningPrograms::Spare,
         false,
     )
     .unwrap();
@@ -1479,7 +1516,15 @@ fn a_kept_target_outlives_its_age_but_not_its_checkout() {
     assert!(!agent.1.exists() && !human.1.exists() && !newest.1.exists());
 
     std::fs::remove_dir_all(&kept.0).unwrap();
-    let outcome = collect_by(&config.target.root, None, None, &precedence, false).unwrap();
+    let outcome = collect_by(
+        &config.target.root,
+        None,
+        None,
+        &precedence,
+        RunningPrograms::Spare,
+        false,
+    )
+    .unwrap();
     assert_eq!(outcome.removed_stale_views, 1);
     assert!(!kept.1.exists(), "a checkout that is gone takes its target");
 }
@@ -1729,6 +1774,7 @@ fn a_file_written_after_the_measure_is_not_credited() {
         None,
         Some(Duration::from_secs(10)),
         &Precedence::default(),
+        RunningPrograms::Spare,
         false,
         now_secs(),
         || {},
