@@ -29,6 +29,13 @@ fn pool_at(dir: &Path, capacity: u64, bytes_per_permit: u64) -> Pool {
     pool
 }
 
+/// A low-priority pool with the same host independence as `pool_at`.
+fn low_pool_at(dir: &Path, capacity: u64) -> Pool {
+    let mut pool = pool_at(dir, capacity, 0);
+    pool.priority = SchedulerPriority::Low;
+    pool
+}
+
 fn calibrate_kind(pool: &Pool, kind: &str) {
     let mut ledger = read_ledger(&pool.ledger_path());
     for index in 0..10 {
@@ -290,8 +297,7 @@ fn a_demand_heavier_than_the_pool_runs_alone_rather_than_never() {
 #[test]
 fn low_priority_leaves_the_reserve_even_on_an_idle_pool() {
     let directory = tempfile::tempdir().unwrap();
-    let mut low = Pool::new(directory.path().to_path_buf(), 4, 0, SchedulerPriority::Low);
-    low.available_memory = || None;
+    let low = low_pool_at(directory.path(), 4);
     std::fs::write(directory.path().join(PRIORITY_WAIT_STAMP), b"").unwrap();
 
     // An idle pool is the ordinary state between two compilations, so it is
@@ -309,8 +315,7 @@ fn low_priority_leaves_the_reserve_even_on_an_idle_pool() {
 #[test]
 fn a_weight_the_reserve_would_never_admit_still_runs_alone() {
     let directory = tempfile::tempdir().unwrap();
-    let mut low = Pool::new(directory.path().to_path_buf(), 4, 0, SchedulerPriority::Low);
-    low.available_memory = || None;
+    let low = low_pool_at(directory.path(), 4);
     std::fs::write(directory.path().join(PRIORITY_WAIT_STAMP), b"").unwrap();
 
     // Four permits out of four never fits beside a reserve of one, and a
@@ -357,13 +362,7 @@ fn the_reserve_never_swallows_the_whole_pool() {
     // low-priority build could ever run would be the oversized-demand escape,
     // which hands it the whole machine at once. Yielding must not invert.
     for capacity in 1..=8 {
-        let mut low = Pool::new(
-            directory.path().to_path_buf(),
-            capacity,
-            0,
-            SchedulerPriority::Low,
-        );
-        low.available_memory = || None;
+        let low = low_pool_at(directory.path(), capacity);
         assert!(
             low.reserved() < capacity,
             "capacity {capacity} reserved all of itself"
@@ -413,8 +412,7 @@ fn the_memory_gate_defers_predicted_heavy_work() {
 fn low_priority_leaves_the_reserve_while_a_normal_build_waits() {
     let directory = tempfile::tempdir().unwrap();
     let normal = pool_at(directory.path(), 4, 0);
-    let mut low = Pool::new(directory.path().to_path_buf(), 4, 0, SchedulerPriority::Low);
-    low.available_memory = || None;
+    let low = low_pool_at(directory.path(), 4);
 
     let held = normal.try_admit(2, None).unwrap().expect("two permits");
     std::fs::write(directory.path().join(PRIORITY_WAIT_STAMP), b"").unwrap();
