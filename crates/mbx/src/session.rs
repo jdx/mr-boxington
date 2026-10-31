@@ -1404,9 +1404,36 @@ fn build_script_crate_name(path: &Path) -> Option<String> {
 }
 
 pub(crate) fn build_script_invocation_path() -> Option<PathBuf> {
-    std::env::var_os(BUILD_SCRIPT_SHIM_PATH_ENV)
-        .map(PathBuf::from)
-        .or_else(|| std::env::args_os().next().map(PathBuf::from))
+    build_script_launch().map(|(path, _)| path)
+}
+
+/// The arguments Cargo gave the build script, without the launcher's own.
+pub(crate) fn build_script_arguments() -> Vec<OsString> {
+    let skip = build_script_launch().map_or(1, |(_, skip)| skip);
+    std::env::args_os().skip(skip).collect()
+}
+
+/// The build-script path this process stands in for, and how many leading
+/// arguments the launch added before Cargo's own.
+///
+/// A shell launcher sets the path in the environment and execs mbx as itself.
+/// A direct launcher is a shebang naming the pinned mbx, which the kernel runs
+/// as `<pinned mbx> <launcher> <arguments>`.
+fn build_script_launch() -> Option<(PathBuf, usize)> {
+    if let Some(path) = std::env::var_os(BUILD_SCRIPT_SHIM_PATH_ENV) {
+        return Some((PathBuf::from(path), 1));
+    }
+    let mut arguments = std::env::args_os();
+    let program = PathBuf::from(arguments.next()?);
+    let pinned = program
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        == Some(OsStr::new(".mbx-build-script-shims"));
+    if pinned && let Some(launcher) = arguments.next() {
+        return Some((PathBuf::from(launcher), 2));
+    }
+    Some((program, 1))
 }
 
 pub(crate) fn build_script_real_path(executable: &Path) -> PathBuf {
