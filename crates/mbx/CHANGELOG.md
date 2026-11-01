@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.29.1](https://github.com/jdx/mr-boxington/compare/v1.29.0...v1.29.1) - 2026-10-31
+
+### Fixed
+
+- *(build-script)* keep non-identifier env vars when launching build scripts ([#888](https://github.com/jdx/mr-boxington/pull/888))
+- *(gc)* keep a target a running process uses ([#886](https://github.com/jdx/mr-boxington/pull/886))
+- *(cache)* keep Cargo-fresh actions in a grouped export after a workspace-state restore ([#873](https://github.com/jdx/mr-boxington/pull/873))
+
+### Other
+
+- *(storage)* compare statfs f_type without a cast Clippy rejects on musl ([#891](https://github.com/jdx/mr-boxington/pull/891))
+- *(scheduler)* keep low-priority fixtures independent of host CPU count ([#890](https://github.com/jdx/mr-boxington/pull/890))
+
 ## [1.29.0](https://github.com/jdx/mr-boxington/compare/v1.28.0...v1.29.0) - 2026-10-28
 
 ### Added

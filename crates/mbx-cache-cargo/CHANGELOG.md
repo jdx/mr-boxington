@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.20](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.3.19...mbx-cache-cargo-v0.3.20) - 2026-10-31
+
+### Fixed
+
+- *(cargo)* stop reusing a Cargo roots record after a same-tick config edit ([#881](https://github.com/jdx/mr-boxington/pull/881))
+- *(cargo)* let Windows CRLF checkouts inherit earlier lockfile predictions ([#870](https://github.com/jdx/mr-boxington/pull/870))
+
 ## [0.3.19](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.3.18...mbx-cache-cargo-v0.3.19) - 2026-10-28
 
 ### Fixed

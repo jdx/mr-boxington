@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.2.0...mbx-cache-store-v0.2.1) - 2026-10-31
+
+### Fixed
+
+- *(cache)* keep Cargo-fresh actions in a grouped export after a workspace-state restore ([#873](https://github.com/jdx/mr-boxington/pull/873))
+
 ## [0.2.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.1.44...mbx-cache-store-v0.2.0) - 2026-10-28
 
 ### Added
