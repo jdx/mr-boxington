@@ -306,6 +306,9 @@ impl DiscoveredInputs {
         started_at: SystemTime,
         before: &BTreeMap<PathBuf, FileSnapshot>,
     ) -> Result<(), BypassReason> {
+        // A metadata-only change keeps the result, so it must not hide a
+        // content change to a later input.
+        let mut metadata_changed = None;
         for input in &self.inputs {
             if let Some(previous) = before.get(&input.path)
                 && previous.proves_content_change()
@@ -322,6 +325,10 @@ impl DiscoveredInputs {
                     })?
                     .or_else(|| FileIdentity::describe(&input.path, &metadata));
                 if previous.matches(identity.as_ref(), &input.digest) {
+                    continue;
+                }
+                if previous.differs_only_in_change_token(identity.as_ref()) {
+                    metadata_changed.get_or_insert_with(|| input.path.clone());
                     continue;
                 }
                 return Err(BypassReason::InputModifiedDuringCompilation(
@@ -345,7 +352,9 @@ impl DiscoveredInputs {
                 ));
             }
         }
-        Ok(())
+        metadata_changed.map_or(Ok(()), |path| {
+            Err(BypassReason::InputMetadataChangedDuringCompilation(path))
+        })
     }
 
     /// Compatibility form for callers that captured metadata identities.
@@ -975,6 +984,75 @@ mod tests {
             invocation.discover_inputs(&dep_info, root),
             Err(BypassReason::InputRead { path, .. }) if path == external
         ));
+    }
+
+    /// macOS writes extended attributes to a file a second or two after an
+    /// app saves it, moving its change time alone. That must not discard a
+    /// compilation as if the source had changed: it leaves it uncached. It
+    /// must not hide a content change to another input either.
+    #[cfg(unix)]
+    #[test]
+    fn a_metadata_write_during_compilation_bypasses_without_discarding() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let library = directory.path().join("lib.rs");
+        let module = directory.path().join("module.rs");
+        std::fs::write(&library, "mod module;\n").unwrap();
+        std::fs::write(&module, "pub fn module() {}\n").unwrap();
+        let invocation = RustcInvocation::parse(&[
+            "--crate-name=widget".into(),
+            "--crate-type=lib".into(),
+            "--emit=dep-info,metadata".into(),
+            library.clone().into_os_string(),
+        ])
+        .unwrap();
+        let dep_info = RustcDepInfo::parse(&format!(
+            "output: {} {}\n",
+            library.display(),
+            module.display()
+        ))
+        .unwrap();
+        let identity = |path: &Path| {
+            FileIdentity::for_digest_cache(path, &std::fs::metadata(path).unwrap()).unwrap()
+        };
+        // Settled metadata snapshots, whatever the host's timestamp tick.
+        let Some(settled) = identity(&library).filter(|identity| identity.changed.is_some()) else {
+            return; // No change token on this filesystem.
+        };
+        let before = BTreeMap::from([
+            (library.clone(), FileSnapshot::from(settled.clone())),
+            (
+                module.clone(),
+                FileSnapshot::from(identity(&module).unwrap()),
+            ),
+        ]);
+
+        let mode = std::fs::metadata(&library).unwrap().permissions().mode();
+        std::fs::set_permissions(&library, std::fs::Permissions::from_mode(mode)).unwrap();
+        if identity(&library) == Some(settled) {
+            return; // The change time did not move within this tick.
+        }
+        let discovered = invocation
+            .discover_inputs(&dep_info, directory.path())
+            .unwrap();
+        assert_eq!(
+            discovered.verify_not_modified_since_with_snapshots(SystemTime::UNIX_EPOCH, &before),
+            Err(BypassReason::InputMetadataChangedDuringCompilation(
+                library.clone()
+            ))
+        );
+
+        // A rewrite of a different length is still a content change, even
+        // behind the earlier metadata-only one.
+        std::fs::write(&module, "pub fn module() { let _ = 1; }\n").unwrap();
+        let discovered = invocation
+            .discover_inputs(&dep_info, directory.path())
+            .unwrap();
+        assert_eq!(
+            discovered.verify_not_modified_since_with_snapshots(SystemTime::UNIX_EPOCH, &before),
+            Err(BypassReason::InputModifiedDuringCompilation(module))
+        );
     }
 
     #[test]
