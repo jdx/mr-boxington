@@ -322,6 +322,11 @@ pub enum BypassReason {
     /// An input's modification time overlaps the compiler execution.
     #[error("compiler input was modified during compilation: {0}")]
     InputModifiedDuringCompilation(PathBuf),
+    /// An input's metadata-change token moved while the compiler ran, but
+    /// not its length, modification time or file object: a metadata write
+    /// that does not prove new contents, so the result is kept uncached.
+    #[error("compiler input metadata changed during compilation: {0}")]
+    InputMetadataChangedDuringCompilation(PathBuf),
     /// Discovered inputs and the action use different working directories.
     #[error("discovered inputs were collected from a different working directory")]
     DiscoveryWorkingDirectory,

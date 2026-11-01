@@ -238,6 +238,26 @@ impl FileSnapshot {
         )
     }
 
+    /// Whether `identity` differs from this metadata snapshot in its change
+    /// token alone: same length, modification time and file object.
+    ///
+    /// The token also moves for writes that leave the bytes alone. macOS
+    /// records extended attributes (`com.apple.provenance`,
+    /// `com.apple.macl`) on a file a second or two after an app writes it,
+    /// long after the timestamp race window, so a source saved or checked
+    /// out just before a build changes its token mid-compile. Such a change
+    /// cannot prove new contents.
+    pub fn differs_only_in_change_token(&self, identity: Option<&FileIdentity>) -> bool {
+        self.content.is_none()
+            && identity.is_some_and(|after| {
+                after.changed != self.identity.changed
+                    && after.path == self.identity.path
+                    && after.len == self.identity.len
+                    && after.modified == self.identity.modified
+                    && after.object == self.identity.object
+            })
+    }
+
     /// Whether a mismatch proves the file's contents changed.
     pub fn proves_content_change(&self) -> bool {
         self.content.is_some() || self.identity.changed.is_some()

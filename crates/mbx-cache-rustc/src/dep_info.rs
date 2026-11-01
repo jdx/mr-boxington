@@ -324,6 +324,11 @@ impl DiscoveredInputs {
                 if previous.matches(identity.as_ref(), &input.digest) {
                     continue;
                 }
+                if previous.differs_only_in_change_token(identity.as_ref()) {
+                    return Err(BypassReason::InputMetadataChangedDuringCompilation(
+                        input.path.clone(),
+                    ));
+                }
                 return Err(BypassReason::InputModifiedDuringCompilation(
                     input.path.clone(),
                 ));
@@ -975,6 +980,57 @@ mod tests {
             invocation.discover_inputs(&dep_info, root),
             Err(BypassReason::InputRead { path, .. }) if path == external
         ));
+    }
+
+    /// macOS writes extended attributes to a file a second or two after an
+    /// app saves it, moving its change time alone. That must not discard a
+    /// compilation as if the source had changed: it leaves it uncached.
+    #[cfg(unix)]
+    #[test]
+    fn a_metadata_write_during_compilation_bypasses_without_discarding() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("lib.rs");
+        std::fs::write(&source, "pub fn library() {}\n").unwrap();
+        let invocation = RustcInvocation::parse(&[
+            "--crate-name=widget".into(),
+            "--crate-type=lib".into(),
+            "--emit=dep-info,metadata".into(),
+            source.clone().into_os_string(),
+        ])
+        .unwrap();
+        let dep_info = RustcDepInfo::parse(&format!("output: {}\n", source.display())).unwrap();
+        // Past the timestamp race window, so the snapshot is metadata alone.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let snapshot = FileSnapshot::capture(&source).unwrap().unwrap();
+        if !snapshot.proves_content_change() {
+            return; // No change token on this filesystem.
+        }
+        let before = BTreeMap::from([(source.clone(), snapshot)]);
+
+        let mode = std::fs::metadata(&source).unwrap().permissions().mode();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(mode)).unwrap();
+        let discovered = invocation
+            .discover_inputs(&dep_info, directory.path())
+            .unwrap();
+        let reason = discovered
+            .verify_not_modified_since_with_snapshots(SystemTime::UNIX_EPOCH, &before)
+            .unwrap_err();
+        assert_eq!(
+            reason,
+            BypassReason::InputMetadataChangedDuringCompilation(source.clone())
+        );
+
+        // A rewrite of a different length is still a content change.
+        std::fs::write(&source, "pub fn library() { let _ = 1; }\n").unwrap();
+        let discovered = invocation
+            .discover_inputs(&dep_info, directory.path())
+            .unwrap();
+        assert_eq!(
+            discovered.verify_not_modified_since_with_snapshots(SystemTime::UNIX_EPOCH, &before),
+            Err(BypassReason::InputModifiedDuringCompilation(source))
+        );
     }
 
     #[test]
