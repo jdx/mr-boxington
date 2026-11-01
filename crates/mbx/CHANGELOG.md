@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.29.2](https://github.com/jdx/mr-boxington/compare/v1.29.1...v1.29.2) - 2026-11-01
+
+### Other
+
+- update Cargo.lock dependencies
+
 ## [1.29.1](https://github.com/jdx/mr-boxington/compare/v1.29.0...v1.29.1) - 2026-10-31
 
 ### Fixed
