@@ -901,6 +901,23 @@ pub(crate) fn denormalize_output_text(bytes: &[u8], mappings: &[PathMapping]) ->
     text
 }
 
+/// [`denormalize_output_text`] for a line of JSON, where the path sits inside a
+/// string. The plain placeholder restores as the root escaped for JSON; the
+/// variants (`:escaped`, `:json`, `:slash`) were stored already in the form the
+/// string needs, so they restore as they are.
+pub(crate) fn denormalize_output_json(bytes: &[u8], mappings: &[PathMapping]) -> Vec<u8> {
+    let mut text = bytes.to_vec();
+    for (root, placeholder) in root_spellings(mappings) {
+        let root = if placeholder.contains(':') {
+            root
+        } else {
+            json_escaped(&root)
+        };
+        text = replace_bytes(&text, placeholder.as_bytes(), root.as_bytes());
+    }
+    text
+}
+
 pub(crate) fn json_escaped(text: &str) -> String {
     serde_json::to_string(text)
         .map(|quoted| quoted[1..quoted.len() - 1].to_owned())

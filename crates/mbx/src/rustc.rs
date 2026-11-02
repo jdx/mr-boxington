@@ -1,9 +1,9 @@
 use crate::materialize::{
     CachedCompilation, CachedOutput, Materialization, StagedOutputs, apply_file_mode,
-    denormalize_output_text, executable_mode_matches, exit_code, file_mode, find_blobs,
-    normalize_output_text, persist_outputs, read_canonical_blob, read_verified_blob,
-    record_action_hit_with_diagnostic, record_verification, replay_bytes, resolve_executable,
-    stage_verified_cached_output, staging_directory, validate_file_mode,
+    denormalize_output_json, denormalize_output_text, executable_mode_matches, exit_code,
+    file_mode, find_blobs, normalize_output_text, persist_outputs, read_canonical_blob,
+    read_verified_blob, record_action_hit_with_diagnostic, record_verification, replay_bytes,
+    resolve_executable, stage_verified_cached_output, staging_directory, validate_file_mode,
 };
 use crate::{incremental, session, util::workspace_root};
 use eyre::{Context, Result, bail};
@@ -1109,32 +1109,25 @@ fn forward_stream(source: impl Read, sink: impl Write) -> std::io::Result<Vec<u8
 /// `C:\work\target` or one containing a quote has to be escaped the way the
 /// string is, or the line stops parsing. Other lines are plain text.
 struct OutputPaths<'a> {
-    plain: &'a [PathMapping],
-    json: Vec<PathMapping>,
+    mappings: &'a [PathMapping],
 }
 
 impl<'a> OutputPaths<'a> {
-    fn new(plain: &'a [PathMapping]) -> Self {
-        let json = plain
-            .iter()
-            .filter_map(|mapping| {
-                let root = serde_json::to_string(mapping.root.to_str()?).ok()?;
-                let root = root.strip_prefix('"')?.strip_suffix('"')?;
-                Some(PathMapping::new(root, &mapping.placeholder))
-            })
-            .collect();
-        Self { plain, json }
+    fn new(mappings: &'a [PathMapping]) -> Self {
+        Self { mappings }
     }
 
     fn denormalize(&self, bytes: &[u8]) -> Vec<u8> {
-        if self.plain.is_empty() {
+        if self.mappings.is_empty() {
             return bytes.to_vec();
         }
         let mut text = Vec::with_capacity(bytes.len());
         for line in bytes.split_inclusive(|byte| *byte == b'\n') {
-            let json = line.trim_ascii_start().first() == Some(&b'{');
-            let mappings = if json { &self.json } else { self.plain };
-            text.extend(denormalize_output_text(line, mappings));
+            if line.trim_ascii_start().first() == Some(&b'{') {
+                text.extend(denormalize_output_json(line, self.mappings));
+            } else {
+                text.extend(denormalize_output_text(line, self.mappings));
+            }
         }
         text
     }

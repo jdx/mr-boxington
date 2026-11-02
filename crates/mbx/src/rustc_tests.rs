@@ -2737,3 +2737,33 @@ fn restored_json_diagnostics_escape_the_receiving_root() {
     assert_eq!(value["f"], "C:\\work\\a/src/lib.rs");
     assert_eq!(plain, " --> C:\\work\\a/src/lib.rs\n");
 }
+
+/// Store on one checkout and restore on another, both with roots JSON has to
+/// escape: the decoded path must be the receiving root, escaped exactly once.
+#[test]
+fn json_diagnostics_round_trip_between_escaping_roots() {
+    for (publishing, receiving) in [
+        ("/work/\"a\"", "/other/\"b\""),
+        ("C:\\work\\a", "D:\\other\\b"),
+        ("/work/a", "/other/\"b\""),
+        ("/work/\"a\"", "/other/b"),
+    ] {
+        let line = |root: &str| {
+            format!(
+                "{{\"f\":{}}}\n",
+                serde_json::to_string(&format!("{root}/src/lib.rs")).unwrap()
+            )
+        };
+        let stored = normalize_output_text(
+            line(publishing).as_bytes(),
+            &[PathMapping::new(publishing, "workspace")],
+        );
+        let restored =
+            OutputPaths::new(&[PathMapping::new(receiving, "workspace")]).denormalize(&stored);
+        assert_eq!(
+            String::from_utf8(restored).unwrap(),
+            line(receiving),
+            "{publishing} -> {receiving}"
+        );
+    }
+}
