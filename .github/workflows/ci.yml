@@ -53,7 +53,7 @@ jobs:
         run: mise run ci
         if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
       # On main the tests go through jouet so their timing is recorded. The
-      # `cost` job below pushes the timings, so this job needs no write token.
+      # `jouet-cost` job below pushes the timings, so this job needs no write token.
       # The other checks are the ones `mise run ci` depends on; `mise run test`
       # builds before it tests.
       - name: Run lint and documentation checks
@@ -71,19 +71,21 @@ jobs:
           JOUET_TEST_BASELINE: "off"
         run: |
           jouet test --display human --cmd -- mise run test
-          git bundle create "$RUNNER_TEMP/jouet-cost.bundle" refs/notes/jouet-cost
+          git bundle create "$RUNNER_TEMP/cost-${{ github.job }}-${{ strategy.job-index }}.bundle" refs/notes/jouet-cost || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         with:
-          name: jouet-cost
-          path: ${{ runner.temp }}/jouet-cost.bundle
+          name: jouet-cost-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/cost-${{ github.job }}-${{ strategy.job-index }}.bundle
+          if-no-files-found: ignore
 
   # Pushes the timings that the linux job recorded on main. It is its own job so
   # the jobs that run pull request code never hold a write token, and nothing
   # waits on it.
-  cost:
-    needs: linux
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.linux.result == 'success' }}
+  jouet-cost:
+    name: jouet-cost
+    needs: [linux]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -98,11 +100,15 @@ jobs:
           install_args: jouet
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: jouet-cost
-          path: ${{ runner.temp }}
-      - name: Push the timings
+          pattern: jouet-cost-*
+          merge-multiple: true
+          path: jouet-cost-bundles
+      - name: Merge and push the timings
         run: |
-          git fetch "$RUNNER_TEMP/jouet-cost.bundle" refs/notes/jouet-cost:refs/notes/jouet-cost
+          for b in jouet-cost-bundles/*.bundle; do
+            [ -e "$b" ] || continue
+            jouet cost fetch "./$b"
+          done
           jouet cost push
 
   test:
