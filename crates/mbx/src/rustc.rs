@@ -676,7 +676,12 @@ pub(crate) fn compile(
         wrapper_argument.is_none() && !invocation.crate_name().starts_with("build_script_");
     clear_bootstrap_dep_info(seed_mode, &outputs.dep_info)?;
     let mut output = crate::phase_timing::measure("compiler", || {
-        run_compiler(&mut command, forwarded && !held, eligible)
+        run_compiler(
+            &mut command,
+            forwarded && !held,
+            eligible,
+            &portable.mappings,
+        )
     })
     .wrap_err("failed to execute rustc")?;
     drop(response_file);
@@ -717,7 +722,7 @@ pub(crate) fn compile(
             IncrementalSeedMode::Disabled,
         )?;
         output = crate::phase_timing::measure("compiler", || {
-            run_compiler(&mut command, forwarded, eligible)
+            run_compiler(&mut command, forwarded, eligible, &portable.mappings)
         })
         .wrap_err("failed to execute rustc without bootstrap")?;
         drop(response_file);
@@ -1019,12 +1024,34 @@ pub(crate) fn compile(
 /// start before this compilation ends and its result is published. The bytes
 /// are still captured whole, because a cache entry stores them for replay on a
 /// hit and a verification run compares them.
-fn run_compiler(command: &mut Command, forward: bool, eligible: bool) -> std::io::Result<Output> {
+///
+/// The remapping flags mbx appends make rustc spell some paths as placeholders
+/// (`${out_dir}/gen.rs`). Cargo, and tools that read its diagnostics such as
+/// trybuild, need the real path, so `mappings` translate the compiler's output
+/// back before it is forwarded or returned. The cache normalizes it again when
+/// it stores a result.
+fn run_compiler(
+    command: &mut Command,
+    forward: bool,
+    eligible: bool,
+    mappings: &[PathMapping],
+) -> std::io::Result<Output> {
     if !forward {
-        return crate::supervision::output(command, eligible);
+        let mut output = crate::supervision::output(command, eligible)?;
+        if !mappings.is_empty() {
+            output.stdout = denormalize_output_text(&output.stdout, mappings);
+            output.stderr = denormalize_output_text(&output.stderr, mappings);
+        }
+        return Ok(output);
     }
     let action = crate::supervision::prepare(command, eligible);
-    run_compiler_forwarding(command, std::io::stdout(), std::io::stderr(), action)
+    run_compiler_forwarding(
+        command,
+        std::io::stdout(),
+        std::io::stderr(),
+        action,
+        mappings,
+    )
 }
 
 /// [`run_compiler`] with the forwarding destinations spelled out, so a test can
@@ -1034,6 +1061,7 @@ fn run_compiler_forwarding(
     stdout_sink: impl Write + Send + 'static,
     stderr_sink: impl Write,
     mut action: Option<crate::supervision::Action>,
+    mappings: &[PathMapping],
 ) -> std::io::Result<Output> {
     let mut child = command
         .stdin(Stdio::null())
@@ -1048,8 +1076,10 @@ fn run_compiler_forwarding(
     // Standard error carries the diagnostics and the notifications, so it is
     // read here; standard output is drained alongside so that neither pipe
     // can fill up and stall the compiler.
-    let stdout = std::thread::spawn(move || forward_stream(stdout, stdout_sink));
-    let stderr = forward_stream(stderr, stderr_sink);
+    let stdout_mappings = mappings.to_vec();
+    let stdout =
+        std::thread::spawn(move || forward_stream_mapped(stdout, stdout_sink, &stdout_mappings));
+    let stderr = forward_stream_mapped(stderr, stderr_sink, mappings);
     let status = child.wait()?;
     let stdout = stdout
         .join()
@@ -1067,14 +1097,32 @@ fn run_compiler_forwarding(
 /// Forwarding is best effort: once the sink fails, the rest of the stream is
 /// still captured, because the compiler must be drained for it to finish and
 /// its exit status is what decides the build.
-fn forward_stream(source: impl Read, mut sink: impl Write) -> std::io::Result<Vec<u8>> {
+#[cfg(test)]
+fn forward_stream(source: impl Read, sink: impl Write) -> std::io::Result<Vec<u8>> {
+    forward_stream_mapped(source, sink, &[])
+}
+
+/// [`forward_stream`] that rewrites placeholders in each line into real paths
+/// first, so what is forwarded and what is captured agree.
+fn forward_stream_mapped(
+    source: impl Read,
+    mut sink: impl Write,
+    mappings: &[PathMapping],
+) -> std::io::Result<Vec<u8>> {
     let mut reader = BufReader::new(source);
     let mut captured = Vec::new();
     let mut forwarding = true;
+    let mut line = Vec::new();
     loop {
         let start = captured.len();
-        if reader.read_until(b'\n', &mut captured)? == 0 {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
             break;
+        }
+        if mappings.is_empty() {
+            captured.extend_from_slice(&line);
+        } else {
+            captured.extend_from_slice(&denormalize_output_text(&line, mappings));
         }
         if forwarding {
             forwarding = sink
@@ -1237,8 +1285,8 @@ fn compile_execution_only_build_script(
         &profile_arguments(arguments),
         working_dir,
     );
-    let output =
-        run_compiler(&mut command, forwarded, false).wrap_err("failed to execute rustc")?;
+    let output = run_compiler(&mut command, forwarded, false, &portable.mappings)
+        .wrap_err("failed to execute rustc")?;
     drop(permit);
     crate::scheduler::record_compiler_memory(&demand, &output.status);
     session::record_compiler_invocation(
