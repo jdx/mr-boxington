@@ -901,6 +901,12 @@ pub(crate) fn denormalize_output_text(bytes: &[u8], mappings: &[PathMapping]) ->
     text
 }
 
+pub(crate) fn json_escaped(text: &str) -> String {
+    serde_json::to_string(text)
+        .map(|quoted| quoted[1..quoted.len() - 1].to_owned())
+        .unwrap_or_else(|_| text.to_owned())
+}
+
 /// Every spelling a root can take in these outputs, paired with the
 /// placeholder that stands for it.
 ///
@@ -937,11 +943,22 @@ fn root_spellings(mappings: &[PathMapping]) -> Vec<(String, String)> {
             (root.to_string(), ""),
             (root.replace('\\', "\\\\"), ":escaped"),
             (root.replace('\\', "/"), ":slash"),
+            // The spelling inside a JSON string, which also escapes quotes
+            // and control characters. Equal to the escaped one for a plain
+            // backslash, and skipped below when it is.
+            (json_escaped(root), ":json"),
         ] {
-            if spellings.iter().any(|(existing, _)| existing == &spelling) {
+            // Two variants can share a spelling here and still stand for
+            // different placeholders in stored text, which a receiving root
+            // that needs no escaping must restore all the same.
+            let placeholder = format!("${{{}{suffix}}}", mapping.placeholder);
+            if spellings
+                .iter()
+                .any(|(existing, stand_in)| existing == &spelling && stand_in == &placeholder)
+            {
                 continue;
             }
-            spellings.push((spelling, format!("${{{}{suffix}}}", mapping.placeholder)));
+            spellings.push((spelling, placeholder));
         }
     }
     // An alias may lie under another mapped root, and escaped spellings may

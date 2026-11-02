@@ -157,14 +157,13 @@ pub(crate) fn for_display(bytes: &[u8]) -> Vec<u8> {
 /// lines that are JSON, where a backslash or quote in a path would otherwise
 /// leave the line unparseable.
 fn swap_paths(bytes: &[u8], from: &str, to: &str) -> Vec<u8> {
-    let json = |text: &str| {
-        let quoted = serde_json::to_string(text).unwrap_or_default();
-        quoted.trim_matches('"').to_owned()
-    };
     let mut text = Vec::with_capacity(bytes.len());
     for line in bytes.split_inclusive(|byte| *byte == b'\n') {
         let (from, to) = if line.trim_ascii_start().first() == Some(&b'{') {
-            (json(from), json(to))
+            (
+                crate::materialize::json_escaped(from),
+                crate::materialize::json_escaped(to),
+            )
         } else {
             (from.to_owned(), to.to_owned())
         };

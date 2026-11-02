@@ -2709,3 +2709,17 @@ fn bypassed_library_incremental_gate_keeps_safe_and_rejects_optimized_invocation
     ));
     assert!(!bypassed_library_incremental_is_enabled(&safe, true, true));
 }
+
+/// A quote in a root is escaped in JSON diagnostics; it must still normalize to
+/// the placeholder, and restore as the receiving checkout's escaped spelling.
+#[test]
+fn json_escaped_quotes_in_a_root_round_trip() {
+    let publishing = [PathMapping::new("/work/\"a\"", "workspace")];
+    let receiving = [PathMapping::new("/other/b", "workspace")];
+    let stored = normalize_output_text(b"{\"f\":\"/work/\\\"a\\\"/src/lib.rs\"}\n", &publishing);
+    assert_eq!(stored, b"{\"f\":\"${workspace:json}/src/lib.rs\"}\n");
+    assert_eq!(
+        denormalize_output_text(&stored, &receiving),
+        b"{\"f\":\"/other/b/src/lib.rs\"}\n"
+    );
+}
