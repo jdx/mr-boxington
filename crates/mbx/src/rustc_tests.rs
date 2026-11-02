@@ -2745,6 +2745,8 @@ fn json_diagnostics_round_trip_between_escaping_roots() {
     for (publishing, receiving) in [
         ("/work/\"a\"", "/other/\"b\""),
         ("C:\\work\\a", "D:\\other\\b"),
+        ("C:\\work\\a", "/other/\"b\""),
+        ("C:\\work\\a", "D:\\other\\\"b\""),
         ("/work/a", "/other/\"b\""),
         ("/work/\"a\"", "/other/b"),
     ] {

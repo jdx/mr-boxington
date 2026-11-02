@@ -902,14 +902,17 @@ pub(crate) fn denormalize_output_text(bytes: &[u8], mappings: &[PathMapping]) ->
 }
 
 /// [`denormalize_output_text`] for a line of JSON, where the path sits inside a
-/// string. The plain placeholder restores as the root escaped for JSON; the
-/// variants (`:escaped`, `:json`, `:slash`) were stored already in the form the
-/// string needs, so they restore as they are.
+/// string. Whichever spelling a placeholder was stored for, the receiving root
+/// has to appear as exactly one JSON string encoding of itself, whatever it
+/// contains: the `:json` variant is that already, and the others are brought to
+/// it from their own spelling.
 pub(crate) fn denormalize_output_json(bytes: &[u8], mappings: &[PathMapping]) -> Vec<u8> {
     let mut text = bytes.to_vec();
     for (root, placeholder) in root_spellings(mappings) {
-        let root = if placeholder.contains(':') {
+        let root = if placeholder.ends_with(":json}") {
             root
+        } else if placeholder.ends_with(":escaped}") {
+            json_escaped(&root.replace("\\\\", "\\"))
         } else {
             json_escaped(&root)
         };
