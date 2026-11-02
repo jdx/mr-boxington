@@ -21,12 +21,16 @@ jobs:
   linux:
     runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=cache
     timeout-minutes: 20
+    # `jouet cost push` writes refs/notes/jouet-cost on pushes to main.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           submodules: recursive
-          persist-credentials: false
+          # Only main keeps the token, for `jouet cost push` below.
+          persist-credentials: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
       - uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1.7.0
         with:
@@ -51,6 +55,23 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: mise run ci
+        if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+      # On main the tests go through jouet so their timing is recorded, and
+      # `jouet cost push` shares the timings with agents. The other checks are
+      # the ones `mise run ci` depends on.
+      - name: Run lint, build and documentation checks
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mise run lint ::: build ::: check:docs ::: check:links
+      - name: Run tests with jouet and share timings
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          jouet test --cmd -- mise run test
+          jouet cost push
 
   test:
     strategy:
