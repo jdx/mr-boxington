@@ -148,7 +148,11 @@ pub(crate) fn for_display(bytes: &[u8]) -> Vec<u8> {
         return bytes.to_vec();
     };
     match (stable.to_str(), original.to_str()) {
-        (Some(stable), Some(original)) => swap_paths(bytes, stable, original),
+        (Some(stable), Some(original)) => {
+            // A restored hit can carry the forward-slash spelling too.
+            let text = swap_paths(bytes, stable, original);
+            swap_paths(&text, &stable.replace('\\', "/"), original)
+        }
         _ => bytes.to_vec(),
     }
 }

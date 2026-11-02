@@ -2723,3 +2723,17 @@ fn json_escaped_quotes_in_a_root_round_trip() {
         b"{\"f\":\"/other/b/src/lib.rs\"}\n"
     );
 }
+
+/// A cached JSON diagnostic stores the plain placeholder, and a receiving root
+/// with a backslash must be escaped when it is restored.
+#[test]
+fn restored_json_diagnostics_escape_the_receiving_root() {
+    let receiving = [PathMapping::new("C:\\work\\a", "workspace")];
+    let restored = OutputPaths::new(&receiving)
+        .denormalize(b"{\"f\":\"${workspace}/src/lib.rs\"}\n --> ${workspace}/src/lib.rs\n");
+    let text = String::from_utf8(restored).unwrap();
+    let (json, plain) = text.split_once('\n').unwrap();
+    let value: serde_json::Value = serde_json::from_str(json).unwrap();
+    assert_eq!(value["f"], "C:\\work\\a/src/lib.rs");
+    assert_eq!(plain, " --> C:\\work\\a/src/lib.rs\n");
+}

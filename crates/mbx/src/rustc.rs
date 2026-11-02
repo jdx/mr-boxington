@@ -3591,14 +3591,9 @@ fn restore_result(
     let mut digests = vec![metadata.stdout.clone(), metadata.stderr.clone()];
     digests.extend(files.iter().map(|(node, _)| node.digest.clone()));
     let blobs = find_blobs(&digests)?;
-    let stdout = denormalize_output_text(
-        &read_verified_blob(&blobs[0], &metadata.stdout, "stdout")?,
-        mappings,
-    );
-    let stderr = denormalize_output_text(
-        &read_verified_blob(&blobs[1], &metadata.stderr, "stderr")?,
-        mappings,
-    );
+    let paths = OutputPaths::new(mappings);
+    let stdout = paths.denormalize(&read_verified_blob(&blobs[0], &metadata.stdout, "stdout")?);
+    let stderr = paths.denormalize(&read_verified_blob(&blobs[1], &metadata.stderr, "stderr")?);
 
     let materialization_started = Instant::now();
     std::fs::create_dir_all(&outputs.directory)?;
