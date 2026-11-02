@@ -743,3 +743,15 @@ fn displayed_json_stays_valid_for_windows_roots() {
     let value: serde_json::Value = serde_json::from_slice(&text).unwrap();
     assert_eq!(value["file_name"], "C:\\work\\target\\out/gen.rs");
 }
+
+#[test]
+fn a_backslash_in_a_unix_root_is_not_a_separator() {
+    let stable = "/cache/a\\b";
+    let original = "/work/out";
+    let unrelated = b"see /cache/a/b/x\n";
+    assert_eq!(swap_stable(unrelated, stable, original, false), unrelated);
+    assert_eq!(
+        swap_stable(unrelated, stable, original, true),
+        b"see /work/out/x\n"
+    );
+}

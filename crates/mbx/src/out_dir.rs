@@ -148,12 +148,20 @@ pub(crate) fn for_display(bytes: &[u8]) -> Vec<u8> {
         return bytes.to_vec();
     };
     match (stable.to_str(), original.to_str()) {
-        (Some(stable), Some(original)) => {
-            // A restored hit can carry the forward-slash spelling too.
-            let text = swap_paths(bytes, stable, original);
-            swap_paths(&text, &stable.replace('\\', "/"), original)
-        }
+        (Some(stable), Some(original)) => swap_stable(bytes, stable, original, cfg!(windows)),
         _ => bytes.to_vec(),
+    }
+}
+
+/// [`swap_paths`] for the native spelling of `stable`, and on Windows for its
+/// forward-slash spelling, which a restored hit can carry. Elsewhere a
+/// backslash is an ordinary filename character, not a separator.
+fn swap_stable(bytes: &[u8], stable: &str, original: &str, windows: bool) -> Vec<u8> {
+    let text = swap_paths(bytes, stable, original);
+    if windows {
+        swap_paths(&text, &stable.replace('\\', "/"), original)
+    } else {
+        text
     }
 }
 
