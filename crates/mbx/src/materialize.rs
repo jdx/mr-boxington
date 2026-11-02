@@ -636,10 +636,10 @@ pub(crate) fn persist_outputs(staged: StagedOutputs) -> Result<()> {
 /// Replay a cached compilation's diagnostics so a hit looks like a compile.
 pub(crate) fn replay_bytes(stdout_bytes: &[u8], stderr_bytes: &[u8]) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
-    stdout.write_all(stdout_bytes)?;
+    stdout.write_all(&crate::out_dir::for_display(stdout_bytes))?;
     stdout.flush()?;
     let mut stderr = std::io::stderr().lock();
-    stderr.write_all(stderr_bytes)?;
+    stderr.write_all(&crate::out_dir::for_display(stderr_bytes))?;
     stderr.flush()?;
     Ok(())
 }
@@ -901,6 +901,32 @@ pub(crate) fn denormalize_output_text(bytes: &[u8], mappings: &[PathMapping]) ->
     text
 }
 
+/// [`denormalize_output_text`] for a line of JSON, where the path sits inside a
+/// string. Whichever spelling a placeholder was stored for, the receiving root
+/// has to appear as exactly one JSON string encoding of itself, whatever it
+/// contains: the `:json` variant is that already, and the others are brought to
+/// it from their own spelling.
+pub(crate) fn denormalize_output_json(bytes: &[u8], mappings: &[PathMapping]) -> Vec<u8> {
+    let mut text = bytes.to_vec();
+    for (root, placeholder) in root_spellings(mappings) {
+        let root = if placeholder.ends_with(":json}") {
+            root
+        } else if placeholder.ends_with(":escaped}") {
+            json_escaped(&root.replace("\\\\", "\\"))
+        } else {
+            json_escaped(&root)
+        };
+        text = replace_bytes(&text, placeholder.as_bytes(), root.as_bytes());
+    }
+    text
+}
+
+pub(crate) fn json_escaped(text: &str) -> String {
+    serde_json::to_string(text)
+        .map(|quoted| quoted[1..quoted.len() - 1].to_owned())
+        .unwrap_or_else(|_| text.to_owned())
+}
+
 /// Every spelling a root can take in these outputs, paired with the
 /// placeholder that stands for it.
 ///
@@ -937,11 +963,22 @@ fn root_spellings(mappings: &[PathMapping]) -> Vec<(String, String)> {
             (root.to_string(), ""),
             (root.replace('\\', "\\\\"), ":escaped"),
             (root.replace('\\', "/"), ":slash"),
+            // The spelling inside a JSON string, which also escapes quotes
+            // and control characters. Equal to the escaped one for a plain
+            // backslash, and skipped below when it is.
+            (json_escaped(root), ":json"),
         ] {
-            if spellings.iter().any(|(existing, _)| existing == &spelling) {
+            // Two variants can share a spelling here and still stand for
+            // different placeholders in stored text, which a receiving root
+            // that needs no escaping must restore all the same.
+            let placeholder = format!("${{{}{suffix}}}", mapping.placeholder);
+            if spellings
+                .iter()
+                .any(|(existing, stand_in)| existing == &spelling && stand_in == &placeholder)
+            {
                 continue;
             }
-            spellings.push((spelling, format!("${{{}{suffix}}}", mapping.placeholder)));
+            spellings.push((spelling, placeholder));
         }
     }
     // An alias may lie under another mapped root, and escaped spellings may
@@ -966,7 +1003,7 @@ fn ends_at_boundary(haystack: &[u8], end: usize) -> bool {
     }
 }
 
-fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+pub(crate) fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return haystack.to_vec();
     }

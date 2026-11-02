@@ -136,6 +136,58 @@ pub(crate) fn restore() {
     LEASES.lock().unwrap().clear();
 }
 
+/// Compiler output as the person running Cargo should see it.
+///
+/// rustc reads the stable copy of `OUT_DIR`, so its paths name that copy. The
+/// copy is an implementation detail, and tools such as trybuild match the
+/// `target/.../out` path Cargo gave the build script, so on the way out the
+/// copy's path becomes Cargo's. What the cache stores is untouched.
+pub(crate) fn for_display(bytes: &[u8]) -> Vec<u8> {
+    let original = ORIGINAL.lock().unwrap().clone();
+    let (Some(original), Some(stable)) = (original, std::env::var_os("OUT_DIR")) else {
+        return bytes.to_vec();
+    };
+    match (stable.to_str(), original.to_str()) {
+        (Some(stable), Some(original)) => swap_stable(bytes, stable, original, cfg!(windows)),
+        _ => bytes.to_vec(),
+    }
+}
+
+/// [`swap_paths`] for the native spelling of `stable`, and on Windows for its
+/// forward-slash spelling, which a restored hit can carry. Elsewhere a
+/// backslash is an ordinary filename character, not a separator.
+fn swap_stable(bytes: &[u8], stable: &str, original: &str, windows: bool) -> Vec<u8> {
+    let text = swap_paths(bytes, stable, original);
+    if windows {
+        swap_paths(&text, &stable.replace('\\', "/"), original)
+    } else {
+        text
+    }
+}
+
+/// Replace `from` with `to` in `bytes`, escaping both as JSON strings on the
+/// lines that are JSON, where a backslash or quote in a path would otherwise
+/// leave the line unparseable.
+fn swap_paths(bytes: &[u8], from: &str, to: &str) -> Vec<u8> {
+    let mut text = Vec::with_capacity(bytes.len());
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        let (from, to) = if line.trim_ascii_start().first() == Some(&b'{') {
+            (
+                crate::materialize::json_escaped(from),
+                crate::materialize::json_escaped(to),
+            )
+        } else {
+            (from.to_owned(), to.to_owned())
+        };
+        text.extend(crate::materialize::replace_bytes(
+            line,
+            from.as_bytes(),
+            to.as_bytes(),
+        ));
+    }
+    text
+}
+
 /// Whether any Rust source below `directory` mentions `OUT_DIR`.
 ///
 /// Hidden directories, `target`, and `node_modules` are skipped: none of them

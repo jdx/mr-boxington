@@ -1,9 +1,9 @@
 use crate::materialize::{
     CachedCompilation, CachedOutput, Materialization, StagedOutputs, apply_file_mode,
-    denormalize_output_text, executable_mode_matches, exit_code, file_mode, find_blobs,
-    normalize_output_text, persist_outputs, read_canonical_blob, read_verified_blob,
-    record_action_hit_with_diagnostic, record_verification, replay_bytes, resolve_executable,
-    stage_verified_cached_output, staging_directory, validate_file_mode,
+    denormalize_output_json, denormalize_output_text, executable_mode_matches, exit_code,
+    file_mode, find_blobs, normalize_output_text, persist_outputs, read_canonical_blob,
+    read_verified_blob, record_action_hit_with_diagnostic, record_verification, replay_bytes,
+    resolve_executable, stage_verified_cached_output, staging_directory, validate_file_mode,
 };
 use crate::{incremental, session, util::workspace_root};
 use eyre::{Context, Result, bail};
@@ -676,7 +676,12 @@ pub(crate) fn compile(
         wrapper_argument.is_none() && !invocation.crate_name().starts_with("build_script_");
     clear_bootstrap_dep_info(seed_mode, &outputs.dep_info)?;
     let mut output = crate::phase_timing::measure("compiler", || {
-        run_compiler(&mut command, forwarded && !held, eligible)
+        run_compiler(
+            &mut command,
+            forwarded && !held,
+            eligible,
+            &portable.mappings,
+        )
     })
     .wrap_err("failed to execute rustc")?;
     drop(response_file);
@@ -717,7 +722,7 @@ pub(crate) fn compile(
             IncrementalSeedMode::Disabled,
         )?;
         output = crate::phase_timing::measure("compiler", || {
-            run_compiler(&mut command, forwarded, eligible)
+            run_compiler(&mut command, forwarded, eligible, &portable.mappings)
         })
         .wrap_err("failed to execute rustc without bootstrap")?;
         drop(response_file);
@@ -1019,12 +1024,35 @@ pub(crate) fn compile(
 /// start before this compilation ends and its result is published. The bytes
 /// are still captured whole, because a cache entry stores them for replay on a
 /// hit and a verification run compares them.
-fn run_compiler(command: &mut Command, forward: bool, eligible: bool) -> std::io::Result<Output> {
+///
+/// The remapping flags mbx appends make rustc spell some paths as placeholders
+/// (`${out_dir}/gen.rs`). Cargo, and tools that read its diagnostics such as
+/// trybuild, need the real path, so `mappings` translate the compiler's output
+/// back before it is forwarded or returned. The cache normalizes it again when
+/// it stores a result.
+fn run_compiler(
+    command: &mut Command,
+    forward: bool,
+    eligible: bool,
+    mappings: &[PathMapping],
+) -> std::io::Result<Output> {
     if !forward {
-        return crate::supervision::output(command, eligible);
+        let mut output = crate::supervision::output(command, eligible)?;
+        if !mappings.is_empty() {
+            let paths = OutputPaths::new(mappings);
+            output.stdout = paths.denormalize(&output.stdout);
+            output.stderr = paths.denormalize(&output.stderr);
+        }
+        return Ok(output);
     }
     let action = crate::supervision::prepare(command, eligible);
-    run_compiler_forwarding(command, std::io::stdout(), std::io::stderr(), action)
+    run_compiler_forwarding(
+        command,
+        std::io::stdout(),
+        std::io::stderr(),
+        action,
+        mappings,
+    )
 }
 
 /// [`run_compiler`] with the forwarding destinations spelled out, so a test can
@@ -1034,6 +1062,7 @@ fn run_compiler_forwarding(
     stdout_sink: impl Write + Send + 'static,
     stderr_sink: impl Write,
     mut action: Option<crate::supervision::Action>,
+    mappings: &[PathMapping],
 ) -> std::io::Result<Output> {
     let mut child = command
         .stdin(Stdio::null())
@@ -1048,8 +1077,10 @@ fn run_compiler_forwarding(
     // Standard error carries the diagnostics and the notifications, so it is
     // read here; standard output is drained alongside so that neither pipe
     // can fill up and stall the compiler.
-    let stdout = std::thread::spawn(move || forward_stream(stdout, stdout_sink));
-    let stderr = forward_stream(stderr, stderr_sink);
+    let stdout_mappings = mappings.to_vec();
+    let stdout =
+        std::thread::spawn(move || forward_stream_mapped(stdout, stdout_sink, &stdout_mappings));
+    let stderr = forward_stream_mapped(stderr, stderr_sink, mappings);
     let status = child.wait()?;
     let stdout = stdout
         .join()
@@ -1067,18 +1098,63 @@ fn run_compiler_forwarding(
 /// Forwarding is best effort: once the sink fails, the rest of the stream is
 /// still captured, because the compiler must be drained for it to finish and
 /// its exit status is what decides the build.
-fn forward_stream(source: impl Read, mut sink: impl Write) -> std::io::Result<Vec<u8>> {
+#[cfg(test)]
+fn forward_stream(source: impl Read, sink: impl Write) -> std::io::Result<Vec<u8>> {
+    forward_stream_mapped(source, sink, &[])
+}
+
+/// Placeholders in compiler output, translated back into this checkout's paths.
+///
+/// A line of JSON carries the path inside a string, so a root such as
+/// `C:\work\target` or one containing a quote has to be escaped the way the
+/// string is, or the line stops parsing. Other lines are plain text.
+struct OutputPaths<'a> {
+    mappings: &'a [PathMapping],
+}
+
+impl<'a> OutputPaths<'a> {
+    fn new(mappings: &'a [PathMapping]) -> Self {
+        Self { mappings }
+    }
+
+    fn denormalize(&self, bytes: &[u8]) -> Vec<u8> {
+        if self.mappings.is_empty() {
+            return bytes.to_vec();
+        }
+        let mut text = Vec::with_capacity(bytes.len());
+        for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+            if line.trim_ascii_start().first() == Some(&b'{') {
+                text.extend(denormalize_output_json(line, self.mappings));
+            } else {
+                text.extend(denormalize_output_text(line, self.mappings));
+            }
+        }
+        text
+    }
+}
+
+/// [`forward_stream`] that rewrites placeholders in each line into real paths
+/// first, so what is forwarded and what is captured agree.
+fn forward_stream_mapped(
+    source: impl Read,
+    mut sink: impl Write,
+    mappings: &[PathMapping],
+) -> std::io::Result<Vec<u8>> {
     let mut reader = BufReader::new(source);
     let mut captured = Vec::new();
     let mut forwarding = true;
+    let mut line = Vec::new();
+    let paths = OutputPaths::new(mappings);
     loop {
         let start = captured.len();
-        if reader.read_until(b'\n', &mut captured)? == 0 {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
             break;
         }
+        captured.extend_from_slice(&paths.denormalize(&line));
         if forwarding {
             forwarding = sink
-                .write_all(&captured[start..])
+                .write_all(&crate::out_dir::for_display(&captured[start..]))
                 .and_then(|()| sink.flush())
                 .is_ok();
         }
@@ -1237,8 +1313,8 @@ fn compile_execution_only_build_script(
         &profile_arguments(arguments),
         working_dir,
     );
-    let output =
-        run_compiler(&mut command, forwarded, false).wrap_err("failed to execute rustc")?;
+    let output = run_compiler(&mut command, forwarded, false, &portable.mappings)
+        .wrap_err("failed to execute rustc")?;
     drop(permit);
     crate::scheduler::record_compiler_memory(&demand, &output.status);
     session::record_compiler_invocation(
@@ -3508,14 +3584,9 @@ fn restore_result(
     let mut digests = vec![metadata.stdout.clone(), metadata.stderr.clone()];
     digests.extend(files.iter().map(|(node, _)| node.digest.clone()));
     let blobs = find_blobs(&digests)?;
-    let stdout = denormalize_output_text(
-        &read_verified_blob(&blobs[0], &metadata.stdout, "stdout")?,
-        mappings,
-    );
-    let stderr = denormalize_output_text(
-        &read_verified_blob(&blobs[1], &metadata.stderr, "stderr")?,
-        mappings,
-    );
+    let paths = OutputPaths::new(mappings);
+    let stdout = paths.denormalize(&read_verified_blob(&blobs[0], &metadata.stdout, "stdout")?);
+    let stderr = paths.denormalize(&read_verified_blob(&blobs[1], &metadata.stderr, "stderr")?);
 
     let materialization_started = Instant::now();
     std::fs::create_dir_all(&outputs.directory)?;

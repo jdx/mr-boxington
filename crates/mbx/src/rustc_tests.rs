@@ -197,6 +197,45 @@ fn forwarded_lines_are_the_captured_bytes() {
     assert!(forward_stream(&b""[..], &mut sink).unwrap().is_empty());
 }
 
+/// rustc prints the placeholder it was told to remap to; Cargo and tools such
+/// as trybuild need the real path, in what is forwarded and what is returned.
+#[test]
+fn forwarded_diagnostics_name_real_paths_not_placeholders() {
+    let mappings = [PathMapping::new(
+        "/work/target/debug/build/x/out",
+        "out_dir",
+    )];
+    let mut sink = Sink::default();
+    let captured = forward_stream_mapped(
+        &b"{\"file_name\":\"${out_dir}/gen.rs\"}\n --> ${out_dir}/gen.rs:1:29"[..],
+        &mut sink,
+        &mappings,
+    )
+    .unwrap();
+    let expected = &b"{\"file_name\":\"/work/target/debug/build/x/out/gen.rs\"}\n --> /work/target/debug/build/x/out/gen.rs:1:29"[..];
+    assert_eq!(captured, expected);
+    assert_eq!(sink.bytes(), expected);
+}
+
+/// A Windows root or a quote in a path must not break a JSON diagnostic.
+#[test]
+fn json_diagnostics_stay_valid_with_windows_and_quoted_roots() {
+    for root in ["C:\\work\\target\\out", "/work/\"odd\"/out"] {
+        let mappings = [PathMapping::new(root, "out_dir")];
+        let mut sink = Sink::default();
+        let captured = forward_stream_mapped(
+            &b"{\"file_name\":\"${out_dir}/gen.rs\"}\n --> ${out_dir}/gen.rs\n"[..],
+            &mut sink,
+            &mappings,
+        )
+        .unwrap();
+        let text = String::from_utf8(captured).unwrap();
+        let (json, plain) = text.split_once('\n').unwrap();
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(value["file_name"], format!("{root}/gen.rs"));
+        assert_eq!(plain, format!(" --> {root}/gen.rs\n"));
+    }
+}
 #[test]
 fn a_closed_forwarding_destination_still_drains_the_compiler() {
     let seen = Sink::default();
@@ -227,9 +266,14 @@ fn a_forwarded_compiler_run_captures_what_it_forwards() {
     command.arg("-c").arg(script);
     let stdout_sink = Sink::default();
     let stderr_sink = Sink::default();
-    let output =
-        run_compiler_forwarding(&mut command, stdout_sink.clone(), stderr_sink.clone(), None)
-            .unwrap();
+    let output = run_compiler_forwarding(
+        &mut command,
+        stdout_sink.clone(),
+        stderr_sink.clone(),
+        None,
+        &[],
+    )
+    .unwrap();
     assert_eq!(output.status.code(), Some(3));
     assert_eq!(
         output.stdout, b"out one\nout two\ntail without newline",
@@ -245,7 +289,7 @@ fn a_forwarded_compiler_run_captures_what_it_forwards() {
     // The plain path returns the same thing Cargo would have seen at the end.
     let mut command = Command::new("sh");
     command.arg("-c").arg(script);
-    let held = run_compiler(&mut command, false, false).unwrap();
+    let held = run_compiler(&mut command, false, false, &[]).unwrap();
     assert_eq!(held.stdout, output.stdout);
     assert_eq!(held.stderr, output.stderr);
     assert_eq!(held.status.code(), Some(3));
@@ -291,7 +335,7 @@ fn a_notification_is_forwarded_before_the_compiler_exits() {
     let (done, finished) = std::sync::mpsc::channel();
     let release_on_timeout = root.path().join("release");
     let worker = std::thread::spawn(move || {
-        let output = run_compiler_forwarding(&mut command, Sink::default(), sink, None);
+        let output = run_compiler_forwarding(&mut command, Sink::default(), sink, None, &[]);
         let _ = done.send(());
         output
     });
@@ -2664,4 +2708,64 @@ fn bypassed_library_incremental_gate_keeps_safe_and_rejects_optimized_invocation
         &safe, false, false
     ));
     assert!(!bypassed_library_incremental_is_enabled(&safe, true, true));
+}
+
+/// A quote in a root is escaped in JSON diagnostics; it must still normalize to
+/// the placeholder, and restore as the receiving checkout's escaped spelling.
+#[test]
+fn json_escaped_quotes_in_a_root_round_trip() {
+    let publishing = [PathMapping::new("/work/\"a\"", "workspace")];
+    let receiving = [PathMapping::new("/other/b", "workspace")];
+    let stored = normalize_output_text(b"{\"f\":\"/work/\\\"a\\\"/src/lib.rs\"}\n", &publishing);
+    assert_eq!(stored, b"{\"f\":\"${workspace:json}/src/lib.rs\"}\n");
+    assert_eq!(
+        denormalize_output_text(&stored, &receiving),
+        b"{\"f\":\"/other/b/src/lib.rs\"}\n"
+    );
+}
+
+/// A cached JSON diagnostic stores the plain placeholder, and a receiving root
+/// with a backslash must be escaped when it is restored.
+#[test]
+fn restored_json_diagnostics_escape_the_receiving_root() {
+    let receiving = [PathMapping::new("C:\\work\\a", "workspace")];
+    let restored = OutputPaths::new(&receiving)
+        .denormalize(b"{\"f\":\"${workspace}/src/lib.rs\"}\n --> ${workspace}/src/lib.rs\n");
+    let text = String::from_utf8(restored).unwrap();
+    let (json, plain) = text.split_once('\n').unwrap();
+    let value: serde_json::Value = serde_json::from_str(json).unwrap();
+    assert_eq!(value["f"], "C:\\work\\a/src/lib.rs");
+    assert_eq!(plain, " --> C:\\work\\a/src/lib.rs\n");
+}
+
+/// Store on one checkout and restore on another, both with roots JSON has to
+/// escape: the decoded path must be the receiving root, escaped exactly once.
+#[test]
+fn json_diagnostics_round_trip_between_escaping_roots() {
+    for (publishing, receiving) in [
+        ("/work/\"a\"", "/other/\"b\""),
+        ("C:\\work\\a", "D:\\other\\b"),
+        ("C:\\work\\a", "/other/\"b\""),
+        ("C:\\work\\a", "D:\\other\\\"b\""),
+        ("/work/a", "/other/\"b\""),
+        ("/work/\"a\"", "/other/b"),
+    ] {
+        let line = |root: &str| {
+            format!(
+                "{{\"f\":{}}}\n",
+                serde_json::to_string(&format!("{root}/src/lib.rs")).unwrap()
+            )
+        };
+        let stored = normalize_output_text(
+            line(publishing).as_bytes(),
+            &[PathMapping::new(publishing, "workspace")],
+        );
+        let restored =
+            OutputPaths::new(&[PathMapping::new(receiving, "workspace")]).denormalize(&stored);
+        assert_eq!(
+            String::from_utf8(restored).unwrap(),
+            line(receiving),
+            "{publishing} -> {receiving}"
+        );
+    }
 }

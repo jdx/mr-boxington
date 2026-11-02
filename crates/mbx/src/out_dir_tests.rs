@@ -717,3 +717,41 @@ fn partial_retired_source_deletion_credits_freed_bytes_and_counts_survivors() {
     assert_eq!(stats(&root).unwrap().remaining_bytes, 4);
     assert!(retired.join("survivor.rs").exists());
 }
+
+#[test]
+fn displayed_output_names_cargos_out_dir_not_the_stable_copy() {
+    let stable = "/cache/out-dirs/v1/abc";
+    let original = "/work/target/debug/build/x-1/out";
+    let text = swap_paths(
+        b"{\"file_name\":\"/cache/out-dirs/v1/abc/gen.rs\"}\n --> /cache/out-dirs/v1/abc/gen.rs:1:29\n",
+        stable,
+        original,
+    );
+    assert_eq!(
+        String::from_utf8(text).unwrap(),
+        "{\"file_name\":\"/work/target/debug/build/x-1/out/gen.rs\"}\n --> /work/target/debug/build/x-1/out/gen.rs:1:29\n"
+    );
+}
+
+#[test]
+fn displayed_json_stays_valid_for_windows_roots() {
+    let text = swap_paths(
+        b"{\"file_name\":\"/cache/abc/gen.rs\"}\n",
+        "/cache/abc",
+        "C:\\work\\target\\out",
+    );
+    let value: serde_json::Value = serde_json::from_slice(&text).unwrap();
+    assert_eq!(value["file_name"], "C:\\work\\target\\out/gen.rs");
+}
+
+#[test]
+fn a_backslash_in_a_unix_root_is_not_a_separator() {
+    let stable = "/cache/a\\b";
+    let original = "/work/out";
+    let unrelated = b"see /cache/a/b/x\n";
+    assert_eq!(swap_stable(unrelated, stable, original, false), unrelated);
+    assert_eq!(
+        swap_stable(unrelated, stable, original, true),
+        b"see /work/out/x\n"
+    );
+}
