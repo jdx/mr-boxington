@@ -1,12 +1,7 @@
 # Contributing
 
-> [!CAUTION]
-> **AI replies to Discussions and Issues are restricted.** Only use AI to reply to a thread if you
-> created it, opened a PR that fixes it, or have already had a contribution, attributed to your GitHub account, merged into the default branch of mr-boxington.
-> Everyone else is not allowed to, including with lightly edited, reviewed, or disclosed model
-> output. Doing this is an instant ban across all of jdx's projects.
-> Using AI to help write and file your own Discussion or Issue is fine. Review it before posting, and
-> disclose that AI contributed.
+Using AI to help write a Discussion, Issue, reply, or pull request is fine.
+Review it before you post it, and disclose that AI contributed.
 
 Start with [Discussions](https://github.com/jdx/mr-boxington/discussions) for
 questions and proposed changes. For a suspected vulnerability, use the private
