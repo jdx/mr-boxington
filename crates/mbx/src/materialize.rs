@@ -636,10 +636,10 @@ pub(crate) fn persist_outputs(staged: StagedOutputs) -> Result<()> {
 /// Replay a cached compilation's diagnostics so a hit looks like a compile.
 pub(crate) fn replay_bytes(stdout_bytes: &[u8], stderr_bytes: &[u8]) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
-    stdout.write_all(stdout_bytes)?;
+    stdout.write_all(&crate::out_dir::for_display(stdout_bytes))?;
     stdout.flush()?;
     let mut stderr = std::io::stderr().lock();
-    stderr.write_all(stderr_bytes)?;
+    stderr.write_all(&crate::out_dir::for_display(stderr_bytes))?;
     stderr.flush()?;
     Ok(())
 }
@@ -966,7 +966,7 @@ fn ends_at_boundary(haystack: &[u8], end: usize) -> bool {
     }
 }
 
-fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+pub(crate) fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return haystack.to_vec();
     }

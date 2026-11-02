@@ -1161,7 +1161,7 @@ fn forward_stream_mapped(
         captured.extend_from_slice(&paths.denormalize(&line));
         if forwarding {
             forwarding = sink
-                .write_all(&captured[start..])
+                .write_all(&crate::out_dir::for_display(&captured[start..]))
                 .and_then(|()| sink.flush())
                 .is_ok();
         }
