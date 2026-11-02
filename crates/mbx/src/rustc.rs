@@ -1039,8 +1039,9 @@ fn run_compiler(
     if !forward {
         let mut output = crate::supervision::output(command, eligible)?;
         if !mappings.is_empty() {
-            output.stdout = denormalize_output_text(&output.stdout, mappings);
-            output.stderr = denormalize_output_text(&output.stderr, mappings);
+            let paths = OutputPaths::new(mappings);
+            output.stdout = paths.denormalize(&output.stdout);
+            output.stderr = paths.denormalize(&output.stderr);
         }
         return Ok(output);
     }
@@ -1102,6 +1103,43 @@ fn forward_stream(source: impl Read, sink: impl Write) -> std::io::Result<Vec<u8
     forward_stream_mapped(source, sink, &[])
 }
 
+/// Placeholders in compiler output, translated back into this checkout's paths.
+///
+/// A line of JSON carries the path inside a string, so a root such as
+/// `C:\work\target` or one containing a quote has to be escaped the way the
+/// string is, or the line stops parsing. Other lines are plain text.
+struct OutputPaths<'a> {
+    plain: &'a [PathMapping],
+    json: Vec<PathMapping>,
+}
+
+impl<'a> OutputPaths<'a> {
+    fn new(plain: &'a [PathMapping]) -> Self {
+        let json = plain
+            .iter()
+            .filter_map(|mapping| {
+                let root = serde_json::to_string(mapping.root.to_str()?).ok()?;
+                let root = root.strip_prefix('"')?.strip_suffix('"')?;
+                Some(PathMapping::new(root, &mapping.placeholder))
+            })
+            .collect();
+        Self { plain, json }
+    }
+
+    fn denormalize(&self, bytes: &[u8]) -> Vec<u8> {
+        if self.plain.is_empty() {
+            return bytes.to_vec();
+        }
+        let mut text = Vec::with_capacity(bytes.len());
+        for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+            let json = line.trim_ascii_start().first() == Some(&b'{');
+            let mappings = if json { &self.json } else { self.plain };
+            text.extend(denormalize_output_text(line, mappings));
+        }
+        text
+    }
+}
+
 /// [`forward_stream`] that rewrites placeholders in each line into real paths
 /// first, so what is forwarded and what is captured agree.
 fn forward_stream_mapped(
@@ -1113,17 +1151,14 @@ fn forward_stream_mapped(
     let mut captured = Vec::new();
     let mut forwarding = true;
     let mut line = Vec::new();
+    let paths = OutputPaths::new(mappings);
     loop {
         let start = captured.len();
         line.clear();
         if reader.read_until(b'\n', &mut line)? == 0 {
             break;
         }
-        if mappings.is_empty() {
-            captured.extend_from_slice(&line);
-        } else {
-            captured.extend_from_slice(&denormalize_output_text(&line, mappings));
-        }
+        captured.extend_from_slice(&paths.denormalize(&line));
         if forwarding {
             forwarding = sink
                 .write_all(&captured[start..])

@@ -216,6 +216,26 @@ fn forwarded_diagnostics_name_real_paths_not_placeholders() {
     assert_eq!(captured, expected);
     assert_eq!(sink.bytes(), expected);
 }
+
+/// A Windows root or a quote in a path must not break a JSON diagnostic.
+#[test]
+fn json_diagnostics_stay_valid_with_windows_and_quoted_roots() {
+    for root in ["C:\\work\\target\\out", "/work/\"odd\"/out"] {
+        let mappings = [PathMapping::new(root, "out_dir")];
+        let mut sink = Sink::default();
+        let captured = forward_stream_mapped(
+            &b"{\"file_name\":\"${out_dir}/gen.rs\"}\n --> ${out_dir}/gen.rs\n"[..],
+            &mut sink,
+            &mappings,
+        )
+        .unwrap();
+        let text = String::from_utf8(captured).unwrap();
+        let (json, plain) = text.split_once('\n').unwrap();
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(value["file_name"], format!("{root}/gen.rs"));
+        assert_eq!(plain, format!(" --> {root}/gen.rs\n"));
+    }
+}
 #[test]
 fn a_closed_forwarding_destination_still_drains_the_compiler() {
     let seen = Sink::default();
