@@ -3,9 +3,59 @@ use eyre::{Result, bail};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 /// Why [`LocalActionCache::store`] refuses to replace an intact result.
 pub const ACTION_CONFLICT_MESSAGE: &str = "local action key already has a different result";
+
+/// How long a recorded use of a store file stands before another use writes
+/// it again: the granularity `relatime` gives, and far finer than any
+/// eviction decision needs.
+pub const USE_REFRESH: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Record that a build used the store file at `path` at `now`.
+///
+/// Eviction ranks store files by access time, and a read cannot be trusted to
+/// keep it. APFS refreshes it only while it is older than the modification
+/// time, which a file written once and never again does not stay; Windows
+/// volumes over 128 GB and `noatime` mounts do not track it at all.
+///
+/// So the access time is written here, at most once per [`USE_REFRESH`], and
+/// the modification time is left alone: it is what a remembered blob is
+/// checked against, and what tells a rewrite apart from a use.
+pub fn record_use(path: &Path, now: SystemTime) -> std::io::Result<()> {
+    let accessed = fs::metadata(path)?.accessed().ok();
+    if let (Some(accessed), Some(stale)) = (accessed, now.checked_sub(USE_REFRESH))
+        && accessed > stale
+    {
+        return Ok(());
+    }
+    open_for_times(path)?.set_times(fs::FileTimes::new().set_accessed(now))
+}
+
+/// Open `path` only as far as setting its times needs.
+///
+/// The owner may set the times of a file it cannot write, so a read-only
+/// descriptor is enough, and it works on a read-only blob.
+#[cfg(not(windows))]
+fn open_for_times(path: &Path) -> std::io::Result<fs::File> {
+    fs::File::open(path)
+}
+
+/// Windows needs the attribute-writing right, which the read-only attribute
+/// does not withhold, rather than the write access that it does. Sharing
+/// everything keeps a concurrent restore, or an eviction, from failing on it.
+#[cfg(windows)]
+fn open_for_times(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+    };
+    fs::OpenOptions::new()
+        .access_mode(FILE_WRITE_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .open(path)
+}
 
 /// A validated, content-addressed store on the local filesystem.
 #[derive(Debug, Clone)]
@@ -347,6 +397,55 @@ impl LocalActionCache {
                 .directories
                 .iter()
                 .all(|child| self.directory_is_intact(&child.digest, seen))
+    }
+
+    /// Record that a build used `result`: its record, and every object it
+    /// names that this index can see.
+    ///
+    /// Nothing is verified or hashed. The objects were just restored from, so
+    /// this is a stat of each and, at most once a day, a write of its access
+    /// time. A file that cannot be recorded -- evicted meanwhile, or in a
+    /// store owned by someone else -- costs eviction order, never a build, so
+    /// it is skipped.
+    pub fn record_use(&self, result: &RemoteActionResult, now: SystemTime) {
+        let record = |path: &Path| {
+            if let Err(error) = record_use(path, now) {
+                log::debug!("use of {} was not recorded: {error}", path.display());
+            }
+        };
+        let blob = |digest: &CacheDigest| {
+            if let Ok(path) = self.cas.path_for(digest) {
+                record(&path);
+            }
+        };
+        if let Ok(path) = self.path_for(&result.action) {
+            record(&path);
+        }
+        blob(&result.action);
+        if let Some(metadata) = &result.metadata {
+            blob(metadata);
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut pending: Vec<CacheDigest> = result.output_root.iter().cloned().collect();
+        while let Some(digest) = pending.pop() {
+            if !seen.insert(digest.clone()) {
+                continue;
+            }
+            let Ok(path) = self.cas.path_for(&digest) else {
+                continue;
+            };
+            record(&path);
+            let Some(directory) = fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<crate::CacheDirectory>(&bytes).ok())
+            else {
+                continue;
+            };
+            for file in &directory.files {
+                blob(&file.digest);
+            }
+            pending.extend(directory.directories.into_iter().map(|child| child.digest));
+        }
     }
 
     /// Atomically publish an action result after validating all referenced objects.
@@ -904,5 +1003,116 @@ mod tests {
             ActionStoreOutcome::Stored
         );
         assert_eq!(actions.find(&action).unwrap(), Some(second));
+    }
+
+    /// A whole second, so filesystems that keep coarser times still compare
+    /// equal to what was written.
+    fn whole_second_now() -> SystemTime {
+        let since_epoch = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        SystemTime::UNIX_EPOCH + Duration::from_secs(since_epoch.as_secs())
+    }
+
+    fn backdate(path: &Path, by: Duration) -> SystemTime {
+        let then = whole_second_now() - by;
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_accessed(then).set_modified(then))
+            .unwrap();
+        then
+    }
+
+    #[test]
+    fn a_stale_use_is_recorded_without_touching_the_modification_time() {
+        let directory = tempfile::tempdir().unwrap();
+        let blob = directory.path().join("blob");
+        fs::write(&blob, b"object").unwrap();
+        let written = backdate(&blob, 3 * USE_REFRESH);
+        let now = whole_second_now();
+
+        record_use(&blob, now).unwrap();
+
+        let metadata = fs::metadata(&blob).unwrap();
+        assert_eq!(metadata.accessed().unwrap(), now);
+        assert_eq!(metadata.modified().unwrap(), written);
+    }
+
+    #[test]
+    fn a_use_recorded_within_the_refresh_window_is_not_written_again() {
+        let directory = tempfile::tempdir().unwrap();
+        let blob = directory.path().join("blob");
+        fs::write(&blob, b"object").unwrap();
+        let recent = backdate(&blob, USE_REFRESH / 2);
+
+        record_use(&blob, whole_second_now()).unwrap();
+
+        assert_eq!(fs::metadata(&blob).unwrap().accessed().unwrap(), recent);
+    }
+
+    #[test]
+    fn a_read_only_blob_still_records_its_use() {
+        let directory = tempfile::tempdir().unwrap();
+        let blob = directory.path().join("blob");
+        fs::write(&blob, b"object").unwrap();
+        let written = backdate(&blob, 3 * USE_REFRESH);
+        let mut permissions = fs::metadata(&blob).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&blob, permissions).unwrap();
+        let now = whole_second_now();
+
+        let recorded = record_use(&blob, now);
+
+        let metadata = fs::metadata(&blob).unwrap();
+        // Restored before asserting: Windows will not delete a read-only file,
+        // and the temporary directory would be left behind.
+        #[cfg(windows)]
+        make_owner_writable(&blob).unwrap();
+        recorded.unwrap();
+        assert_eq!(metadata.accessed().unwrap(), now);
+        assert_eq!(metadata.modified().unwrap(), written);
+        assert!(metadata.permissions().readonly());
+    }
+
+    #[test]
+    fn a_result_whose_objects_went_missing_records_the_rest() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = LocalCas::new(directory.path());
+        let actions = LocalActionCache::new(directory.path());
+        let action = CacheDigest::blake3(b"action");
+        cas.store_bytes(&action, b"action").unwrap();
+        let result = RemoteActionResult {
+            version: 1,
+            action: action.clone(),
+            metadata: None,
+            output_root: None,
+        };
+        actions.store(&result).unwrap();
+        let missing = CacheDigest::blake3(b"evicted");
+        assert_eq!(
+            record_use(&cas.path_for(&missing).unwrap(), whole_second_now())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        let record = actions.path_for(&action).unwrap();
+        let blob = cas.path_for(&action).unwrap();
+        backdate(&record, 3 * USE_REFRESH);
+        backdate(&blob, 3 * USE_REFRESH);
+        let now = whole_second_now();
+
+        actions.record_use(
+            &RemoteActionResult {
+                metadata: Some(missing.clone()),
+                output_root: Some(missing),
+                ..result
+            },
+            now,
+        );
+
+        assert_eq!(fs::metadata(&record).unwrap().accessed().unwrap(), now);
+        assert_eq!(fs::metadata(&blob).unwrap().accessed().unwrap(), now);
     }
 }

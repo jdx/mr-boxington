@@ -375,6 +375,9 @@ pub struct CacheAgent {
     remote_transfers: Arc<tokio::sync::Semaphore>,
     prefetch_transfers: Arc<tokio::sync::Semaphore>,
     prefetch_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    /// Hits whose use is still being written to the store, so a session can
+    /// let them land before it goes. See [`CacheAgent::wait_for_use_records`].
+    use_records: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     /// Distinct shim diagnostics already surfaced, so a diagnostic that fires
     /// once per compilation is printed once per session. The severity is part
     /// of each key: a fatal reason must still be surfaced after the same text
@@ -924,6 +927,7 @@ impl CacheAgent {
             remote_transfers,
             prefetch_transfers: Arc::new(tokio::sync::Semaphore::new(MAX_PREFETCH_TRANSFERS)),
             prefetch_tasks: Arc::new(Mutex::new(Vec::new())),
+            use_records: Arc::new(Mutex::new(Vec::new())),
             diagnostics: Arc::new(Mutex::new(BTreeSet::new())),
             file_digests: Arc::new(Mutex::new(BTreeMap::new())),
             file_digest_locks: Arc::new(Mutex::new(BTreeMap::new())),
@@ -1419,6 +1423,21 @@ impl CacheAgent {
         };
         let _timer = AtomicDurationTimer::start(&self.stats.upload_drain_duration_ns);
         uploads.drain().await;
+    }
+
+    /// Let every hit's use finish being recorded in the store.
+    ///
+    /// A hit replies before its use is written, so the walk over its objects
+    /// adds nothing to the compilation it answers. Those writes run on the
+    /// session's runtime, and a process that exits without waiting here may
+    /// leave the last few hits looking older than they are.
+    pub async fn wait_for_use_records(&self) {
+        let tasks = std::mem::take(&mut *self.use_records.lock().unwrap());
+        for task in tasks {
+            if let Err(error) = task.await {
+                debug!("recording a hit's use failed: {error}");
+            }
+        }
     }
 
     async fn wait_for_prefetches(&self) {
@@ -2533,14 +2552,18 @@ impl CacheAgent {
         diagnostic: Option<AgentEvent>,
     ) -> Result<AgentResponse> {
         validate_crate_name(crate_name.as_deref())?;
-        if self.actions.find(action)?.is_none() {
-            let pending = self.pending_remote_actions.lock().unwrap().remove(action);
-            if let Some(result) = pending {
+        let result = match self.actions.find(action)? {
+            Some(result) => result,
+            None => {
+                let pending = self.pending_remote_actions.lock().unwrap().remove(action);
+                let Some(result) = pending else {
+                    bail!("cannot record a hit for a missing action result");
+                };
                 self.actions.store(&result)?;
-            } else {
-                bail!("cannot record a hit for a missing action result");
+                result
             }
-        }
+        };
+        self.record_use(result);
         self.record_restore(restore);
         self.stats.lookups.fetch_add(1, Ordering::Relaxed);
         self.stats.hits.fetch_add(1, Ordering::Relaxed);
@@ -2552,6 +2575,20 @@ impl CacheAgent {
             },
         );
         Ok(AgentResponse::ActionHitRecorded)
+    }
+
+    /// Mark a restored result, and everything it names, as used, so eviction
+    /// ranks it by when builds last needed it rather than when it was written.
+    ///
+    /// Only a hit does this. Lookups also serve publication conflict checks,
+    /// verification builds and speculative prefetches, none of which is a use.
+    fn record_use(&self, result: RemoteActionResult) {
+        let actions = self.actions.clone();
+        let now = SystemTime::now();
+        let task = tokio::task::spawn_blocking(move || actions.record_use(&result, now));
+        let mut tasks = self.use_records.lock().unwrap();
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(task);
     }
 
     fn record_restore(&self, restore: RestoreStats) {

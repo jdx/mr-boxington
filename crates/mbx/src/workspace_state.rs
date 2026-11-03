@@ -279,10 +279,36 @@ pub(crate) fn restore_with(
     }
     std::fs::rename(&staged_target, &destination)?;
     crate::target::touch_managed(config, workspace_root, target_dir);
+    record_use(&cas, attachment, state);
     Ok(Some(RestoreOutcome {
         files: state.references.len() as u64,
         referenced_bytes: bytes,
     }))
+}
+
+/// Mark the store objects this restore materialized as used, as a cache hit
+/// does for the objects it restores, so eviction does not take them for
+/// abandoned the day after an import.
+fn record_use(cas: &LocalCas, attachment: &CacheDigest, state: &WorkspaceState) {
+    let now = std::time::SystemTime::now();
+    let references = state
+        .references
+        .iter()
+        .filter_map(|reference| match &reference.source {
+            FileSource::Cas(digest) => Some(digest),
+            FileSource::Mbx => None,
+        });
+    for digest in [attachment, &state.inline_archive]
+        .into_iter()
+        .chain(references)
+    {
+        let Ok(path) = cas.path_for(digest) else {
+            continue;
+        };
+        if let Err(error) = mbx_cache_core::record_use(&path, now) {
+            log::debug!("use of {} was not recorded: {error}", path.display());
+        }
+    }
 }
 
 fn unpack_inline(cas: &LocalCas, digest: &CacheDigest, destination: &Path) -> Result<()> {

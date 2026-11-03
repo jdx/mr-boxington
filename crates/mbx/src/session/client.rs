@@ -89,6 +89,8 @@ pub(super) fn request_standalone_agent(requests: &[AgentRequest]) -> Result<Vec<
                     agent.commit_task(&run).await?;
                 }
             }
+            // No session outlives this process to let a hit's use land later.
+            agent.wait_for_use_records().await;
             Ok(responses)
         })
     })

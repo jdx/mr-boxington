@@ -4,6 +4,7 @@ use crate::{
     ACTION_PROMISE_MEDIA_TYPE, ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE,
     BLOB_PACK_BLOBS_HEADER, MAX_ACTION_PREDICTION_PAYLOAD,
 };
+use crate::{CacheDirectoryNode, CacheFileNode};
 use std::time::Duration;
 
 #[test]
@@ -1054,6 +1055,169 @@ async fn a_hit_carrying_an_unusable_crate_name_is_rejected() {
         response,
         AgentResponse::Error { message } if message.contains("invalid compiler crate name")
     ));
+}
+
+/// A stored result whose outputs nest one directory inside another, and every
+/// file of it: the record, the action, the metadata, both directory objects
+/// and both outputs, all last used `USE_REFRESH` times three ago.
+fn stored_result_used_long_ago(agent: &CacheAgent) -> (CacheDigest, Vec<PathBuf>) {
+    let file = |name: &str, contents: &[u8]| {
+        let digest = CacheDigest::blake3(contents);
+        agent.cas.store_bytes(&digest, contents).unwrap();
+        CacheFileNode {
+            digest,
+            executable: false,
+            mode: 0o644,
+            name: name.into(),
+        }
+    };
+    let directory = |directories, files| {
+        let bytes = serde_json::to_vec(&CacheDirectory {
+            directories,
+            files,
+            symlinks: Vec::new(),
+            version: 1,
+        })
+        .unwrap();
+        let digest = CacheDigest::blake3(&bytes);
+        agent.cas.store_bytes(&digest, &bytes).unwrap();
+        digest
+    };
+    let deps = file("libdep.rlib", b"rlib");
+    let nested = directory(Vec::new(), vec![deps.clone()]);
+    let output = file("out.d", b"dep-info");
+    let output_root = directory(
+        vec![CacheDirectoryNode {
+            digest: nested.clone(),
+            mode: 0o755,
+            name: "deps".into(),
+        }],
+        vec![output.clone()],
+    );
+    let action = CacheDigest::blake3(b"action");
+    let metadata = CacheDigest::blake3(b"metadata");
+    agent.cas.store_bytes(&action, b"action").unwrap();
+    agent.cas.store_bytes(&metadata, b"metadata").unwrap();
+    agent
+        .actions
+        .store(&RemoteActionResult {
+            action: action.clone(),
+            metadata: Some(metadata.clone()),
+            output_root: Some(output_root.clone()),
+            version: 1,
+        })
+        .unwrap();
+    let mut paths = vec![agent.actions.path_for(&action).unwrap()];
+    for digest in [
+        &action,
+        &metadata,
+        &output_root,
+        &nested,
+        &output.digest,
+        &deps.digest,
+    ] {
+        paths.push(agent.cas.path_for(digest).unwrap());
+    }
+    let long_ago = SystemTime::now() - 3 * crate::USE_REFRESH;
+    for path in &paths {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new()
+                    .set_accessed(long_ago)
+                    .set_modified(long_ago),
+            )
+            .unwrap();
+    }
+    (action, paths)
+}
+
+fn last_used(path: &Path) -> SystemTime {
+    fs::metadata(path).unwrap().accessed().unwrap()
+}
+
+#[tokio::test]
+async fn a_hit_records_the_use_of_its_result_and_everything_it_names() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    let (action, paths) = stored_result_used_long_ago(&agent);
+    let written: Vec<_> = paths
+        .iter()
+        .map(|path| fs::metadata(path).unwrap().modified().unwrap())
+        .collect();
+    let before = SystemTime::now() - Duration::from_secs(1);
+
+    let response = agent
+        .respond(AgentRequest::RecordActionHit {
+            action,
+            restore: RestoreStats::default(),
+            crate_name: None,
+        })
+        .await;
+    agent.wait_for_use_records().await;
+
+    assert!(matches!(response, AgentResponse::ActionHitRecorded));
+    for (path, written) in paths.iter().zip(written) {
+        assert!(last_used(path) >= before, "{}", path.display());
+        // A remembered blob is checked against its modification time, so a
+        // recorded use must not look like a rewrite.
+        assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), written);
+    }
+}
+
+#[tokio::test]
+async fn looking_a_result_up_is_not_a_use() {
+    // Lookups also answer publication conflict checks, verification builds
+    // and speculative prefetches. Only a restored hit counts toward keeping a
+    // result.
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    let (action, paths) = stored_result_used_long_ago(&agent);
+    let unused: Vec<_> = paths.iter().map(|path| last_used(path)).collect();
+    let blobs = paths[1..]
+        .iter()
+        .map(|path| {
+            let name = path.file_name().unwrap().to_str().unwrap();
+            let (hash, size) = name.split_once('-').unwrap();
+            CacheDigest {
+                algorithm: "blake3".into(),
+                hash: hash.into(),
+                size: size.parse().unwrap(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let found = agent
+        .handle_requests([
+            AgentRequest::FindActionResult { action },
+            AgentRequest::FindBlob {
+                digest: blobs[0].clone(),
+            },
+            AgentRequest::FindBlobs { digests: blobs },
+        ])
+        .await;
+    agent.wait_for_use_records().await;
+
+    assert!(matches!(
+        found[0],
+        AgentResponse::ActionResult { result: Some(_) }
+    ));
+    assert!(matches!(found[1], AgentResponse::Blob { path: Some(_) }));
+    assert!(
+        matches!(&found[2], AgentResponse::Blobs { paths } if paths.iter().all(Option::is_some))
+    );
+    assert!(agent.use_records.lock().unwrap().is_empty());
+    // Verifying a blob reads it, and Linux's `relatime` or a small Windows
+    // volume may refresh the access time on that read. APFS leaves a time
+    // that is not older than the modification time alone, so there the
+    // times show that nothing here wrote them.
+    if cfg!(target_os = "macos") {
+        for (path, unused) in paths.iter().zip(unused) {
+            assert_eq!(last_used(path), unused, "{}", path.display());
+        }
+    }
 }
 
 #[tokio::test]

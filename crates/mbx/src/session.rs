@@ -853,6 +853,7 @@ impl CacheSession {
         // Cancelling first hands the queue the transfer budget the abandoned
         // downloads were holding.
         self.agent.wait_for_uploads().await;
+        self.agent.wait_for_use_records().await;
         served?;
         // Saved after the shims are done and before the summary, so the next
         // session in this checkout starts from everything this one hashed.
