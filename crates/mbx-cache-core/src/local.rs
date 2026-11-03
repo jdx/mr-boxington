@@ -57,6 +57,14 @@ fn open_for_times(path: &Path) -> std::io::Result<fs::File> {
         .open(path)
 }
 
+/// The captured compiler output an action's metadata names, whatever the
+/// adapter that wrote it.
+#[derive(serde::Deserialize)]
+struct CapturedOutput {
+    stdout: CacheDigest,
+    stderr: CacheDigest,
+}
+
 /// A validated, content-addressed store on the local filesystem.
 #[derive(Debug, Clone)]
 pub struct LocalCas {
@@ -424,6 +432,19 @@ impl LocalActionCache {
         blob(&result.action);
         if let Some(metadata) = &result.metadata {
             blob(metadata);
+            // Every adapter's metadata names the compiler output a hit
+            // replays, and eviction would otherwise take the empty blob that
+            // all silent compilations share for the oldest object in the store.
+            if let Some(captured) = self
+                .cas
+                .path_for(metadata)
+                .ok()
+                .and_then(|path| fs::read(path).ok())
+                .and_then(|bytes| serde_json::from_slice::<CapturedOutput>(&bytes).ok())
+            {
+                blob(&captured.stdout);
+                blob(&captured.stderr);
+            }
         }
         let mut seen = std::collections::BTreeSet::new();
         let mut pending: Vec<CacheDigest> = result.output_root.iter().cloned().collect();

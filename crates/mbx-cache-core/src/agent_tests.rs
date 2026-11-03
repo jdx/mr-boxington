@@ -1058,8 +1058,9 @@ async fn a_hit_carrying_an_unusable_crate_name_is_rejected() {
 }
 
 /// A stored result whose outputs nest one directory inside another, and every
-/// file of it: the record, the action, the metadata, both directory objects
-/// and both outputs, all last used `USE_REFRESH` times three ago.
+/// file of it: the record, the action, the metadata and the compiler output it
+/// names, both directory objects and both outputs, all last used
+/// `USE_REFRESH` times three ago.
 fn stored_result_used_long_ago(agent: &CacheAgent) -> (CacheDigest, Vec<PathBuf>) {
     let file = |name: &str, contents: &[u8]| {
         let digest = CacheDigest::blake3(contents);
@@ -1095,9 +1096,23 @@ fn stored_result_used_long_ago(agent: &CacheAgent) -> (CacheDigest, Vec<PathBuf>
         vec![output.clone()],
     );
     let action = CacheDigest::blake3(b"action");
-    let metadata = CacheDigest::blake3(b"metadata");
     agent.cas.store_bytes(&action, b"action").unwrap();
-    agent.cas.store_bytes(&metadata, b"metadata").unwrap();
+    let stdout = CacheDigest::blake3(b"");
+    let stderr = CacheDigest::blake3(b"warning: unused variable");
+    agent.cas.store_bytes(&stdout, b"").unwrap();
+    agent
+        .cas
+        .store_bytes(&stderr, b"warning: unused variable")
+        .unwrap();
+    let metadata_bytes = serde_json::to_vec(&crate::RustcMetadata {
+        version: 1,
+        kind: "rustc".into(),
+        stdout: stdout.clone(),
+        stderr: stderr.clone(),
+    })
+    .unwrap();
+    let metadata = CacheDigest::blake3(&metadata_bytes);
+    agent.cas.store_bytes(&metadata, &metadata_bytes).unwrap();
     agent
         .actions
         .store(&RemoteActionResult {
@@ -1111,6 +1126,8 @@ fn stored_result_used_long_ago(agent: &CacheAgent) -> (CacheDigest, Vec<PathBuf>
     for digest in [
         &action,
         &metadata,
+        &stdout,
+        &stderr,
         &output_root,
         &nested,
         &output.digest,
