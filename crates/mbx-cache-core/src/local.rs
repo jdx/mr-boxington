@@ -429,18 +429,32 @@ impl LocalActionCache {
     /// Record that a build used `result`: its record, and every object it
     /// names that this index can see.
     ///
-    /// Nothing is verified or hashed. The objects were just restored from, so
-    /// this is a stat of each and, at most once a day, a write of its access
-    /// time. A file that cannot be recorded -- evicted meanwhile, or in a
-    /// store owned by someone else -- costs eviction order, never a build, so
-    /// it is skipped.
+    /// The record's access time stands for its whole closure, so a hit on a
+    /// result used within [`USE_REFRESH`] costs one stat and walks nothing.
+    /// It is written last, after the objects, so an interrupted walk is
+    /// retried by the next hit. Where reads do refresh access times, the
+    /// lookup may refresh the record first and skip the walk, but the restore
+    /// then read the objects too, which refreshed them the same way.
+    ///
+    /// Nothing is verified or hashed. A file that cannot be recorded --
+    /// evicted meanwhile, or in a store owned by someone else -- costs
+    /// eviction order, never a build, so it is skipped.
     pub fn record_use(&self, result: &RemoteActionResult, now: SystemTime) {
-        if let Ok(path) = self.path_for(&result.action) {
-            record_use_or_log(&path, now);
+        let Ok(record) = self.path_for(&result.action) else {
+            return;
+        };
+        let recent = now.checked_sub(USE_REFRESH).is_some_and(|stale| {
+            fs::metadata(&record)
+                .and_then(|metadata| metadata.accessed())
+                .is_ok_and(|accessed| accessed > stale)
+        });
+        if recent {
+            return;
         }
         for digest in self.named_objects(result) {
             self.cas.record_use(&digest, now);
         }
+        record_use_or_log(&record, now);
     }
 
     /// Every store object `result` names: the action, its metadata and the
@@ -1157,5 +1171,30 @@ pub(crate) mod tests {
 
         assert_eq!(fs::metadata(&record).unwrap().accessed().unwrap(), now);
         assert_eq!(fs::metadata(&blob).unwrap().accessed().unwrap(), now);
+    }
+
+    #[test]
+    fn a_result_used_within_the_refresh_window_walks_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = LocalCas::new(directory.path());
+        let actions = LocalActionCache::new(directory.path());
+        let action = CacheDigest::blake3(b"action");
+        cas.store_bytes(&action, b"action").unwrap();
+        let result = RemoteActionResult {
+            version: 1,
+            action: action.clone(),
+            metadata: None,
+            output_root: None,
+        };
+        actions.store(&result).unwrap();
+        let record = actions.path_for(&action).unwrap();
+        let blob = cas.path_for(&action).unwrap();
+        let recent = backdate(&record, USE_REFRESH / 2);
+        let old = backdate(&blob, 3 * USE_REFRESH);
+
+        actions.record_use(&result, whole_second_now());
+
+        assert_eq!(fs::metadata(&record).unwrap().accessed().unwrap(), recent);
+        assert_eq!(fs::metadata(&blob).unwrap().accessed().unwrap(), old);
     }
 }
