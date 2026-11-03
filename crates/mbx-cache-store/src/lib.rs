@@ -2017,11 +2017,13 @@ fn checkout_record_path(store: &Path, identity: &str, workspace_root: &Path) -> 
 ///
 /// Objects no live checkout can reach are evicted first, so deleting a worktree
 /// releases what only that worktree needed. Within each class eviction is
-/// least-recently-used by access time where the filesystem records it, falling
-/// back to modification time. A restore verifies the blob it serves, which
-/// means it reads the whole file and the access time is real -- but only where
-/// the mount records one, so the ordering is an approximation either way.
-/// Evicting a live object costs a recompile, never correctness.
+/// least-recently-used by access time, falling back to modification time. A
+/// build that restores a result sets the access time of the result and every
+/// object it names itself, at most once a day, rather than trusting reads to:
+/// APFS, `noatime` and large Windows volumes do not refresh it on a read. So
+/// the order is right to the day, and an object nothing has restored since it
+/// was written ranks by its write. Evicting a live object costs a recompile,
+/// never correctness.
 pub fn gc(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
     gc_with_mode(store, max_bytes, false, HashSet::new())
 }

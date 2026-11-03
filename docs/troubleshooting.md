@@ -31,7 +31,7 @@ Example output (versions, paths, and budgets depend on your machine):
   ok  cargo        cargo 1.98.0 (797e8a9bc 2026-08-05)
   ok  rustc        rustc 1.98.0 (88d9e12ae 2026-08-18)
   ok  cache        /home/you/.cache/mbx is writable
-  ok  atime        /home/you/.cache/mbx/actions: reads refresh access times
+  ok  atime        /home/you/.cache/mbx/actions: mbx records use times itself
   ok  atime        /home/you/.cache/mbx/targets/v1: reads refresh access times
   ok  session      Unix-domain listeners are available
   ok  config       50.0 GiB budget, automatic gc enabled, managed targets enabled at /home/you/.cache/mbx/targets; `mbx settings ls` shows every setting
@@ -48,7 +48,8 @@ Example output (versions, paths, and budgets depend on your machine):
 
 - the Cargo and rustc executables
 - cache write access
-- whether reads refresh access times in the action store and managed target views
+- whether mbx can record use times in the action store, and whether reads
+  refresh access times in managed target views
 - on Unix, the local listener that compiler shims use to reach the cache agent
 - whether restores can clone or hard link into Cargo's target directory and,
   with managed targets enabled, the managed target root
@@ -59,13 +60,16 @@ Example output (versions, paths, and budgets depend on your machine):
 Warnings describe setup problems, optional features, or fallbacks. Failures
 make `mbx doctor` exit unsuccessfully.
 
-The `atime` check reads a temporary file with an access time two days in the
-past. Both `relatime` and `strictatime` pass. With `noatime`, object eviction
-loses its recent-use ordering, unused-unit collection is skipped, and seeding
-cannot filter units by recent use. On Linux, enable access times with
+The `atime` checks start from a temporary file with an access time two days in
+the past. In the action store, mbx records object use itself, so the check
+confirms that it can set that file's access time; if it cannot, object
+eviction loses its recent-use ordering. Managed target views still depend on
+the filesystem: there the check reads the file, and both `relatime` and
+`strictatime` pass. With `noatime`, unused-unit collection is skipped and
+seeding cannot filter units by recent use. On Linux, enable access times with
 `relatime` or `strictatime`; on ZFS, both `atime=on` and `relatime=on` are needed
 for relative access-time updates. On other platforms, check the filesystem's
-access-time settings. The check warns rather than fails because caching still
+access-time settings. The checks warn rather than fail because caching still
 works. The action store is probed at `<cache_dir>/actions`, and managed targets
 at `<target.root>/v1`, following symlinks and mounts at either location. A
 missing directory is probed through its nearest existing ancestor without

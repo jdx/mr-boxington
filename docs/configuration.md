@@ -236,10 +236,12 @@ need. The most recently used version is always kept, so a store left idle for
 longer than the window is not emptied. Results that are not Rust compilations,
 and results a pending grouped CI export still needs, are not affected.
 
-Use time is the result file's access time where the filesystem records it,
-otherwise its modification time. Mounts with `noatime` therefore see only
-writes, so choose a window longer than you go between building a project and
-rebuilding it. `mbx gc --dry-run` shows what a window would remove.
+Use time is the result file's access time, which mbx records itself when a
+build restores the result, at most once a day per file. It does not depend on
+the filesystem refreshing access times on reads, so it holds under `noatime`,
+on APFS, and on Windows volumes with last-access updates turned off. Choose a
+window longer than you go between building a project and rebuilding it.
+`mbx gc --dry-run` shows what a window would remove.
 
 To drop a version right after you stop using it, name it instead of waiting
 out a window:
