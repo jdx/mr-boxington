@@ -306,16 +306,8 @@ fn a_workspace_state_restore_records_the_use_of_what_it_materialized() {
         .collect();
     assert!(objects.contains(&cas.path_for(&artifact).unwrap()));
     for path in &objects {
-        std::fs::File::options()
-            .write(true)
-            .open(path)
-            .unwrap()
-            .set_times(
-                std::fs::FileTimes::new()
-                    .set_accessed(long_ago)
-                    .set_modified(long_ago),
-            )
-            .unwrap();
+        let time = filetime::FileTime::from_system_time(long_ago);
+        filetime::set_file_times(path, time, time).unwrap();
     }
     let lease = ViewLease::acquire(&config.target.root, &workspace).unwrap();
     let before = std::time::SystemTime::now() - std::time::Duration::from_secs(1);

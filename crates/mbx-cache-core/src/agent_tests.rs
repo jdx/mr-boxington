@@ -1057,11 +1057,14 @@ async fn a_hit_carrying_an_unusable_crate_name_is_rejected() {
     ));
 }
 
-/// A stored result whose outputs nest one directory inside another, and every
-/// file of it: the record, the action, the metadata and the compiler output it
-/// names, both directory objects and both outputs, all last used
-/// `USE_REFRESH` times three ago.
-fn stored_result_used_long_ago(agent: &CacheAgent) -> (CacheDigest, Vec<PathBuf>) {
+/// A stored result whose outputs nest one directory inside another, every
+/// object it names -- the action, the metadata and the compiler output it
+/// names, both directory objects and both outputs -- and the files of the
+/// record and of each object in that order, all last used `USE_REFRESH` times
+/// three ago.
+fn stored_result_used_long_ago(
+    agent: &CacheAgent,
+) -> (CacheDigest, Vec<CacheDigest>, Vec<PathBuf>) {
     let file = |name: &str, contents: &[u8]| {
         let digest = CacheDigest::blake3(contents);
         agent.cas.store_bytes(&digest, contents).unwrap();
@@ -1122,33 +1125,27 @@ fn stored_result_used_long_ago(agent: &CacheAgent) -> (CacheDigest, Vec<PathBuf>
             version: 1,
         })
         .unwrap();
-    let mut paths = vec![agent.actions.path_for(&action).unwrap()];
-    for digest in [
-        &action,
-        &metadata,
-        &stdout,
-        &stderr,
-        &output_root,
-        &nested,
-        &output.digest,
-        &deps.digest,
-    ] {
-        paths.push(agent.cas.path_for(digest).unwrap());
-    }
-    let long_ago = SystemTime::now() - 3 * crate::USE_REFRESH;
+    let objects = vec![
+        action.clone(),
+        metadata,
+        stdout,
+        stderr,
+        output_root,
+        nested,
+        output.digest,
+        deps.digest,
+    ];
+    let paths: Vec<_> = std::iter::once(agent.actions.path_for(&action).unwrap())
+        .chain(
+            objects
+                .iter()
+                .map(|digest| agent.cas.path_for(digest).unwrap()),
+        )
+        .collect();
     for path in &paths {
-        fs::File::options()
-            .write(true)
-            .open(path)
-            .unwrap()
-            .set_times(
-                fs::FileTimes::new()
-                    .set_accessed(long_ago)
-                    .set_modified(long_ago),
-            )
-            .unwrap();
+        crate::local::tests::backdate(path, 3 * crate::USE_REFRESH);
     }
-    (action, paths)
+    (action, objects, paths)
 }
 
 fn last_used(path: &Path) -> SystemTime {
@@ -1159,7 +1156,7 @@ fn last_used(path: &Path) -> SystemTime {
 async fn a_hit_records_the_use_of_its_result_and_everything_it_names() {
     let directory = tempfile::tempdir().unwrap();
     let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
-    let (action, paths) = stored_result_used_long_ago(&agent);
+    let (action, _, paths) = stored_result_used_long_ago(&agent);
     let written: Vec<_> = paths
         .iter()
         .map(|path| fs::metadata(path).unwrap().modified().unwrap())
@@ -1173,7 +1170,6 @@ async fn a_hit_records_the_use_of_its_result_and_everything_it_names() {
             crate_name: None,
         })
         .await;
-    agent.wait_for_use_records().await;
 
     assert!(matches!(response, AgentResponse::ActionHitRecorded));
     for (path, written) in paths.iter().zip(written) {
@@ -1191,20 +1187,8 @@ async fn looking_a_result_up_is_not_a_use() {
     // result.
     let directory = tempfile::tempdir().unwrap();
     let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
-    let (action, paths) = stored_result_used_long_ago(&agent);
+    let (action, blobs, paths) = stored_result_used_long_ago(&agent);
     let unused: Vec<_> = paths.iter().map(|path| last_used(path)).collect();
-    let blobs = paths[1..]
-        .iter()
-        .map(|path| {
-            let name = path.file_name().unwrap().to_str().unwrap();
-            let (hash, size) = name.split_once('-').unwrap();
-            CacheDigest {
-                algorithm: "blake3".into(),
-                hash: hash.into(),
-                size: size.parse().unwrap(),
-            }
-        })
-        .collect::<Vec<_>>();
 
     let found = agent
         .handle_requests([
@@ -1215,7 +1199,6 @@ async fn looking_a_result_up_is_not_a_use() {
             AgentRequest::FindBlobs { digests: blobs },
         ])
         .await;
-    agent.wait_for_use_records().await;
 
     assert!(matches!(
         found[0],
@@ -1225,7 +1208,6 @@ async fn looking_a_result_up_is_not_a_use() {
     assert!(
         matches!(&found[2], AgentResponse::Blobs { paths } if paths.iter().all(Option::is_some))
     );
-    assert!(agent.use_records.lock().unwrap().is_empty());
     // Verifying a blob reads it, and Linux's `relatime` or a small Windows
     // volume may refresh the access time on that read. APFS leaves a time
     // that is not older than the modification time alone, so there the

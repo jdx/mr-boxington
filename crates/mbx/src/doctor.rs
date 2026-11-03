@@ -352,7 +352,7 @@ fn probe_use_records(directory: &Path) -> std::io::Result<()> {
             .set_accessed(past)
             .set_modified(past),
     )?;
-    mbx_cache_core::record_use(file.path(), std::time::SystemTime::now())?;
+    mbx_cache_core::record_file_use(file.path(), std::time::SystemTime::now())?;
     let metadata = std::fs::metadata(file.path())?;
     if metadata.accessed()? <= past + mbx_cache_core::USE_REFRESH {
         return Err(std::io::Error::other("the access time did not change"));

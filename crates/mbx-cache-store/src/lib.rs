@@ -14,9 +14,9 @@ mod events;
 
 use eyre::{Context, Result};
 use mbx_cache_core::{
-    ActionPrediction, ActionSlot, CacheDigest, CacheDirectory, LocalCas, RemoteActionResult,
-    RustcMetadata, TaskActionManifest, is_task_identity, merge_task_action_predictions,
-    task_manifest_actions,
+    ActionPrediction, ActionSlot, CacheDigest, CacheDirectory, CapturedOutput, LocalCas,
+    RemoteActionResult, RustcMetadata, TaskActionManifest, is_task_identity,
+    merge_task_action_predictions, task_manifest_actions,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -1176,12 +1176,6 @@ fn verify_pending(pending: &mut [PendingObject]) -> Result<()> {
         Some((_, error)) => Err(error),
         None => Ok(()),
     }
-}
-
-#[derive(Deserialize)]
-struct CapturedOutput {
-    stdout: CacheDigest,
-    stderr: CacheDigest,
 }
 
 fn merge_imported_manifest(destination: &Path, mut imported: TaskActionManifest) -> Result<()> {

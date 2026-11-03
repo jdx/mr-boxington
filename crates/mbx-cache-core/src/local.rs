@@ -23,7 +23,7 @@ pub const USE_REFRESH: Duration = Duration::from_secs(24 * 60 * 60);
 /// So the access time is written here, at most once per [`USE_REFRESH`], and
 /// the modification time is left alone: it is what a remembered blob is
 /// checked against, and what tells a rewrite apart from a use.
-pub fn record_use(path: &Path, now: SystemTime) -> std::io::Result<()> {
+pub fn record_file_use(path: &Path, now: SystemTime) -> std::io::Result<()> {
     let accessed = fs::metadata(path)?.accessed().ok();
     if let (Some(accessed), Some(stale)) = (accessed, now.checked_sub(USE_REFRESH))
         && accessed > stale
@@ -31,6 +31,14 @@ pub fn record_use(path: &Path, now: SystemTime) -> std::io::Result<()> {
         return Ok(());
     }
     open_for_times(path)?.set_times(fs::FileTimes::new().set_accessed(now))
+}
+
+/// [`record_file_use`], for a use whose failure costs eviction order and
+/// nothing else.
+fn record_use_or_log(path: &Path, now: SystemTime) {
+    if let Err(error) = record_file_use(path, now) {
+        log::debug!("use of {} was not recorded: {error}", path.display());
+    }
 }
 
 /// Open `path` only as far as setting its times needs.
@@ -60,9 +68,11 @@ fn open_for_times(path: &Path) -> std::io::Result<fs::File> {
 /// The captured compiler output an action's metadata names, whatever the
 /// adapter that wrote it.
 #[derive(serde::Deserialize)]
-struct CapturedOutput {
-    stdout: CacheDigest,
-    stderr: CacheDigest,
+pub struct CapturedOutput {
+    /// The compiler's standard output.
+    pub stdout: CacheDigest,
+    /// The compiler's standard error.
+    pub stderr: CacheDigest,
 }
 
 /// A validated, content-addressed store on the local filesystem.
@@ -109,6 +119,15 @@ impl LocalCas {
             .join(&digest.algorithm)
             .join(&digest.hash[..2])
             .join(format!("{}-{}", digest.hash, digest.size)))
+    }
+
+    /// Record that a build used the object `digest` names at `now`; see
+    /// [`record_file_use`]. A use that cannot be recorded is logged and
+    /// otherwise ignored.
+    pub fn record_use(&self, digest: &CacheDigest, now: SystemTime) {
+        if let Ok(path) = self.path_for(digest) {
+            record_use_or_log(&path, now);
+        }
     }
 
     /// Find and verify a stored object.
@@ -416,34 +435,38 @@ impl LocalActionCache {
     /// store owned by someone else -- costs eviction order, never a build, so
     /// it is skipped.
     pub fn record_use(&self, result: &RemoteActionResult, now: SystemTime) {
-        let record = |path: &Path| {
-            if let Err(error) = record_use(path, now) {
-                log::debug!("use of {} was not recorded: {error}", path.display());
-            }
-        };
-        let blob = |digest: &CacheDigest| {
-            if let Ok(path) = self.cas.path_for(digest) {
-                record(&path);
-            }
-        };
         if let Ok(path) = self.path_for(&result.action) {
-            record(&path);
+            record_use_or_log(&path, now);
         }
-        blob(&result.action);
+        for digest in self.named_objects(result) {
+            self.cas.record_use(&digest, now);
+        }
+    }
+
+    /// Every store object `result` names: the action, its metadata and the
+    /// compiler output that names, and each directory and file under its
+    /// output root.
+    ///
+    /// Nothing is verified. An object that is missing or does not parse names
+    /// nothing further, so the walk yields what it can reach.
+    fn named_objects(&self, result: &RemoteActionResult) -> Vec<CacheDigest> {
+        let read = |digest: &CacheDigest| {
+            self.cas
+                .path_for(digest)
+                .ok()
+                .and_then(|path| fs::read(path).ok())
+        };
+        let mut objects = vec![result.action.clone()];
         if let Some(metadata) = &result.metadata {
-            blob(metadata);
+            objects.push(metadata.clone());
             // Every adapter's metadata names the compiler output a hit
             // replays, and eviction would otherwise take the empty blob that
             // all silent compilations share for the oldest object in the store.
-            if let Some(captured) = self
-                .cas
-                .path_for(metadata)
-                .ok()
-                .and_then(|path| fs::read(path).ok())
+            if let Some(captured) = read(metadata)
                 .and_then(|bytes| serde_json::from_slice::<CapturedOutput>(&bytes).ok())
             {
-                blob(&captured.stdout);
-                blob(&captured.stderr);
+                objects.push(captured.stdout);
+                objects.push(captured.stderr);
             }
         }
         let mut seen = std::collections::BTreeSet::new();
@@ -452,21 +475,16 @@ impl LocalActionCache {
             if !seen.insert(digest.clone()) {
                 continue;
             }
-            let Ok(path) = self.cas.path_for(&digest) else {
-                continue;
-            };
-            record(&path);
-            let Some(directory) = fs::read(&path)
-                .ok()
+            objects.push(digest.clone());
+            let Some(directory) = read(&digest)
                 .and_then(|bytes| serde_json::from_slice::<crate::CacheDirectory>(&bytes).ok())
             else {
                 continue;
             };
-            for file in &directory.files {
-                blob(&file.digest);
-            }
+            objects.extend(directory.files.into_iter().map(|file| file.digest));
             pending.extend(directory.directories.into_iter().map(|child| child.digest));
         }
+        objects
     }
 
     /// Atomically publish an action result after validating all referenced objects.
@@ -567,7 +585,7 @@ impl LocalActionCache {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1028,14 +1046,15 @@ mod tests {
 
     /// A whole second, so filesystems that keep coarser times still compare
     /// equal to what was written.
-    fn whole_second_now() -> SystemTime {
+    pub(crate) fn whole_second_now() -> SystemTime {
         let since_epoch = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap();
         SystemTime::UNIX_EPOCH + Duration::from_secs(since_epoch.as_secs())
     }
 
-    fn backdate(path: &Path, by: Duration) -> SystemTime {
+    /// Set both times of `path` to `by` before [`whole_second_now`].
+    pub(crate) fn backdate(path: &Path, by: Duration) -> SystemTime {
         let then = whole_second_now() - by;
         fs::File::options()
             .write(true)
@@ -1054,7 +1073,7 @@ mod tests {
         let written = backdate(&blob, 3 * USE_REFRESH);
         let now = whole_second_now();
 
-        record_use(&blob, now).unwrap();
+        record_file_use(&blob, now).unwrap();
 
         let metadata = fs::metadata(&blob).unwrap();
         assert_eq!(metadata.accessed().unwrap(), now);
@@ -1068,7 +1087,7 @@ mod tests {
         fs::write(&blob, b"object").unwrap();
         let recent = backdate(&blob, USE_REFRESH / 2);
 
-        record_use(&blob, whole_second_now()).unwrap();
+        record_file_use(&blob, whole_second_now()).unwrap();
 
         assert_eq!(fs::metadata(&blob).unwrap().accessed().unwrap(), recent);
     }
@@ -1084,7 +1103,7 @@ mod tests {
         fs::set_permissions(&blob, permissions).unwrap();
         let now = whole_second_now();
 
-        let recorded = record_use(&blob, now);
+        let recorded = record_file_use(&blob, now);
 
         let metadata = fs::metadata(&blob).unwrap();
         // Restored before asserting: Windows will not delete a read-only file,
@@ -1095,6 +1114,15 @@ mod tests {
         assert_eq!(metadata.accessed().unwrap(), now);
         assert_eq!(metadata.modified().unwrap(), written);
         assert!(metadata.permissions().readonly());
+    }
+
+    #[test]
+    fn a_missing_file_reports_that_its_use_was_not_recorded() {
+        let directory = tempfile::tempdir().unwrap();
+
+        let recorded = record_file_use(&directory.path().join("evicted"), whole_second_now());
+
+        assert_eq!(recorded.unwrap_err().kind(), std::io::ErrorKind::NotFound);
     }
 
     #[test]
@@ -1112,12 +1140,6 @@ mod tests {
         };
         actions.store(&result).unwrap();
         let missing = CacheDigest::blake3(b"evicted");
-        assert_eq!(
-            record_use(&cas.path_for(&missing).unwrap(), whole_second_now())
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::NotFound
-        );
         let record = actions.path_for(&action).unwrap();
         let blob = cas.path_for(&action).unwrap();
         backdate(&record, 3 * USE_REFRESH);

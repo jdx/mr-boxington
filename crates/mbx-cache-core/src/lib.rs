@@ -59,8 +59,8 @@ pub use agent::{
 pub use client::BlockingAgentClient;
 pub use imds::{InstanceRoleCredentials, TemporaryCredentials};
 pub use local::{
-    ACTION_CONFLICT_MESSAGE, ActionStoreOutcome, LocalActionCache, LocalCas, USE_REFRESH,
-    record_use,
+    ACTION_CONFLICT_MESSAGE, ActionStoreOutcome, CapturedOutput, LocalActionCache, LocalCas,
+    USE_REFRESH, record_file_use,
 };
 pub use mbx_cache_protocol::{
     ACTION_PROMISE_MEDIA_TYPE, ACTION_RESULT_BATCH_MEDIA_TYPE, ACTION_RESULT_MEDIA_TYPE,
