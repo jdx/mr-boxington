@@ -3794,8 +3794,22 @@ fn without_rendered(stderr: &[u8]) -> Vec<u8> {
         let normalized = serde_json::from_slice::<serde_json::Value>(line.trim_ascii_end())
             .ok()
             .and_then(|mut message| {
-                *message.get_mut("rendered")? = serde_json::Value::Null;
-                serde_json::to_vec(&message).ok()
+                let mut found = false;
+                if let Some(rendered) = message.get_mut("rendered") {
+                    *rendered = serde_json::Value::Null;
+                    found = true;
+                }
+                // Future-incompat reports nest rendered diagnostics.
+                let reports = message
+                    .get_mut("future_incompat_report")
+                    .and_then(|reports| reports.as_array_mut());
+                for report in reports.into_iter().flatten() {
+                    if let Some(rendered) = report.pointer_mut("/diagnostic/rendered") {
+                        *rendered = serde_json::Value::Null;
+                        found = true;
+                    }
+                }
+                found.then(|| serde_json::to_vec(&message).ok()).flatten()
             });
         match normalized {
             Some(message) => {

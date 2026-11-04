@@ -2811,6 +2811,14 @@ fn verification_ignores_diagnostic_wrapping() {
         verification_divergence(&cached(b"note: a b\n"), &compiled(b"note: ab\n")).is_some(),
         "plain stderr is compared exactly"
     );
+    let report = |rendered: &str| {
+        format!(r#"{{"future_incompat_report":[{{"diagnostic":{{"rendered":"{rendered}","code":"x"}}}}]}}"#)
+            .into_bytes()
+    };
+    assert_eq!(
+        verification_divergence(&cached(&report("a b")), &compiled(&report("a\\n..."))),
+        None
+    );
     assert!(
         verification_divergence(&cached(full), &compiled(br#"{"rendered":"x","code":"y"}"#))
             .is_some(),
