@@ -6980,6 +6980,31 @@ mod target_views {
         assert_gc_waits_for_in(project, store.path(), arguments);
     }
 
+    /// Set the access time of every file at the top of `view`'s profiles to
+    /// long ago, so collection sees no program run from it.
+    fn backdate_runs(view: &Path) {
+        let mut pending = vec![(view.to_path_buf(), 0)];
+        while let Some((directory, depth)) = pending.pop() {
+            for entry in std::fs::read_dir(&directory).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if depth < 3 {
+                        pending.push((path, depth + 1));
+                    }
+                } else if directory.join(".cargo-lock").is_file() {
+                    // Read-only, since a running program cannot be opened for
+                    // writing; setting times only needs ownership.
+                    std::fs::File::open(&path)
+                        .unwrap()
+                        .set_times(std::fs::FileTimes::new().set_accessed(
+                            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1),
+                        ))
+                        .unwrap();
+                }
+            }
+        }
+    }
+
     /// [`assert_gc_waits_for`] with a store an earlier build may have placed
     /// the target directory in.
     fn assert_gc_waits_for_in(project: &Path, store: &Path, arguments: &[&str]) {
@@ -7036,6 +7061,8 @@ mod target_views {
                 .unwrap();
         fields["updated_secs"] = 1.into();
         std::fs::write(&record, serde_json::to_vec(&fields).unwrap()).unwrap();
+        // Running the program counts as using the target too.
+        backdate_runs(&view);
 
         let (gc_stdout, gc_stderr) = gc_expired_targets(store);
         assert!(
