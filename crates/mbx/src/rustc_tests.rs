@@ -2769,3 +2769,83 @@ fn json_diagnostics_round_trip_between_escaping_roots() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn verification_ignores_diagnostic_wrapping() {
+    use std::os::unix::process::ExitStatusExt as _;
+    let cached = |stderr: &[u8]| CachedCompilation {
+        action: CacheDigest::blake3(b"action"),
+        stdout: Vec::new(),
+        stderr: stderr.to_vec(),
+        outputs: Vec::new(),
+        restore: Default::default(),
+    };
+    let compiled = |stderr: &[u8]| Output {
+        status: std::process::ExitStatus::from_raw(0),
+        stdout: Vec::new(),
+        stderr: stderr.to_vec(),
+    };
+    let wide = br#"{"rendered":"warning: unused variable `x`\n --> src/lib.rs:1:1\n"}"#;
+    let narrow = br#"{"rendered":"warning: unused variable\n`x`\n  --> src/lib.rs:1:1\n"}"#;
+    assert_eq!(
+        verification_divergence(&cached(wide), &compiled(narrow)),
+        None
+    );
+    // Only `rendered` is width-dependent; its truncation is tolerated too.
+    let suggestion = |replacement: &str| {
+        format!(r#"{{"rendered":"w\n","children":[{{"suggested_replacement":"{replacement}"}}]}}"#)
+            .into_bytes()
+    };
+    let truncated = br#"{"rendered":"warning: long ...\n","code":"x"}"#;
+    let full = br#"{"rendered":"warning: long source line\n","code":"x"}"#;
+    assert_eq!(
+        verification_divergence(&cached(truncated), &compiled(full)),
+        None
+    );
+    assert!(
+        verification_divergence(&cached(&suggestion("a b")), &compiled(&suggestion("ab")))
+            .is_some()
+    );
+    assert!(
+        verification_divergence(&cached(b"note: a b\n"), &compiled(b"note: ab\n")).is_some(),
+        "plain stderr is compared exactly"
+    );
+    let report = |rendered: &str| {
+        format!(r#"{{"future_incompat_report":[{{"diagnostic":{{"rendered":"{rendered}","code":"x"}}}}]}}"#)
+            .into_bytes()
+    };
+    assert_eq!(
+        verification_divergence(&cached(&report("a b")), &compiled(&report("a\\n..."))),
+        None
+    );
+    assert!(
+        verification_divergence(&cached(full), &compiled(br#"{"rendered":"x","code":"y"}"#))
+            .is_some(),
+        "a different field is still a divergence"
+    );
+}
+
+#[test]
+fn bypassed_library_identity_ignores_a_single_diagnostic_width() {
+    let identity = |arguments: &[&str]| {
+        bypassed_library_identity(&arguments.iter().map(OsString::from).collect::<Vec<_>>())
+    };
+    let base = identity(&["--crate-name=widget", "src/lib.rs"]);
+    assert_eq!(
+        base,
+        identity(&[
+            "--crate-name=widget",
+            "--diagnostic-width=120",
+            "src/lib.rs"
+        ])
+    );
+    assert_eq!(
+        base,
+        identity(&["--crate-name=widget", "--diagnostic-width=80", "src/lib.rs"])
+    );
+    assert_ne!(
+        base,
+        identity(&["--crate-name=widget", "--diagnostic-width=x", "src/lib.rs"])
+    );
+}

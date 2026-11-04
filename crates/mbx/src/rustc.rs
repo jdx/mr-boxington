@@ -2131,16 +2131,35 @@ pub(crate) fn bypassed_library_incremental_flag(arguments: &[OsString]) -> Optio
     if !in_workspace {
         return None;
     }
-    let mut identity = Vec::new();
-    for argument in arguments {
-        identity.extend_from_slice(argument.as_encoded_bytes());
-        identity.push(0);
-    }
-    let directory = incremental_directory(&CacheDigest::blake3(&identity), &crate_name, false)?;
+    let directory =
+        incremental_directory(&bypassed_library_identity(arguments), &crate_name, false)?;
     if incremental_state_exceeds_backstop(&directory, session::incremental_budget()) {
         return None;
     }
     Some(private_incremental_flag(&directory))
+}
+
+/// The arguments a bypassed library's private incremental directory is keyed
+/// on. A single numeric `--diagnostic-width` is left out, as it is from the
+/// cache key, so terminal and piped builds share the directory.
+fn bypassed_library_identity(arguments: &[OsString]) -> CacheDigest {
+    fn width(argument: &OsString) -> Option<&str> {
+        argument.to_str()?.strip_prefix("--diagnostic-width=")
+    }
+    let mut widths = arguments.iter().filter_map(width);
+    let drop_width = matches!(
+        (widths.next(), widths.next()),
+        (Some(value), None) if value.parse::<usize>().is_ok()
+    );
+    let mut identity = Vec::new();
+    for argument in arguments {
+        if drop_width && width(argument).is_some() {
+            continue;
+        }
+        identity.extend_from_slice(argument.as_encoded_bytes());
+        identity.push(0);
+    }
+    CacheDigest::blake3(&identity)
 }
 
 /// Oversized learned state takes the shared compilation path this time.
@@ -3783,6 +3802,45 @@ fn finalize_restored_outputs(staged: StagedOutputs, restore_outputs: bool) -> Re
     Ok(())
 }
 
+/// Diagnostics are keyed without `--diagnostic-width`, so a cached entry and a
+/// shadow run may wrap or truncate the same diagnostic differently. Only the
+/// `rendered` text of cargo's JSON messages depends on the width, so it is left
+/// out of the comparison; every other field and any plain stderr line stays
+/// byte-exact.
+fn without_rendered(stderr: &[u8]) -> Vec<u8> {
+    let mut text = Vec::with_capacity(stderr.len());
+    for line in stderr.split_inclusive(|&byte| byte == b'\n') {
+        let normalized = serde_json::from_slice::<serde_json::Value>(line.trim_ascii_end())
+            .ok()
+            .and_then(|mut message| {
+                let mut found = false;
+                if let Some(rendered) = message.get_mut("rendered") {
+                    *rendered = serde_json::Value::Null;
+                    found = true;
+                }
+                // Future-incompat reports nest rendered diagnostics.
+                let reports = message
+                    .get_mut("future_incompat_report")
+                    .and_then(|reports| reports.as_array_mut());
+                for report in reports.into_iter().flatten() {
+                    if let Some(rendered) = report.pointer_mut("/diagnostic/rendered") {
+                        *rendered = serde_json::Value::Null;
+                        found = true;
+                    }
+                }
+                found.then(|| serde_json::to_vec(&message).ok()).flatten()
+            });
+        match normalized {
+            Some(message) => {
+                text.extend(message);
+                text.push(b'\n');
+            }
+            None => text.extend_from_slice(line),
+        }
+    }
+    text
+}
+
 /// Describe how a restore differs from the compilation it was checked against.
 ///
 /// `None` means they agree. A divergence names what disagreed, because that is
@@ -3797,8 +3855,8 @@ fn verification_divergence(cached: &CachedCompilation, output: &Output) -> Optio
             .or_else(|| {
                 crate::materialize::stream_divergence(
                     "standard error",
-                    &cached.stderr,
-                    &output.stderr,
+                    &without_rendered(&cached.stderr),
+                    &without_rendered(&output.stderr),
                 )
             })
     {
