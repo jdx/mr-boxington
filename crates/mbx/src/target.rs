@@ -1529,6 +1529,11 @@ fn collect_with(
         .collect::<Vec<_>>();
     let mut entries = Vec::new();
     let mut total_views = 0_u64;
+    // A record is refreshed by builds only, so a program run from `target/`
+    // between them, by a hook or a link on `PATH`, would otherwise leave its
+    // target ranked as unused as one nobody has touched since.
+    let runs_tracked = (max_bytes.is_some() || max_age.is_some())
+        && crate::target_units::access_times_tracked(&views_root(root));
     for (record_path, directory) in views(root)? {
         total_views += 1;
         let Some(record) = read_view_record(&record_path) else {
@@ -1538,13 +1543,23 @@ fn collect_with(
             continue;
         };
         let files = ledger.measure(&directory, &HashSet::new());
+        let last_run = runs_tracked
+            .then(|| crate::target_units::last_run(&directory))
+            .flatten()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |since| since.as_secs());
         entries.push((
             record_path,
             directory,
-            record.updated_secs,
+            // When the target was last used, which is what age and the
+            // budget's order go by.
+            record.updated_secs.max(last_run.min(now)),
             files,
             crate::store::checkout_is_live_on(root, &record.workspace_root),
             precedence.standing(&record.workspace_root),
+            // When a build last claimed it, which tells a build arriving
+            // during the removal apart.
+            record.updated_secs,
         ));
     }
     // A file a view still links stays counted there; a deletion that stops
@@ -1568,9 +1583,9 @@ fn collect_with(
         && entries
             .iter()
             .any(|entry| entry.4 && entry.5 != Standing::Keep && !expired(entry.2, entry.5))
-        && crate::target_units::access_times_tracked(&views_root(root))
+        && runs_tracked
     {
-        for (_, directory, updated, files, live, standing) in &mut entries {
+        for (_, directory, updated, files, live, standing, _) in &mut entries {
             // A kept target keeps what it holds: one built for a bisect or a
             // release and left alone is exactly one whose units look unused.
             if !*live || *standing == Standing::Keep || expired(*updated, *standing) {
@@ -1638,7 +1653,7 @@ fn collect_with(
     let mut projection = max_bytes.map(|_| ledger.clone());
     let mut remaining = ledger.total();
     let mut selected = HashSet::new();
-    for (record_path, _, updated, files, live, standing) in &entries {
+    for (record_path, _, updated, files, live, standing, _) in &entries {
         if !live || expired(*updated, *standing) {
             selected.insert(record_path.clone());
             if let Some(projection) = &mut projection {
@@ -1674,7 +1689,7 @@ fn collect_with(
     }
 
     before_removal();
-    for (record_path, directory, updated, files, live, _) in entries {
+    for (record_path, directory, _, files, live, _, updated) in entries {
         if !selected.contains(&record_path) {
             continue;
         }

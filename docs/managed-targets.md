@@ -343,6 +343,17 @@ link without mbx is protected while Cargo holds its build lock.
 Ctrl-C stops the whole process group, so it ends the command and its lease
 together.
 
+A target directory is used when a build uses it, and also when a program runs
+one of the executables or loads one of the libraries at the top of a profile,
+such as `target/debug/app` or `target/x86_64-unknown-linux-gnu/release/app`.
+This covers a program that runs often but is rebuilt rarely, such as one a hook
+runs, one on your `PATH`, or one linked from `~/.local/bin`. Collection reads
+that from the file's access time, so it needs a filesystem that records access
+times (`mbx doctor` warns when it does not). Under Linux's default `relatime`, a
+file's access time moves at most once a day, so a program run several times a
+day counts as used once a day. Executables under `deps/` and `build/` do not
+count.
+
 A target directory is removed when any of these is true:
 
 - Its checkout is gone. This happens regardless of the limits below.
