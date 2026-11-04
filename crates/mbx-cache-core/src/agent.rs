@@ -372,6 +372,11 @@ pub struct CacheAgent {
     remote_download_limit: u64,
     remote_download_bytes: Arc<AtomicU64>,
     pending_remote_actions: Arc<Mutex<BTreeMap<CacheDigest, RemoteActionResult>>>,
+    /// Results this session wrote to the local store and has not had a hit
+    /// on yet. A record written just now looks recently used, but the objects
+    /// it shares with older results may not have been, so the first hit on
+    /// one records its whole closure.
+    stored_results: Arc<Mutex<BTreeSet<CacheDigest>>>,
     remote_transfers: Arc<tokio::sync::Semaphore>,
     prefetch_transfers: Arc<tokio::sync::Semaphore>,
     prefetch_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
@@ -921,6 +926,7 @@ impl CacheAgent {
             remote_download_limit,
             remote_download_bytes: Arc::new(AtomicU64::new(0)),
             pending_remote_actions: Arc::new(Mutex::new(BTreeMap::new())),
+            stored_results: Arc::new(Mutex::new(BTreeSet::new())),
             remote_transfers,
             prefetch_transfers: Arc::new(tokio::sync::Semaphore::new(MAX_PREFETCH_TRANSFERS)),
             prefetch_tasks: Arc::new(Mutex::new(Vec::new())),
@@ -2395,6 +2401,10 @@ impl CacheAgent {
         connection: &ConnectionUploads,
     ) -> Result<AgentResponse> {
         let path = self.actions.store(result)?;
+        self.stored_results
+            .lock()
+            .unwrap()
+            .insert(result.action.clone());
         if let Some(uploads) = &self.uploads {
             uploads.queue_action_result(result, connection);
         }
@@ -2554,6 +2564,7 @@ impl CacheAgent {
         // conflict checks, verification builds and speculative prefetches,
         // none of which is a use. The restore just hashed these objects, so a
         // stat of each adds nothing a build would notice.
+        let stored = self.stored_results.lock().unwrap().remove(action) || stored;
         if stored {
             self.actions
                 .record_use_of_stored(&result, SystemTime::now());

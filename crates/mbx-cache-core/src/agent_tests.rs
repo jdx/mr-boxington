@@ -1181,6 +1181,39 @@ async fn a_hit_records_the_use_of_its_result_and_everything_it_names() {
 }
 
 #[tokio::test]
+async fn the_first_hit_on_a_result_stored_this_session_records_everything_it_names() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = CacheAgent::new(directory.path().join("cache"), "test-version");
+    let (action, _, paths) = stored_result_used_long_ago(&agent);
+    // Published again in this session, the way a compilation or a prefetch
+    // writes it: its record is new, but its objects were already stored and
+    // have not been used in a long time.
+    let result = agent.actions.find(&action).unwrap().unwrap();
+    fs::remove_file(&paths[0]).unwrap();
+    let response = agent
+        .respond(AgentRequest::StoreActionResult { result })
+        .await;
+    assert!(matches!(response, AgentResponse::ActionStored { .. }));
+    for path in &paths[1..] {
+        crate::local::tests::backdate(path, 3 * crate::USE_REFRESH);
+    }
+    let before = SystemTime::now() - Duration::from_secs(1);
+
+    let response = agent
+        .respond(AgentRequest::RecordActionHit {
+            action,
+            restore: RestoreStats::default(),
+            crate_name: None,
+        })
+        .await;
+
+    assert!(matches!(response, AgentResponse::ActionHitRecorded));
+    for path in &paths {
+        assert!(last_used(path) >= before, "{}", path.display());
+    }
+}
+
+#[tokio::test]
 async fn looking_a_result_up_is_not_a_use() {
     // Lookups also answer publication conflict checks, verification builds
     // and speculative prefetches. Only a restored hit counts toward keeping a

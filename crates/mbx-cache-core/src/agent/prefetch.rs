@@ -555,6 +555,11 @@ impl CacheAgent {
                         .lock()
                         .unwrap()
                         .remove(&action.result.action);
+                    // A prefetch is not a use; the first hit records it.
+                    self.stored_results
+                        .lock()
+                        .unwrap()
+                        .insert(action.result.action.clone());
                     self.stats
                         .prefetched_actions
                         .fetch_add(1, Ordering::Relaxed);
