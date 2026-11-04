@@ -3784,19 +3784,30 @@ fn finalize_restored_outputs(staged: StagedOutputs, restore_outputs: bool) -> Re
 }
 
 /// Diagnostics are keyed without `--diagnostic-width`, so a cached entry and a
-/// shadow run may wrap the same diagnostic differently. Dropping whitespace and
-/// the escaped newlines of cargo's JSON messages compares the text alone.
+/// shadow run may wrap the same diagnostic differently. Only the `rendered`
+/// text of cargo's JSON messages depends on the width, so its whitespace is
+/// dropped; every other field and any plain stderr line stays byte-exact.
 fn without_wrapping(stderr: &[u8]) -> Vec<u8> {
     let mut text = Vec::with_capacity(stderr.len());
-    let mut bytes = stderr.iter().copied().peekable();
-    while let Some(byte) = bytes.next() {
-        if byte == b'\\' && bytes.peek() == Some(&b'n') {
-            bytes.next();
-        } else if byte == b'\\' && bytes.peek() == Some(&b'\\') {
-            // An escaped backslash is text, and must not pair with a following `n`.
-            text.extend([byte, bytes.next().unwrap_or(byte)]);
-        } else if !byte.is_ascii_whitespace() {
-            text.push(byte);
+    for line in stderr.split_inclusive(|&byte| byte == b'\n') {
+        let normalized = serde_json::from_slice::<serde_json::Value>(line.trim_ascii_end())
+            .ok()
+            .and_then(|mut message| {
+                let rendered = message.get_mut("rendered")?;
+                let unwrapped: String = rendered
+                    .as_str()?
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .collect();
+                *rendered = unwrapped.into();
+                serde_json::to_vec(&message).ok()
+            });
+        match normalized {
+            Some(message) => {
+                text.extend(message);
+                text.push(b'\n');
+            }
+            None => text.extend_from_slice(line),
         }
     }
     text

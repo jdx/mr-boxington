@@ -2792,13 +2792,18 @@ fn verification_ignores_diagnostic_wrapping() {
         verification_divergence(&cached(wide), &compiled(narrow)),
         None
     );
-    // `\\n` is an escaped backslash and an `n`, not a newline.
+    // Only `rendered` is width-dependent.
+    let suggestion = |replacement: &str| {
+        format!(r#"{{"rendered":"w\n","children":[{{"suggested_replacement":"{replacement}"}}]}}"#)
+            .into_bytes()
+    };
     assert!(
-        verification_divergence(
-            &cached(br#"{"a":"C:\\name"}"#),
-            &compiled(br#"{"a":"C:\\ame"}"#)
-        )
-        .is_some()
+        verification_divergence(&cached(&suggestion("a b")), &compiled(&suggestion("ab")))
+            .is_some()
+    );
+    assert!(
+        verification_divergence(&cached(b"note: a b\n"), &compiled(b"note: ab\n")).is_some(),
+        "plain stderr is compared exactly"
     );
     assert!(
         verification_divergence(&cached(wide), &compiled(b"{\"rendered\":\"error\"}")).is_some(),
