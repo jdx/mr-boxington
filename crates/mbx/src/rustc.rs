@@ -3784,22 +3784,17 @@ fn finalize_restored_outputs(staged: StagedOutputs, restore_outputs: bool) -> Re
 }
 
 /// Diagnostics are keyed without `--diagnostic-width`, so a cached entry and a
-/// shadow run may wrap the same diagnostic differently. Only the `rendered`
-/// text of cargo's JSON messages depends on the width, so its whitespace is
-/// dropped; every other field and any plain stderr line stays byte-exact.
-fn without_wrapping(stderr: &[u8]) -> Vec<u8> {
+/// shadow run may wrap or truncate the same diagnostic differently. Only the
+/// `rendered` text of cargo's JSON messages depends on the width, so it is left
+/// out of the comparison; every other field and any plain stderr line stays
+/// byte-exact.
+fn without_rendered(stderr: &[u8]) -> Vec<u8> {
     let mut text = Vec::with_capacity(stderr.len());
     for line in stderr.split_inclusive(|&byte| byte == b'\n') {
         let normalized = serde_json::from_slice::<serde_json::Value>(line.trim_ascii_end())
             .ok()
             .and_then(|mut message| {
-                let rendered = message.get_mut("rendered")?;
-                let unwrapped: String = rendered
-                    .as_str()?
-                    .chars()
-                    .filter(|character| !character.is_whitespace())
-                    .collect();
-                *rendered = unwrapped.into();
+                *message.get_mut("rendered")? = serde_json::Value::Null;
                 serde_json::to_vec(&message).ok()
             });
         match normalized {
@@ -3827,8 +3822,8 @@ fn verification_divergence(cached: &CachedCompilation, output: &Output) -> Optio
             .or_else(|| {
                 crate::materialize::stream_divergence(
                     "standard error",
-                    &without_wrapping(&cached.stderr),
-                    &without_wrapping(&output.stderr),
+                    &without_rendered(&cached.stderr),
+                    &without_rendered(&output.stderr),
                 )
             })
     {

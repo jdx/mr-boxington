@@ -2792,11 +2792,17 @@ fn verification_ignores_diagnostic_wrapping() {
         verification_divergence(&cached(wide), &compiled(narrow)),
         None
     );
-    // Only `rendered` is width-dependent.
+    // Only `rendered` is width-dependent; its truncation is tolerated too.
     let suggestion = |replacement: &str| {
         format!(r#"{{"rendered":"w\n","children":[{{"suggested_replacement":"{replacement}"}}]}}"#)
             .into_bytes()
     };
+    let truncated = br#"{"rendered":"warning: long ...\n","code":"x"}"#;
+    let full = br#"{"rendered":"warning: long source line\n","code":"x"}"#;
+    assert_eq!(
+        verification_divergence(&cached(truncated), &compiled(full)),
+        None
+    );
     assert!(
         verification_divergence(&cached(&suggestion("a b")), &compiled(&suggestion("ab")))
             .is_some()
@@ -2806,7 +2812,8 @@ fn verification_ignores_diagnostic_wrapping() {
         "plain stderr is compared exactly"
     );
     assert!(
-        verification_divergence(&cached(wide), &compiled(b"{\"rendered\":\"error\"}")).is_some(),
-        "different text is still a divergence"
+        verification_divergence(&cached(full), &compiled(br#"{"rendered":"x","code":"y"}"#))
+            .is_some(),
+        "a different field is still a divergence"
     );
 }
