@@ -353,7 +353,7 @@ times (`mbx doctor` warns when it does not). Under Linux's default `relatime`, a
 file's access time moves at most once a day, so a program run several times a
 day counts as used once a day. Executables under `deps/` and `build/` do not
 count, and neither does a program hard linked to the shared cache, as
-[`restore_hardlink`](/cli/configuration#restore_hardlink) does where the
+[`restore_hardlink`](/configuration#restore-hardlink) does where the
 filesystem cannot clone files: every target linking it shares one access time.
 Such a target counts as used when it is built, as before. A target that no build has used for `target.max_age` but whose programs
 still run keeps all of its [build units](#unused-build-units), so a library a
