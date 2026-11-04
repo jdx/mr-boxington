@@ -3453,3 +3453,14 @@ fn diagnostic_width_is_never_keyed() {
         }
     }
 }
+
+#[test]
+fn malformed_diagnostic_width_stays_keyed() {
+    let piped = width_action_with(None, &[], &[]);
+    for extra in [
+        &["--diagnostic-width=garbage"][..],
+        &["--diagnostic-width=80", "--diagnostic-width=120"][..],
+    ] {
+        assert_ne!(piped.digest, width_action_with(None, &[], extra).digest);
+    }
+}

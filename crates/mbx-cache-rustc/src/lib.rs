@@ -1460,10 +1460,25 @@ impl<'a> Parser<'a> {
     /// never changes the artifacts, so it is left out of the key for every
     /// crate. Diagnostics replayed from a cached entry keep the wrapping of
     /// the build that produced them.
+    ///
+    /// rustc rejects a repeated flag and a non-numeric value, so only a single
+    /// well-formed width is dropped; anything else stays keyed and cannot
+    /// share an entry with a build that rustc would accept.
     fn drop_unobservable_diagnostic_width(&mut self) {
-        self.parsed.retain(|argument| {
-            !matches!(argument, Argument::Plain(value) if value.starts_with("--diagnostic-width="))
-        });
+        fn widths(argument: &Argument) -> Option<&str> {
+            match argument {
+                Argument::Plain(value) => value.strip_prefix("--diagnostic-width="),
+                _ => None,
+            }
+        }
+        let mut found = self.parsed.iter().filter_map(widths);
+        let valid = matches!(
+            (found.next(), found.next()),
+            (Some(width), None) if width.parse::<usize>().is_ok()
+        );
+        if valid {
+            self.parsed.retain(|argument| widths(argument).is_none());
+        }
     }
 
     fn parse_long(&mut self, value: &str) -> Result<(), BypassReason> {
