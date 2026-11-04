@@ -25,14 +25,20 @@ pub(super) const ROUTED_ENV: &str = "MBX_BLAZE_ROUTED";
 /// shim, so the shim can't find that choice anywhere else.
 const RETURN_CARGO_ENV: &str = "MBX_BLAZE_CARGO";
 
-/// blaze's engine, which `cargo blaze` ran as `ra-jit cargo`. Releases from the
-/// rename of `ra-jit` to `blaze` ship no such program, and the `blaze` they ship
-/// runs no Cargo, so only an older release can serve these builds.
+/// blaze's engine before the rename, which `cargo blaze` ran as `ra-jit cargo`
+/// and which hands the builds it does not do itself to Cargo.
 const ENGINE: &str = "ra-jit";
 
-/// The program of a release without the engine. It builds on its own and never
-/// calls Cargo, so there is no Cargo call for the shim to catch.
+/// blaze's program since the rename, which takes cargo's commands as its own
+/// (`blaze build`) and runs no Cargo, so mbx's cache sees none of its builds.
 const CLIENT: &str = "blaze";
+
+/// The program to run for a command and the arguments it goes before.
+#[derive(Debug, PartialEq, Eq)]
+struct Client {
+    program: PathBuf,
+    prefix: &'static [&'static str],
+}
 
 /// Whether blaze could take this command, before any setting is read. Every
 /// other command goes on without the settings `route` needs.
@@ -64,23 +70,18 @@ pub(super) fn route(
         );
         return None;
     };
-    let path = std::env::var_os("PATH");
-    let Some(engine) = engine(path.as_deref()) else {
-        if find(path.as_deref(), CLIENT).is_some() {
-            log::warn!(
-                "blaze is on, but this blaze has no `{ENGINE}` and runs no Cargo, so mbx has no way to send builds through it; building with Cargo. Use a blaze release that ships `{ENGINE}`, or turn the setting off"
-            );
-        } else {
-            log::warn!("blaze is on, but `{ENGINE}` is not on PATH; building with Cargo");
-        }
+    let Some(client) = client(std::env::var_os("PATH").as_deref()) else {
+        log::warn!(
+            "blaze is on, but neither `{ENGINE}` nor `{CLIENT}` is on PATH; building with Cargo"
+        );
         return None;
     };
     log::debug!(
         "sending `cargo {}` through {}",
         arguments.join(" "),
-        engine.display()
+        client.program.display()
     );
-    run(&engine, shim, real_cargo, arguments)
+    run(&client, shim, real_cargo, arguments)
 }
 
 /// The Cargo to run for a call blaze made through `shim`: the one the shim had
@@ -138,8 +139,20 @@ fn builds_here() -> bool {
     cfg!(target_os = "linux") || cfg!(all(target_os = "macos", target_arch = "aarch64"))
 }
 
-fn engine(path: Option<&OsStr>) -> Option<PathBuf> {
+/// The `ra-jit` on `path` when there is one, as it keeps the cache in the
+/// loop, else the `blaze` that replaced it.
+fn client(path: Option<&OsStr>) -> Option<Client> {
     find(path, ENGINE)
+        .map(|program| Client {
+            program,
+            prefix: &["cargo"],
+        })
+        .or_else(|| {
+            find(path, CLIENT).map(|program| Client {
+                program,
+                prefix: &[],
+            })
+        })
 }
 
 fn find(path: Option<&OsStr>, program: &str) -> Option<PathBuf> {
@@ -167,13 +180,13 @@ pub(super) fn is_executable(path: &Path) -> bool {
 /// such as a `ra-jit` built for another machine: blaze has done nothing yet, so
 /// the command goes to Cargo. A failure once it has started is the build's own.
 fn run(
-    engine: &Path,
+    client: &Client,
     shim: &Path,
     real_cargo: &OsStr,
     arguments: &[String],
 ) -> Option<Result<ExitCode>> {
-    let mut child = match Command::new(engine)
-        .arg("cargo")
+    let mut child = match Command::new(&client.program)
+        .args(client.prefix)
         .args(arguments)
         .env("CARGO", shim)
         .env(RETURN_CARGO_ENV, real_cargo)
@@ -184,7 +197,7 @@ fn run(
         Err(error) => {
             log::warn!(
                 "blaze is on, but {} could not be started ({error}); building with Cargo",
-                engine.display()
+                client.program.display()
             );
             return None;
         }
@@ -192,7 +205,7 @@ fn run(
     Some(
         child
             .wait()
-            .wrap_err_with(|| format!("failed to wait for {}", engine.display()))
+            .wrap_err_with(|| format!("failed to wait for {}", client.program.display()))
             .map(super::cargo::exit_code),
     )
 }
@@ -253,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_is_found_on_path() {
+    fn the_client_is_found_on_path() {
         let root = tempfile::tempdir().unwrap();
         let empty = root.path().join("empty");
         let blaze = root.path().join("blaze");
@@ -261,21 +274,45 @@ mod tests {
         std::fs::create_dir_all(&blaze).unwrap();
         executable(&blaze.join(ENGINE));
         let path = std::env::join_paths([&empty, &blaze]).unwrap();
-        assert_eq!(engine(Some(&path)), Some(blaze.join(ENGINE)));
+        assert_eq!(
+            client(Some(&path)),
+            Some(Client {
+                program: blaze.join(ENGINE),
+                prefix: &["cargo"]
+            })
+        );
         let path = std::env::join_paths([&empty]).unwrap();
-        assert_eq!(engine(Some(&path)), None);
-        assert_eq!(engine(None), None);
+        assert_eq!(client(Some(&path)), None);
+        assert_eq!(client(None), None);
     }
 
     #[test]
-    fn a_blaze_without_the_engine_is_not_the_engine() {
+    fn a_blaze_without_the_engine_takes_the_commands_itself() {
         let root = tempfile::tempdir().unwrap();
         let blaze = root.path().join("blaze");
+        let both = root.path().join("both");
         std::fs::create_dir_all(&blaze).unwrap();
+        std::fs::create_dir_all(&both).unwrap();
         executable(&blaze.join(CLIENT));
+        executable(&both.join(CLIENT));
+        executable(&both.join(ENGINE));
         let path = std::env::join_paths([&blaze]).unwrap();
-        assert_eq!(engine(Some(&path)), None);
-        assert_eq!(find(Some(&path), CLIENT), Some(blaze.join(CLIENT)));
+        assert_eq!(
+            client(Some(&path)),
+            Some(Client {
+                program: blaze.join(CLIENT),
+                prefix: &[]
+            })
+        );
+        // The engine keeps mbx's cache in the loop, so it wins over its successor.
+        let path = std::env::join_paths([&blaze, &both]).unwrap();
+        assert_eq!(
+            client(Some(&path)),
+            Some(Client {
+                program: both.join(ENGINE),
+                prefix: &["cargo"]
+            })
+        );
     }
 
     #[cfg(unix)]
@@ -289,7 +326,10 @@ mod tests {
         std::fs::write(broken.join(ENGINE), "").unwrap();
         executable(&blaze.join(ENGINE));
         let path = std::env::join_paths([&broken, &blaze]).unwrap();
-        assert_eq!(engine(Some(&path)), Some(blaze.join(ENGINE)));
+        assert_eq!(
+            client(Some(&path)).map(|c| c.program),
+            Some(blaze.join(ENGINE))
+        );
     }
 
     #[test]
@@ -343,7 +383,10 @@ mod tests {
         // Gone between the lookup and the start: every platform refuses to
         // start it, where what an unloadable file does differs (macOS starts
         // a file of zeros and reports the failure as its exit).
-        let engine = root.path().join(ENGINE);
+        let engine = Client {
+            program: root.path().join(ENGINE),
+            prefix: &["cargo"],
+        };
         assert!(
             run(
                 &engine,

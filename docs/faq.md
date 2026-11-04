@@ -85,13 +85,18 @@ cargo build
 mbx's Cargo shim then runs `ra-jit cargo build` instead, and blaze's own Cargo
 builds come back through the shim. Only dev `build`, `run`, `test`, and `check`
 commands go to blaze; `--release` and `--profile` builds and other commands run
-Cargo as before. This needs `ra-jit` on `PATH` and the Cargo shim that
-`mbx setup` installs, which is how blaze reaches mbx again. Releases of blaze
-from the rename of `ra-jit` to `blaze` on ship no `ra-jit`, and their `blaze`
-builds without running Cargo, so there is no Cargo call for mbx to catch: with
-one of those the setting does nothing, mbx warns, and Cargo builds as usual. blaze builds with
-Rust 1.99.0 whatever toolchain the project selects, so the entries its builds
-store serve other blaze builds, not builds with another toolchain.
+Cargo as before. This needs the Cargo shim that `mbx setup` installs, which is
+how blaze reaches mbx again, and `ra-jit` on `PATH`.
+
+Releases of blaze from the rename of `ra-jit` to `blaze` on ship no `ra-jit`.
+With one of those on `PATH`, the shim runs `blaze build` (or `run`, `test`,
+`check`) instead. That `blaze` builds without running Cargo, so there is no
+Cargo call for mbx to catch and mbx's cache sees none of its builds. When both
+are on `PATH`, `ra-jit` is used.
+
+blaze builds with Rust 1.99.0 whatever toolchain the project selects, so the
+entries its builds store serve other blaze builds, not builds with another
+toolchain.
 
 ## Are restored artifacts byte-identical to freshly compiled ones? {#are-restored-artifacts-byte-identical-to-what-a-compile-would-produce}
 
