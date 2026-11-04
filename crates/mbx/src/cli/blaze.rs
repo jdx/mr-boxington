@@ -25,9 +25,14 @@ pub(super) const ROUTED_ENV: &str = "MBX_BLAZE_ROUTED";
 /// shim, so the shim can't find that choice anywhere else.
 const RETURN_CARGO_ENV: &str = "MBX_BLAZE_CARGO";
 
-/// blaze's engine. Releases before the rename have no `blaze` program, and
-/// every release has this one, which `cargo blaze` runs as `ra-jit cargo`.
+/// blaze's engine, which `cargo blaze` ran as `ra-jit cargo`. Releases from the
+/// rename of `ra-jit` to `blaze` ship no such program, and the `blaze` they ship
+/// runs no Cargo, so only an older release can serve these builds.
 const ENGINE: &str = "ra-jit";
+
+/// The program of a release without the engine. It builds on its own and never
+/// calls Cargo, so there is no Cargo call for the shim to catch.
+const CLIENT: &str = "blaze";
 
 /// Whether blaze could take this command, before any setting is read. Every
 /// other command goes on without the settings `route` needs.
@@ -59,8 +64,15 @@ pub(super) fn route(
         );
         return None;
     };
-    let Some(engine) = engine(std::env::var_os("PATH").as_deref()) else {
-        log::warn!("blaze is on, but `{ENGINE}` is not on PATH; building with Cargo");
+    let path = std::env::var_os("PATH");
+    let Some(engine) = engine(path.as_deref()) else {
+        if find(path.as_deref(), CLIENT).is_some() {
+            log::warn!(
+                "blaze is on, but this blaze has no `{ENGINE}` and runs no Cargo, so mbx has no way to send builds through it; building with Cargo. Use a blaze release that ships `{ENGINE}`, or turn the setting off"
+            );
+        } else {
+            log::warn!("blaze is on, but `{ENGINE}` is not on PATH; building with Cargo");
+        }
         return None;
     };
     log::debug!(
@@ -127,8 +139,12 @@ fn builds_here() -> bool {
 }
 
 fn engine(path: Option<&OsStr>) -> Option<PathBuf> {
+    find(path, ENGINE)
+}
+
+fn find(path: Option<&OsStr>, program: &str) -> Option<PathBuf> {
     std::env::split_paths(path?)
-        .map(|directory| directory.join(ENGINE))
+        .map(|directory| directory.join(program))
         .find(|candidate| is_executable(candidate))
 }
 
@@ -249,6 +265,17 @@ mod tests {
         let path = std::env::join_paths([&empty]).unwrap();
         assert_eq!(engine(Some(&path)), None);
         assert_eq!(engine(None), None);
+    }
+
+    #[test]
+    fn a_blaze_without_the_engine_is_not_the_engine() {
+        let root = tempfile::tempdir().unwrap();
+        let blaze = root.path().join("blaze");
+        std::fs::create_dir_all(&blaze).unwrap();
+        executable(&blaze.join(CLIENT));
+        let path = std::env::join_paths([&blaze]).unwrap();
+        assert_eq!(engine(Some(&path)), None);
+        assert_eq!(find(Some(&path), CLIENT), Some(blaze.join(CLIENT)));
     }
 
     #[cfg(unix)]

@@ -34,7 +34,7 @@ mbx sets the variable through the build-script wrapper that `build_script_execut
 
 Send dev builds typed as plain `cargo` through blaze.
 
-When the Cargo shim receives `cargo build`, `run`, `test`, or `check` without `--release` or `--profile`, and blaze's `ra-jit` is on `PATH`, it runs `ra-jit cargo` instead of Cargo. blaze rebuilds an edited function in milliseconds and runs Cargo when it has to, through this shim, so those builds still use the cache. blaze compiles workspace crates itself, and mbx does not cache those. Experimental: Linux and macOS on Apple silicon only, where blaze builds.
+When the Cargo shim receives `cargo build`, `run`, `test`, or `check` without `--release` or `--profile`, and blaze's `ra-jit` is on `PATH`, it runs `ra-jit cargo` instead of Cargo. Releases of blaze from its rename on ship no `ra-jit` and run no Cargo, so with one of those the setting has no effect and Cargo builds as usual. blaze rebuilds an edited function in milliseconds and runs Cargo when it has to, through this shim, so those builds still use the cache. blaze compiles workspace crates itself, and mbx does not cache those. Experimental: Linux and macOS on Apple silicon only, where blaze builds.
 
 ### `build_script_execution`
 
