@@ -74,7 +74,7 @@ cache. The build summary counts each workspace crate blaze compiles as a
 `workspace-wrapper` bypass.
 
 blaze rebuilds an edited function in milliseconds only when its own client runs
-in place of Cargo, as `cargo blaze build` does. To get that from plain `cargo`
+in place of Cargo, as `blaze build` does. To get that from plain `cargo`
 commands, turn on the [`blaze`](/configuration#blaze) setting:
 
 ```sh
@@ -82,13 +82,24 @@ export MBX_BLAZE=1
 cargo build
 ```
 
-mbx's Cargo shim then runs `ra-jit cargo build` instead, and blaze's own Cargo
-builds come back through the shim. Only dev `build`, `run`, `test`, and `check`
-commands go to blaze; `--release` and `--profile` builds and other commands run
-Cargo as before. This needs `ra-jit` on `PATH` and the Cargo shim that
-`mbx setup` installs, which is how blaze reaches mbx again. blaze builds with
-Rust 1.99.0 whatever toolchain the project selects, so the entries its builds
-store serve other blaze builds, not builds with another toolchain.
+mbx's Cargo shim then runs `blaze build` instead. Only dev `build`, `run`,
+`test`, and `check` commands go to blaze; `--release` and `--profile` builds and
+other commands run Cargo as before. blaze builds without running Cargo, so
+there is no Cargo call for mbx to catch and mbx's cache sees none of those
+builds. The shim runs `blaze test` with `BLAZE_TESTS=all` unless `BLAZE_TESTS`
+is set, so a routed `cargo test` runs every test, as Cargo does. A `blaze test`
+you run yourself defaults to the tests an edit affects and can reuse passing
+results.
+
+Releases of blaze from before its rename to `blaze` ship `ra-jit` and no
+`blaze`. With only `ra-jit` on `PATH`, the shim runs `ra-jit cargo build`
+instead, and `ra-jit`'s own Cargo builds come back through the Cargo shim that
+`mbx setup` installs, so they use the cache. This fallback goes away in
+mbx 2.0.
+
+blaze builds with its own pinned toolchain whatever toolchain the project
+selects (`blaze toolchain --path` shows it), so the entries its builds store
+serve other blaze builds, not builds with another toolchain.
 
 ## Are restored artifacts byte-identical to freshly compiled ones? {#are-restored-artifacts-byte-identical-to-what-a-compile-would-produce}
 

@@ -2,14 +2,19 @@
 //!
 //! blaze (<https://github.com/indexable-inc/blaze>) keeps a workspace compiled
 //! in a daemon and rebuilds an edited function without running Cargo. Its fast
-//! path needs its own client in front of Cargo, which `cargo blaze build`
-//! gives; a workspace wrapper alone does not. With the `blaze` setting on, the
-//! Cargo shim runs that client for the commands it serves and names itself as
-//! the client's `CARGO`, so the Cargo builds blaze still runs come back through
-//! the shim and use the cache. The Cargo the shim selected travels beside it,
-//! so that the build that comes back runs the same Cargo a build that never
-//! left would have.
+//! path needs its own client in front of Cargo, which `blaze build` is; a
+//! workspace wrapper alone does not give it. With the `blaze` setting on, the
+//! Cargo shim runs that client for the commands it serves. Since it runs no
+//! Cargo, mbx's cache sees none of those builds.
+//!
+//! Releases of blaze from before its rename ship `ra-jit` instead, which the
+//! shim still runs, as `ra-jit cargo`, when there is no `blaze`. That client
+//! hands the builds it does not do itself to Cargo, and the shim names itself as
+//! its `CARGO`, so those builds come back through the shim and use the cache.
+//! The Cargo the shim selected travels beside it, so that the build that comes
+//! back runs the same Cargo a build that never left would have.
 
+use crate::remove_by::remove_by;
 use eyre::{Context, Result};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -25,9 +30,28 @@ pub(super) const ROUTED_ENV: &str = "MBX_BLAZE_ROUTED";
 /// shim, so the shim can't find that choice anywhere else.
 const RETURN_CARGO_ENV: &str = "MBX_BLAZE_CARGO";
 
-/// blaze's engine. Releases before the rename have no `blaze` program, and
-/// every release has this one, which `cargo blaze` runs as `ra-jit cargo`.
+/// blaze's program, which takes cargo's commands as its own (`blaze build`)
+/// and runs no Cargo, so mbx's cache sees none of its builds.
+const CLIENT: &str = "blaze";
+
+// Releases of blaze before its rename shipped `ra-jit` and no `blaze`; the
+// fallback to it, here and in the help text and FAQ, goes with mbx 1.x.
+remove_by!("2.0.0", "ra-jit-fallback");
+
+/// blaze's engine before the rename, which `cargo blaze` ran as `ra-jit cargo`
+/// and which hands the builds it does not do itself to Cargo. Only used when
+/// there is no `blaze`.
 const ENGINE: &str = "ra-jit";
+
+/// blaze's choice of which tests a `test` runs.
+const TESTS_ENV: &str = "BLAZE_TESTS";
+
+/// The program to run for a command and the arguments it goes before.
+#[derive(Debug, PartialEq, Eq)]
+struct Client {
+    program: PathBuf,
+    prefix: &'static [&'static str],
+}
 
 /// Whether blaze could take this command, before any setting is read. Every
 /// other command goes on without the settings `route` needs.
@@ -59,16 +83,18 @@ pub(super) fn route(
         );
         return None;
     };
-    let Some(engine) = engine(std::env::var_os("PATH").as_deref()) else {
-        log::warn!("blaze is on, but `{ENGINE}` is not on PATH; building with Cargo");
+    let Some(client) = client(std::env::var_os("PATH").as_deref()) else {
+        log::warn!(
+            "blaze is on, but neither `{CLIENT}` nor `{ENGINE}` is on PATH; building with Cargo"
+        );
         return None;
     };
     log::debug!(
         "sending `cargo {}` through {}",
         arguments.join(" "),
-        engine.display()
+        client.program.display()
     );
-    run(&engine, shim, real_cargo, arguments)
+    run(&client, shim, real_cargo, arguments)
 }
 
 /// The Cargo to run for a call blaze made through `shim`: the one the shim had
@@ -126,9 +152,24 @@ fn builds_here() -> bool {
     cfg!(target_os = "linux") || cfg!(all(target_os = "macos", target_arch = "aarch64"))
 }
 
-fn engine(path: Option<&OsStr>) -> Option<PathBuf> {
+/// The `blaze` on `path` when there is one, else the `ra-jit` it replaced.
+fn client(path: Option<&OsStr>) -> Option<Client> {
+    find(path, CLIENT)
+        .map(|program| Client {
+            program,
+            prefix: &[],
+        })
+        .or_else(|| {
+            find(path, ENGINE).map(|program| Client {
+                program,
+                prefix: &["cargo"],
+            })
+        })
+}
+
+fn find(path: Option<&OsStr>, program: &str) -> Option<PathBuf> {
     std::env::split_paths(path?)
-        .map(|directory| directory.join(ENGINE))
+        .map(|directory| directory.join(program))
         .find(|candidate| is_executable(candidate))
 }
 
@@ -147,28 +188,43 @@ pub(super) fn is_executable(path: &Path) -> bool {
     }
 }
 
+/// Whether to ask `blaze test` for every test. blaze runs only the tests an
+/// edit affects unless told otherwise, so a repeated `cargo test` could skip a
+/// test that Cargo would have run again, such as one that depends on time.
+/// A mode the user already set is theirs, and `ra-jit` runs Cargo's own tests.
+fn runs_every_test(client: &Client, arguments: &[String], set: Option<&OsStr>) -> bool {
+    client.prefix.is_empty()
+        && set.is_none()
+        && arguments
+            .first()
+            .is_some_and(|command| matches!(command.as_str(), "test" | "t"))
+}
+
 /// Run blaze's client for `arguments`. `None` when it could not be started,
 /// such as a `ra-jit` built for another machine: blaze has done nothing yet, so
 /// the command goes to Cargo. A failure once it has started is the build's own.
 fn run(
-    engine: &Path,
+    client: &Client,
     shim: &Path,
     real_cargo: &OsStr,
     arguments: &[String],
 ) -> Option<Result<ExitCode>> {
-    let mut child = match Command::new(engine)
-        .arg("cargo")
+    let mut command = Command::new(&client.program);
+    command
+        .args(client.prefix)
         .args(arguments)
         .env("CARGO", shim)
         .env(RETURN_CARGO_ENV, real_cargo)
-        .env(ROUTED_ENV, "1")
-        .spawn()
-    {
+        .env(ROUTED_ENV, "1");
+    if runs_every_test(client, arguments, std::env::var_os(TESTS_ENV).as_deref()) {
+        command.env(TESTS_ENV, "all");
+    }
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
             log::warn!(
                 "blaze is on, but {} could not be started ({error}); building with Cargo",
-                engine.display()
+                client.program.display()
             );
             return None;
         }
@@ -176,7 +232,7 @@ fn run(
     Some(
         child
             .wait()
-            .wrap_err_with(|| format!("failed to wait for {}", engine.display()))
+            .wrap_err_with(|| format!("failed to wait for {}", client.program.display()))
             .map(super::cargo::exit_code),
     )
 }
@@ -237,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_is_found_on_path() {
+    fn the_client_is_found_on_path() {
         let root = tempfile::tempdir().unwrap();
         let empty = root.path().join("empty");
         let blaze = root.path().join("blaze");
@@ -245,10 +301,45 @@ mod tests {
         std::fs::create_dir_all(&blaze).unwrap();
         executable(&blaze.join(ENGINE));
         let path = std::env::join_paths([&empty, &blaze]).unwrap();
-        assert_eq!(engine(Some(&path)), Some(blaze.join(ENGINE)));
+        assert_eq!(
+            client(Some(&path)),
+            Some(Client {
+                program: blaze.join(ENGINE),
+                prefix: &["cargo"]
+            })
+        );
         let path = std::env::join_paths([&empty]).unwrap();
-        assert_eq!(engine(Some(&path)), None);
-        assert_eq!(engine(None), None);
+        assert_eq!(client(Some(&path)), None);
+        assert_eq!(client(None), None);
+    }
+
+    #[test]
+    fn blaze_is_preferred_to_the_engine_it_replaced() {
+        let root = tempfile::tempdir().unwrap();
+        let blaze = root.path().join("blaze");
+        let both = root.path().join("both");
+        std::fs::create_dir_all(&blaze).unwrap();
+        std::fs::create_dir_all(&both).unwrap();
+        executable(&blaze.join(CLIENT));
+        executable(&both.join(CLIENT));
+        executable(&both.join(ENGINE));
+        let path = std::env::join_paths([&blaze]).unwrap();
+        assert_eq!(
+            client(Some(&path)),
+            Some(Client {
+                program: blaze.join(CLIENT),
+                prefix: &[]
+            })
+        );
+        // With both on PATH, the first blaze found wins over any ra-jit.
+        let path = std::env::join_paths([&both, &blaze]).unwrap();
+        assert_eq!(
+            client(Some(&path)),
+            Some(Client {
+                program: both.join(CLIENT),
+                prefix: &[]
+            })
+        );
     }
 
     #[cfg(unix)]
@@ -262,7 +353,38 @@ mod tests {
         std::fs::write(broken.join(ENGINE), "").unwrap();
         executable(&blaze.join(ENGINE));
         let path = std::env::join_paths([&broken, &blaze]).unwrap();
-        assert_eq!(engine(Some(&path)), Some(blaze.join(ENGINE)));
+        assert_eq!(
+            client(Some(&path)).map(|c| c.program),
+            Some(blaze.join(ENGINE))
+        );
+    }
+
+    #[test]
+    fn blaze_runs_every_test_unless_told_otherwise() {
+        let blaze = Client {
+            program: PathBuf::from("blaze"),
+            prefix: &[],
+        };
+        let engine = Client {
+            program: PathBuf::from("ra-jit"),
+            prefix: &["cargo"],
+        };
+        assert!(runs_every_test(&blaze, &arguments("test --lib"), None));
+        assert!(runs_every_test(&blaze, &arguments("t"), None));
+        assert!(!runs_every_test(&blaze, &arguments("build"), None));
+        assert!(!runs_every_test(&blaze, &arguments("check"), None));
+        // The user's own mode, even an empty one, is left alone.
+        assert!(!runs_every_test(
+            &blaze,
+            &arguments("test"),
+            Some(OsStr::new("affected"))
+        ));
+        assert!(!runs_every_test(
+            &blaze,
+            &arguments("test"),
+            Some(OsStr::new(""))
+        ));
+        assert!(!runs_every_test(&engine, &arguments("test"), None));
     }
 
     #[test]
@@ -316,7 +438,10 @@ mod tests {
         // Gone between the lookup and the start: every platform refuses to
         // start it, where what an unloadable file does differs (macOS starts
         // a file of zeros and reports the failure as its exit).
-        let engine = root.path().join(ENGINE);
+        let engine = Client {
+            program: root.path().join(ENGINE),
+            prefix: &["cargo"],
+        };
         assert!(
             run(
                 &engine,
