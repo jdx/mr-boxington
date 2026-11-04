@@ -145,10 +145,16 @@ pub(crate) fn last_run(view: &Path) -> Option<SystemTime> {
 
 /// Whether Cargo's output at `path` is a program or a library a program
 /// loads, rather than dep-info or an rlib only builds read.
+///
+/// Cargo links the unit's output to its place at the top of the profile, so
+/// a file of its own has two names. One with more is shared with the store or
+/// another target, as a hard-linked restore is, and a run through any of them
+/// moves the access time they all report, so it says nothing about this one.
 #[cfg(unix)]
 fn runnable(_path: &Path, metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o111 != 0
+    metadata.permissions().mode() & 0o111 != 0 && metadata.nlink() <= 2
 }
 
 #[cfg(not(unix))]

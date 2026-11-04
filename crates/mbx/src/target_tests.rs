@@ -1991,3 +1991,32 @@ fn a_target_only_its_program_runs_keep_keeps_its_units() {
     assert_eq!(outcome.removed_units, 0);
     assert!(library.exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_run_of_a_program_shared_with_other_targets_is_not_use() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    let view = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    if !crate::target_units::access_times_tracked(&views_root(&config.target.root)) {
+        return;
+    }
+    let program = ran_program(&view);
+    // Cargo's own two names, and a third where a restore linked the store's
+    // object: a run through any of them moves the one access time.
+    std::fs::hard_link(&program, view.join("debug/app-0123456789abcdef")).unwrap();
+    std::fs::hard_link(&program, directory.path().join("store-object")).unwrap();
+    age_view(&config.target.root, &workspace, 1);
+
+    let outcome = collect(
+        &config.target.root,
+        None,
+        Some(Duration::from_secs(60)),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(outcome.removed_live_views, 1);
+    assert!(!view.exists());
+}
