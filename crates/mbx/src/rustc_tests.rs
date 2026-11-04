@@ -2792,6 +2792,14 @@ fn verification_ignores_diagnostic_wrapping() {
         verification_divergence(&cached(wide), &compiled(narrow)),
         None
     );
+    // `\\n` is an escaped backslash and an `n`, not a newline.
+    assert!(
+        verification_divergence(
+            &cached(br#"{"a":"C:\\name"}"#),
+            &compiled(br#"{"a":"C:\\ame"}"#)
+        )
+        .is_some()
+    );
     assert!(
         verification_divergence(&cached(wide), &compiled(b"{\"rendered\":\"error\"}")).is_some(),
         "different text is still a divergence"

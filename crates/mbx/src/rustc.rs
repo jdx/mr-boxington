@@ -3792,6 +3792,9 @@ fn without_wrapping(stderr: &[u8]) -> Vec<u8> {
     while let Some(byte) = bytes.next() {
         if byte == b'\\' && bytes.peek() == Some(&b'n') {
             bytes.next();
+        } else if byte == b'\\' && bytes.peek() == Some(&b'\\') {
+            // An escaped backslash is text, and must not pair with a following `n`.
+            text.extend([byte, bytes.next().unwrap_or(byte)]);
         } else if !byte.is_ascii_whitespace() {
             text.push(byte);
         }
