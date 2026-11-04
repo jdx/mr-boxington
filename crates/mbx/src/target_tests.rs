@@ -1949,3 +1949,45 @@ fn reading_a_file_that_is_not_a_program_is_not_use() {
     assert_eq!(outcome.removed_live_views, 1);
     assert!(!view.exists());
 }
+
+#[test]
+fn a_target_only_its_program_runs_keep_keeps_its_units() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    let view = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    if !crate::target_units::access_times_tracked(&views_root(&config.target.root)) {
+        return;
+    }
+    ran_program(&view);
+    // A library the program loads, in a unit no build has used for months.
+    let fingerprint = view.join("debug/build/dep/0123456789abcdef/fingerprint");
+    std::fs::create_dir_all(&fingerprint).unwrap();
+    let library = fingerprint.parent().unwrap().join("libdep.so");
+    std::fs::write(&library, b"library").unwrap();
+    std::fs::write(fingerprint.join("lib-dep"), b"hash").unwrap();
+    let long_ago = SystemTime::now() - Duration::from_secs(90 * 24 * 60 * 60);
+    for path in [fingerprint.join("lib-dep"), fingerprint.clone()] {
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_accessed(long_ago)
+                    .set_modified(long_ago),
+            )
+            .unwrap();
+    }
+    age_view(&config.target.root, &workspace, 1);
+
+    let outcome = collect(
+        &config.target.root,
+        None,
+        Some(Duration::from_secs(60)),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(outcome.removed_views, 0);
+    assert_eq!(outcome.removed_units, 0);
+    assert!(library.exists());
+}

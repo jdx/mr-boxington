@@ -352,7 +352,9 @@ that from the file's access time, so it needs a filesystem that records access
 times (`mbx doctor` warns when it does not). Under Linux's default `relatime`, a
 file's access time moves at most once a day, so a program run several times a
 day counts as used once a day. Executables under `deps/` and `build/` do not
-count.
+count. A target that no build has used for `target.max_age` but whose programs
+still run keeps all of its [build units](#unused-build-units), so a library a
+program loads from `deps/` or `build/` stays too.
 
 A target directory is removed when any of these is true:
 

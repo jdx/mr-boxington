@@ -1585,10 +1585,16 @@ fn collect_with(
             .any(|entry| entry.4 && entry.5 != Standing::Keep && !expired(entry.2, entry.5))
         && runs_tracked
     {
-        for (_, directory, updated, files, live, standing, _) in &mut entries {
+        for (_, directory, updated, files, live, standing, built) in &mut entries {
             // A kept target keeps what it holds: one built for a bisect or a
             // release and left alone is exactly one whose units look unused.
             if !*live || *standing == Standing::Keep || expired(*updated, *standing) {
+                continue;
+            }
+            // So does one only its programs' runs keep: no build has read its
+            // fingerprints, so every unit looks unused, a library the program
+            // loads from `deps/` or `build/` included.
+            if expired(*built, *standing) {
                 continue;
             }
             // A program run from `target/` by hand takes no lease, but its
