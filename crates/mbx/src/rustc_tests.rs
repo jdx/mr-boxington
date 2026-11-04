@@ -2769,3 +2769,31 @@ fn json_diagnostics_round_trip_between_escaping_roots() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn verification_ignores_diagnostic_wrapping() {
+    use std::os::unix::process::ExitStatusExt as _;
+    let cached = |stderr: &[u8]| CachedCompilation {
+        action: CacheDigest::blake3(b"action"),
+        stdout: Vec::new(),
+        stderr: stderr.to_vec(),
+        outputs: Vec::new(),
+        restore: Default::default(),
+    };
+    let compiled = |stderr: &[u8]| Output {
+        status: std::process::ExitStatus::from_raw(0),
+        stdout: Vec::new(),
+        stderr: stderr.to_vec(),
+    };
+    let wide = br#"{"rendered":"warning: unused variable `x`\n --> src/lib.rs:1:1\n"}"#;
+    let narrow = br#"{"rendered":"warning: unused variable\n`x`\n  --> src/lib.rs:1:1\n"}"#;
+    assert_eq!(
+        verification_divergence(&cached(wide), &compiled(narrow)),
+        None
+    );
+    assert!(
+        verification_divergence(&cached(wide), &compiled(b"{\"rendered\":\"error\"}")).is_some(),
+        "different text is still a divergence"
+    );
+}

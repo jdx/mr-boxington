@@ -3783,6 +3783,22 @@ fn finalize_restored_outputs(staged: StagedOutputs, restore_outputs: bool) -> Re
     Ok(())
 }
 
+/// Diagnostics are keyed without `--diagnostic-width`, so a cached entry and a
+/// shadow run may wrap the same diagnostic differently. Dropping whitespace and
+/// the escaped newlines of cargo's JSON messages compares the text alone.
+fn without_wrapping(stderr: &[u8]) -> Vec<u8> {
+    let mut text = Vec::with_capacity(stderr.len());
+    let mut bytes = stderr.iter().copied().peekable();
+    while let Some(byte) = bytes.next() {
+        if byte == b'\\' && bytes.peek() == Some(&b'n') {
+            bytes.next();
+        } else if !byte.is_ascii_whitespace() {
+            text.push(byte);
+        }
+    }
+    text
+}
+
 /// Describe how a restore differs from the compilation it was checked against.
 ///
 /// `None` means they agree. A divergence names what disagreed, because that is
@@ -3797,8 +3813,8 @@ fn verification_divergence(cached: &CachedCompilation, output: &Output) -> Optio
             .or_else(|| {
                 crate::materialize::stream_divergence(
                     "standard error",
-                    &cached.stderr,
-                    &output.stderr,
+                    &without_wrapping(&cached.stderr),
+                    &without_wrapping(&output.stderr),
                 )
             })
     {
