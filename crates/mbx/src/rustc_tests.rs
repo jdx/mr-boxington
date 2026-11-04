@@ -2825,3 +2825,27 @@ fn verification_ignores_diagnostic_wrapping() {
         "a different field is still a divergence"
     );
 }
+
+#[test]
+fn bypassed_library_identity_ignores_a_single_diagnostic_width() {
+    let identity = |arguments: &[&str]| {
+        bypassed_library_identity(&arguments.iter().map(OsString::from).collect::<Vec<_>>())
+    };
+    let base = identity(&["--crate-name=widget", "src/lib.rs"]);
+    assert_eq!(
+        base,
+        identity(&[
+            "--crate-name=widget",
+            "--diagnostic-width=120",
+            "src/lib.rs"
+        ])
+    );
+    assert_eq!(
+        base,
+        identity(&["--crate-name=widget", "--diagnostic-width=80", "src/lib.rs"])
+    );
+    assert_ne!(
+        base,
+        identity(&["--crate-name=widget", "--diagnostic-width=x", "src/lib.rs"])
+    );
+}

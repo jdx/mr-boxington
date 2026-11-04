@@ -2131,16 +2131,35 @@ pub(crate) fn bypassed_library_incremental_flag(arguments: &[OsString]) -> Optio
     if !in_workspace {
         return None;
     }
-    let mut identity = Vec::new();
-    for argument in arguments {
-        identity.extend_from_slice(argument.as_encoded_bytes());
-        identity.push(0);
-    }
-    let directory = incremental_directory(&CacheDigest::blake3(&identity), &crate_name, false)?;
+    let directory =
+        incremental_directory(&bypassed_library_identity(arguments), &crate_name, false)?;
     if incremental_state_exceeds_backstop(&directory, session::incremental_budget()) {
         return None;
     }
     Some(private_incremental_flag(&directory))
+}
+
+/// The arguments a bypassed library's private incremental directory is keyed
+/// on. A single numeric `--diagnostic-width` is left out, as it is from the
+/// cache key, so terminal and piped builds share the directory.
+fn bypassed_library_identity(arguments: &[OsString]) -> CacheDigest {
+    fn width(argument: &OsString) -> Option<&str> {
+        argument.to_str()?.strip_prefix("--diagnostic-width=")
+    }
+    let mut widths = arguments.iter().filter_map(width);
+    let drop_width = matches!(
+        (widths.next(), widths.next()),
+        (Some(value), None) if value.parse::<usize>().is_ok()
+    );
+    let mut identity = Vec::new();
+    for argument in arguments {
+        if drop_width && width(argument).is_some() {
+            continue;
+        }
+        identity.extend_from_slice(argument.as_encoded_bytes());
+        identity.push(0);
+    }
+    CacheDigest::blake3(&identity)
 }
 
 /// Oversized learned state takes the shared compilation path this time.
