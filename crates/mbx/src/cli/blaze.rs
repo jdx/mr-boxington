@@ -33,6 +33,9 @@ const ENGINE: &str = "ra-jit";
 /// (`blaze build`) and runs no Cargo, so mbx's cache sees none of its builds.
 const CLIENT: &str = "blaze";
 
+/// blaze's choice of which tests a `test` runs.
+const TESTS_ENV: &str = "BLAZE_TESTS";
+
 /// The program to run for a command and the arguments it goes before.
 #[derive(Debug, PartialEq, Eq)]
 struct Client {
@@ -176,6 +179,18 @@ pub(super) fn is_executable(path: &Path) -> bool {
     }
 }
 
+/// Whether to ask `blaze test` for every test. blaze runs only the tests an
+/// edit affects unless told otherwise, so a repeated `cargo test` could skip a
+/// test that Cargo would have run again, such as one that depends on time.
+/// A mode the user already set is theirs, and `ra-jit` runs Cargo's own tests.
+fn runs_every_test(client: &Client, arguments: &[String], set: Option<&OsStr>) -> bool {
+    client.prefix.is_empty()
+        && set.is_none()
+        && arguments
+            .first()
+            .is_some_and(|command| matches!(command.as_str(), "test" | "t"))
+}
+
 /// Run blaze's client for `arguments`. `None` when it could not be started,
 /// such as a `ra-jit` built for another machine: blaze has done nothing yet, so
 /// the command goes to Cargo. A failure once it has started is the build's own.
@@ -185,14 +200,17 @@ fn run(
     real_cargo: &OsStr,
     arguments: &[String],
 ) -> Option<Result<ExitCode>> {
-    let mut child = match Command::new(&client.program)
+    let mut command = Command::new(&client.program);
+    command
         .args(client.prefix)
         .args(arguments)
         .env("CARGO", shim)
         .env(RETURN_CARGO_ENV, real_cargo)
-        .env(ROUTED_ENV, "1")
-        .spawn()
-    {
+        .env(ROUTED_ENV, "1");
+    if runs_every_test(client, arguments, std::env::var_os(TESTS_ENV).as_deref()) {
+        command.env(TESTS_ENV, "all");
+    }
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
             log::warn!(
@@ -330,6 +348,34 @@ mod tests {
             client(Some(&path)).map(|c| c.program),
             Some(blaze.join(ENGINE))
         );
+    }
+
+    #[test]
+    fn blaze_runs_every_test_unless_told_otherwise() {
+        let blaze = Client {
+            program: PathBuf::from("blaze"),
+            prefix: &[],
+        };
+        let engine = Client {
+            program: PathBuf::from("ra-jit"),
+            prefix: &["cargo"],
+        };
+        assert!(runs_every_test(&blaze, &arguments("test --lib"), None));
+        assert!(runs_every_test(&blaze, &arguments("t"), None));
+        assert!(!runs_every_test(&blaze, &arguments("build"), None));
+        assert!(!runs_every_test(&blaze, &arguments("check"), None));
+        // The user's own mode, even an empty one, is left alone.
+        assert!(!runs_every_test(
+            &blaze,
+            &arguments("test"),
+            Some(OsStr::new("affected"))
+        ));
+        assert!(!runs_every_test(
+            &blaze,
+            &arguments("test"),
+            Some(OsStr::new(""))
+        ));
+        assert!(!runs_every_test(&engine, &arguments("test"), None));
     }
 
     #[test]

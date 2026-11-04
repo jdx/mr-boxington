@@ -94,9 +94,10 @@ With one of those on `PATH`, the shim runs `blaze build` (or `run`, `test`,
 Cargo call for mbx to catch and mbx's cache sees none of its builds. When both
 are on `PATH`, `ra-jit` is used.
 
-blaze builds with Rust 1.99.0 whatever toolchain the project selects, so the
-entries its builds store serve other blaze builds, not builds with another
-toolchain.
+blaze builds with its own pinned toolchain whatever toolchain the project
+selects (`blaze toolchain --path` shows it), so the entries its builds store
+serve other blaze builds, not builds with another toolchain. `blaze test` runs
+every test, as Cargo does, unless `BLAZE_TESTS` is set.
 
 ## Are restored artifacts byte-identical to freshly compiled ones? {#are-restored-artifacts-byte-identical-to-what-a-compile-would-produce}
 

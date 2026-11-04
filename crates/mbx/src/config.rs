@@ -326,9 +326,10 @@ pub(crate) struct RawConfig {
     /// Send dev builds typed as plain `cargo` through blaze.
     ///
     /// When the Cargo shim receives `cargo build`, `run`, `test`, or `check`
-    /// without `--release` or `--profile`, and blaze is on `PATH`, it runs
-    /// blaze instead of Cargo: `ra-jit cargo` for a release that ships
-    /// `ra-jit`, else `blaze`, which replaced it. blaze rebuilds an edited
+    /// without `--release` or `--profile`, and `ra-jit` or `blaze` is on
+    /// `PATH`, it runs blaze instead of Cargo: `ra-jit cargo` when `ra-jit` is
+    /// there, else `blaze`, which replaced it. `blaze test` runs every test,
+    /// as Cargo does, unless `BLAZE_TESTS` is set. blaze rebuilds an edited
     /// function in milliseconds. `ra-jit` runs Cargo when it has to, through
     /// this shim, so those builds still use the cache; `blaze` runs no Cargo,
     /// so mbx caches none of its builds. blaze compiles workspace crates
