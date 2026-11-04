@@ -1456,31 +1456,14 @@ impl<'a> Parser<'a> {
 
     /// Cargo passes `--diagnostic-width` only when stderr is a terminal, with
     /// the terminal's width as the value, so keying it splits the cache by how
-    /// a build was launched. The width only wraps rendered diagnostics, and
-    /// `--cap-lints=allow` (which cargo passes for every non-workspace
-    /// dependency) silences every lint except `--force-warn`, so under it the argument cannot change
-    /// what a build prints and is left out of the key.
+    /// a build was launched. The width only wraps rendered diagnostics and
+    /// never changes the artifacts, so it is left out of the key for every
+    /// crate. Diagnostics replayed from a cached entry keep the wrapping of
+    /// the build that produced them.
     fn drop_unobservable_diagnostic_width(&mut self) {
-        // rustc honors the last `--cap-lints`.
-        let capped = self
-            .parsed
-            .iter()
-            .rev()
-            .find_map(|argument| match argument {
-                Argument::Plain(value) => value.strip_prefix("--cap-lints="),
-                _ => None,
-            })
-            .is_some_and(|level| level == "allow");
-        // `--force-warn` is the one lint level `--cap-lints` does not lower.
-        let forced = self
-            .parsed
-            .iter()
-            .any(|argument| matches!(argument, Argument::Plain(value) if value.starts_with("--force-warn=")));
-        if capped && !forced {
-            self.parsed.retain(|argument| {
-                !matches!(argument, Argument::Plain(value) if value.starts_with("--diagnostic-width="))
-            });
-        }
+        self.parsed.retain(|argument| {
+            !matches!(argument, Argument::Plain(value) if value.starts_with("--diagnostic-width="))
+        });
     }
 
     fn parse_long(&mut self, value: &str) -> Result<(), BypassReason> {

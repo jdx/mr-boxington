@@ -3411,10 +3411,6 @@ fn a_build_script_is_recognized_by_its_crate_name() {
     assert!(!is_build_script_crate_name("build_script_"));
 }
 
-fn width_action(width: Option<&str>, cap_lints: &[&str]) -> RustcAction {
-    width_action_with(width, cap_lints, &[])
-}
-
 fn width_action_with(width: Option<&str>, cap_lints: &[&str], extra: &[&str]) -> RustcAction {
     let mut arguments: Vec<OsString> = vec![
         "--crate-name=widget".into(),
@@ -3438,50 +3434,22 @@ fn width_action_with(width: Option<&str>, cap_lints: &[&str], extra: &[&str]) ->
 }
 
 #[test]
-fn diagnostic_width_is_not_keyed_when_lints_are_capped() {
-    let piped = width_action(None, &["allow"]);
-    assert_eq!(piped.digest, width_action(Some("120"), &["allow"]).digest);
-    assert_eq!(piped.digest, width_action(Some("80"), &["allow"]).digest);
-}
-
-#[test]
-fn diagnostic_width_is_keyed_when_lints_are_not_capped() {
-    let piped = width_action(None, &[]);
-    assert_ne!(piped.digest, width_action(Some("120"), &[]).digest);
-    assert_ne!(
-        width_action(Some("80"), &[]).digest,
-        width_action(Some("120"), &[]).digest
-    );
-    // A cap that still reports warnings leaves the width observable.
-    assert_ne!(
-        width_action(None, &["warn"]).digest,
-        width_action(Some("120"), &["warn"]).digest
-    );
-}
-
-#[test]
-fn diagnostic_width_follows_the_last_cap_lints() {
-    // rustc honors the last `--cap-lints`, so a later `warn` re-exposes the width.
-    assert_ne!(
-        width_action(None, &["allow", "warn"]).digest,
-        width_action(Some("120"), &["allow", "warn"]).digest
-    );
-    assert_eq!(
-        width_action(None, &["warn", "allow"]).digest,
-        width_action(Some("120"), &["warn", "allow"]).digest
-    );
-}
-
-#[test]
-fn diagnostic_width_is_keyed_under_force_warn_even_when_lints_are_capped() {
-    // `--force-warn` is not lowered by `--cap-lints`, so those warnings still print.
-    for extra in [
-        &["--force-warn=unused_variables"][..],
-        &["--force-warn", "unused_variables"][..],
-    ] {
-        assert_ne!(
-            width_action_with(None, &["allow"], extra).digest,
-            width_action_with(Some("120"), &["allow"], extra).digest
-        );
+fn diagnostic_width_is_never_keyed() {
+    for cap_lints in [&[][..], &["allow"], &["warn"], &["allow", "warn"]] {
+        for extra in [
+            &[][..],
+            &["--force-warn=unused_variables"],
+            &["--force-warn", "unused_variables"],
+        ] {
+            let piped = width_action_with(None, cap_lints, extra);
+            assert_eq!(
+                piped.digest,
+                width_action_with(Some("120"), cap_lints, extra).digest
+            );
+            assert_eq!(
+                piped.digest,
+                width_action_with(Some("80"), cap_lints, extra).digest
+            );
+        }
     }
 }
