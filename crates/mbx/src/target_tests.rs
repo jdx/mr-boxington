@@ -1967,16 +1967,34 @@ fn a_target_only_its_program_runs_keep_keeps_its_units() {
     std::fs::write(&library, b"library").unwrap();
     std::fs::write(fingerprint.join("lib-dep"), b"hash").unwrap();
     let long_ago = SystemTime::now() - Duration::from_secs(90 * 24 * 60 * 60);
-    for path in [fingerprint.join("lib-dep"), fingerprint.clone()] {
-        std::fs::File::open(&path)
+    let long_ago_times = || {
+        std::fs::FileTimes::new()
+            .set_accessed(long_ago)
+            .set_modified(long_ago)
+    };
+    std::fs::File::options()
+        .write(true)
+        .open(fingerprint.join("lib-dep"))
+        .unwrap()
+        .set_times(long_ago_times())
+        .unwrap();
+    // Windows opens a directory only with backup semantics, and setting its
+    // times needs attribute access that a plain open does not ask for.
+    #[cfg(windows)]
+    let fingerprint_directory = {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
+        };
+        std::fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&fingerprint)
             .unwrap()
-            .set_times(
-                std::fs::FileTimes::new()
-                    .set_accessed(long_ago)
-                    .set_modified(long_ago),
-            )
-            .unwrap();
-    }
+    };
+    #[cfg(not(windows))]
+    let fingerprint_directory = std::fs::File::open(&fingerprint).unwrap();
+    fingerprint_directory.set_times(long_ago_times()).unwrap();
     age_view(&config.target.root, &workspace, 1);
 
     let outcome = collect(
