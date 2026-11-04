@@ -96,8 +96,10 @@ are on `PATH`, `ra-jit` is used.
 
 blaze builds with its own pinned toolchain whatever toolchain the project
 selects (`blaze toolchain --path` shows it), so the entries its builds store
-serve other blaze builds, not builds with another toolchain. `blaze test` runs
-every test, as Cargo does, unless `BLAZE_TESTS` is set.
+serve other blaze builds, not builds with another toolchain. The shim runs
+`blaze test` with `BLAZE_TESTS=all` unless `BLAZE_TESTS` is set, so a routed
+`cargo test` runs every test, as Cargo does. A `blaze test` you run yourself
+defaults to the tests an edit affects and can reuse passing results.
 
 ## Are restored artifacts byte-identical to freshly compiled ones? {#are-restored-artifacts-byte-identical-to-what-a-compile-would-produce}
 
