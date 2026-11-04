@@ -1843,3 +1843,198 @@ fn migrate_existing(
     lease._file.unlock().unwrap();
     migrated
 }
+
+/// Put a program Cargo built at the top of `view`'s debug profile, run just
+/// now and built long ago, and dep-info beside it that was read just now.
+fn ran_program(view: &Path) -> PathBuf {
+    let profile = view.join("debug");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::write(profile.join(".cargo-lock"), b"").unwrap();
+    let program = profile.join(if cfg!(windows) { "app.exe" } else { "app" });
+    std::fs::write(&program, b"program").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let built = SystemTime::now() - Duration::from_secs(90 * 24 * 60 * 60);
+    let times = std::fs::FileTimes::new()
+        .set_accessed(SystemTime::now())
+        .set_modified(built);
+    std::fs::File::options()
+        .write(true)
+        .open(&program)
+        .unwrap()
+        .set_times(times)
+        .unwrap();
+    program
+}
+
+#[test]
+fn a_program_run_from_a_target_since_its_build_counts_as_use() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let ran_workspace = checkout(directory.path(), "ran");
+    let built_workspace = checkout(directory.path(), "built");
+    let ran = place(
+        &config,
+        &ran_workspace,
+        &ran_workspace.join("target"),
+        false,
+    )
+    .unwrap();
+    let built = place(
+        &config,
+        &built_workspace,
+        &built_workspace.join("target"),
+        false,
+    )
+    .unwrap();
+    if !crate::target_units::access_times_tracked(&views_root(&config.target.root)) {
+        return;
+    }
+    let program = ran_program(&ran);
+    std::fs::write(built.join("artifact"), vec![0_u8; 10]).unwrap();
+    // Built before the other, but its program ran after both builds.
+    age_view(&config.target.root, &ran_workspace, 1);
+    age_view(&config.target.root, &built_workspace, 2);
+
+    let outcome = collect(&config.target.root, Some(10), None, false).unwrap();
+
+    assert_eq!(outcome.removed_live_views, 1);
+    assert!(program.exists(), "the target whose program ran is kept");
+    assert!(!built.exists(), "the one only built goes first");
+
+    let outcome = collect(
+        &config.target.root,
+        None,
+        Some(Duration::from_secs(60)),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        outcome.removed_views, 0,
+        "a run inside the age limit keeps it"
+    );
+    assert!(program.exists());
+}
+
+#[test]
+fn reading_a_file_that_is_not_a_program_is_not_use() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    let view = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    if !crate::target_units::access_times_tracked(&views_root(&config.target.root)) {
+        return;
+    }
+    let program = ran_program(&view);
+    let dep_info = program.with_extension("d");
+    std::fs::rename(&program, &dep_info).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dep_info, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    age_view(&config.target.root, &workspace, 1);
+
+    let outcome = collect(
+        &config.target.root,
+        None,
+        Some(Duration::from_secs(60)),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(outcome.removed_live_views, 1);
+    assert!(!view.exists());
+}
+
+#[test]
+fn a_target_only_its_program_runs_keep_keeps_its_units() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    let view = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    if !crate::target_units::access_times_tracked(&views_root(&config.target.root)) {
+        return;
+    }
+    ran_program(&view);
+    // A library the program loads, in a unit no build has used for months.
+    let fingerprint = view.join("debug/build/dep/0123456789abcdef/fingerprint");
+    std::fs::create_dir_all(&fingerprint).unwrap();
+    let library = fingerprint.parent().unwrap().join("libdep.so");
+    std::fs::write(&library, b"library").unwrap();
+    std::fs::write(fingerprint.join("lib-dep"), b"hash").unwrap();
+    let long_ago = SystemTime::now() - Duration::from_secs(90 * 24 * 60 * 60);
+    let long_ago_times = || {
+        std::fs::FileTimes::new()
+            .set_accessed(long_ago)
+            .set_modified(long_ago)
+    };
+    std::fs::File::options()
+        .write(true)
+        .open(fingerprint.join("lib-dep"))
+        .unwrap()
+        .set_times(long_ago_times())
+        .unwrap();
+    // Windows opens a directory only with backup semantics, and setting its
+    // times needs attribute access that a plain open does not ask for.
+    #[cfg(windows)]
+    let fingerprint_directory = {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
+        };
+        std::fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&fingerprint)
+            .unwrap()
+    };
+    #[cfg(not(windows))]
+    let fingerprint_directory = std::fs::File::open(&fingerprint).unwrap();
+    fingerprint_directory.set_times(long_ago_times()).unwrap();
+    age_view(&config.target.root, &workspace, 1);
+
+    let outcome = collect(
+        &config.target.root,
+        None,
+        Some(Duration::from_secs(60)),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(outcome.removed_views, 0);
+    assert_eq!(outcome.removed_units, 0);
+    assert!(library.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_run_of_a_program_shared_with_other_targets_is_not_use() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    let view = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    if !crate::target_units::access_times_tracked(&views_root(&config.target.root)) {
+        return;
+    }
+    let program = ran_program(&view);
+    // Cargo's own two names, and a third where a restore linked the store's
+    // object: a run through any of them moves the one access time.
+    std::fs::hard_link(&program, view.join("debug/app-0123456789abcdef")).unwrap();
+    std::fs::hard_link(&program, directory.path().join("store-object")).unwrap();
+    age_view(&config.target.root, &workspace, 1);
+
+    let outcome = collect(
+        &config.target.root,
+        None,
+        Some(Duration::from_secs(60)),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(outcome.removed_live_views, 1);
+    assert!(!view.exists());
+}

@@ -121,6 +121,49 @@ pub(crate) fn prune(
     outcome
 }
 
+/// When a program last ran one of the executables Cargo puts at the top of a
+/// profile in `view`, such as `target/debug/app`, or a library loaded from
+/// there. Running a file reads it, which updates its access time, so this
+/// is how collection learns that a hook, a `PATH` entry, or a link into
+/// `target/` uses the directory between builds. Only meaningful where
+/// [`access_times_tracked`] holds.
+///
+/// Outputs below the profile are left out: rustc reads `deps/` on every
+/// compile, and anything under it a build runs already holds a lease.
+pub(crate) fn last_run(view: &Path) -> Option<SystemTime> {
+    profiles(view)
+        .iter()
+        .filter_map(|profile| std::fs::read_dir(profile).ok())
+        .flat_map(|listing| listing.flatten())
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            (metadata.is_file() && runnable(&entry.path(), &metadata))
+                .then(|| metadata.accessed().ok())?
+        })
+        .max()
+}
+
+/// Whether Cargo's output at `path` is a program or a library a program
+/// loads, rather than dep-info or an rlib only builds read.
+///
+/// Cargo links the unit's output to its place at the top of the profile, so
+/// a file of its own has two names. One with more is shared with the store or
+/// another target, as a hard-linked restore is, and a run through any of them
+/// moves the access time they all report, so it says nothing about this one.
+#[cfg(unix)]
+fn runnable(_path: &Path, metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0 && metadata.nlink() <= 2
+}
+
+#[cfg(not(unix))]
+fn runnable(path: &Path, _metadata: &std::fs::Metadata) -> bool {
+    path.extension().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("exe") || extension.eq_ignore_ascii_case("dll")
+    })
+}
+
 /// The profile directories in `view`: those Cargo keeps a `.cargo-lock` in,
 /// up to three levels down. That covers `<profile>`, `<triple>/<profile>`,
 /// and an editor's `rust-analyzer/<triple>/<profile>`, the same depth the
