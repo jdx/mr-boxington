@@ -68,6 +68,7 @@ mod materialize;
 mod object_cleanup;
 mod out_dir;
 mod pressure;
+mod remove_by;
 mod retired;
 mod rustc;
 mod rustdoc;

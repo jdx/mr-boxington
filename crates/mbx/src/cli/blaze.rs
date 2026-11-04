@@ -2,14 +2,19 @@
 //!
 //! blaze (<https://github.com/indexable-inc/blaze>) keeps a workspace compiled
 //! in a daemon and rebuilds an edited function without running Cargo. Its fast
-//! path needs its own client in front of Cargo, which `cargo blaze build`
-//! gives; a workspace wrapper alone does not. With the `blaze` setting on, the
-//! Cargo shim runs that client for the commands it serves and names itself as
-//! the client's `CARGO`, so the Cargo builds blaze still runs come back through
-//! the shim and use the cache. The Cargo the shim selected travels beside it,
-//! so that the build that comes back runs the same Cargo a build that never
-//! left would have.
+//! path needs its own client in front of Cargo, which `blaze build` is; a
+//! workspace wrapper alone does not give it. With the `blaze` setting on, the
+//! Cargo shim runs that client for the commands it serves. Since it runs no
+//! Cargo, mbx's cache sees none of those builds.
+//!
+//! Releases of blaze from before its rename ship `ra-jit` instead, which the
+//! shim still runs, as `ra-jit cargo`, when there is no `blaze`. That client
+//! hands the builds it does not do itself to Cargo, and the shim names itself as
+//! its `CARGO`, so those builds come back through the shim and use the cache.
+//! The Cargo the shim selected travels beside it, so that the build that comes
+//! back runs the same Cargo a build that never left would have.
 
+use crate::remove_by::remove_by;
 use eyre::{Context, Result};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -25,13 +30,18 @@ pub(super) const ROUTED_ENV: &str = "MBX_BLAZE_ROUTED";
 /// shim, so the shim can't find that choice anywhere else.
 const RETURN_CARGO_ENV: &str = "MBX_BLAZE_CARGO";
 
-/// blaze's engine before the rename, which `cargo blaze` ran as `ra-jit cargo`
-/// and which hands the builds it does not do itself to Cargo.
-const ENGINE: &str = "ra-jit";
-
-/// blaze's program since the rename, which takes cargo's commands as its own
-/// (`blaze build`) and runs no Cargo, so mbx's cache sees none of its builds.
+/// blaze's program, which takes cargo's commands as its own (`blaze build`)
+/// and runs no Cargo, so mbx's cache sees none of its builds.
 const CLIENT: &str = "blaze";
+
+// Releases of blaze before its rename shipped `ra-jit` and no `blaze`; the
+// fallback to it, here and in the help text and FAQ, goes with mbx 1.x.
+remove_by!("2.0.0", "ra-jit-fallback");
+
+/// blaze's engine before the rename, which `cargo blaze` ran as `ra-jit cargo`
+/// and which hands the builds it does not do itself to Cargo. Only used when
+/// there is no `blaze`.
+const ENGINE: &str = "ra-jit";
 
 /// blaze's choice of which tests a `test` runs.
 const TESTS_ENV: &str = "BLAZE_TESTS";
@@ -75,7 +85,7 @@ pub(super) fn route(
     };
     let Some(client) = client(std::env::var_os("PATH").as_deref()) else {
         log::warn!(
-            "blaze is on, but neither `{ENGINE}` nor `{CLIENT}` is on PATH; building with Cargo"
+            "blaze is on, but neither `{CLIENT}` nor `{ENGINE}` is on PATH; building with Cargo"
         );
         return None;
     };
@@ -142,18 +152,17 @@ fn builds_here() -> bool {
     cfg!(target_os = "linux") || cfg!(all(target_os = "macos", target_arch = "aarch64"))
 }
 
-/// The `ra-jit` on `path` when there is one, as it keeps the cache in the
-/// loop, else the `blaze` that replaced it.
+/// The `blaze` on `path` when there is one, else the `ra-jit` it replaced.
 fn client(path: Option<&OsStr>) -> Option<Client> {
-    find(path, ENGINE)
+    find(path, CLIENT)
         .map(|program| Client {
             program,
-            prefix: &["cargo"],
+            prefix: &[],
         })
         .or_else(|| {
-            find(path, CLIENT).map(|program| Client {
+            find(path, ENGINE).map(|program| Client {
                 program,
-                prefix: &[],
+                prefix: &["cargo"],
             })
         })
 }
@@ -305,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn a_blaze_without_the_engine_takes_the_commands_itself() {
+    fn blaze_is_preferred_to_the_engine_it_replaced() {
         let root = tempfile::tempdir().unwrap();
         let blaze = root.path().join("blaze");
         let both = root.path().join("both");
@@ -322,13 +331,13 @@ mod tests {
                 prefix: &[]
             })
         );
-        // The engine keeps mbx's cache in the loop, so it wins over its successor.
-        let path = std::env::join_paths([&blaze, &both]).unwrap();
+        // With both on PATH, the first blaze found wins over any ra-jit.
+        let path = std::env::join_paths([&both, &blaze]).unwrap();
         assert_eq!(
             client(Some(&path)),
             Some(Client {
-                program: both.join(ENGINE),
-                prefix: &["cargo"]
+                program: both.join(CLIENT),
+                prefix: &[]
             })
         );
     }
