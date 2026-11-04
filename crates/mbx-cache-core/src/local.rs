@@ -473,10 +473,7 @@ impl LocalActionCache {
     /// result used within [`USE_REFRESH`] costs one stat and walks nothing.
     /// It is written last, after the objects, so an interrupted walk is
     /// retried by the next hit, and mbx reads records with
-    /// [`read_untouched`] so a lookup does not move it first. A record that
-    /// was only written, by a compilation or a remote hit, has an access time
-    /// no later than its modification time, and its objects may be older than
-    /// it, so only an access time past the modification time counts.
+    /// [`read_untouched`] so a lookup does not move it first.
     ///
     /// Nothing is verified or hashed. A file that cannot be recorded --
     /// evicted meanwhile, or in a store owned by someone else -- costs
@@ -486,22 +483,32 @@ impl LocalActionCache {
             return;
         };
         let recorded = now.checked_sub(USE_REFRESH).is_some_and(|stale| {
-            fs::metadata(&record).is_ok_and(|metadata| {
-                matches!(
-                    (metadata.accessed(), metadata.modified()),
-                    (Ok(accessed), Ok(modified)) if accessed > stale && accessed > modified
-                )
-            })
+            fs::metadata(&record)
+                .and_then(|metadata| metadata.accessed())
+                .is_ok_and(|accessed| accessed > stale)
         });
-        if recorded {
-            return;
+        if !recorded {
+            self.record_closure_use(&record, result, now);
         }
+    }
+
+    /// [`Self::record_use`] for a result this index stored just now, such as
+    /// the one a remote hit was served. Its record looks recently used
+    /// because it was just written, but objects already in the store may
+    /// not have been used in a long time, so the whole closure is recorded.
+    pub fn record_use_of_stored(&self, result: &RemoteActionResult, now: SystemTime) {
+        if let Ok(record) = self.path_for(&result.action) {
+            self.record_closure_use(&record, result, now);
+        }
+    }
+
+    fn record_closure_use(&self, record: &Path, result: &RemoteActionResult, now: SystemTime) {
         for digest in self.named_objects(result) {
             self.cas.record_use(&digest, now);
         }
         // Unthrottled: a record written just now already has a recent access
         // time, and leaving it there would walk again on every hit.
-        if let Err(error) = open_for_times(&record)
+        if let Err(error) = open_for_times(record)
             .and_then(|file| file.set_times(fs::FileTimes::new().set_accessed(now)))
         {
             log::debug!("use of {} was not recorded: {error}", record.display());
@@ -1240,12 +1247,7 @@ pub(crate) mod tests {
         actions.store(&result).unwrap();
         let record = actions.path_for(&action).unwrap();
         let blob = cas.path_for(&action).unwrap();
-        backdate(&record, 3 * USE_REFRESH);
-        let recent = whole_second_now() - USE_REFRESH / 2;
-        fs::File::open(&record)
-            .unwrap()
-            .set_times(fs::FileTimes::new().set_accessed(recent))
-            .unwrap();
+        let recent = backdate(&record, USE_REFRESH / 2);
         let old = backdate(&blob, 3 * USE_REFRESH);
 
         actions.record_use(&result, whole_second_now());
@@ -1255,16 +1257,15 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_result_written_just_now_still_records_the_older_objects_it_names() {
+    fn a_result_stored_just_now_still_records_the_older_objects_it_names() {
         let directory = tempfile::tempdir().unwrap();
         let cas = LocalCas::new(directory.path());
         let actions = LocalActionCache::new(directory.path());
         let action = CacheDigest::blake3(b"action");
         cas.store_bytes(&action, b"action").unwrap();
         let blob = cas.path_for(&action).unwrap();
-        backdate(&blob, 3 * USE_REFRESH);
         // Stored the way a remote hit stores the result it was served, just
-        // before recording its use.
+        // before recording its use: the record looks recently used.
         let result = RemoteActionResult {
             version: 1,
             action: action.clone(),
@@ -1272,9 +1273,12 @@ pub(crate) mod tests {
             output_root: None,
         };
         actions.store(&result).unwrap();
+        // Aged after the store, which reads it to validate the result and,
+        // where reads refresh access times, would count as a use.
+        backdate(&blob, 3 * USE_REFRESH);
         let now = whole_second_now() + Duration::from_secs(1);
 
-        actions.record_use(&result, now);
+        actions.record_use_of_stored(&result, now);
 
         assert_eq!(fs::metadata(&blob).unwrap().accessed().unwrap(), now);
         let record = fs::metadata(actions.path_for(&action).unwrap()).unwrap();

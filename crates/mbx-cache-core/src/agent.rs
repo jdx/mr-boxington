@@ -2533,8 +2533,8 @@ impl CacheAgent {
         diagnostic: Option<AgentEvent>,
     ) -> Result<AgentResponse> {
         validate_crate_name(crate_name.as_deref())?;
-        let result = match self.actions.find(action)? {
-            Some(result) => result,
+        let (result, stored) = match self.actions.find(action)? {
+            Some(result) => (result, false),
             None => {
                 let result = self
                     .pending_remote_actions
@@ -2545,7 +2545,7 @@ impl CacheAgent {
                         eyre::eyre!("cannot record a hit for a missing action result")
                     })?;
                 self.actions.store(&result)?;
-                result
+                (result, true)
             }
         };
         // Marks the result, and everything it names, as used, so eviction
@@ -2554,7 +2554,12 @@ impl CacheAgent {
         // conflict checks, verification builds and speculative prefetches,
         // none of which is a use. The restore just hashed these objects, so a
         // stat of each adds nothing a build would notice.
-        self.actions.record_use(&result, SystemTime::now());
+        if stored {
+            self.actions
+                .record_use_of_stored(&result, SystemTime::now());
+        } else {
+            self.actions.record_use(&result, SystemTime::now());
+        }
         self.record_restore(restore);
         self.stats.lookups.fetch_add(1, Ordering::Relaxed);
         self.stats.hits.fetch_add(1, Ordering::Relaxed);
