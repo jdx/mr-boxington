@@ -372,6 +372,11 @@ pub struct CacheAgent {
     remote_download_limit: u64,
     remote_download_bytes: Arc<AtomicU64>,
     pending_remote_actions: Arc<Mutex<BTreeMap<CacheDigest, RemoteActionResult>>>,
+    /// Results this session wrote to the local store and has not had a hit
+    /// on yet. A record written just now looks recently used, but the objects
+    /// it shares with older results may not have been, so the first hit on
+    /// one records its whole closure.
+    stored_results: Arc<Mutex<BTreeSet<CacheDigest>>>,
     remote_transfers: Arc<tokio::sync::Semaphore>,
     prefetch_transfers: Arc<tokio::sync::Semaphore>,
     prefetch_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
@@ -921,6 +926,7 @@ impl CacheAgent {
             remote_download_limit,
             remote_download_bytes: Arc::new(AtomicU64::new(0)),
             pending_remote_actions: Arc::new(Mutex::new(BTreeMap::new())),
+            stored_results: Arc::new(Mutex::new(BTreeSet::new())),
             remote_transfers,
             prefetch_transfers: Arc::new(tokio::sync::Semaphore::new(MAX_PREFETCH_TRANSFERS)),
             prefetch_tasks: Arc::new(Mutex::new(Vec::new())),
@@ -2395,6 +2401,10 @@ impl CacheAgent {
         connection: &ConnectionUploads,
     ) -> Result<AgentResponse> {
         let path = self.actions.store(result)?;
+        self.stored_results
+            .lock()
+            .unwrap()
+            .insert(result.action.clone());
         if let Some(uploads) = &self.uploads {
             uploads.queue_action_result(result, connection);
         }
@@ -2533,13 +2543,33 @@ impl CacheAgent {
         diagnostic: Option<AgentEvent>,
     ) -> Result<AgentResponse> {
         validate_crate_name(crate_name.as_deref())?;
-        if self.actions.find(action)?.is_none() {
-            let pending = self.pending_remote_actions.lock().unwrap().remove(action);
-            if let Some(result) = pending {
+        let (result, stored) = match self.actions.find(action)? {
+            Some(result) => (result, false),
+            None => {
+                let result = self
+                    .pending_remote_actions
+                    .lock()
+                    .unwrap()
+                    .remove(action)
+                    .ok_or_else(|| {
+                        eyre::eyre!("cannot record a hit for a missing action result")
+                    })?;
                 self.actions.store(&result)?;
-            } else {
-                bail!("cannot record a hit for a missing action result");
+                (result, true)
             }
+        };
+        // Marks the result, and everything it names, as used, so eviction
+        // ranks it by when builds last needed it rather than when it was
+        // written. Only a hit does this: lookups also serve publication
+        // conflict checks, verification builds and speculative prefetches,
+        // none of which is a use. The restore just hashed these objects, so a
+        // stat of each adds nothing a build would notice.
+        let stored = self.stored_results.lock().unwrap().remove(action) || stored;
+        if stored {
+            self.actions
+                .record_use_of_stored(&result, SystemTime::now());
+        } else {
+            self.actions.record_use(&result, SystemTime::now());
         }
         self.record_restore(restore);
         self.stats.lookups.fetch_add(1, Ordering::Relaxed);

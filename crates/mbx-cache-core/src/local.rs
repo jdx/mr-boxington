@@ -3,9 +3,115 @@ use eyre::{Result, bail};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 /// Why [`LocalActionCache::store`] refuses to replace an intact result.
 pub const ACTION_CONFLICT_MESSAGE: &str = "local action key already has a different result";
+
+/// How long a recorded use of a store file stands before another use writes
+/// it again: the granularity `relatime` gives, and far finer than any
+/// eviction decision needs.
+pub const USE_REFRESH: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Record that a build used the store file at `path` at `now`.
+///
+/// Eviction ranks store files by access time, and a read cannot be trusted to
+/// keep it. APFS refreshes it only while it is older than the modification
+/// time, which a file written once and never again does not stay; Windows
+/// volumes over 128 GB and `noatime` mounts do not track it at all.
+///
+/// So the access time is written here, at most once per [`USE_REFRESH`], and
+/// the modification time is left alone: it is what a remembered blob is
+/// checked against, and what tells a rewrite apart from a use.
+pub fn record_file_use(path: &Path, now: SystemTime) -> std::io::Result<()> {
+    let accessed = fs::metadata(path)?.accessed().ok();
+    if let (Some(accessed), Some(stale)) = (accessed, now.checked_sub(USE_REFRESH))
+        && accessed > stale
+    {
+        return Ok(());
+    }
+    open_for_times(path)?.set_times(fs::FileTimes::new().set_accessed(now))
+}
+
+/// [`record_file_use`], for a use whose failure costs eviction order and
+/// nothing else.
+fn record_use_or_log(path: &Path, now: SystemTime) {
+    if let Err(error) = record_file_use(path, now) {
+        log::debug!("use of {} was not recorded: {error}", path.display());
+    }
+}
+
+/// Read a store file without advancing the access time that records its use.
+///
+/// Where reads refresh access times -- `relatime`, NTFS with last-access
+/// updates on -- a lookup or a maintenance pass would otherwise count as a
+/// use: a result record would look used without its objects being recorded,
+/// and an idle compiler version would never age out. On Linux the file is
+/// opened with `O_NOATIME`, which leaves the time alone without touching it
+/// afterwards, so a concurrent hit is never overwritten. Elsewhere, or when
+/// the kernel refuses the flag for a file the caller does not own, a time the
+/// read moved is put back; that can lose a hit that lands inside the read.
+pub fn read_untouched(path: &Path) -> std::io::Result<Vec<u8>> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::Read as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOATIME)
+            .open(path)
+        {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            return Ok(bytes);
+        }
+    }
+    let before = fs::metadata(path)?.accessed().ok();
+    let bytes = fs::read(path)?;
+    if let Some(before) = before
+        && fs::metadata(path)
+            .and_then(|metadata| metadata.accessed())
+            .is_ok_and(|after| after != before)
+    {
+        let _ = open_for_times(path)
+            .and_then(|file| file.set_times(fs::FileTimes::new().set_accessed(before)));
+    }
+    Ok(bytes)
+}
+
+/// Open `path` only as far as setting its times needs.
+///
+/// The owner may set the times of a file it cannot write, so a read-only
+/// descriptor is enough, and it works on a read-only blob.
+#[cfg(not(windows))]
+fn open_for_times(path: &Path) -> std::io::Result<fs::File> {
+    fs::File::open(path)
+}
+
+/// Windows needs the attribute-writing right, which the read-only attribute
+/// does not withhold, rather than the write access that it does. Sharing
+/// everything keeps a concurrent restore, or an eviction, from failing on it.
+#[cfg(windows)]
+fn open_for_times(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+    };
+    fs::OpenOptions::new()
+        .access_mode(FILE_WRITE_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .open(path)
+}
+
+/// The captured compiler output an action's metadata names, whatever the
+/// adapter that wrote it.
+#[derive(serde::Deserialize)]
+pub struct CapturedOutput {
+    /// The compiler's standard output.
+    pub stdout: CacheDigest,
+    /// The compiler's standard error.
+    pub stderr: CacheDigest,
+}
 
 /// A validated, content-addressed store on the local filesystem.
 #[derive(Debug, Clone)]
@@ -51,6 +157,15 @@ impl LocalCas {
             .join(&digest.algorithm)
             .join(&digest.hash[..2])
             .join(format!("{}-{}", digest.hash, digest.size)))
+    }
+
+    /// Record that a build used the object `digest` names at `now`; see
+    /// [`record_file_use`]. A use that cannot be recorded is logged and
+    /// otherwise ignored.
+    pub fn record_use(&self, digest: &CacheDigest, now: SystemTime) {
+        if let Ok(path) = self.path_for(digest) {
+            record_use_or_log(&path, now);
+        }
     }
 
     /// Find and verify a stored object.
@@ -296,7 +411,9 @@ impl LocalActionCache {
         if !path.exists() {
             return Ok(None);
         }
-        let bytes = fs::read(&path)?;
+        // Untouched, because the record's access time stands for the use of
+        // everything it names and only `record_use` may move it.
+        let bytes = read_untouched(&path)?;
         Ok(Some(Self::parse_record(&bytes, action)?))
     }
 
@@ -347,6 +464,99 @@ impl LocalActionCache {
                 .directories
                 .iter()
                 .all(|child| self.directory_is_intact(&child.digest, seen))
+    }
+
+    /// Record that a build used `result`: its record, and every object it
+    /// names that this index can see.
+    ///
+    /// The record's access time stands for its whole closure, so a hit on a
+    /// result used within [`USE_REFRESH`] costs one stat and walks nothing.
+    /// It is written last, after the objects, so an interrupted walk is
+    /// retried by the next hit, and mbx reads records with
+    /// [`read_untouched`] so a lookup does not move it first.
+    ///
+    /// Nothing is verified or hashed. A file that cannot be recorded --
+    /// evicted meanwhile, or in a store owned by someone else -- costs
+    /// eviction order, never a build, so it is skipped.
+    pub fn record_use(&self, result: &RemoteActionResult, now: SystemTime) {
+        let Ok(record) = self.path_for(&result.action) else {
+            return;
+        };
+        let recorded = now.checked_sub(USE_REFRESH).is_some_and(|stale| {
+            fs::metadata(&record)
+                .and_then(|metadata| metadata.accessed())
+                .is_ok_and(|accessed| accessed > stale)
+        });
+        if !recorded {
+            self.record_closure_use(&record, result, now);
+        }
+    }
+
+    /// [`Self::record_use`] for a result this index stored just now, such as
+    /// the one a remote hit was served. Its record looks recently used
+    /// because it was just written, but objects already in the store may
+    /// not have been used in a long time, so the whole closure is recorded.
+    pub fn record_use_of_stored(&self, result: &RemoteActionResult, now: SystemTime) {
+        if let Ok(record) = self.path_for(&result.action) {
+            self.record_closure_use(&record, result, now);
+        }
+    }
+
+    fn record_closure_use(&self, record: &Path, result: &RemoteActionResult, now: SystemTime) {
+        for digest in self.named_objects(result) {
+            self.cas.record_use(&digest, now);
+        }
+        // Unthrottled: a record written just now already has a recent access
+        // time, and leaving it there would walk again on every hit.
+        if let Err(error) = open_for_times(record)
+            .and_then(|file| file.set_times(fs::FileTimes::new().set_accessed(now)))
+        {
+            log::debug!("use of {} was not recorded: {error}", record.display());
+        }
+    }
+
+    /// Every store object `result` names: the action, its metadata and the
+    /// compiler output that names, and each directory and file under its
+    /// output root.
+    ///
+    /// Nothing is verified. An object that is missing or does not parse names
+    /// nothing further, so the walk yields what it can reach.
+    fn named_objects(&self, result: &RemoteActionResult) -> Vec<CacheDigest> {
+        let read = |digest: &CacheDigest| {
+            self.cas
+                .path_for(digest)
+                .ok()
+                .and_then(|path| fs::read(path).ok())
+        };
+        let mut objects = vec![result.action.clone()];
+        if let Some(metadata) = &result.metadata {
+            objects.push(metadata.clone());
+            // Every adapter's metadata names the compiler output a hit
+            // replays, and eviction would otherwise take the empty blob that
+            // all silent compilations share for the oldest object in the store.
+            if let Some(captured) = read(metadata)
+                .and_then(|bytes| serde_json::from_slice::<CapturedOutput>(&bytes).ok())
+            {
+                objects.push(captured.stdout);
+                objects.push(captured.stderr);
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut pending: Vec<CacheDigest> = result.output_root.iter().cloned().collect();
+        while let Some(digest) = pending.pop() {
+            if !seen.insert(digest.clone()) {
+                continue;
+            }
+            objects.push(digest.clone());
+            let Some(directory) = read(&digest)
+                .and_then(|bytes| serde_json::from_slice::<crate::CacheDirectory>(&bytes).ok())
+            else {
+                continue;
+            };
+            objects.extend(directory.files.into_iter().map(|file| file.digest));
+            pending.extend(directory.directories.into_iter().map(|child| child.digest));
+        }
+        objects
     }
 
     /// Atomically publish an action result after validating all referenced objects.
@@ -447,7 +657,7 @@ impl LocalActionCache {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -904,5 +1114,198 @@ mod tests {
             ActionStoreOutcome::Stored
         );
         assert_eq!(actions.find(&action).unwrap(), Some(second));
+    }
+
+    /// A whole second, so filesystems that keep coarser times still compare
+    /// equal to what was written.
+    pub(crate) fn whole_second_now() -> SystemTime {
+        let since_epoch = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        SystemTime::UNIX_EPOCH + Duration::from_secs(since_epoch.as_secs())
+    }
+
+    /// Set both times of `path` to `by` before [`whole_second_now`].
+    pub(crate) fn backdate(path: &Path, by: Duration) -> SystemTime {
+        let then = whole_second_now() - by;
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_accessed(then).set_modified(then))
+            .unwrap();
+        then
+    }
+
+    #[test]
+    fn a_stale_use_is_recorded_without_touching_the_modification_time() {
+        let directory = tempfile::tempdir().unwrap();
+        let blob = directory.path().join("blob");
+        fs::write(&blob, b"object").unwrap();
+        let written = backdate(&blob, 3 * USE_REFRESH);
+        let now = whole_second_now();
+
+        record_file_use(&blob, now).unwrap();
+
+        let metadata = fs::metadata(&blob).unwrap();
+        assert_eq!(metadata.accessed().unwrap(), now);
+        assert_eq!(metadata.modified().unwrap(), written);
+    }
+
+    #[test]
+    fn a_use_recorded_within_the_refresh_window_is_not_written_again() {
+        let directory = tempfile::tempdir().unwrap();
+        let blob = directory.path().join("blob");
+        fs::write(&blob, b"object").unwrap();
+        let recent = backdate(&blob, USE_REFRESH / 2);
+
+        record_file_use(&blob, whole_second_now()).unwrap();
+
+        assert_eq!(fs::metadata(&blob).unwrap().accessed().unwrap(), recent);
+    }
+
+    #[test]
+    fn a_read_only_blob_still_records_its_use() {
+        let directory = tempfile::tempdir().unwrap();
+        let blob = directory.path().join("blob");
+        fs::write(&blob, b"object").unwrap();
+        let written = backdate(&blob, 3 * USE_REFRESH);
+        let mut permissions = fs::metadata(&blob).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&blob, permissions).unwrap();
+        let now = whole_second_now();
+
+        let recorded = record_file_use(&blob, now);
+
+        let metadata = fs::metadata(&blob).unwrap();
+        // Restored before asserting: Windows will not delete a read-only file,
+        // and the temporary directory would be left behind.
+        #[cfg(windows)]
+        make_owner_writable(&blob).unwrap();
+        recorded.unwrap();
+        assert_eq!(metadata.accessed().unwrap(), now);
+        assert_eq!(metadata.modified().unwrap(), written);
+        assert!(metadata.permissions().readonly());
+    }
+
+    #[test]
+    fn a_missing_file_reports_that_its_use_was_not_recorded() {
+        let directory = tempfile::tempdir().unwrap();
+
+        let recorded = record_file_use(&directory.path().join("evicted"), whole_second_now());
+
+        assert_eq!(recorded.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_result_whose_objects_went_missing_records_the_rest() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = LocalCas::new(directory.path());
+        let actions = LocalActionCache::new(directory.path());
+        let action = CacheDigest::blake3(b"action");
+        cas.store_bytes(&action, b"action").unwrap();
+        let result = RemoteActionResult {
+            version: 1,
+            action: action.clone(),
+            metadata: None,
+            output_root: None,
+        };
+        actions.store(&result).unwrap();
+        let missing = CacheDigest::blake3(b"evicted");
+        let record = actions.path_for(&action).unwrap();
+        let blob = cas.path_for(&action).unwrap();
+        backdate(&record, 3 * USE_REFRESH);
+        backdate(&blob, 3 * USE_REFRESH);
+        let now = whole_second_now();
+
+        actions.record_use(
+            &RemoteActionResult {
+                metadata: Some(missing.clone()),
+                output_root: Some(missing),
+                ..result
+            },
+            now,
+        );
+
+        assert_eq!(fs::metadata(&record).unwrap().accessed().unwrap(), now);
+        assert_eq!(fs::metadata(&blob).unwrap().accessed().unwrap(), now);
+    }
+
+    #[test]
+    fn a_result_used_within_the_refresh_window_walks_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = LocalCas::new(directory.path());
+        let actions = LocalActionCache::new(directory.path());
+        let action = CacheDigest::blake3(b"action");
+        cas.store_bytes(&action, b"action").unwrap();
+        let result = RemoteActionResult {
+            version: 1,
+            action: action.clone(),
+            metadata: None,
+            output_root: None,
+        };
+        actions.store(&result).unwrap();
+        let record = actions.path_for(&action).unwrap();
+        let blob = cas.path_for(&action).unwrap();
+        let recent = backdate(&record, USE_REFRESH / 2);
+        let old = backdate(&blob, 3 * USE_REFRESH);
+
+        actions.record_use(&result, whole_second_now());
+
+        assert_eq!(fs::metadata(&record).unwrap().accessed().unwrap(), recent);
+        assert_eq!(fs::metadata(&blob).unwrap().accessed().unwrap(), old);
+    }
+
+    #[test]
+    fn a_result_stored_just_now_still_records_the_older_objects_it_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = LocalCas::new(directory.path());
+        let actions = LocalActionCache::new(directory.path());
+        let action = CacheDigest::blake3(b"action");
+        cas.store_bytes(&action, b"action").unwrap();
+        let blob = cas.path_for(&action).unwrap();
+        // Stored the way a remote hit stores the result it was served, just
+        // before recording its use: the record looks recently used.
+        let result = RemoteActionResult {
+            version: 1,
+            action: action.clone(),
+            metadata: None,
+            output_root: None,
+        };
+        actions.store(&result).unwrap();
+        // Aged after the store, which reads it to validate the result and,
+        // where reads refresh access times, would count as a use.
+        backdate(&blob, 3 * USE_REFRESH);
+        let now = whole_second_now() + Duration::from_secs(1);
+
+        actions.record_use_of_stored(&result, now);
+
+        assert_eq!(fs::metadata(&blob).unwrap().accessed().unwrap(), now);
+        let record = fs::metadata(actions.path_for(&action).unwrap()).unwrap();
+        assert_eq!(record.accessed().unwrap(), now);
+    }
+
+    #[test]
+    fn reading_untouched_leaves_an_access_time_that_reads_would_refresh() {
+        let directory = tempfile::tempdir().unwrap();
+        let record = directory.path().join("record.json");
+        fs::write(&record, b"{}").unwrap();
+        // Older than the modification time, which APFS, `relatime` and NTFS
+        // with last-access updates on all refresh on a plain read.
+        let accessed = whole_second_now() - 3 * USE_REFRESH;
+        fs::File::options()
+            .write(true)
+            .open(&record)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new()
+                    .set_accessed(accessed)
+                    .set_modified(whole_second_now() - USE_REFRESH),
+            )
+            .unwrap();
+
+        assert_eq!(read_untouched(&record).unwrap(), b"{}");
+
+        assert_eq!(fs::metadata(&record).unwrap().accessed().unwrap(), accessed);
     }
 }

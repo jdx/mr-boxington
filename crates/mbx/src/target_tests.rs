@@ -277,6 +277,61 @@ fn restoring_an_explicit_default_target_keeps_it_in_the_checkout() {
 }
 
 #[test]
+fn a_workspace_state_restore_records_the_use_of_what_it_materialized() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    let target = workspace.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("artifact"), b"restored output").unwrap();
+    let store = config.store_dir();
+    let cas = mbx_cache_core::LocalCas::new(&store);
+    // Already in the store, so the state refers to it rather than inlining it.
+    let artifact = mbx_cache_core::CacheDigest::blake3(b"restored output");
+    cas.store_bytes(&artifact, b"restored output").unwrap();
+    let additions = crate::workspace_state::capture(
+        &store,
+        &[mbx_cache_store::WorkspaceTarget {
+            workspace_root: workspace.clone(),
+            target_dir: target.clone(),
+        }],
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&target).unwrap();
+    let long_ago = std::time::SystemTime::now() - 3 * mbx_cache_core::USE_REFRESH;
+    let objects: Vec<_> = additions
+        .objects
+        .iter()
+        .map(|digest| cas.path_for(digest).unwrap())
+        .collect();
+    assert!(objects.contains(&cas.path_for(&artifact).unwrap()));
+    for path in &objects {
+        let time = filetime::FileTime::from_system_time(long_ago);
+        filetime::set_file_times(path, time, time).unwrap();
+    }
+    let lease = ViewLease::acquire(&config.target.root, &workspace).unwrap();
+    let before = std::time::SystemTime::now() - std::time::Duration::from_secs(1);
+
+    let restored = crate::workspace_state::restore(
+        &config,
+        &store,
+        &additions.attachments[crate::workspace_state::ATTACHMENT],
+        &workspace,
+        &target,
+        true,
+        &lease,
+    )
+    .unwrap();
+
+    assert!(restored.is_some());
+    for path in &objects {
+        let metadata = std::fs::metadata(path).unwrap();
+        assert!(metadata.accessed().unwrap() >= before, "{}", path.display());
+        assert_eq!(metadata.modified().unwrap(), long_ago);
+    }
+}
+
+#[test]
 fn a_failed_migration_restores_existing_outputs() {
     let directory = tempfile::tempdir().unwrap();
     let config = test_config(directory.path(), true);

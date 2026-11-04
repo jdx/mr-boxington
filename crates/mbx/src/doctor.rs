@@ -161,10 +161,7 @@ async fn check(config: &Config, toolchain: Option<&str>) -> Vec<Check> {
         command_check("rustc", &rustc, toolchain),
     ];
     checks.push(cache_check(&config.cache_dir));
-    checks.push(atime_check(
-        &config.store_dir(),
-        "cache eviction cannot tell recently read objects from unused ones",
-    ));
+    checks.push(store_use_check(&config.store_dir()));
     if config.target.views {
         checks.push(atime_check(
             &crate::target::views_root(&config.target.root),
@@ -322,6 +319,48 @@ fn cache_check(cache_dir: &Path) -> Check {
             format!("{} is not writable: {error}", cache_dir.display()),
         ),
     }
+}
+
+/// Whether mbx can record a use in the action store.
+///
+/// Builds write the store's access times themselves, so whether reads refresh
+/// them does not matter there; whether the explicit write works does.
+fn store_use_check(store: &Path) -> Check {
+    store_use_check_with(store, probe_use_records)
+}
+
+fn store_use_check_with(store: &Path, probe: impl FnOnce(&Path) -> std::io::Result<()>) -> Check {
+    let location = store.display();
+    match existing_ancestor(store).and_then(|parent| probe(&parent)) {
+        Ok(()) => Check::pass("atime", format!("{location}: mbx records use times itself")),
+        Err(error) => Check::warn(
+            "atime",
+            format!(
+                "{location}: mbx could not record a use time ({error}); cache eviction cannot tell recently used objects from unused ones"
+            ),
+        ),
+    }
+}
+
+/// Record a use of a temporary file last used long ago, as a hit does for the
+/// objects it restores, and confirm the access time moved and nothing else.
+fn probe_use_records(directory: &Path) -> std::io::Result<()> {
+    let file = tempfile::NamedTempFile::new_in(directory)?;
+    let past = std::time::SystemTime::now() - 2 * mbx_cache_core::USE_REFRESH;
+    file.as_file().set_times(
+        std::fs::FileTimes::new()
+            .set_accessed(past)
+            .set_modified(past),
+    )?;
+    mbx_cache_core::record_file_use(file.path(), std::time::SystemTime::now())?;
+    let metadata = std::fs::metadata(file.path())?;
+    if metadata.accessed()? <= past + mbx_cache_core::USE_REFRESH {
+        return Err(std::io::Error::other("the access time did not change"));
+    }
+    if metadata.modified()? > past + mbx_cache_core::USE_REFRESH {
+        return Err(std::io::Error::other("the modification time changed too"));
+    }
+    Ok(())
 }
 
 fn atime_check(directory: &Path, impact: &str) -> Check {
@@ -773,6 +812,33 @@ mod tests {
                 assert_eq!(json["severity"], "warn");
             }
         }
+    }
+
+    #[test]
+    fn the_store_passes_where_mbx_can_record_a_use_and_leaves_no_probe() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path().join("not-created/actions");
+
+        let check = store_use_check(&store);
+
+        assert_eq!(check.name, "atime");
+        assert_eq!(check.severity, Severity::Pass, "{}", check.detail);
+        assert!(check.detail.contains("mbx records use times itself"));
+        assert!(check.detail.contains(&store.display().to_string()));
+        assert!(!check.detail.contains("reads"));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_store_where_mbx_cannot_record_a_use_warns_about_eviction() {
+        let directory = tempfile::tempdir().unwrap();
+        let check = store_use_check_with(directory.path(), |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        });
+
+        assert_eq!(check.severity, Severity::Warn);
+        assert!(check.detail.contains("could not record a use time"));
+        assert!(check.detail.contains("cache eviction cannot tell"));
     }
 
     #[test]
