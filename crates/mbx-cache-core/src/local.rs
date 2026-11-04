@@ -41,6 +41,44 @@ fn record_use_or_log(path: &Path, now: SystemTime) {
     }
 }
 
+/// Read a store file without advancing the access time that records its use.
+///
+/// Where reads refresh access times -- `relatime`, NTFS with last-access
+/// updates on -- a lookup or a maintenance pass would otherwise count as a
+/// use: a result record would look used without its objects being recorded,
+/// and an idle compiler version would never age out. On Linux the file is
+/// opened with `O_NOATIME`, which leaves the time alone without touching it
+/// afterwards, so a concurrent hit is never overwritten. Elsewhere, or when
+/// the kernel refuses the flag for a file the caller does not own, a time the
+/// read moved is put back; that can lose a hit that lands inside the read.
+pub fn read_untouched(path: &Path) -> std::io::Result<Vec<u8>> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::Read as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOATIME)
+            .open(path)
+        {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            return Ok(bytes);
+        }
+    }
+    let before = fs::metadata(path)?.accessed().ok();
+    let bytes = fs::read(path)?;
+    if let Some(before) = before
+        && fs::metadata(path)
+            .and_then(|metadata| metadata.accessed())
+            .is_ok_and(|after| after != before)
+    {
+        let _ = open_for_times(path)
+            .and_then(|file| file.set_times(fs::FileTimes::new().set_accessed(before)));
+    }
+    Ok(bytes)
+}
+
 /// Open `path` only as far as setting its times needs.
 ///
 /// The owner may set the times of a file it cannot write, so a read-only
@@ -373,7 +411,9 @@ impl LocalActionCache {
         if !path.exists() {
             return Ok(None);
         }
-        let bytes = fs::read(&path)?;
+        // Untouched, because the record's access time stands for the use of
+        // everything it names and only `record_use` may move it.
+        let bytes = read_untouched(&path)?;
         Ok(Some(Self::parse_record(&bytes, action)?))
     }
 
@@ -432,9 +472,8 @@ impl LocalActionCache {
     /// The record's access time stands for its whole closure, so a hit on a
     /// result used within [`USE_REFRESH`] costs one stat and walks nothing.
     /// It is written last, after the objects, so an interrupted walk is
-    /// retried by the next hit. Where reads do refresh access times, the
-    /// lookup may refresh the record first and skip the walk, but the restore
-    /// then read the objects too, which refreshed them the same way.
+    /// retried by the next hit, and mbx reads records with
+    /// [`read_untouched`] so a lookup does not move it first.
     ///
     /// Nothing is verified or hashed. A file that cannot be recorded --
     /// evicted meanwhile, or in a store owned by someone else -- costs
@@ -1196,5 +1235,29 @@ pub(crate) mod tests {
 
         assert_eq!(fs::metadata(&record).unwrap().accessed().unwrap(), recent);
         assert_eq!(fs::metadata(&blob).unwrap().accessed().unwrap(), old);
+    }
+
+    #[test]
+    fn reading_untouched_leaves_an_access_time_that_reads_would_refresh() {
+        let directory = tempfile::tempdir().unwrap();
+        let record = directory.path().join("record.json");
+        fs::write(&record, b"{}").unwrap();
+        // Older than the modification time, which APFS, `relatime` and NTFS
+        // with last-access updates on all refresh on a plain read.
+        let accessed = whole_second_now() - 3 * USE_REFRESH;
+        fs::File::options()
+            .write(true)
+            .open(&record)
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new()
+                    .set_accessed(accessed)
+                    .set_modified(whole_second_now() - USE_REFRESH),
+            )
+            .unwrap();
+
+        assert_eq!(read_untouched(&record).unwrap(), b"{}");
+
+        assert_eq!(fs::metadata(&record).unwrap().accessed().unwrap(), accessed);
     }
 }

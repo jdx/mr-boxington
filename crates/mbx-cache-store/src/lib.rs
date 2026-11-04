@@ -2325,7 +2325,7 @@ fn stale_compilers_pass(
     let mut by_version: BTreeMap<String, Vec<Attributed>> = BTreeMap::new();
     let mut unattributed = Vec::new();
     for entry in walk_files(&store.join(ACTION_RESULTS_DIR))? {
-        let result = read_result_untouched(&entry.path)
+        let result = mbx_cache_core::read_untouched(&entry.path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<RemoteActionResult>(&bytes).ok());
         let Some(result) = result else {
@@ -2401,36 +2401,6 @@ fn stale_compilers_pass(
     Ok((outcome, planned))
 }
 
-/// Read a cache file without advancing the access time sweeps treat as use.
-///
-/// Maintenance passes read every result. Where the filesystem records access
-/// times, that would make each sweep look like a use and an idle compiler
-/// version would never age out. On Linux the file is opened with `O_NOATIME`,
-/// which leaves the time alone without touching it afterwards, so a build's
-/// concurrent hit is never overwritten. Elsewhere, or when the kernel refuses
-/// the flag for a file the caller does not own, the time seen before the read
-/// is put back; that can lose a hit that lands inside the read.
-fn read_result_untouched(path: &Path) -> std::io::Result<Vec<u8>> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::io::Read as _;
-        use std::os::unix::fs::OpenOptionsExt as _;
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOATIME)
-            .open(path)
-        {
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)?;
-            return Ok(bytes);
-        }
-    }
-    let before = std::fs::metadata(path)?;
-    let bytes = std::fs::read(path)?;
-    let _ = filetime::set_file_atime(path, filetime::FileTime::from_last_access_time(&before));
-    Ok(bytes)
-}
-
 /// Whether `wanted` names the compiler a descriptor recorded as `version`.
 ///
 /// `version` is the identity's `rustc ...` line followed by `; `-joined build
@@ -2449,7 +2419,7 @@ fn names_compiler(wanted: &str, version: &str) -> bool {
 
 /// The compiler version a rustc action descriptor was keyed under.
 fn rustc_version_of(cas: &LocalCas, action: &CacheDigest) -> Option<String> {
-    let bytes = read_result_untouched(&cas.path_for(action).ok()?).ok()?;
+    let bytes = mbx_cache_core::read_untouched(&cas.path_for(action).ok()?).ok()?;
     let descriptor: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     if descriptor.get("kind")?.as_str()? != "rustc" {
         return None;
@@ -2955,7 +2925,7 @@ fn read_action_result(store: &Path, action: &CacheDigest) -> Option<RemoteAction
     let path = mbx_cache_core::LocalActionCache::new(store)
         .path_for(action)
         .ok()?;
-    let bytes = read_result_untouched(&path).ok()?;
+    let bytes = mbx_cache_core::read_untouched(&path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
@@ -3095,7 +3065,7 @@ fn action_result_is_dangling(
     walk_tree: bool,
     trees: &mut HashMap<CacheDigest, bool>,
 ) -> Result<bool> {
-    let bytes = match read_result_untouched(path) {
+    let bytes = match mbx_cache_core::read_untouched(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => {
