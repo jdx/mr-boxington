@@ -335,11 +335,11 @@ global_config_file() {
   cd lanes/inner
   run "$MBX_BIN" explain --last
   assert_success
-  assert_output --regexp "workspace: [^[:space:]]*inner"
+  assert_output --regexp $'workspace: [^\n]*inner\n'
 
   run "$MBX_BIN" analyze
   assert_success
-  assert_output --regexp "workspace: [^[:space:]]*inner"
+  assert_output --regexp $'workspace: [^\n]*inner\n'
 }
 
 @test "analyze charges a dependent's rebuild to the crate that changed" {
