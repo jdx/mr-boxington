@@ -874,9 +874,10 @@ fn absolute(path: &Path, working_dir: &Path) -> PathBuf {
 
 /// Roots the key replaces with placeholders.
 ///
-/// Deliberately the same roots the rustc shim maps, and read from the same
+/// The checkout and machine roots the rustc shim maps, read from the same
 /// session variables, so both adapters agree on which paths belong to a
-/// checkout rather than to the machine.
+/// checkout rather than to the machine. The rustc shim's profile directory is
+/// not among them: a C compilation keys its paths under `${target}`.
 fn path_mappings(working_dir: &Path) -> Vec<PathMapping> {
     let mut mappings = Vec::new();
     let mut add = |root: Option<PathBuf>, placeholder: &str| {

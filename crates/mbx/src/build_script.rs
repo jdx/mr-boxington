@@ -144,11 +144,16 @@ pub(crate) fn install(executable: &Path, binary_action: &CacheDigest) -> Result<
 
 #[cfg(unix)]
 fn install_launcher(mbx: &Path, executable: &Path) -> std::io::Result<()> {
-    let depth = profile_depth(executable);
     let profile = executable
-        .ancestors()
-        .nth(depth)
+        .parent()
+        .and_then(crate::cargo_layout::profile_dir)
         .ok_or_else(|| std::io::Error::other("build-script path has no Cargo profile directory"))?;
+    // How many levels the executable sits below the profile: three before
+    // Cargo 1.100 (`build/<unit>/<name>`), five from it.
+    let depth = executable
+        .ancestors()
+        .take_while(|path| path != &profile)
+        .count();
     let metadata = std::fs::metadata(mbx)?;
     let modified = metadata
         .modified()
@@ -271,19 +276,6 @@ pub(crate) fn retarget_launcher(
         .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
     temporary.persist(launcher).map_err(|error| error.error)?;
     Ok(())
-}
-
-/// How many levels a build-script executable sits below its Cargo profile
-/// directory: `<profile>/build/<unit>/<name>` before Cargo 1.100, and
-/// `<profile>/build/<package>/<hash>/out/<name>` from it. An old-layout unit
-/// directory is `<package>-<hash>`, so it is never named `out`.
-#[cfg(unix)]
-fn profile_depth(executable: &Path) -> usize {
-    if executable.parent().and_then(Path::file_name) == Some("out".as_ref()) {
-        5
-    } else {
-        3
-    }
 }
 
 #[cfg(unix)]

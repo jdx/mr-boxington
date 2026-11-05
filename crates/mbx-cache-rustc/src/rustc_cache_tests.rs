@@ -127,7 +127,11 @@ fn context(inputs: &[(&str, &str)]) -> ActionContext {
 }
 
 fn common_invocation() -> RustcInvocation {
-    let output = workspace().join("target/debug/deps");
+    common_invocation_in(&workspace().join("target/debug/deps"))
+}
+
+/// [`common_invocation`], writing to and linking from `output`.
+fn common_invocation_in(output: &Path) -> RustcInvocation {
     RustcInvocation::parse(&[
         "--crate-name".into(),
         "widget".into(),
@@ -140,7 +144,7 @@ fn common_invocation() -> RustcInvocation {
         "-C".into(),
         "metadata=abc123".into(),
         "--out-dir".into(),
-        output.clone().into_os_string(),
+        output.as_os_str().to_owned(),
         format!("-Ldependency={}", output.display()).into(),
         "--extern".into(),
         format!("serde={}", output.join("libserde.rlib").display()).into(),
@@ -1279,20 +1283,8 @@ fn equivalent_worktrees_produce_the_same_action_key() {
 #[test]
 fn equivalent_profiles_produce_the_same_action_key() {
     let keyed = |profile: &str, mapped: bool| {
-        let output = workspace().join("target").join(profile).join("deps");
-        let invocation = RustcInvocation::parse(&[
-            "--crate-name=widget".into(),
-            "--edition=2024".into(),
-            "src/lib.rs".into(),
-            "--crate-type=lib".into(),
-            "--emit=dep-info,metadata,link".into(),
-            "-Cmetadata=abc123".into(),
-            format!("--out-dir={}", output.display()).into(),
-            format!("-Ldependency={}", output.display()).into(),
-            format!("--extern=serde={}", output.join("libserde.rlib").display()).into(),
-            format!("--sysroot={}", sysroot().display()).into(),
-        ])
-        .unwrap();
+        let invocation =
+            common_invocation_in(&workspace().join("target").join(profile).join("deps"));
         let serde = format!("target/{profile}/deps/libserde.rlib");
         let mut context = context(&[("src/lib.rs", "source"), (&serde, "serde")]);
         if mapped {

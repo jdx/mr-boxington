@@ -3970,14 +3970,17 @@ fn a_profile_inheriting_dev_restores_what_dev_stored() {
     );
     assert!(count(&dev, "stored_bytes") > 0, "{dev}");
 
-    let alt = cargo_with(
-        project.path(),
-        store.path(),
-        &reports.path().join("alt.json"),
-        &["build", "--offline", "--profile", "alt"],
-        &[],
-    )
-    .0;
+    let build_alt = |report: &str| {
+        cargo_with(
+            project.path(),
+            store.path(),
+            &reports.path().join(report),
+            &["build", "--offline", "--profile", "alt"],
+            &[],
+        )
+        .0
+    };
+    let alt = build_alt("alt.json");
     assert!(count(&alt, "hits") > 0, "{alt}");
     assert_eq!(
         count(&alt, "misses"),
@@ -4000,14 +4003,7 @@ fn a_profile_inheriting_dev_restores_what_dev_stored() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "42\n");
 
-    let fresh = cargo_with(
-        project.path(),
-        store.path(),
-        &reports.path().join("fresh.json"),
-        &["build", "--offline", "--profile", "alt"],
-        &[],
-    )
-    .0;
+    let fresh = build_alt("fresh.json");
     assert_eq!(count(&fresh, "hits"), 0, "{fresh}");
     assert_eq!(count(&fresh, "misses"), 0, "{fresh}");
 }

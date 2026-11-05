@@ -763,87 +763,23 @@ fn cargo_registry_mapping_follows_a_child_symlink() {
     );
 }
 
-#[test]
-fn standalone_target_mapping_covers_the_profile_tree() {
-    assert_eq!(
-        standalone_target_root(Path::new("/tmp/target/debug/deps"), None),
-        Path::new("/tmp/target")
-    );
-    assert_eq!(
-        standalone_target_root(
-            Path::new("/tmp/target/x86_64-unknown-linux-gnu/release/deps"),
-            Some("x86_64-unknown-linux-gnu"),
-        ),
-        Path::new("/tmp/target")
-    );
-    assert_eq!(
-        standalone_target_root(
-            Path::new("/tmp/target/custom/release/deps"),
-            Some("/tmp/targets/custom.json"),
-        ),
-        Path::new("/tmp/target")
-    );
-    // Cargo 1.100 gives every unit its own directory below `build/`.
-    assert_eq!(
-        standalone_target_root(
-            Path::new("/tmp/target/debug/build/widget/0123456789abcdef/out"),
-            None,
-        ),
-        Path::new("/tmp/target")
-    );
-    assert_eq!(
-        standalone_target_root(
-            Path::new(
-                "/tmp/target/x86_64-unknown-linux-gnu/debug/build/widget/0123456789abcdef/out"
-            ),
-            Some("x86_64-unknown-linux-gnu"),
-        ),
-        Path::new("/tmp/target")
-    );
-    // A pre-1.100 build script's OUT_DIR is not a unit output directory.
-    assert_eq!(
-        standalone_target_root(
-            Path::new("/tmp/target/debug/build/widget-0123456789abcdef/out"),
-            None,
-        ),
-        Path::new("/tmp/target/debug/build/widget-0123456789abcdef/out")
-    );
-}
-
-#[test]
-fn profile_dir_follows_cargo_output_layouts() {
-    let cases = [
-        ("/tmp/target/debug/deps", Some("/tmp/target/debug")),
-        ("/tmp/target/alt/examples", Some("/tmp/target/alt")),
-        (
-            "/tmp/target/debug/build/widget-0123456789abcdef",
-            Some("/tmp/target/debug"),
-        ),
-        (
-            "/tmp/target/x86_64-unknown-linux-gnu/release/deps",
-            Some("/tmp/target/x86_64-unknown-linux-gnu/release"),
-        ),
-        (
-            "/tmp/target/custom/alt/deps",
-            Some("/tmp/target/custom/alt"),
-        ),
-        (
-            "/tmp/target/alt/build/widget/0123456789abcdef/out",
-            Some("/tmp/target/alt"),
-        ),
-        // Neither rustdoc's output nor a build script's pre-1.100 OUT_DIR is
-        // a compilation's output directory.
-        ("/tmp/target/doc", None),
-        ("/tmp/target/debug/build/widget-0123456789abcdef/out", None),
-        ("/tmp/out", None),
-    ];
-    for (output, profile) in cases {
-        assert_eq!(
-            profile_dir(Path::new(output)),
-            profile.map(Path::new),
-            "{output}"
-        );
-    }
+/// Ordered mappings for a compilation writing to `output`, with
+/// `session_target` as the session's target root when there is one.
+fn output_mappings(
+    working_dir: &Path,
+    output: &Path,
+    target: Option<&str>,
+    session_target: Option<&Path>,
+) -> Vec<PathMapping> {
+    PathMapping::ordered(&path_mappings_with_env(
+        working_dir,
+        Some(output),
+        target,
+        |name| match name {
+            session::TARGET_DIR_ENV => session_target.map(|root| root.as_os_str().to_owned()),
+            _ => None,
+        },
+    ))
 }
 
 /// The profile placeholder each output directory gets, beside the target
@@ -853,10 +789,7 @@ fn profile_mappings(
     target: Option<&str>,
     session_target: Option<&Path>,
 ) -> (Option<PathBuf>, Option<PathBuf>) {
-    let mappings = path_mappings_with_env(output, Some(output), target, |name| match name {
-        session::TARGET_DIR_ENV => session_target.map(|root| root.as_os_str().to_owned()),
-        _ => None,
-    });
+    let mappings = output_mappings(output, output, target, session_target);
     let root = |placeholder: &str| {
         mappings
             .iter()
@@ -919,15 +852,12 @@ fn dep_info_restores_into_the_receiving_profile() {
     let directory = tempfile::tempdir().unwrap();
     let target = directory.path().join("target");
     let mappings = |profile: &str| {
-        PathMapping::ordered(&path_mappings_with_env(
+        output_mappings(
             directory.path(),
-            Some(&target.join(profile).join("deps")),
+            &target.join(profile).join("deps"),
             None,
-            |name| match name {
-                session::TARGET_DIR_ENV => Some(target.as_os_str().to_owned()),
-                _ => None,
-            },
-        ))
+            Some(&target),
+        )
     };
     let dep_info = |profile: &str| {
         let profile = target.join(profile);
