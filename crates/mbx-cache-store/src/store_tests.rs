@@ -3555,3 +3555,65 @@ fn a_cleared_restore_is_not_carried_into_later_receipts() {
     let receipt = read_build_receipt(&latest_receipt_path(source.path(), &workspace)).unwrap();
     assert_eq!(receipt.predictions, vec![current]);
 }
+
+#[test]
+fn configured_session_limits_and_live_lock_apply_to_real_and_dry_gc() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("store");
+    write_session(&store, "100-1-aaaa", Duration::from_secs(3 * 86_400));
+    write_session(&store, "200-1-bbbb", Duration::from_secs(2 * 86_400));
+    write_session(&store, "300-1-cccc", Duration::from_secs(60));
+    let writer = crate::events::EventWriter::new(&store);
+    writer.started(Path::new("/workspace"), &["build".into()]);
+    let live = crate::events::session_paths(&store, writer.id());
+    let old = SystemTime::now() - Duration::from_secs(4 * 86_400);
+    let time = filetime::FileTime::from_system_time(old);
+    filetime::set_file_times(&live.events, time, time).unwrap();
+
+    let age_only = SessionRetention {
+        max_age: Some(Duration::from_secs(86_400)),
+        max_sessions: None,
+    };
+    assert_eq!(
+        gc_dry_run_with_sessions(&store, u64::MAX, age_only)
+            .unwrap()
+            .removed_session_streams,
+        2
+    );
+    assert_eq!(session_count(&store), 4);
+    let count_only = SessionRetention {
+        max_age: None,
+        max_sessions: Some(1),
+    };
+    assert_eq!(
+        gc_dry_run_with_sessions(&store, u64::MAX, count_only)
+            .unwrap()
+            .removed_session_streams,
+        2
+    );
+    assert_eq!(
+        gc_with_sessions(&store, u64::MAX, count_only)
+            .unwrap()
+            .removed_session_streams,
+        2
+    );
+    assert!(live.events.exists());
+    assert_eq!(session_count(&store), 2);
+    let unlimited = SessionRetention {
+        max_age: None,
+        max_sessions: None,
+    };
+    assert_eq!(
+        gc_with_sessions(&store, u64::MAX, unlimited)
+            .unwrap()
+            .removed_session_streams,
+        0
+    );
+    drop(writer);
+    assert_eq!(
+        gc_with_sessions(&store, u64::MAX, age_only)
+            .unwrap()
+            .removed_session_streams,
+        1
+    );
+}

@@ -11,6 +11,8 @@ fn combined_budget_respects_component_caps_and_occupied_reserves() {
         target_max_age: None,
         incremental_max_bytes: Some(20),
         incremental_max_age: None,
+        events_max_age: Some(Duration::from_secs(7 * 86_400)),
+        events_max_sessions: Some(256),
         rustc_max_age: None,
         max_total_bytes: Some(100),
         target_precedence: Default::default(),
@@ -194,6 +196,8 @@ fn always_short() -> RetentionSettings {
         target_max_age: None,
         incremental_max_bytes: None,
         incremental_max_age: None,
+        events_max_age: Some(Duration::from_secs(7 * 86_400)),
+        events_max_sessions: Some(256),
         rustc_max_age: None,
         max_total_bytes: None,
         min_free: Some(crate::config::MinFree::Bytes(u64::MAX / 2)),
@@ -665,6 +669,8 @@ fn generated_trees_get_a_bounded_first_share_despite_busy_incremental_state() {
         let mut retention = RetentionSettings {
             incremental_max_bytes: Some(100),
             incremental_max_age: None,
+            events_max_age: Some(Duration::from_secs(7 * 86_400)),
+            events_max_sessions: Some(256),
             rustc_max_age: None,
             target_max_bytes: None,
             target_max_age: None,
@@ -1211,4 +1217,26 @@ fn a_program_keeps_its_target_from_the_budget_but_not_from_a_short_disk() {
         &mut collection
     ));
     assert!(!view.exists());
+}
+
+#[test]
+fn configured_session_count_reaches_gc_and_dry_run() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = super::cargo_tests::managed_target_config(directory.path());
+    let sessions = config.store_dir().join("sessions/v1");
+    std::fs::create_dir_all(&sessions).unwrap();
+    for id in ["100-1-aaaa", "200-1-bbbb"] {
+        std::fs::write(sessions.join(format!("{id}.jsonl")), b"{}\n").unwrap();
+    }
+    let retention = RetentionSettings {
+        events_max_age: None,
+        events_max_sessions: Some(1),
+        min_free: None,
+        ..RetentionSettings::default()
+    };
+    gc::run(&config, u64::MAX, true, false, None, &retention).unwrap();
+    assert!(sessions.join("100-1-aaaa.jsonl").exists());
+    gc::run(&config, u64::MAX, false, false, None, &retention).unwrap();
+    assert!(!sessions.join("100-1-aaaa.jsonl").exists());
+    assert!(sessions.join("200-1-bbbb.jsonl").exists());
 }
