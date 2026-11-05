@@ -199,8 +199,14 @@ impl Lifetime {
                 self.compilations.as_ref().map_or_else(
                     || "not tracked yet".into(),
                     |counted| {
+                        // Verifications only appear where sampling is on.
+                        let verified = if counted.verifications > 0 {
+                            format!(", {} verified", counted.verifications)
+                        } else {
+                            String::new()
+                        };
                         format!(
-                            "{} hits, {} misses, {} not looked up, {} bypassed {}",
+                            "{} hits, {} misses, {} not looked up, {} bypassed{verified} {}",
                             counted.hits,
                             counted.misses,
                             counted.unconsulted,
@@ -393,6 +399,7 @@ mod tests {
                 "misses": 2,
                 "unconsulted": 3,
                 "bypasses": 1,
+                "verifications": 4,
                 "incremental": 2,
                 "unconsulted_compiler_ns": 5,
             },
@@ -407,7 +414,7 @@ mod tests {
         assert_eq!(json["compilations"]["compiler_ns"]["unconsulted"], 5);
         assert_eq!(
             row(&report),
-            "7 hits, 2 misses, 3 not looked up, 1 bypassed since 2027-01-15"
+            "7 hits, 2 misses, 3 not looked up, 1 bypassed, 4 verified since 2027-01-15"
         );
     }
 

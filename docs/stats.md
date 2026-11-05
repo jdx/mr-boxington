@@ -23,7 +23,7 @@ action store, managed targets, and learned incremental state currently held.
 | --- | --- |
 | Compiler time avoided | Estimated compiler work skipped by cache hits, accumulated across builds. |
 | Cache hits | Compilations served from cache since counting began. |
-| Compilations | Compilations by outcome: hits, misses, compilations that ran without a cache lookup (`not looked up`), and bypasses, counted from their own start date. |
+| Compilations | Compilations by outcome: hits, misses, compilations that ran without a cache lookup (`not looked up`), bypasses, and, when verification sampling is on, verified hits, counted from their own start date. |
 | Pruned by mbx | Cumulative bytes collected from managed targets, learned incremental state, [generated source trees](/limits#out-dir-sharing), and the store, by both automatic sweeps and explicit `mbx gc` runs. The `targets / cache` split counts everything but the store as `targets`. |
 | Automatically pruned | Bytes collected by automatic sweeps, counted from a separate start date. |
 | Requested removals | Bytes removed by confirmed migrations or explicit workspace removals, kept separate from pruning. |
@@ -82,8 +82,8 @@ include the build-script runs mbx caches, not only compiler invocations, and a
 build script's run time counts as compiler time. mbx does not compute a hit
 rate, because which
 outcomes belong in the denominator depends on the question. For example,
-`hits / (hits + misses)` is the rate among compilations that looked something
-up.
+`hits / (hits + misses)` compares hits with misses, and leaves out
+verifications, bypasses, and compilations that made no lookup.
 
 ## A little personality
 

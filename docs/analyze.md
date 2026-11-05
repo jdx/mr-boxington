@@ -69,8 +69,11 @@ work only when they took compiler time.
 A crate you are editing keeps private [incremental state](/incremental)
 instead of publishing its result, and so does every crate that links it. None
 of them looks anything up in the cache. Recordings from this mbx version say
-why, so the report charges an edited crate to `inputs of <crate> changed` and
-each crate that links it to that same cause. A crate that links an edited
+why. The report charges each crate that links the edited crate to the same
+cause as the edited crate. An edited crate that skipped the lookup is charged
+to `inputs of <crate> changed`. One that looked up and missed first is
+classified like any other miss; when its recording lacks key details, as for
+an incremental miss, that is `misses with no earlier recording`. A crate that links an edited
 crate's private output is charged to that crate even when it was edited as
 well, because mbx does not check its own sources on that path. Older
 recordings lack this, and the report names these compilations as a first

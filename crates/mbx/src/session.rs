@@ -2140,21 +2140,11 @@ fn run_transparent_rustc(
                 if let Some(objects) = objects {
                     objects.remove_superseded(&status);
                 }
-                record_compiler_invocation_with_metadata(
-                    if incremental_flag.is_some() {
-                        "incremental-bypass"
-                    } else {
-                        "bypass"
-                    },
+                record_transparent_compilation(
+                    incremental_flag.is_some(),
                     crate_name.as_deref(),
+                    described,
                     duration_ns(started.elapsed()),
-                    None,
-                    crate_name
-                        .as_deref()
-                        .map(|name| mbx_cache_core::CompileMetadata {
-                            unit_kind: crate::rustc::compiler_unit_kind(described, name),
-                            ..Default::default()
-                        }),
                 );
                 crate::materialize::exit_code(status)
             }
@@ -2192,9 +2182,10 @@ fn run_transparent_rustc(
                 if let Some(objects) = objects {
                     objects.remove_superseded(&status);
                 }
-                record_compiler_invocation(
-                    "bypass",
+                record_transparent_compilation(
+                    incremental_flag.is_some(),
                     crate_name.as_deref(),
+                    described,
                     duration_ns(started.elapsed()),
                 );
                 // ExitProcess skips Rust destructors, including the timer.
@@ -2210,6 +2201,31 @@ fn run_transparent_rustc(
             }
         }
     }
+}
+
+/// Record a compilation the transparent wrapper ran without the cache, and
+/// whether mbx gave it private incremental state. Both platforms report it the
+/// same way, so their session rows match.
+fn record_transparent_compilation(
+    incremental: bool,
+    crate_name: Option<&str>,
+    arguments: &[OsString],
+    duration_ns: u64,
+) {
+    record_compiler_invocation_with_metadata(
+        if incremental {
+            "incremental-bypass"
+        } else {
+            "bypass"
+        },
+        crate_name,
+        duration_ns,
+        None,
+        crate_name.map(|name| mbx_cache_core::CompileMetadata {
+            unit_kind: crate::rustc::compiler_unit_kind(arguments, name),
+            ..Default::default()
+        }),
+    );
 }
 
 /// Avoid object cleanup when a wrapper can report success without compiling.
