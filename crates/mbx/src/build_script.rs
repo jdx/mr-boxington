@@ -634,8 +634,9 @@ fn prediction_payload(prediction: &Prediction) -> Result<String> {
 /// is not inside `OUT_DIR`. Only `OUT_DIR` is restored on a hit, so a link path
 /// elsewhere (rusty_v8 downloads its archive to `gn_out/obj`) would be replayed
 /// pointing at nothing, and the script has to run again in every checkout.
-/// `OUT_DIR` normalizes to its own placeholder, so any `${target` left in the
-/// value is a path outside it, as is a `..` that climbs out of `OUT_DIR`.
+/// `OUT_DIR` normalizes to its own placeholder, so any `${target` or
+/// `${profile` left in the value is a path outside it, as is a `..` that
+/// climbs out of `OUT_DIR`.
 fn links_outside_out_dir(directive: &str, mappings: &[PathMapping]) -> bool {
     let Some((name, value)) = directive.split_once('=') else {
         return false;
@@ -671,7 +672,7 @@ fn links_outside_out_dir(directive: &str, mappings: &[PathMapping]) -> bool {
         })
     };
     relative_in_target
-        || value.contains("${target")
+        || names_target_directory(&value)
         || value.split([' ', '=', ',']).any(|token| {
             let rooted = token
                 .strip_prefix("${build_script_out_dir")
@@ -719,8 +720,17 @@ fn relative_token_is_in_target(token: &str, bases: &[PathBuf], mappings: &[PathM
                 other => resolved.push(other),
             }
         }
-        normalize_environment_value(&resolved.to_string_lossy(), mappings).contains("${target")
+        names_target_directory(&normalize_environment_value(
+            &resolved.to_string_lossy(),
+            mappings,
+        ))
     })
+}
+
+/// Whether a normalized value names a path in the target directory, including
+/// its profile directory, which has a placeholder of its own.
+fn names_target_directory(value: &str) -> bool {
+    value.contains("${target") || value.contains("${profile")
 }
 
 /// Whether recorded output carries such a directive. Predictions stored before
@@ -1848,6 +1858,19 @@ fn build_script_mappings_with_env(
             mappings.push(PathMapping::new(root, placeholder));
         }
     }
+    // The profile directory holding this script's unit holds every other
+    // unit's outputs too, so a `DEP_*` value or link path naming one of them
+    // agrees between profiles that build it identically, as rustc keys do.
+    // `OUT_DIR` is the unit directory itself from Cargo 1.100, and sits in it
+    // before.
+    if let (Some(out_dir), Some(target)) =
+        (environment("OUT_DIR"), environment(session::TARGET_DIR_ENV))
+        && let Some(profile) = crate::cargo_layout::profile_dir(&out_dir)
+            .or_else(|| out_dir.parent().and_then(crate::cargo_layout::profile_dir))
+            .filter(|profile| profile.starts_with(&target) && *profile != target)
+    {
+        mappings.push(PathMapping::new(profile, "profile"));
+    }
     let cargo_home = environment("CARGO_HOME").or_else(|| {
         ["HOME", "USERPROFILE"]
             .into_iter()
@@ -2661,6 +2684,45 @@ mod tests {
         assert_eq!(
             normalize_environment_value(&cargo_bin.to_string_lossy(), &mappings),
             PathBuf::from("${cargo_home}").join("bin").to_string_lossy()
+        );
+    }
+
+    /// A `DEP_*` value naming another unit's output agrees between profiles
+    /// that build it identically, in both of Cargo's layouts, while a link
+    /// path into that unit still counts as one outside `OUT_DIR`.
+    #[test]
+    fn build_script_mappings_name_the_profile_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target");
+        let normalized = |profile: &str, unit: &str| {
+            let profile = target.join(profile);
+            let out_dir = profile.join(unit);
+            let mappings = build_script_mappings_with_env(|name| match name {
+                "OUT_DIR" => Some(out_dir.clone()),
+                session::TARGET_DIR_ENV => Some(target.clone()),
+                _ => None,
+            });
+            let include = profile.join("build/zlib-0abc/out/include");
+            let directive = format!("rustc-link-search=native={}", include.display());
+            assert!(links_outside_out_dir(&directive, &mappings), "{directive}");
+            normalize_environment_value(&include.to_string_lossy(), &mappings)
+        };
+
+        for unit in ["build/app-0def/out", "build/app/0123456789abcdef/out"] {
+            let debug = normalized("debug", unit);
+            assert!(debug.starts_with("${profile}"), "{debug}");
+            assert_eq!(debug, normalized("alt", unit));
+        }
+        // An `OUT_DIR` outside the target root claims no profile.
+        let mappings = build_script_mappings_with_env(|name| match name {
+            "OUT_DIR" => Some(directory.path().join("build/debug/build/app-0def/out")),
+            session::TARGET_DIR_ENV => Some(target.clone()),
+            _ => None,
+        });
+        assert!(
+            !mappings
+                .iter()
+                .any(|mapping| mapping.placeholder == "profile")
         );
     }
 

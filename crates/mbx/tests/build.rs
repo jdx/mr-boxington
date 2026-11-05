@@ -3914,8 +3914,10 @@ fn a_second_checkout_starts_warm() {
     );
 }
 
-/// Write a binary with a path dependency and a build script, and a custom
-/// profile that inherits `dev` unchanged.
+/// Write a binary with a build script and a custom profile that inherits
+/// `dev` unchanged. Its path dependency has a `links` build script whose
+/// `cargo:root` reaches the binary's build script as `DEP_BASE_ROOT`, a path
+/// in the profile directory.
 fn write_inherited_profile_project(directory: &Path) {
     std::fs::create_dir_all(directory.join("src")).unwrap();
     std::fs::create_dir_all(directory.join("base/src")).unwrap();
@@ -3928,7 +3930,7 @@ fn write_inherited_profile_project(directory: &Path) {
     .unwrap();
     std::fs::write(
         directory.join("base/Cargo.toml"),
-        "[package]\nname = \"base\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        "[package]\nname = \"base\"\nversion = \"0.1.0\"\nedition = \"2021\"\nlinks = \"base\"\n",
     )
     .unwrap();
     std::fs::write(
@@ -3937,8 +3939,17 @@ fn write_inherited_profile_project(directory: &Path) {
     )
     .unwrap();
     std::fs::write(
+        directory.join("base/build.rs"),
+        "fn main() {\n\
+             println!(\"cargo:root={}\", std::env::var(\"OUT_DIR\").unwrap());\n\
+             println!(\"cargo:rerun-if-changed=build.rs\");\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
         directory.join("build.rs"),
         "fn main() {\n\
+             assert!(std::env::var_os(\"DEP_BASE_ROOT\").is_some());\n\
              let out = std::path::PathBuf::from(std::env::var_os(\"OUT_DIR\").unwrap());\n\
              std::fs::write(out.join(\"generated.rs\"), \"pub const FACTOR: u32 = 2;\\n\").unwrap();\n\
              println!(\"cargo:rerun-if-changed=build.rs\");\n\
