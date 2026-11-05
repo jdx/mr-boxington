@@ -49,12 +49,12 @@ struct Action<'a> {
     inputs: &'a BTreeMap<String, InputState>,
     kind: &'static str,
     out_dir: Option<&'a str>,
-    /// The profile directory the script runs for, such as `${target}/debug`.
+    /// The profile directory the script runs for, such as `${target}/debug`,
+    /// or its whole `OUT_DIR` when that sits outside Cargo's layout.
     /// `OUT_DIR`'s placeholder hides it, and the binary's own key is the same
     /// in every profile that compiles it identically, yet a script can still
     /// read the profile out of `OUT_DIR` and emit something that names it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    profile: Option<&'a str>,
+    profile: &'a str,
     version: u8,
 }
 
@@ -856,8 +856,7 @@ fn build_action(
     let checkout = checkout_local
         .then(|| std::env::var("CARGO_MANIFEST_DIR"))
         .transpose()?;
-    let profile = std::env::var_os("OUT_DIR")
-        .and_then(|out_dir| execution_profile(Path::new(&out_dir), &mappings));
+    let profile = execution_profile(Path::new(&std::env::var("OUT_DIR")?), &mappings);
     let archive_timestamps = archive_timestamp_key();
     let bytes = canonical_json(&Action {
         archive_timestamps: archive_timestamps.as_deref(),
@@ -868,10 +867,12 @@ fn build_action(
         inputs: &inputs,
         kind: ADAPTER,
         out_dir: out_dir.as_deref(),
-        profile: profile.as_deref(),
+        profile: &profile,
         // Results stored before resolved stream roots were normalized may
         // still contain the publishing checkout's canonical target paths.
-        version: 5,
+        // Keys before 6 named no profile, so their runs were shared between
+        // profiles that compile the script identically.
+        version: 6,
     })?;
     let digest = CacheDigest::blake3(&bytes);
     Ok((bytes, digest))
@@ -1843,9 +1844,23 @@ fn build_script_mappings() -> Vec<PathMapping> {
 }
 
 /// The profile directory of a script's `OUT_DIR`, as the key names it.
-fn execution_profile(out_dir: &Path, mappings: &[PathMapping]) -> Option<String> {
-    let profile = crate::cargo_layout::out_dir_profile(out_dir)?;
-    Some(normalize_environment_value(profile.to_str()?, mappings))
+///
+/// An `OUT_DIR` outside Cargo's layout names no profile directory, so the key
+/// takes the whole directory instead, under any root but its own placeholder,
+/// which would hide it again.
+fn execution_profile(out_dir: &Path, mappings: &[PathMapping]) -> String {
+    let (identity, mappings) = match crate::cargo_layout::out_dir_profile(out_dir) {
+        Some(profile) => (profile, mappings.to_vec()),
+        None => (
+            out_dir,
+            mappings
+                .iter()
+                .filter(|mapping| mapping.placeholder != "build_script_out_dir")
+                .cloned()
+                .collect(),
+        ),
+    };
+    normalize_environment_value(&identity.to_string_lossy(), &mappings)
 }
 
 /// Construct build-script mappings from an injectable environment lookup.
@@ -2709,11 +2724,57 @@ mod tests {
             let (alt_root, alt_profile) = keyed("alt", unit);
             assert_ne!(debug_root, alt_root);
             assert_eq!(
-                debug_profile.as_deref(),
-                Some(format!("${{target}}{}debug", std::path::MAIN_SEPARATOR).as_str())
+                debug_profile,
+                format!("${{target}}{}debug", std::path::MAIN_SEPARATOR)
             );
             assert_ne!(debug_profile, alt_profile);
         }
+
+        // Outside Cargo's layout the whole `OUT_DIR` tells the runs apart,
+        // under a known root where there is one and literally where not.
+        let external = |root: &Path, profile: &str| {
+            let out_dir = root.join(profile).join("generated");
+            let mappings = build_script_mappings_with_env(|name| match name {
+                "OUT_DIR" => Some(out_dir.clone()),
+                session::TARGET_DIR_ENV => Some(target.clone()),
+                _ => None,
+            });
+            execution_profile(&out_dir, &mappings)
+        };
+        assert_eq!(
+            external(&target, "debug"),
+            format!("${{target}}{0}debug{0}generated", std::path::MAIN_SEPARATOR)
+        );
+        assert_ne!(external(&target, "debug"), external(&target, "alt"));
+        let elsewhere = directory.path().join("external");
+        assert_eq!(
+            external(&elsewhere, "debug"),
+            elsewhere.join("debug").join("generated").to_string_lossy()
+        );
+        assert_ne!(external(&elsewhere, "debug"), external(&elsewhere, "alt"));
+    }
+
+    /// Keys from before runs named their profile matched across profiles, so
+    /// no descriptor written now may serialize as one of those.
+    #[test]
+    fn a_run_descriptor_always_names_its_profile() {
+        let empty = BTreeMap::new();
+        let bytes = canonical_json(&Action {
+            archive_timestamps: None,
+            binary_action: &CacheDigest::blake3(b"binary"),
+            cargo_environment: &empty,
+            checkout: None,
+            environment: &empty,
+            inputs: &BTreeMap::new(),
+            kind: ADAPTER,
+            out_dir: None,
+            profile: "${target}/debug",
+            version: 6,
+        })
+        .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains(r#""profile":"${target}/debug""#), "{text}");
+        assert!(text.contains(r#""version":6"#), "{text}");
     }
 
     #[cfg(unix)]
