@@ -67,8 +67,30 @@ listed on one final `expected, nothing to cache:` line. They count as uncached
 work only when they took compiler time.
 
 A crate you are editing keeps private [incremental state](/incremental)
-instead of publishing its result, so a later build does not restore it from
-the cache even when the report names it as a first build.
+instead of publishing its result, and so does every crate that links it. None
+of them looks anything up in the cache. Recordings from this mbx version say
+why, so the report charges an edited crate to `inputs of <crate> changed` and
+each crate that links it to that same cause. Older recordings lack this, and
+the report names these compilations as a first build.
+
+## Private incremental state
+
+When the build kept private incremental state, a section after the causes says
+where that state came from, with compiler time and count for each source:
+
+```text
+private incremental state for 42 compilations
+ 6m 12s  reused this checkout's state (30)
+ 1m 40s  seeded from another checkout, copying 1.2 GiB in 3.1s (8)
+    52s  started empty: no other checkout had it (4)
+```
+
+Seeded state is copied from the checkout that used it most recently, so a new
+checkout does not start from nothing. State starts empty when no other
+checkout has state for the same compilation, while a one-time discard of older
+state is pending, or when the compilation's state cannot be shared between
+checkouts. `reused this checkout's state` means the state directory was
+already there; rustc decides how much of it to reuse.
 
 ## What it compares against
 

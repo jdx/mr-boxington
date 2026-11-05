@@ -306,3 +306,41 @@ fn an_unlimited_stream_records_past_the_default_cap() {
         50
     );
 }
+
+#[test]
+fn action_metadata_is_additive_to_v1() {
+    let store = tempfile::tempdir().unwrap();
+    let writer =
+        EventWriter::with_limit(store.path(), Some(crate::config::DEFAULT_EVENTS_MAX_SIZE));
+    writer.action(
+        ActionOutcome::Miss,
+        Some("x".into()),
+        1,
+        ActionDetail::default(),
+    );
+    writer.action_with_metadata(
+        ActionOutcome::Unconsulted,
+        Some("y".into()),
+        2,
+        ActionDetail::default(),
+        None,
+        Some(mbx_cache_core::CompileMetadata {
+            unit_kind: Some("lib".into()),
+            skip_reason: Some("private-dependency".into()),
+            private_dependencies: vec!["x".into()],
+            ..Default::default()
+        }),
+        Some(true),
+    );
+    let rows = std::fs::read_to_string(session_paths(store.path(), writer.id()).events).unwrap();
+    let values: Vec<serde_json::Value> = rows
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(values[0].get("unit_kind").is_none());
+    assert!(values[0].get("incremental").is_none());
+    assert_eq!(values[1]["unit_kind"], "lib");
+    assert_eq!(values[1]["incremental"], true);
+    assert_eq!(values[1]["private_dependencies"][0], "x");
+    assert_eq!(parse_events(&rows).len(), 2);
+}

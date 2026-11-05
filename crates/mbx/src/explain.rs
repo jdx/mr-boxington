@@ -1100,6 +1100,8 @@ mod tests {
                 duration_ns: 0,
                 detail: Default::default(),
                 diagnostic: Some(diagnostic),
+                metadata: Default::default(),
+                incremental: None,
             }],
         }
     }

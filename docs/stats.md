@@ -23,6 +23,7 @@ action store, managed targets, and learned incremental state currently held.
 | --- | --- |
 | Compiler time avoided | Estimated compiler work skipped by cache hits, accumulated across builds. |
 | Cache hits | Compilations served from cache since counting began. |
+| Compilations | Compilations by outcome: hits, misses, compilations that ran without a cache lookup (`not looked up`), and bypasses, counted from their own start date. |
 | Pruned by mbx | Cumulative bytes collected from managed targets, learned incremental state, [generated source trees](/limits#out-dir-sharing), and the store, by both automatic sweeps and explicit `mbx gc` runs. The `targets / cache` split counts everything but the store as `targets`. |
 | Automatically pruned | Bytes collected by automatic sweeps, counted from a separate start date. |
 | Requested removals | Bytes removed by confirmed migrations or explicit workspace removals, kept separate from pruning. |
@@ -58,6 +59,11 @@ separately, and shows `not tracked yet` until then. Older versions did not
 distinguish automatic from explicit collection, so mbx does not guess or
 backfill that history.
 
+**Compilations** works the same way: it starts at the first build recorded by
+an mbx version that counts outcomes, and shows `not tracked yet` until then.
+While an older mbx shares the store, its builds are not added, so the totals
+for that period are low.
+
 ## JSON report
 
 The [versioned JSON report](/stability#json-output-is-versioned) includes
@@ -65,6 +71,16 @@ The [versioned JSON report](/stability#json-output-is-versioned) includes
 bytes, durations are nanoseconds, and times are Unix timestamps in seconds; an
 unknown start time is `null`. Its field names identify estimates and
 cumulative counters. JSON never contains quips.
+
+Once outcomes are counted, `savings.compilations` holds the raw totals:
+`since_unix_secs`, `hits`, `misses`, `unconsulted`, `bypasses`,
+`verifications`, `incremental`, and `compiler_ns` with compiler time for
+`miss`, `unconsulted`, `bypass`, and `verification`. `incremental` counts
+compilations that kept [private incremental state](/incremental); each is also
+counted under its outcome. mbx does not compute a hit rate, because which
+outcomes belong in the denominator depends on the question. For example,
+`hits / (hits + misses)` is the rate among compilations that looked something
+up.
 
 ## A little personality
 

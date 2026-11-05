@@ -992,6 +992,21 @@ pub(super) fn account_session(
         }
         delta.cached_compilations = stats.hits;
         delta.avoided_compiler_ns = stats.avoided_compiler_duration_ns;
+        let compiler = |outcome: &str| {
+            stats.compiler.get(outcome).map_or((0, 0), |compiler| {
+                (compiler.invocations, compiler.duration_ns)
+            })
+        };
+        // Every count comes from the compiler outcomes the action rows use, so
+        // they add up to the same compilations; `stats.unconsulted` and
+        // `stats.bypasses` count other things and would not.
+        let outcomes = &mut delta.outcomes;
+        outcomes.hits = stats.hits;
+        (outcomes.misses, outcomes.miss_compiler_ns) = compiler("miss");
+        (outcomes.unconsulted, outcomes.unconsulted_compiler_ns) = compiler("unconsulted");
+        (outcomes.bypasses, outcomes.bypass_compiler_ns) = compiler("bypass");
+        (outcomes.verifications, outcomes.verification_compiler_ns) = compiler("verification");
+        outcomes.incremental = stats.incremental_compilations;
         // Both mechanisms save the same thing: a second copy of bytes the
         // store already holds. The ledger counts them together under the name
         // it has always persisted under.

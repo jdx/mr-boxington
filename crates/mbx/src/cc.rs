@@ -344,7 +344,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     let verified = verification.is_some();
     if let Some(cached) = verification {
         let divergence = verification_divergence(&cached, &output);
-        record_verification(divergence.is_none(), cached.restore);
+        record_verification(divergence.is_none(), cached.restore, None);
         if let Some(divergence) = divergence {
             session::report_shim_warning(&crate::materialize::verification_warning(
                 "cc",

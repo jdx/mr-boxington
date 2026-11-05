@@ -48,7 +48,8 @@ pub use stats::{AgentStats, CompilerStats};
 use wire::MAX_REQUEST_BYTES;
 pub use wire::{
     AGENT_PROTOCOL_VERSION, ActionDiagnostic, AgentEvent, AgentEventObserver, AgentRequest,
-    AgentResponse, PinnedFile, PinnedState, RestoreStats, WrapperSpan, WrapperTiming,
+    AgentResponse, CompileMetadata, IncrementalState, PinnedFile, PinnedState, RestoreStats,
+    WrapperSpan, WrapperTiming,
 };
 
 const MAX_EXECUTABLE_IDENTITIES: usize = 64;
@@ -268,6 +269,7 @@ pub(crate) fn lookup_outcome(outcome: &str) -> (&str, bool) {
     match outcome {
         "incremental-miss" => ("miss", true),
         "incremental-unconsulted" => ("unconsulted", true),
+        "incremental-bypass" => ("bypass", true),
         other => (other, false),
     }
 }
@@ -1995,6 +1997,7 @@ impl CacheAgent {
                 action,
                 restore,
                 crate_name,
+                metadata,
             } => {
                 let diagnostic = connection
                     .take_action_diagnostic("hit", crate_name.as_deref())
@@ -2003,7 +2006,7 @@ impl CacheAgent {
                         crate_name: crate_name.clone(),
                         diagnostic,
                     });
-                self.record_action_hit(&action, restore, crate_name, diagnostic)
+                self.record_action_hit(&action, restore, crate_name, metadata, diagnostic)
             }
             AgentRequest::RecordBypass { kind } => {
                 *self
@@ -2115,6 +2118,7 @@ impl CacheAgent {
                 outcome,
                 crate_name,
                 duration_ns,
+                metadata,
             } => {
                 // Normalized before the diagnostic is claimed: it was stored
                 // under the lookup outcome, and an unnormalized name here would
@@ -2139,17 +2143,26 @@ impl CacheAgent {
                     incremental,
                     crate_name.as_deref(),
                     duration_ns,
+                    metadata,
                     diagnostic,
                     bypass,
                 )
             }
-            AgentRequest::RecordActionVerification { matched, restore } => {
+            AgentRequest::RecordActionVerification {
+                matched,
+                restore,
+                metadata,
+            } => {
                 self.record_materialization(restore);
                 self.stats.verifications.fetch_add(1, Ordering::Relaxed);
                 if !matched {
                     self.stats.divergences.fetch_add(1, Ordering::Relaxed);
                 }
-                self.emit(|| AgentEvent::Verification { matched, restore });
+                self.emit(|| AgentEvent::Verification {
+                    matched,
+                    restore,
+                    metadata,
+                });
                 Ok(AgentResponse::ActionVerificationRecorded)
             }
             AgentRequest::StoreActionResult { result } => {
@@ -2540,6 +2553,7 @@ impl CacheAgent {
         action: &CacheDigest,
         restore: RestoreStats,
         crate_name: Option<String>,
+        metadata: Option<CompileMetadata>,
         diagnostic: Option<AgentEvent>,
     ) -> Result<AgentResponse> {
         validate_crate_name(crate_name.as_deref())?;
@@ -2579,6 +2593,7 @@ impl CacheAgent {
             AgentEvent::ActionHit {
                 crate_name,
                 restore,
+                metadata,
             },
         );
         Ok(AgentResponse::ActionHitRecorded)
@@ -2614,12 +2629,14 @@ impl CacheAgent {
         atomic_saturating_add(&self.stats.reused_output_bytes, restore.reused_output_bytes);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_compiler_invocation(
         &self,
         outcome: &str,
         incremental: bool,
         crate_name: Option<&str>,
         duration_ns: u64,
+        metadata: Option<CompileMetadata>,
         diagnostic: Option<AgentEvent>,
         bypass: Option<String>,
     ) -> Result<AgentResponse> {
@@ -2651,13 +2668,17 @@ impl CacheAgent {
         let action = match bypass {
             Some(kind) => AgentEvent::BypassedCompilation {
                 kind,
+                incremental,
                 crate_name: crate_name.map(str::to_string),
                 duration_ns,
+                metadata,
             },
             None => AgentEvent::CompilerInvocation {
                 outcome: outcome.to_string(),
                 crate_name: crate_name.map(str::to_string),
                 duration_ns,
+                incremental,
+                metadata,
             },
         };
         self.emit_action(diagnostic, action);

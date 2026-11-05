@@ -50,11 +50,11 @@ mod uploads;
 pub use action_slot::ActionSlot;
 pub use agent::{
     AGENT_PROTOCOL_VERSION, ActionDiagnostic, AgentEvent, AgentEventObserver, AgentRemoteCache,
-    AgentRequest, AgentResponse, AgentStats, CacheAgent, CompilerStats, FileDigestCache,
-    FileDigestResolution, FileDigestScope, FileIdentity, FileObjectIdentity, FileSnapshot,
-    NoFileDigestCache, PinnedFile, PinnedState, RecordedFileDigest, RestoreStats,
-    ValidatedFileDigest, WrapperSpan, WrapperTiming, digest_file, digest_file_validated,
-    is_task_identity, merge_task_action_predictions, task_manifest_actions,
+    AgentRequest, AgentResponse, AgentStats, CacheAgent, CompileMetadata, CompilerStats,
+    FileDigestCache, FileDigestResolution, FileDigestScope, FileIdentity, FileObjectIdentity,
+    FileSnapshot, IncrementalState, NoFileDigestCache, PinnedFile, PinnedState, RecordedFileDigest,
+    RestoreStats, ValidatedFileDigest, WrapperSpan, WrapperTiming, digest_file,
+    digest_file_validated, is_task_identity, merge_task_action_predictions, task_manifest_actions,
 };
 pub use client::BlockingAgentClient;
 pub use imds::{InstanceRoleCredentials, TemporaryCredentials};

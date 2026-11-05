@@ -108,6 +108,7 @@ async fn records_compiler_time_by_outcome_and_crate() {
                 outcome: outcome.into(),
                 crate_name: crate_name.map(str::to_string),
                 duration_ns,
+                metadata: None,
             })
             .await;
         assert!(matches!(
@@ -321,6 +322,7 @@ async fn compiler_invocations_are_counted_by_known_outcomes() {
                 outcome: outcome.into(),
                 crate_name: Some("demo".into()),
                 duration_ns: 10,
+                metadata: None,
             })
             .await;
     }
@@ -329,6 +331,7 @@ async fn compiler_invocations_are_counted_by_known_outcomes() {
             outcome: "invented".into(),
             crate_name: None,
             duration_ns: 0,
+            metadata: None,
         })
         .await;
 
@@ -590,6 +593,8 @@ fn diagnostic_and_action_events_are_emitted_as_one_pair() {
                         outcome: "miss".into(),
                         crate_name: Some(crate_name),
                         duration_ns: 1,
+                        incremental: false,
+                        metadata: None,
                     },
                 );
             })
@@ -653,6 +658,7 @@ async fn reports_each_accounted_decision_to_an_observer() {
                 outcome: "miss".into(),
                 crate_name: Some("serde".into()),
                 duration_ns: 42,
+                metadata: None,
             },
         ])
         .await;
@@ -660,6 +666,7 @@ async fn reports_each_accounted_decision_to_an_observer() {
         .respond(AgentRequest::RecordActionVerification {
             matched: false,
             restore: RestoreStats::default(),
+            metadata: None,
         })
         .await;
 
@@ -678,6 +685,7 @@ async fn reports_each_accounted_decision_to_an_observer() {
                 outcome,
                 crate_name: Some(crate_name),
                 duration_ns: 42,
+                ..
             },
             AgentEvent::Verification { matched: false, .. },
         ] if kind == "incremental"
@@ -712,6 +720,7 @@ async fn a_bypass_reported_with_its_compile_names_the_crate_and_time() {
                 outcome: "bypass".into(),
                 crate_name: Some("ring".into()),
                 duration_ns: 42,
+                metadata: None,
             },
         ])
         .await;
@@ -725,6 +734,7 @@ async fn a_bypass_reported_with_its_compile_names_the_crate_and_time() {
             outcome: "bypass".into(),
             crate_name: Some("build_script_build".into()),
             duration_ns: 7,
+            metadata: None,
         }])
         .await;
 
@@ -737,6 +747,7 @@ async fn a_bypass_reported_with_its_compile_names_the_crate_and_time() {
                     kind,
                     crate_name: Some(crate_name),
                     duration_ns: 42,
+                    ..
                 },
                 AgentEvent::Bypass { kind: unclaimed },
                 AgentEvent::CompilerInvocation {
@@ -811,6 +822,7 @@ async fn an_incremental_outcome_records_its_lookup_and_its_state_separately() {
                 outcome: outcome.into(),
                 crate_name: Some("serde".into()),
                 duration_ns: 42,
+                metadata: None,
             })
             .await;
     }
@@ -863,6 +875,7 @@ async fn an_incremental_miss_keeps_the_diagnostic_it_was_sent_with() {
                 outcome: "incremental-miss".into(),
                 crate_name: Some("serde".into()),
                 duration_ns: 42,
+                metadata: None,
             },
         ])
         .await;
@@ -933,6 +946,7 @@ async fn an_unconsulted_compilation_keeps_its_diagnostic() {
                 outcome: "unconsulted".into(),
                 crate_name: Some("serde".into()),
                 duration_ns: 42,
+                metadata: None,
             },
         ])
         .await;
@@ -987,6 +1001,7 @@ async fn a_diagnostic_for_an_unkeyed_outcome_is_refused() {
                 outcome: "bypass".into(),
                 crate_name: Some("serde".into()),
                 duration_ns: 42,
+                metadata: None,
             },
         ])
         .await;
@@ -1030,6 +1045,7 @@ async fn a_rejected_hit_reports_no_event() {
                 action: CacheDigest::blake3(b"absent"),
                 restore: RestoreStats::default(),
                 crate_name: Some("serde".into()),
+                metadata: None,
             },
         ])
         .await;
@@ -1048,6 +1064,7 @@ async fn a_hit_carrying_an_unusable_crate_name_is_rejected() {
             action: CacheDigest::blake3(b"action"),
             restore: RestoreStats::default(),
             crate_name: Some("serde\nrustc".into()),
+            metadata: None,
         })
         .await;
 
@@ -1168,6 +1185,7 @@ async fn a_hit_records_the_use_of_its_result_and_everything_it_names() {
             action,
             restore: RestoreStats::default(),
             crate_name: None,
+            metadata: None,
         })
         .await;
 
@@ -1204,6 +1222,7 @@ async fn the_first_hit_on_a_result_stored_this_session_records_everything_it_nam
             action,
             restore: RestoreStats::default(),
             crate_name: None,
+            metadata: None,
         })
         .await;
 
@@ -1307,6 +1326,7 @@ async fn publishes_a_complete_action_result() {
                     reused_output_bytes: 2,
                 },
                 crate_name: None,
+                metadata: None,
             })
             .await,
         AgentResponse::ActionHitRecorded
@@ -1357,6 +1377,7 @@ async fn lookups_are_counted_by_the_outcome_they_end_in() {
                     outcome: outcome.into(),
                     crate_name: None,
                     duration_ns: 1,
+                    metadata: None,
                 })
                 .await,
             AgentResponse::CompilerInvocationRecorded
@@ -1388,6 +1409,7 @@ async fn missing_action_result_is_a_cache_miss() {
                 action,
                 restore: RestoreStats::default(),
                 crate_name: None,
+                metadata: None,
             })
             .await,
         AgentResponse::Error { .. }
@@ -1406,6 +1428,7 @@ async fn missing_action_result_is_a_cache_miss() {
                     output_bytes: 11,
                     ..RestoreStats::default()
                 },
+                metadata: None,
             })
             .await,
         AgentResponse::ActionVerificationRecorded
@@ -3038,6 +3061,7 @@ async fn round_trips_task_actions_between_fresh_local_caches() {
                 action,
                 restore: RestoreStats::default(),
                 crate_name: None,
+                metadata: None,
             })
             .await,
         AgentResponse::ActionHitRecorded

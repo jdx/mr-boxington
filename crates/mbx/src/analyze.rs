@@ -114,6 +114,16 @@ struct Group {
     details: BTreeMap<String, u64>,
 }
 
+/// Where private incremental state came from, over one build.
+#[derive(Debug, Default)]
+struct PrivateState {
+    /// Compilations and their compiler time, by source: `existing`, `seeded`,
+    /// `failed`, or `cold` with its reason.
+    sources: BTreeMap<(String, Option<String>), (u64, u64)>,
+    seeded_bytes: u64,
+    seeded_copy_ns: u64,
+}
+
 /// A recorded build, with its uncached compiler time grouped by cause.
 #[derive(Debug)]
 pub(crate) struct Analysis {
@@ -127,6 +137,7 @@ pub(crate) struct Analysis {
     uncached_count: u64,
     uncached_ns: u64,
     groups: BTreeMap<Cause, Group>,
+    private_state: PrivateState,
     critical: Option<CriticalPath>,
     truncated: bool,
     baseline_truncated: bool,
@@ -138,6 +149,7 @@ impl Analysis {
         let mut verifications = 0;
         let mut divergences = 0;
         let mut avoided_ns = 0u64;
+        let mut private_state = PrivateState::default();
         // Each uncached compilation with its crate, time, and own verdict.
         let mut records = Vec::new();
         for event in &session.events {
@@ -147,6 +159,7 @@ impl Analysis {
                 duration_ns,
                 detail,
                 diagnostic,
+                metadata,
                 ..
             } = event
             else {
@@ -155,6 +168,20 @@ impl Analysis {
             let name = crate_name
                 .clone()
                 .unwrap_or_else(|| "<unknown crate>".into());
+            if let Some(state) = &metadata.incremental_state {
+                let entry = private_state
+                    .sources
+                    .entry((state.source.clone(), state.reason.clone()))
+                    .or_default();
+                entry.0 += 1;
+                entry.1 = entry.1.saturating_add(*duration_ns);
+                private_state.seeded_bytes = private_state
+                    .seeded_bytes
+                    .saturating_add(state.bytes.unwrap_or(0));
+                private_state.seeded_copy_ns = private_state
+                    .seeded_copy_ns
+                    .saturating_add(state.copy_ns.unwrap_or(0));
+            }
             let own = match outcome {
                 ActionOutcome::Hit => {
                     hits += 1;
@@ -174,6 +201,23 @@ impl Analysis {
                 // the first time a crate builds with a set of inputs and
                 // settings. Its key can still be compared with an earlier
                 // recording of the same unit, and that says what was new.
+                // A crate that links another's private artifact compiles
+                // privately because that crate changed, in this build or an
+                // earlier one, so it is charged there, as a miss on a changed
+                // dependency is.
+                ActionOutcome::Unconsulted
+                    if metadata.skip_reason.as_deref() == Some("private-dependency")
+                        && !metadata.private_dependencies.is_empty() =>
+                {
+                    Own::Dependencies(metadata.private_dependencies.clone())
+                }
+                // Hot private state is re-entered only after the crate's own
+                // sources changed; with no key, nothing more is known.
+                ActionOutcome::Unconsulted
+                    if metadata.skip_reason.as_deref() == Some("hot-reuse") =>
+                {
+                    Own::Cause(Cause::Changed(name.clone()), Vec::new())
+                }
                 ActionOutcome::Unconsulted => {
                     match (
                         diagnostic.as_ref(),
@@ -264,6 +308,7 @@ impl Analysis {
             uncached_count,
             uncached_ns,
             groups,
+            private_state,
             critical: CriticalPath::of(&session.events),
             truncated: is_truncated(session),
             baseline_truncated: baselines.truncated,
@@ -361,6 +406,8 @@ impl Analysis {
             }
         }
 
+        self.write_private_state(&mut out);
+
         if let Some(critical) = &self.critical {
             write_critical_path(&mut out, critical);
         }
@@ -384,6 +431,44 @@ impl Analysis {
             let _ = writeln!(out, "\nexpected, nothing to cache: {summary}");
         }
         out
+    }
+
+    /// Where the build's private incremental state came from. Shown only for
+    /// recordings that say: older ones do not.
+    fn write_private_state(&self, out: &mut String) {
+        let sources = &self.private_state.sources;
+        if sources.is_empty() {
+            return;
+        }
+        let count: u64 = sources.values().map(|(count, _)| count).sum();
+        let _ = writeln!(
+            out,
+            "\nprivate incremental state for {count} {}",
+            plural(count, "compilation", "compilations"),
+        );
+        let mut ranked: Vec<_> = sources.iter().collect();
+        ranked.sort_by(|left, right| right.1.1.cmp(&left.1.1).then_with(|| left.0.cmp(right.0)));
+        for ((source, reason), (count, duration_ns)) in ranked {
+            let label = match (source.as_str(), reason.as_deref()) {
+                ("existing", _) => "reused this checkout's state".to_string(),
+                ("seeded", _) => format!(
+                    "seeded from another checkout, copying {} in {}",
+                    crate::stats::size(self.private_state.seeded_bytes),
+                    duration(self.private_state.seeded_copy_ns),
+                ),
+                ("cold", Some("no-donor")) => "started empty: no other checkout had it".into(),
+                ("cold", Some("not-ready")) => {
+                    "started empty: seeding waits for a one-time state discard".into()
+                }
+                ("cold", Some("seeding-off")) => {
+                    "started empty: this state cannot be shared between checkouts".into()
+                }
+                ("cold", _) => "started empty".into(),
+                ("failed", _) => "seeding failed, so it started empty".into(),
+                (other, _) => other.to_string(),
+            };
+            let _ = writeln!(out, "{:>7}  {label} ({count})", duration(*duration_ns));
+        }
     }
 
     fn write_group(&self, out: &mut String, cause: &Cause, group: &Group) {

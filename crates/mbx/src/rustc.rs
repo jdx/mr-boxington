@@ -2,15 +2,16 @@ use crate::materialize::{
     CachedCompilation, CachedOutput, Materialization, StagedOutputs, apply_file_mode,
     denormalize_output_json, denormalize_output_text, executable_mode_matches, exit_code,
     file_mode, find_blobs, normalize_output_text, persist_outputs, read_canonical_blob,
-    read_verified_blob, record_action_hit_with_diagnostic, record_verification, replay_bytes,
+    read_verified_blob, record_action_hit_with_metadata, record_verification, replay_bytes,
     resolve_executable, stage_verified_cached_output, staging_directory, validate_file_mode,
 };
 use crate::{incremental, session, util::workspace_root};
 use eyre::{Context, Result, bail};
 use mbx_cache_core::{
     ActionDiagnostic, ActionPrediction, AgentRequest, AgentResponse, CacheDigest, CacheDirectory,
-    CacheFileNode, FileDigestResolution, FileDigestScope, FileIdentity, FileSnapshot, PinnedFile,
-    RecordedFileDigest, RemoteActionResult, RestoreStats, RustcMetadata, canonical_json,
+    CacheFileNode, CompileMetadata, FileDigestResolution, FileDigestScope, FileIdentity,
+    FileSnapshot, IncrementalState, PinnedFile, RecordedFileDigest, RemoteActionResult,
+    RestoreStats, RustcMetadata, canonical_json,
 };
 use mbx_cache_rustc::{
     ActionContext, ActionInput, BypassReason, CompilerIdentity, DiscoveredInputs, LinkerIdentity,
@@ -64,6 +65,8 @@ struct LearnedPlan {
     streak: u32,
     /// Where that state lives, once somewhere to put it has been resolved.
     directory: Option<PathBuf>,
+    /// Where that state came from, for the compilation's event row.
+    incremental_state: Option<IncrementalState>,
     /// Where to record what this compilation compiled, and what that was.
     record: Option<(PathBuf, CacheDigest)>,
 }
@@ -95,11 +98,14 @@ impl LearnedPlan {
                 self.hot = false;
                 self.directory = None;
             } else {
-                self.directory = incremental_directory(
+                let seedable = mode_in_state_directory(mode, directory.as_deref()).shares_state();
+                let (path, state) = incremental_directory_with_state(
                     unit,
                     compilation.invocation.crate_name(),
-                    mode_in_state_directory(mode, directory.as_deref()).shares_state(),
+                    seedable,
                 );
+                self.directory = path;
+                self.incremental_state = state;
                 if let Some(directory) = &self.directory {
                     incremental::clear_rejection(directory);
                 }
@@ -164,6 +170,8 @@ struct PrivateArtifact {
     version: u8,
     /// Absolute path of the artifact, as the compiler was told to write it.
     path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    producer: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -319,7 +327,9 @@ pub(crate) fn compile(
     // Verification may select a consumer of an unsampled private artifact,
     // and Cargo may also retain such an artifact from an earlier build. The
     // consumer must stay private even when it compiles without incremental state.
-    let private_inputs = links_private_artifact(&compilation);
+    let (private_inputs, private_dependencies, private_dependencies_more) =
+        private_artifact_inputs(&compilation);
+    let unit_kind = compiler_unit_kind(&arguments, invocation.crate_name());
     let mut learned = if !verify
         && ((eager_requested && incremental_safe) || (learned_enabled && private_inputs))
     {
@@ -375,11 +385,15 @@ pub(crate) fn compile(
                         .and_then(|candidate| {
                             compilation_action_diagnostic(&compilation, candidate).ok()
                         });
-                    record_action_hit_with_diagnostic(
+                    record_action_hit_with_metadata(
                         &action,
                         cached.restore,
                         invocation.crate_name(),
                         diagnostic,
+                        Some(CompileMetadata {
+                            unit_kind: unit_kind.clone(),
+                            ..Default::default()
+                        }),
                     );
                     install_build_script_shim(&invocation, &outputs, &action);
                     let _ = replay_bytes(&cached.stdout, &cached.stderr);
@@ -403,6 +417,7 @@ pub(crate) fn compile(
         learned = plan_learned_without_action_key(&compilation, &outputs);
     }
     let mut prediction_missing = private_inputs;
+    let mut prediction_error = false;
     if !private_inputs && !learned.engaged() && !action_lookup_attempted {
         match restore_predicted_result(
             &compilation,
@@ -428,9 +443,11 @@ pub(crate) fn compile(
             // A prediction learned on another branch can name a file this
             // checkout lacks. Compiling normally is the whole consequence.
             Err(error) if is_missing_compiler_input(&error) => {
+                prediction_error = true;
                 session::report_shim_debug(&format!("prediction was not restored: {error:#}"));
             }
             Err(error) => {
+                prediction_error = true;
                 session::report_shim_warning(&format!("prediction was not restored: {error:#}"));
             }
         }
@@ -638,7 +655,7 @@ pub(crate) fn compile(
         let marked = root
             .as_deref()
             .ok_or_else(|| eyre::eyre!("no private artifact directory is available"))
-            .and_then(|root| record_private_artifacts(root, &outputs));
+            .and_then(|root| record_private_artifacts(root, &outputs, invocation.crate_name()));
         if let Err(error) = marked {
             if let Some(root) = root.as_deref() {
                 forget_private_artifacts(root, &outputs);
@@ -758,6 +775,27 @@ pub(crate) fn compile(
         (_, false, true) => "miss",
         (_, false, false) => "unconsulted",
     };
+    let skip_reason = classify_skip_reason(
+        recorded_outcome.ends_with("unconsulted"),
+        private_inputs,
+        learned.engaged(),
+        eager_requested && incremental_safe,
+        unshareable,
+        prediction_missing,
+        prediction_error,
+    )
+    .map(str::to_owned);
+    let metadata = Some(CompileMetadata {
+        unit_kind,
+        skip_reason,
+        private_dependencies,
+        private_dependencies_more,
+        incremental_state: if learned.engaged() {
+            learned.incremental_state.clone()
+        } else {
+            None
+        },
+    });
     if output.status.success()
         && let Some(inputs) = &portable.build_script_inputs
         && let Err(error) = inputs.verify()
@@ -779,11 +817,12 @@ pub(crate) fn compile(
         // path records the invocation and validates rustc's own dep-info;
         // ordinary bypasses and invalid results finish here instead.
         if invalid || verification.is_none() {
-            session::record_compiler_invocation_with_diagnostic(
+            session::record_compiler_invocation_with_metadata(
                 recorded_outcome,
                 Some(&timing.crate_name),
                 timing.duration_ns,
                 current_diagnostic.take(),
+                metadata.clone(),
             );
         }
         if invalid {
@@ -806,11 +845,12 @@ pub(crate) fn compile(
         }
     }
     if let Some(cached) = verification {
-        session::record_compiler_invocation_with_diagnostic(
+        session::record_compiler_invocation_with_metadata(
             recorded_outcome,
             Some(&timing.crate_name),
             timing.duration_ns,
             current_diagnostic,
+            metadata.clone(),
         );
         if output.status.success()
             && let Err(error) = validate_compiler_inputs(
@@ -835,7 +875,14 @@ pub(crate) fn compile(
             ));
         }
         let divergence = verification_divergence(&cached, &output);
-        record_verification(divergence.is_none(), cached.restore);
+        record_verification(
+            divergence.is_none(),
+            cached.restore,
+            Some(CompileMetadata {
+                unit_kind: compiler_unit_kind(&arguments, invocation.crate_name()),
+                ..Default::default()
+            }),
+        );
         if let Some(divergence) = divergence {
             session::report_shim_warning(&crate::materialize::verification_warning(
                 "rustc",
@@ -963,11 +1010,12 @@ pub(crate) fn compile(
         objects.remove_superseded(&output.status);
     }
     session::check_low_disk_after_compile();
-    session::record_compiler_invocation_with_diagnostic(
+    session::record_compiler_invocation_with_metadata(
         recorded_outcome,
         Some(&timing.crate_name),
         timing.duration_ns,
         current_diagnostic,
+        metadata,
     );
     if compiler_input_invalid {
         // The result was rejected because its inputs moved while rustc read
@@ -1317,10 +1365,15 @@ fn compile_execution_only_build_script(
         .wrap_err("failed to execute rustc")?;
     drop(permit);
     crate::scheduler::record_compiler_memory(&demand, &output.status);
-    session::record_compiler_invocation(
+    session::record_compiler_invocation_with_metadata(
         "bypass",
         Some(invocation.crate_name()),
         started.elapsed().as_nanos().try_into().unwrap_or(u64::MAX),
+        None,
+        Some(CompileMetadata {
+            unit_kind: compiler_unit_kind(arguments, invocation.crate_name()),
+            ..Default::default()
+        }),
     );
     if output.status.success()
         && let Err(error) = validate_compiler_inputs(
@@ -1669,6 +1722,7 @@ fn learned_plan(
         backstop_rejected: false,
         streak,
         directory: None,
+        incremental_state: None,
         record: None,
     }
 }
@@ -1987,26 +2041,114 @@ pub(crate) fn incremental_directory(
     crate_name: &str,
     seedable: bool,
 ) -> Option<PathBuf> {
-    let root = incremental_root()?;
-    let key = invocation.key();
-    let shard = key.get(..16)?;
-    let directory = root.join(shard);
-    if seedable
-        && !directory.exists()
-        && let Err(error) = incremental::seed(&root, shard)
-    {
-        // Compiles from scratch, as it would have without a donor.
-        session::report_shim_warning(&format!(
-            "incremental state for {crate_name} was not seeded: {error:#}"
-        ));
+    incremental_directory_with_state(invocation, crate_name, seedable).0
+}
+
+/// Why a compilation that ran without a lookup had none, for its event row.
+///
+/// The first decision in wrapper order wins. Private inputs and eager state are
+/// settled before any lookup. A key that cannot be shared is found while
+/// trying the current dep-info, which only happens when no private state was
+/// engaged yet, so it outranks the private state planned for it afterwards;
+/// otherwise engaged state means a hot unit skipped the lookup. A prediction
+/// that failed is told apart from one that was never there.
+fn classify_skip_reason(
+    unconsulted: bool,
+    private: bool,
+    engaged: bool,
+    eager: bool,
+    unshareable: bool,
+    prediction_missing: bool,
+    prediction_error: bool,
+) -> Option<&'static str> {
+    if !unconsulted {
+        None
+    } else if private {
+        Some("private-dependency")
+    } else if engaged && eager {
+        Some("eager")
+    } else if unshareable {
+        Some("unshareable-key")
+    } else if engaged {
+        Some("hot-reuse")
+    } else if prediction_error {
+        Some("prediction-error")
+    } else if prediction_missing {
+        Some("no-prediction")
+    } else {
+        Some("other")
     }
+}
+
+fn cold_state(reason: &str) -> IncrementalState {
+    IncrementalState {
+        source: "cold".into(),
+        reason: Some(reason.into()),
+        donor: None,
+        files: None,
+        bytes: None,
+        copy_ns: None,
+    }
+}
+
+fn incremental_directory_with_state(
+    invocation: &CacheDigest,
+    crate_name: &str,
+    seedable: bool,
+) -> (Option<PathBuf>, Option<IncrementalState>) {
+    let Some(root) = incremental_root() else {
+        return (None, None);
+    };
+    let key = invocation.key();
+    let Some(shard) = key.get(..16) else {
+        return (None, None);
+    };
+    let directory = root.join(shard);
+    let state = if directory.is_dir() {
+        IncrementalState {
+            source: "existing".into(),
+            reason: None,
+            donor: None,
+            files: None,
+            bytes: None,
+            copy_ns: None,
+        }
+    } else if !seedable {
+        cold_state("seeding-off")
+    } else {
+        match incremental::seed(&root, shard) {
+            Ok(incremental::SeedOutcome::Seeded(report)) => IncrementalState {
+                source: "seeded".into(),
+                reason: None,
+                donor: Some(report.donor_workspace),
+                files: Some(report.files),
+                bytes: Some(report.bytes),
+                copy_ns: Some(report.duration_ns),
+            },
+            Ok(incremental::SeedOutcome::NoDonor) => cold_state("no-donor"),
+            Ok(incremental::SeedOutcome::NotReady) => cold_state("not-ready"),
+            Err(error) => {
+                session::report_shim_warning(&format!(
+                    "incremental state for {crate_name} was not seeded: {error:#}"
+                ));
+                IncrementalState {
+                    source: "failed".into(),
+                    reason: None,
+                    donor: None,
+                    files: None,
+                    bytes: None,
+                    copy_ns: None,
+                }
+            }
+        }
+    };
     match std::fs::create_dir_all(&directory) {
-        Ok(()) => Some(directory),
+        Ok(()) => (Some(directory), Some(state)),
         Err(error) => {
             session::report_shim_warning(&format!(
                 "incremental state was not prepared for {crate_name}: {error:#}"
             ));
-            None
+            (None, None)
         }
     }
 }
@@ -2492,6 +2634,7 @@ fn reuse_hot_workspace_plan(
             backstop_rejected: false,
             streak,
             directory: None,
+            incremental_state: None,
             record: Some((state_path, sources)),
         }
         .resolved(compilation, &unit, mode))
@@ -2629,7 +2772,7 @@ fn private_artifact_path(root: &Path, artifact: &Path) -> Option<PathBuf> {
 
 /// Mark every output of a compilation about to run with private incremental
 /// state, so the crates that link them know not to publish either.
-fn record_private_artifacts(root: &Path, outputs: &RustcOutputs) -> Result<()> {
+fn record_private_artifacts(root: &Path, outputs: &RustcOutputs, producer: &str) -> Result<()> {
     for artifact in &outputs.files {
         let Some(path) = private_artifact_path(root, artifact) else {
             continue;
@@ -2641,6 +2784,7 @@ fn record_private_artifacts(root: &Path, outputs: &RustcOutputs) -> Result<()> {
         let marker = PrivateArtifact {
             version: PRIVATE_ARTIFACT_VERSION,
             path: artifact.clone(),
+            producer: Some(producer.to_owned()),
         };
         crate::util::write_advisory(&path, &serde_json::to_vec(&marker)?)
             .wrap_err_with(|| format!("failed to mark {} as private", artifact.display()))?;
@@ -2674,24 +2818,93 @@ fn forget_private_artifacts(root: &Path, outputs: &RustcOutputs) {
 /// private state instead costs nothing that was available, and gives the edit
 /// loop above an edited dependency the same reuse the dependency itself gets.
 fn links_private_artifact(compilation: &Compilation<'_>) -> bool {
-    let Some(root) = incremental_root() else {
-        return false;
-    };
-    let inputs = compilation
-        .invocation
-        .required_inputs_in(compilation.working_dir);
-    links_private_artifact_in(&root, &inputs)
+    private_artifact_inputs(compilation).0
 }
 
+fn private_artifact_inputs(compilation: &Compilation<'_>) -> (bool, Vec<String>, Option<u64>) {
+    let Some(root) = incremental_root() else {
+        return (false, Vec::new(), None);
+    };
+    private_artifact_inputs_in(
+        &root,
+        &compilation
+            .invocation
+            .required_inputs_in(compilation.working_dir),
+    )
+}
+
+#[cfg(test)]
 fn links_private_artifact_in(root: &Path, inputs: &[PathBuf]) -> bool {
-    inputs.iter().any(|input| {
-        private_artifact_path(root, input)
+    private_artifact_inputs_in(root, inputs).0
+}
+
+/// Whether any of `inputs` is another unit's private artifact, and the crates
+/// that produced them: at most four names, sorted, and how many more there
+/// were. A marker from before producers were recorded still makes the inputs
+/// private but names nobody.
+fn private_artifact_inputs_in(root: &Path, inputs: &[PathBuf]) -> (bool, Vec<String>, Option<u64>) {
+    let mut found = false;
+    let mut names = BTreeSet::new();
+    for input in inputs {
+        if let Some(marker) = private_artifact_path(root, input)
             .and_then(|path| std::fs::read(path).ok())
             .and_then(|bytes| serde_json::from_slice::<PrivateArtifact>(&bytes).ok())
-            .is_some_and(|marker| {
-                marker.version == PRIVATE_ARTIFACT_VERSION && marker.path == *input
-            })
-    })
+            .filter(|marker| marker.version == PRIVATE_ARTIFACT_VERSION && marker.path == *input)
+        {
+            found = true;
+            if let Some(producer) = marker.producer {
+                names.insert(producer);
+            }
+        }
+    }
+    let more = names.len().saturating_sub(4) as u64;
+    (
+        found,
+        names.into_iter().take(4).collect(),
+        (more > 0).then_some(more),
+    )
+}
+
+/// What kind of Cargo unit a rustc invocation compiles, for its event row:
+/// `build-script`, `test` (any `--test` harness), `proc-macro`, `bin`, or
+/// `lib`. `None` when the arguments do not say, as behind a response file.
+pub(crate) fn compiler_unit_kind(
+    arguments: &[std::ffi::OsString],
+    crate_name: &str,
+) -> Option<String> {
+    if crate_name.starts_with("build_script_") {
+        return Some("build-script".into());
+    }
+    if arguments.iter().any(|arg| arg == "--test") {
+        return Some("test".into());
+    }
+    let mut types = BTreeSet::new();
+    for (index, arg) in arguments.iter().enumerate() {
+        let value = arg
+            .to_str()
+            .and_then(|arg| arg.strip_prefix("--crate-type="))
+            .or_else(|| {
+                (arg == "--crate-type")
+                    .then(|| arguments.get(index + 1).and_then(|v| v.to_str()))
+                    .flatten()
+            });
+        if let Some(value) = value {
+            types.extend(value.split(','));
+        }
+    }
+    if types.len() == 1 && types.contains("proc-macro") {
+        Some("proc-macro".into())
+    } else if types.len() == 1 && types.contains("bin") {
+        Some("bin".into())
+    } else if !types.is_empty()
+        && types
+            .iter()
+            .all(|kind| matches!(*kind, "lib" | "rlib" | "dylib" | "cdylib" | "staticlib"))
+    {
+        Some("lib".into())
+    } else {
+        None
+    }
 }
 
 /// A record this version cannot read is treated as no record: the cost is one
@@ -2848,11 +3061,18 @@ fn restore_prediction_payload(
                     .and_then(|candidate| {
                         compilation_action_diagnostic(compilation, candidate).ok()
                     });
-                record_action_hit_with_diagnostic(
+                record_action_hit_with_metadata(
                     &action,
                     cached.restore,
                     invocation.crate_name(),
                     diagnostic,
+                    Some(CompileMetadata {
+                        unit_kind: compiler_unit_kind(
+                            compilation.arguments,
+                            invocation.crate_name(),
+                        ),
+                        ..Default::default()
+                    }),
                 );
             }
             // Re-record even an identical manifest prediction: the cumulative

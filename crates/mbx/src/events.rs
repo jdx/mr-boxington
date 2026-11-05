@@ -77,6 +77,15 @@ pub(crate) enum SessionEvent {
         detail: ActionDetail,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diagnostic: Option<ActionDiagnostic>,
+        /// What the wrapper knew about the compilation; every field is
+        /// optional, and rows from before it was recorded have none. Boxed so
+        /// a row stays small next to the other events.
+        #[serde(default, flatten)]
+        metadata: Box<mbx_cache_core::CompileMetadata>,
+        /// Whether the compilation kept private incremental state; absent on
+        /// hits and on rows from before it was recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        incremental: Option<bool>,
     },
     /// The stream hit its size cap. Counters continue; rows stop.
     Truncated { v: u8, ts_ms: u64 },
@@ -374,6 +383,28 @@ impl EventWriter {
         detail: ActionDetail,
         diagnostic: Option<ActionDiagnostic>,
     ) {
+        self.action_with_metadata(
+            outcome,
+            crate_name,
+            duration_ns,
+            detail,
+            diagnostic,
+            None,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn action_with_metadata(
+        &self,
+        outcome: ActionOutcome,
+        crate_name: Option<String>,
+        duration_ns: u64,
+        detail: ActionDetail,
+        diagnostic: Option<ActionDiagnostic>,
+        metadata: Option<mbx_cache_core::CompileMetadata>,
+        incremental: Option<bool>,
+    ) {
         self.write(&SessionEvent::Action {
             v: EVENT_VERSION,
             ts_ms: now_ms(),
@@ -382,6 +413,8 @@ impl EventWriter {
             duration_ns,
             detail,
             diagnostic,
+            metadata: Box::new(metadata.unwrap_or_default()),
+            incremental,
         });
     }
 

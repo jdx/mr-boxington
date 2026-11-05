@@ -960,9 +960,10 @@ impl AgentEventObserver for EventStream {
             AgentEvent::ActionHit {
                 crate_name,
                 restore,
+                metadata,
             } => {
                 let diagnostic = self.take_diagnostic("hit", crate_name.as_deref());
-                self.writer.action_with_diagnostic(
+                self.writer.action_with_metadata(
                     ActionOutcome::Hit,
                     crate_name,
                     restore.duration_ns,
@@ -975,6 +976,8 @@ impl AgentEventObserver for EventStream {
                         copied_output_bytes: restore.copied_output_bytes,
                     },
                     diagnostic,
+                    metadata,
+                    None,
                 );
             }
             AgentEvent::Bypass { kind } => self.writer.action(
@@ -987,11 +990,16 @@ impl AgentEventObserver for EventStream {
                 kind,
                 crate_name,
                 duration_ns,
-            } => self.writer.action(
+                incremental,
+                metadata,
+            } => self.writer.action_with_metadata(
                 ActionOutcome::Bypass { reason: kind },
                 crate_name,
                 duration_ns,
                 ActionDetail::default(),
+                None,
+                metadata,
+                Some(incremental),
             ),
             // Nothing is emitted for the counter itself: the compiler
             // invocation that follows carries the same fact with a crate name
@@ -1001,6 +1009,8 @@ impl AgentEventObserver for EventStream {
                 outcome,
                 crate_name,
                 duration_ns,
+                incremental,
+                metadata,
             } => {
                 let recorded_outcome = match outcome.as_str() {
                     // An incremental compilation reaches the ledger under what
@@ -1015,19 +1025,28 @@ impl AgentEventObserver for EventStream {
                     _ => return,
                 };
                 let diagnostic = self.take_diagnostic(&outcome, crate_name.as_deref());
-                self.writer.action_with_diagnostic(
+                self.writer.action_with_metadata(
                     recorded_outcome,
                     crate_name,
                     duration_ns,
                     ActionDetail::default(),
                     diagnostic,
+                    metadata,
+                    Some(incremental),
                 );
             }
-            AgentEvent::Verification { matched, restore } => self.writer.action(
+            AgentEvent::Verification {
+                matched,
+                restore,
+                metadata,
+            } => self.writer.action_with_metadata(
                 ActionOutcome::Verification { matched },
                 None,
                 restore.duration_ns,
                 ActionDetail::default(),
+                None,
+                metadata,
+                Some(false),
             ),
             AgentEvent::ActionDiagnostic {
                 outcome,
@@ -2068,7 +2087,7 @@ fn run_transparent_rustc(
         Command::new(&rustc)
     };
     command.args(&arguments);
-    if let Some(flag) = incremental_flag {
+    if let Some(ref flag) = incremental_flag {
         command.arg(flag);
     }
     command.env_remove(PREVIOUS_RUSTC_WRAPPER_ENV);
@@ -2121,10 +2140,21 @@ fn run_transparent_rustc(
                 if let Some(objects) = objects {
                     objects.remove_superseded(&status);
                 }
-                record_compiler_invocation(
-                    "bypass",
+                record_compiler_invocation_with_metadata(
+                    if incremental_flag.is_some() {
+                        "incremental-bypass"
+                    } else {
+                        "bypass"
+                    },
                     crate_name.as_deref(),
                     duration_ns(started.elapsed()),
+                    None,
+                    crate_name
+                        .as_deref()
+                        .map(|name| mbx_cache_core::CompileMetadata {
+                            unit_kind: crate::rustc::compiler_unit_kind(described, name),
+                            ..Default::default()
+                        }),
                 );
                 crate::materialize::exit_code(status)
             }
@@ -2681,6 +2711,16 @@ pub(crate) fn record_compiler_invocation_with_diagnostic(
     duration_ns: u64,
     diagnostic: Option<mbx_cache_core::ActionDiagnostic>,
 ) {
+    record_compiler_invocation_with_metadata(outcome, crate_name, duration_ns, diagnostic, None);
+}
+
+pub(crate) fn record_compiler_invocation_with_metadata(
+    outcome: &str,
+    crate_name: Option<&str>,
+    duration_ns: u64,
+    diagnostic: Option<mbx_cache_core::ActionDiagnostic>,
+    metadata: Option<mbx_cache_core::CompileMetadata>,
+) {
     let mut requests = Vec::new();
     if let Some(diagnostic) = diagnostic
         && let Some(request) = action_diagnostic_request(outcome, crate_name, diagnostic)
@@ -2692,6 +2732,7 @@ pub(crate) fn record_compiler_invocation_with_diagnostic(
         outcome: outcome.into(),
         crate_name: crate_name.map(str::to_string),
         duration_ns,
+        metadata,
     });
     let _ = request_agent(&requests);
 }
