@@ -74,6 +74,13 @@ mbx maps known workspace, target, Cargo registry, toolchain, and sysroot paths
 to stable placeholders before they enter a key. That is what lets equivalent
 worktrees share an action even though their absolute paths differ.
 
+The Cargo profile directory, such as `target/debug` or
+`target/<triple>/release`, gets a placeholder of its own. A profile that
+compiles a unit exactly as another does, like `[profile.alt] inherits = "dev"`
+with nothing changed, therefore shares that unit's action even though Cargo
+writes it to `target/alt`. A unit the profile compiles differently keeps its
+own key.
+
 The key also covers compiler inputs and relevant environment. If mbx cannot
 model something exactly, it bypasses the action.
 
