@@ -37,18 +37,16 @@ pub(crate) fn last(config: &Config) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The newest recorded build for this workspace, and what earlier builds of the
-/// same project recorded for comparison.
+/// The newest recorded build for the workspace containing the current
+/// directory, and what earlier builds of the same project recorded for
+/// comparison.
 pub(crate) fn last_recorded(config: &Config) -> Result<(RecordedSession, Baselines)> {
-    let workspace = crate::util::workspace_root(&std::env::current_dir()?);
+    let cwd = std::env::current_dir()?;
     let mut sessions = recorded_sessions(&config.store_dir())?;
-    let Some(target_index) = sessions
-        .iter()
-        .rposition(|session| session.workspace == workspace)
-    else {
+    let Some(target_index) = select_recorded_session(&sessions, &cwd) else {
         eyre::bail!(
-            "no recorded build was found for {}; run a build with session events enabled first",
-            workspace.display()
+            "no recorded build was found for {} or a workspace that contains it; run a build with session events enabled first",
+            cwd.display()
         );
     };
 
@@ -57,6 +55,31 @@ pub(crate) fn last_recorded(config: &Config) -> Result<(RecordedSession, Baselin
     let target = sessions.pop().expect("the target session was just found");
     let baselines = Baselines::collect(&sessions, &target);
     Ok((target, baselines))
+}
+
+/// Choose the deepest recorded workspace containing `cwd`, preferring its
+/// newest session when several sessions belong to that workspace.
+///
+/// A build records the workspace root Cargo reported, so the recordings are
+/// the authority on which workspace a directory belongs to. Guessing the root
+/// from lockfiles instead cannot tell a checkout nested inside another
+/// project's directory from a workspace member that is its own repository,
+/// and the nested checkout's builds were never found. A directory with no
+/// recording of its own falls back to the nearest enclosing one, which is why
+/// both reports print the workspace they read.
+fn select_recorded_session(sessions: &[RecordedSession], cwd: &Path) -> Option<usize> {
+    sessions
+        .iter()
+        .enumerate()
+        .filter(|(_, session)| cwd.starts_with(&session.workspace))
+        .max_by(|(left_index, left), (right_index, right)| {
+            left.workspace
+                .components()
+                .count()
+                .cmp(&right.workspace.components().count())
+                .then_with(|| left_index.cmp(right_index))
+        })
+        .map(|(index, _)| index)
 }
 
 pub(crate) struct RecordedSession {
@@ -230,7 +253,8 @@ fn display_last(session: &RecordedSession, baselines: &Baselines) {
         .collect::<Vec<_>>()
         .join(", ");
     crate::session::note(&format!(
-        "cache explanation: last recorded build\n  command: {command}\n  results: {summary}"
+        "cache explanation: last recorded build\n  workspace: {}\n  command: {command}\n  results: {summary}",
+        session.workspace.display()
     ));
     // A large workspace reaches the per-session cap partway through a build,
     // and the counts above then describe the rows that fit rather than the
@@ -1076,6 +1100,52 @@ mod tests {
         assert_eq!(
             join_names(&["one".into(), "two".into(), "three".into()]),
             "one, two and three"
+        );
+    }
+
+    #[test]
+    fn selects_deepest_containing_workspace_then_newest_session() {
+        // The enclosing project built last, but the nested checkout's own
+        // newest build is the one that ran here.
+        let sessions = [
+            recorded("/x/bifrost", None, "outer-old"),
+            recorded("/x/bifrost/.mj/lane", None, "lane"),
+            recorded("/x/bifrost/.mj/lane", None, "lane-new"),
+            recorded("/x/bifrost", None, "outer-new"),
+        ];
+        assert_eq!(
+            select_recorded_session(&sessions, Path::new("/x/bifrost/.mj/lane/crate")),
+            Some(2)
+        );
+        assert_eq!(
+            select_recorded_session(&sessions, Path::new("/x/bifrost/crates/core")),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn selects_outer_workspace_when_lane_is_unrecorded() {
+        let sessions = [recorded("/x/bifrost", None, "outer")];
+        assert_eq!(
+            select_recorded_session(&sessions, Path::new("/x/bifrost/.mj/lane")),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn selects_workspace_for_member_and_rejects_sibling_prefix() {
+        let sessions = [recorded("/x/bifrost", None, "outer")];
+        assert_eq!(
+            select_recorded_session(&sessions, Path::new("/x/bifrost/member")),
+            Some(0)
+        );
+        assert_eq!(
+            select_recorded_session(&sessions, Path::new("/x/bifrost2")),
+            None
+        );
+        assert_eq!(
+            select_recorded_session(&sessions, Path::new("/elsewhere")),
+            None
         );
     }
 

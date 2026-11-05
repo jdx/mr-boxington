@@ -117,6 +117,7 @@ struct Group {
 /// A recorded build, with its uncached compiler time grouped by cause.
 #[derive(Debug)]
 pub(crate) struct Analysis {
+    workspace: std::path::PathBuf,
     command: String,
     hits: u64,
     /// Hits rebuilt to check them; restored, but not counted as hits.
@@ -252,6 +253,7 @@ impl Analysis {
         }
 
         Self {
+            workspace: session.workspace.clone(),
             command: if session.command.is_empty() {
                 "cargo".into()
             } else {
@@ -274,6 +276,7 @@ impl Analysis {
     pub(crate) fn text(&self) -> String {
         let mut out = String::new();
         let _ = writeln!(out, "last recorded build: {}", self.command);
+        let _ = writeln!(out, "workspace: {}", self.workspace.display());
         let _ = write!(
             out,
             "compiler time: {} in {} uncached {}",
