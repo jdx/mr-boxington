@@ -3193,8 +3193,9 @@ fn selected_clippy_config(working_dir: &Path) -> Option<PathBuf> {
 ///
 /// On macOS a linked binary records the absolute path and timestamp of every
 /// object behind it, which is what makes a debug-info link unportable across
-/// checkouts. The target root covers both the executable's output directory
-/// and its dependencies, including sibling directories for examples. When
+/// checkouts. The profile directory covers both the executable's output
+/// directory and its dependencies, including sibling directories for
+/// examples, and leaves the profile's name out of the debug map. When
 /// native links are being cached on this platform, the shim appends the
 /// prefix itself rather than asking anyone to discover it. An invocation that
 /// already carries one keeps what its caller chose, and an invocation without
@@ -3232,12 +3233,20 @@ fn with_oso_prefix(arguments: &[OsString], cache_links: bool) -> Cow<'_, [OsStri
         return Cow::Borrowed(arguments);
     };
     // Examples link rlibs from the sibling deps directory, and build scripts
-    // can live further below build/. Strip the shared target root rather than
-    // only the directory receiving this particular executable.
-    let prefix = std::env::var_os(session::TARGET_DIR_ENV)
-        .map(PathBuf::from)
-        .filter(|root| root.is_absolute() && out_dir.starts_with(root))
-        .unwrap_or_else(|| standalone_target_root(&out_dir, None));
+    // can live further below build/. Strip the whole profile directory rather
+    // than only the directory receiving this particular executable, and no
+    // more than it: a debug map naming `deps/x.o` is the same in every profile
+    // that shares the unit. An output outside Cargo's layout falls back to the
+    // target root.
+    let prefix = profile_dir(&out_dir).map_or_else(
+        || {
+            std::env::var_os(session::TARGET_DIR_ENV)
+                .map(PathBuf::from)
+                .filter(|root| root.is_absolute() && out_dir.starts_with(root))
+                .unwrap_or_else(|| standalone_target_root(&out_dir, None))
+        },
+        Path::to_path_buf,
+    );
     // ld64 resolves archive paths through Cargo's target symlink before
     // recording them, so the prefix must use the same physical spelling.
     let prefix = std::fs::canonicalize(&prefix).unwrap_or(prefix);
@@ -4372,6 +4381,19 @@ fn path_mappings_with_env(
             .filter(|root| root.is_absolute())
             .map(|output| standalone_target_root(output, target))
     }) {
+        // The profile directory is deeper still. Cargo gives a profile that
+        // compiles a unit identically -- `[profile.alt] inherits = "dev"` --
+        // the same metadata hash, so the profile's name is the only thing
+        // telling the two keys apart, and only through these paths. Only a
+        // directory Cargo's layout names and the target root holds: one in a
+        // separate build directory claims nothing.
+        if let Some(profile) = target_output
+            .filter(|output| output.is_absolute())
+            .and_then(profile_dir)
+            .filter(|profile| profile.starts_with(&root) && *profile != root)
+        {
+            add_mapping(&mut mappings, &mut roots, profile.to_path_buf(), "profile");
+        }
         add_mapping(&mut mappings, &mut roots, root, "target");
     }
     if let Some(root) = environment(session::WORKSPACE_ROOT_ENV)
@@ -4452,16 +4474,15 @@ fn path_mappings_with_env(
     mappings
 }
 
-/// Infer the profile subtree shared by rustc outputs and build-script output.
+/// The profile directory Cargo writes this output directory below.
 ///
 /// Before 1.100, Cargo writes compilations to `<target>/<profile>/deps` (or
-/// the same shape below a target-triple directory) and build scripts to
-/// `<profile>/build/<unit>`. From 1.100 every unit writes to
-/// `<profile>/build/<package>/<hash>/out`. Mapping the profile parent, rather
-/// than only the output directory, also covers the other units' outputs and
-/// generated inputs below `build/`.
-fn standalone_target_root(output: &Path, target: Option<&str>) -> PathBuf {
-    let profile = if matches!(
+/// the same shape below a target-triple directory), examples to
+/// `<profile>/examples` and build scripts to `<profile>/build/<unit>`. From
+/// 1.100 every unit writes to `<profile>/build/<package>/<hash>/out`. Anything
+/// else -- rustdoc's `doc`, a directory a caller chose -- is no profile.
+fn profile_dir(output: &Path) -> Option<&Path> {
+    if matches!(
         output.file_name().and_then(OsStr::to_str),
         Some("deps" | "examples")
     ) {
@@ -4474,8 +4495,17 @@ fn standalone_target_root(output: &Path, target: Option<&str>) -> PathBuf {
         output.ancestors().nth(4)
     } else {
         None
-    };
-    if let Some(profile_root) = profile.and_then(Path::parent) {
+    }
+}
+
+/// Infer the target root holding the profile subtree shared by rustc outputs
+/// and build-script output.
+///
+/// Mapping the parent of the profile directory, rather than only the output
+/// directory, also covers the other units' outputs and generated inputs below
+/// `build/`, and the host profile beside a target-triple directory.
+fn standalone_target_root(output: &Path, target: Option<&str>) -> PathBuf {
+    if let Some(profile_root) = profile_dir(output).and_then(Path::parent) {
         let target_component = target.and_then(|target| Path::new(target).file_stem());
         if target_component.is_some_and(|target| profile_root.file_name() == Some(target))
             && let Some(root) = profile_root.parent()

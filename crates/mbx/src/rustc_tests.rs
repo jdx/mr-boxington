@@ -811,6 +811,150 @@ fn standalone_target_mapping_covers_the_profile_tree() {
 }
 
 #[test]
+fn profile_dir_follows_cargo_output_layouts() {
+    let cases = [
+        ("/tmp/target/debug/deps", Some("/tmp/target/debug")),
+        ("/tmp/target/alt/examples", Some("/tmp/target/alt")),
+        (
+            "/tmp/target/debug/build/widget-0123456789abcdef",
+            Some("/tmp/target/debug"),
+        ),
+        (
+            "/tmp/target/x86_64-unknown-linux-gnu/release/deps",
+            Some("/tmp/target/x86_64-unknown-linux-gnu/release"),
+        ),
+        (
+            "/tmp/target/custom/alt/deps",
+            Some("/tmp/target/custom/alt"),
+        ),
+        (
+            "/tmp/target/alt/build/widget/0123456789abcdef/out",
+            Some("/tmp/target/alt"),
+        ),
+        // Neither rustdoc's output nor a build script's pre-1.100 OUT_DIR is
+        // a compilation's output directory.
+        ("/tmp/target/doc", None),
+        ("/tmp/target/debug/build/widget-0123456789abcdef/out", None),
+        ("/tmp/out", None),
+    ];
+    for (output, profile) in cases {
+        assert_eq!(
+            profile_dir(Path::new(output)),
+            profile.map(Path::new),
+            "{output}"
+        );
+    }
+}
+
+/// The profile placeholder each output directory gets, beside the target
+/// root's, from mappings for a compilation writing there.
+fn profile_mappings(
+    output: &Path,
+    target: Option<&str>,
+    session_target: Option<&Path>,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    let mappings = path_mappings_with_env(output, Some(output), target, |name| match name {
+        session::TARGET_DIR_ENV => session_target.map(|root| root.as_os_str().to_owned()),
+        _ => None,
+    });
+    let root = |placeholder: &str| {
+        mappings
+            .iter()
+            .find(|mapping| mapping.placeholder == placeholder)
+            .map(|mapping| mapping.root.clone())
+    };
+    (root("profile"), root("target"))
+}
+
+#[test]
+fn profile_directories_map_beneath_the_target_root() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target");
+    let triple = "x86_64-unknown-linux-gnu";
+    let custom = directory.path().join("targets/custom.json");
+    let custom = custom.to_str().unwrap();
+    for (profile, output, platform) in [
+        ("debug", "debug/deps", None),
+        ("alt", "alt/deps", None),
+        ("alt", "alt/build/widget-0123456789abcdef", None),
+        ("alt", "alt/build/widget/0123456789abcdef/out", None),
+        (
+            "x86_64-unknown-linux-gnu/alt",
+            "x86_64-unknown-linux-gnu/alt/deps",
+            Some(triple),
+        ),
+        ("custom/release", "custom/release/deps", Some(custom)),
+    ] {
+        let expected = (Some(target.join(profile)), Some(target.clone()));
+        assert_eq!(
+            profile_mappings(&target.join(output), platform, None),
+            expected,
+            "standalone {output}"
+        );
+        assert_eq!(
+            profile_mappings(&target.join(output), platform, Some(&target)),
+            expected,
+            "session {output}"
+        );
+    }
+
+    // rustdoc writes outside every profile.
+    assert_eq!(
+        profile_mappings(&target.join("doc"), None, Some(&target)),
+        (None, Some(target.clone()))
+    );
+    // A separate build directory holds the profile, outside the session's
+    // target root, so nothing is claimed for it.
+    let build_dir = directory.path().join("build");
+    assert_eq!(
+        profile_mappings(&build_dir.join("debug/deps"), None, Some(&target)),
+        (None, Some(target.clone()))
+    );
+}
+
+/// Dep-info published from one profile restores naming the receiving
+/// profile's own outputs and generated sources.
+#[test]
+fn dep_info_restores_into_the_receiving_profile() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target");
+    let mappings = |profile: &str| {
+        PathMapping::ordered(&path_mappings_with_env(
+            directory.path(),
+            Some(&target.join(profile).join("deps")),
+            None,
+            |name| match name {
+                session::TARGET_DIR_ENV => Some(target.as_os_str().to_owned()),
+                _ => None,
+            },
+        ))
+    };
+    let dep_info = |profile: &str| {
+        let profile = target.join(profile);
+        format!(
+            "{}: {}\n",
+            profile.join("deps/libwidget-0abc.rmeta").display(),
+            profile.join("build/widget-0def/out/generated.rs").display(),
+        )
+    };
+
+    let stored = normalize_output_text(dep_info("debug").as_bytes(), &mappings("debug"));
+    assert_eq!(
+        stored,
+        normalize_output_text(dep_info("alt").as_bytes(), &mappings("alt"))
+    );
+    assert!(
+        String::from_utf8_lossy(&stored).starts_with("${profile}"),
+        "{}",
+        String::from_utf8_lossy(&stored)
+    );
+    assert_eq!(
+        String::from_utf8(denormalize_output_text(&stored, &mappings("alt"))).unwrap(),
+        dep_info("alt")
+    );
+}
+
+#[test]
 fn validates_exact_rustc_output_set() {
     let root = tempfile::tempdir().unwrap();
     let outputs = test_outputs(root.path());
@@ -1394,7 +1538,7 @@ fn the_shim_appends_an_oso_prefix_for_cached_links() {
     let extended = with_oso_prefix(&base, true);
     assert_eq!(
         extended.last().unwrap(),
-        &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/target/"),
+        &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/target/debug/"),
     );
     let example = arguments(&["--out-dir=/work/target/debug/examples", "examples/app.rs"]);
     assert_eq!(with_oso_prefix(&example, true).last(), extended.last());
@@ -1432,12 +1576,31 @@ fn the_shim_appends_an_oso_prefix_for_cached_links() {
         with_oso_prefix(&split_target, true).len(),
         split_target.len()
     );
+    // A Cargo 1.100 unit directory belongs to its profile too, and a custom
+    // profile is stripped like `debug`, so a shared unit's debug map names
+    // `deps/...` in both.
+    let unit = arguments(&[
+        "--out-dir=/work/target/debug/build/app/0123456789abcdef/out",
+        "src/main.rs",
+    ]);
+    assert_eq!(with_oso_prefix(&unit, true).last(), extended.last());
+    let alt = arguments(&["--out-dir=/work/target/alt/deps", "src/main.rs"]);
+    assert_eq!(
+        with_oso_prefix(&alt, true).last().unwrap(),
+        &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/target/alt/"),
+    );
+    // An output outside Cargo's layout keeps stripping its own directory.
+    let chosen_dir = arguments(&["--out-dir=/work/out", "src/main.rs"]);
+    assert_eq!(
+        with_oso_prefix(&chosen_dir, true).last().unwrap(),
+        &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/out/"),
+    );
     let relative = arguments(&["--out-dir", "target/debug/deps", "src/main.rs"]);
     assert_eq!(with_oso_prefix(&relative, true).len(), relative.len());
     let split = arguments(&["--out-dir=/work/target/debug/deps", "src/main.rs"]);
     assert_eq!(
         with_oso_prefix(&split, true).last().unwrap(),
-        &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/target/"),
+        &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/target/debug/"),
     );
 }
 

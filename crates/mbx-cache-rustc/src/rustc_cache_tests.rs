@@ -1272,6 +1272,49 @@ fn equivalent_worktrees_produce_the_same_action_key() {
     assert_eq!(first.digest, second.digest);
 }
 
+/// Cargo gives a profile that compiles a unit identically -- one inheriting
+/// `dev` unchanged -- the same metadata hash, so the profile directory is all
+/// that tells the two invocations apart. Mapped to its own placeholder, it no
+/// longer does.
+#[test]
+fn equivalent_profiles_produce_the_same_action_key() {
+    let keyed = |profile: &str, mapped: bool| {
+        let output = workspace().join("target").join(profile).join("deps");
+        let invocation = RustcInvocation::parse(&[
+            "--crate-name=widget".into(),
+            "--edition=2024".into(),
+            "src/lib.rs".into(),
+            "--crate-type=lib".into(),
+            "--emit=dep-info,metadata,link".into(),
+            "-Cmetadata=abc123".into(),
+            format!("--out-dir={}", output.display()).into(),
+            format!("-Ldependency={}", output.display()).into(),
+            format!("--extern=serde={}", output.join("libserde.rlib").display()).into(),
+            format!("--sysroot={}", sysroot().display()).into(),
+        ])
+        .unwrap();
+        let serde = format!("target/{profile}/deps/libserde.rlib");
+        let mut context = context(&[("src/lib.rs", "source"), (&serde, "serde")]);
+        if mapped {
+            context.path_mappings.insert(
+                0,
+                PathMapping::new(workspace().join("target").join(profile), "profile"),
+            );
+        }
+        invocation.action(context).unwrap()
+    };
+
+    let debug = keyed("debug", true);
+    assert_eq!(debug.digest, keyed("alt", true).digest);
+    let json = String::from_utf8(debug.bytes).unwrap();
+    assert!(
+        json.contains(r#""--extern=serde=${profile}/deps/libserde.rlib""#),
+        "{json}"
+    );
+    // Without the mapping the profile's name stays in the key.
+    assert_ne!(keyed("debug", false).digest, keyed("alt", false).digest);
+}
+
 #[test]
 fn predicts_inputs_without_reusing_stale_contents() {
     let directory = tempfile::tempdir().unwrap();
