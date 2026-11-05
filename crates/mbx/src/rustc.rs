@@ -2872,7 +2872,9 @@ pub(crate) fn compiler_unit_kind(
     arguments: &[std::ffi::OsString],
     crate_name: &str,
 ) -> Option<String> {
-    if crate_name.starts_with("build_script_") {
+    // A library can share a build script's crate name, but never its crate
+    // type, so the name alone is not enough.
+    if session::is_cargo_build_script(crate_name) && session::compiles_only_a_binary(arguments) {
         return Some("build-script".into());
     }
     if arguments.iter().any(|arg| arg == "--test") {

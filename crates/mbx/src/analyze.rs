@@ -204,7 +204,8 @@ impl Analysis {
                 // A crate that links another's private artifact compiles
                 // privately because that crate changed, in this build or an
                 // earlier one, so it is charged there, as a miss on a changed
-                // dependency is.
+                // dependency is. Its own sources are not checked on that
+                // path, so an edit to it as well is charged there too.
                 ActionOutcome::Unconsulted
                     if metadata.skip_reason.as_deref() == Some("private-dependency")
                         && !metadata.private_dependencies.is_empty() =>

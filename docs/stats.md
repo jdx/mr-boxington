@@ -77,7 +77,10 @@ Once outcomes are counted, `savings.compilations` holds the raw totals:
 `verifications`, `incremental`, and `compiler_ns` with compiler time for
 `miss`, `unconsulted`, `bypass`, and `verification`. `incremental` counts
 compilations that kept [private incremental state](/incremental); each is also
-counted under its outcome. mbx does not compute a hit rate, because which
+counted under its outcome. As in each build's own summary, these totals
+include the build-script runs mbx caches, not only compiler invocations, and a
+build script's run time counts as compiler time. mbx does not compute a hit
+rate, because which
 outcomes belong in the denominator depends on the question. For example,
 `hits / (hits + misses)` is the rate among compilations that looked something
 up.

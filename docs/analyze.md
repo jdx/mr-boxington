@@ -70,8 +70,11 @@ A crate you are editing keeps private [incremental state](/incremental)
 instead of publishing its result, and so does every crate that links it. None
 of them looks anything up in the cache. Recordings from this mbx version say
 why, so the report charges an edited crate to `inputs of <crate> changed` and
-each crate that links it to that same cause. Older recordings lack this, and
-the report names these compilations as a first build.
+each crate that links it to that same cause. A crate that links an edited
+crate's private output is charged to that crate even when it was edited as
+well, because mbx does not check its own sources on that path. Older
+recordings lack this, and the report names these compilations as a first
+build.
 
 ## Private incremental state
 

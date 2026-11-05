@@ -2886,6 +2886,10 @@ fn compiler_kind_comes_from_rustc_flags() {
         compiler_unit_kind(&args(&["--crate-type=bin"]), "build_script_build").as_deref(),
         Some("build-script")
     );
+    assert_eq!(
+        compiler_unit_kind(&args(&["--crate-type=lib"]), "build_script_helper").as_deref(),
+        Some("lib")
+    );
     assert_eq!(compiler_unit_kind(&args(&[]), "unknown"), None);
 }
 
