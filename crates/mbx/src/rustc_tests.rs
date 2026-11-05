@@ -361,7 +361,37 @@ fn churn(sources: &str, streak: u32) -> ChurnState {
         version: CHURN_STATE_VERSION,
         sources: CacheDigest::blake3(sources.as_bytes()).key(),
         streak,
+        dep_info: None,
     }
+}
+
+/// Cargo empties a unit's output directory before recompiling it, so the
+/// dep-info kept in the record has to survive the rewrite that follows every
+/// compilation.
+#[test]
+fn rewriting_a_churn_record_keeps_the_dep_info_it_carries() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("unit.json");
+    let mut state = churn("before", 1);
+    state.dep_info = Some("out/p: src/main.rs\n".to_owned());
+    std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+
+    write_churn_state(&path, &CacheDigest::blake3(b"after"), 1).unwrap();
+
+    let rewritten = read_churn_state(&path).unwrap();
+    assert_eq!(rewritten.dep_info.as_deref(), Some("out/p: src/main.rs\n"));
+    assert_ne!(rewritten.sources, state.sources);
+}
+
+#[test]
+fn only_a_units_own_build_directory_is_an_output_directory() {
+    assert!(is_unit_output_directory(Path::new(
+        "/t/debug/build/p/0123456789abcdef/out"
+    )));
+    assert!(!is_unit_output_directory(Path::new("/t/debug/deps")));
+    assert!(!is_unit_output_directory(Path::new(
+        "/t/debug/build/p/0123456789abcdef/fingerprint"
+    )));
 }
 
 /// The streak is what separates a crate someone is editing from one that merely
