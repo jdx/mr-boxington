@@ -32,6 +32,13 @@ pub(crate) fn profile_dir(output: &Path) -> Option<&Path> {
     }
 }
 
+/// The profile directory holding the unit a build script's `OUT_DIR` belongs
+/// to: `OUT_DIR` is the unit's own output directory from 1.100, and sits in
+/// the unit's directory before.
+pub(crate) fn out_dir_profile(out_dir: &Path) -> Option<&Path> {
+    profile_dir(out_dir).or_else(|| out_dir.parent().and_then(profile_dir))
+}
+
 /// Infer the target root holding the profile subtree shared by rustc outputs
 /// and build-script output.
 ///
@@ -54,6 +61,21 @@ pub(crate) fn standalone_target_root(output: &Path, target: Option<&str>) -> Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn out_dir_profile_follows_both_build_script_layouts() {
+        for out_dir in [
+            "/tmp/target/alt/build/widget-0123456789abcdef/out",
+            "/tmp/target/alt/build/widget/0123456789abcdef/out",
+        ] {
+            assert_eq!(
+                out_dir_profile(Path::new(out_dir)),
+                Some(Path::new("/tmp/target/alt")),
+                "{out_dir}"
+            );
+        }
+        assert_eq!(out_dir_profile(Path::new("/tmp/out")), None);
+    }
 
     #[test]
     fn standalone_target_mapping_covers_the_profile_tree() {

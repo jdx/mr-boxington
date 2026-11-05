@@ -3954,8 +3954,10 @@ fn write_inherited_profile_project(directory: &Path) {
     generate_lockfile(directory);
 }
 
-/// A profile that compiles every unit as `dev` does restores all of them from
-/// what `dev` stored, though Cargo writes it to another directory.
+/// A profile that compiles every unit as `dev` does restores every
+/// compilation from what `dev` stored, though Cargo writes it to another
+/// directory. The build script runs again: it could read the profile out of
+/// its `OUT_DIR`, so its run stays per profile.
 #[test]
 fn a_profile_inheriting_dev_restores_what_dev_stored() {
     let store = tempfile::tempdir().unwrap();
@@ -3984,8 +3986,16 @@ fn a_profile_inheriting_dev_restores_what_dev_stored() {
     assert!(count(&alt, "hits") > 0, "{alt}");
     assert_eq!(
         count(&alt, "misses"),
-        0,
-        "every unit should restore from dev: {alt}"
+        1,
+        "every compilation should restore from dev: {alt}"
+    );
+    assert_eq!(
+        alt["slow_compilations"],
+        serde_json::json!([{
+            "crate_name": "profile-fixture build script",
+            "duration_ns": alt["slow_compilations"][0]["duration_ns"],
+        }]),
+        "only the build script should run again: {alt}"
     );
     assert_eq!(
         count(&alt, "unconsulted"),
