@@ -77,9 +77,11 @@ worktrees share an action even though their absolute paths differ.
 The Cargo profile directory, such as `target/debug` or
 `target/<triple>/release`, gets a placeholder of its own. A profile that
 compiles a unit exactly as another does, like `[profile.alt] inherits = "dev"`
-with nothing changed, therefore shares that unit's compilation, and its
-build-script run, even though Cargo writes it to `target/alt`. A unit the
-profile compiles differently keeps its own key.
+with nothing changed, therefore shares that unit's compilation even though
+Cargo writes it to `target/alt`. A unit the profile compiles differently keeps
+its own key. Build-script runs stay per profile: a script can read the
+profile's name from its `OUT_DIR` or from a path a `links` dependency exports,
+such as `DEP_Z_ROOT`, and emit something that depends on it.
 
 The key also covers compiler inputs and relevant environment. If mbx cannot
 model something exactly, it bypasses the action.
