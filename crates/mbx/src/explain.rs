@@ -68,15 +68,27 @@ pub(crate) fn last_recorded(config: &Config) -> Result<(RecordedSession, Baselin
 /// recording of its own falls back to the nearest enclosing one, which is why
 /// both reports print the workspace they read.
 fn select_recorded_session(sessions: &[RecordedSession], cwd: &Path) -> Option<usize> {
+    // A recording keeps the spelling its build was given, which may go
+    // through a symbolic link; compare resolved paths so that spelling does
+    // not hide the checkout's own builds. A path that no longer resolves is
+    // compared as it was written.
+    let resolve = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let cwd = resolve(cwd);
+    let mut resolved = std::collections::HashMap::new();
     sessions
         .iter()
         .enumerate()
-        .filter(|(_, session)| cwd.starts_with(&session.workspace))
+        .filter_map(|(index, session)| {
+            let workspace = resolved
+                .entry(session.workspace.as_path())
+                .or_insert_with(|| resolve(&session.workspace))
+                .clone();
+            cwd.starts_with(&workspace).then_some((index, workspace))
+        })
         .max_by(|(left_index, left), (right_index, right)| {
-            left.workspace
-                .components()
+            left.components()
                 .count()
-                .cmp(&right.workspace.components().count())
+                .cmp(&right.components().count())
                 .then_with(|| left_index.cmp(right_index))
         })
         .map(|(index, _)| index)
@@ -1147,6 +1159,22 @@ mod tests {
             select_recorded_session(&sessions, Path::new("/elsewhere")),
             None
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_workspace_recorded_through_a_symlink_still_contains_the_checkout() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        let inner = real.join("lanes/inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let sessions = [
+            recorded(real.to_str().unwrap(), None, "outer"),
+            recorded(link.join("lanes/inner").to_str().unwrap(), None, "lane"),
+        ];
+        assert_eq!(select_recorded_session(&sessions, &inner), Some(1));
     }
 
     fn recorded(workspace: &str, identity: Option<&str>, action: &str) -> RecordedSession {
