@@ -2919,6 +2919,9 @@ fn restore_prediction_payload(
             cached.restore.avoided_compiler_duration_ns = input_prediction.compiler_duration_ns;
             if learned_enabled && source_is_in_workspace(compilation) {
                 record_learned_baseline(compilation, &discovered);
+                if restore_outputs {
+                    save_dep_info(compilation, outputs);
+                }
             }
             if restore_outputs {
                 let diagnostic = candidates
