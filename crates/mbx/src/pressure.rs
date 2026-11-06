@@ -197,10 +197,11 @@ impl State {
     }
 
     fn update(&mut self, now: u64, reading: Reading) {
-        // An episode under way with nothing blamed was recorded by a version
-        // that kept no causes. Its cause stays unknown until it ends.
-        let unknown_cause =
-            (self.pressured || self.recovered_ms.is_some()) && self.blamed.is_empty();
+        // A bad sample or an episode under way with nothing blamed was
+        // recorded by a version that kept no causes. Its cause stays unknown
+        // until the episode it starts or belongs to ends.
+        let unknown_cause = (self.bad_samples > 0 || self.pressured || self.recovered_ms.is_some())
+            && self.blamed.is_empty();
         let elapsed = now
             .checked_sub(self.sampled_ms)
             .filter(|n| *n > 0 && *n <= STALE_MS);
@@ -589,6 +590,27 @@ mod tests {
         older.update(2_000, reading_short_child());
         assert!(older.pressured);
         assert_eq!(older.short_scopes(), None);
+    }
+
+    #[test]
+    fn a_first_bad_sample_from_an_older_version_blames_the_host() {
+        let mut state = State::default();
+        state.update(1_000, reading_short_child_bad());
+        assert_eq!(state.bad_samples, 1);
+        let mut older: serde_json::Value = serde_json::to_value(&state).unwrap();
+        older.as_object_mut().unwrap().remove("blamed");
+        let mut older: State = serde_json::from_value(older).unwrap();
+        older.update(1_500, reading_short_child_bad());
+        assert!(older.pressured);
+        assert_eq!(older.short_scopes(), None);
+    }
+
+    fn reading_short_child_bad() -> Reading {
+        Reading {
+            available: Some(2),
+            limits: vec![limit(None, 90), limit(Some("0:8"), 2)],
+            ..reading_short_child()
+        }
     }
 
     fn reading_short_child() -> Reading {

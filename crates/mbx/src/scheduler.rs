@@ -1654,7 +1654,8 @@ pub(crate) fn reservation_pool(config: &Config, priority: SchedulerPriority) -> 
         pool.set_memory_capacity(scheduler.memory_bytes.unwrap_or(0));
         pool.events = config.events;
         pool.pressure = scheduler.pressure;
-        pool.place_leases(suspends(scheduler));
+        // A reserved command runs where it is started; supervision moves
+        // only compilers.
         pool
     })
 }
