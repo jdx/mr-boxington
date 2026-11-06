@@ -117,7 +117,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
           cache: false
         env:
@@ -388,13 +388,13 @@ jobs:
           cache-all-crates: "true"
           cache-workspace-crates: "true"
       - if: matrix.tool == 'mbx'
-        uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
+        uses: jdx/mr-boxington-action@88acf2bb50552c7c508cbac13e5f8c576b95b1de # v1.7.3
         with:
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
           save-on-workflow-dispatch: "true"
       - if: startsWith(matrix.tool, 'mbx-registry')
-        uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
+        uses: jdx/mr-boxington-action@88acf2bb50552c7c508cbac13e5f8c576b95b1de # v1.7.3
         with:
           backend: local
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
@@ -479,12 +479,12 @@ jobs:
           save-if: "false"
       - if: matrix.tool == 'mbx'
         id: mbx_restore
-        uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
+        uses: jdx/mr-boxington-action@88acf2bb50552c7c508cbac13e5f8c576b95b1de # v1.7.3
         with:
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
           cache-key: gha-small-edit-mbx-${{ github.run_id }}-${{ matrix.trial }}-parent
       - if: startsWith(matrix.tool, 'mbx-registry')
-        uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
+        uses: jdx/mr-boxington-action@88acf2bb50552c7c508cbac13e5f8c576b95b1de # v1.7.3
         with:
           backend: local
           version: ${{ inputs.small_edit_mbx_ref == '' && inputs.small_edit_mbx_version || '' }}
