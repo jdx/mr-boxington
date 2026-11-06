@@ -706,6 +706,7 @@ mod tests {
             build_id: waiter.build.as_ref().map(|b| b.0.clone()),
             domain: Some(waiter.domain.clone()),
             cgroups: None,
+            written: None,
             bytes_per_permit: waiter.bytes_per_permit,
         }
     }

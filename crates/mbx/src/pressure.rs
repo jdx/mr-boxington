@@ -52,9 +52,12 @@ pub(crate) struct State {
     reading: Reading,
     bad_samples: u8,
     healthy_since: Option<u64>,
-    /// Stall sources the latest comparison found unhealthy.
+    /// Every figure found unhealthy since this episode of pressure began,
+    /// by scope: a cgroup identity, or `None` for the host. Kept until
+    /// recovery ends, because the figures that started the pressure are what
+    /// recovery protects even after they read healthy again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    stalled: Vec<String>,
+    blamed: Vec<Option<String>>,
     pub pressured: bool,
     pub valid: bool,
     pub recovered_ms: Option<u64>,
@@ -184,36 +187,20 @@ impl State {
     ///
     /// Pressure can come from any figure: a cgroup's headroom, the host's, or
     /// the stalls of the host or of any cgroup above this process. Each one
-    /// that is not healthy names memory some compilations are using, and all
-    /// of those compilations count, not just those behind the smallest
-    /// headroom. When every figure is healthy again but recovery has not
-    /// finished, the smallest headroom is what recovery is waiting on.
+    /// that was unhealthy during this episode names memory some compilations
+    /// are using, and all of those compilations count, not just those behind
+    /// the smallest headroom. With nothing blamed, the smallest headroom is
+    /// what any gate is waiting on.
     pub(crate) fn short_scopes(&self) -> Option<Vec<String>> {
-        let total = self.reading.total.filter(|n| *n > 0);
-        let mut scopes: Vec<Option<String>> = self
-            .reading
-            .limits
-            .iter()
-            .filter(|limit| {
-                total.is_some_and(|total| limit.bytes as f64 / total as f64 <= HEALTHY_HEADROOM)
-            })
-            .map(|limit| limit.cgroup.clone())
-            .chain(
-                self.stalled
-                    .iter()
-                    .map(|source| self.reading.stall_cgroups.get(source).cloned()),
-            )
-            .collect();
-        if scopes.is_empty() {
-            scopes.push(
-                self.reading
-                    .limits
-                    .iter()
-                    .min_by_key(|limit| limit.bytes)
-                    .and_then(|limit| limit.cgroup.clone()),
-            );
+        if self.blamed.is_empty() {
+            return crate::util::short_scopes([self
+                .reading
+                .limits
+                .iter()
+                .min_by_key(|limit| limit.bytes)
+                .and_then(|limit| limit.cgroup.clone())]);
         }
-        crate::util::short_scopes(scopes)
+        crate::util::short_scopes(self.blamed.iter().cloned())
     }
 
     fn update(&mut self, now: u64, reading: Reading) {
@@ -234,29 +221,45 @@ impl State {
             Vec::new()
         };
         let stall_percent = stalls.iter().map(|(_, percent)| *percent).reduce(f64::max);
-        let stalled = stalls
-            .iter()
-            .filter(|(_, percent)| *percent >= HEALTHY_STALL)
-            .map(|(source, _)| (*source).clone())
-            .collect();
-        let headroom = reading
-            .total
-            .filter(|n| *n > 0)
+        let total = reading.total.filter(|n| *n > 0);
+        let headroom = total
             .zip(reading.available)
             .map(|(total, available)| available as f64 / total as f64);
+        // The scope of every figure that is not healthy now.
+        let unhealthy: Vec<Option<String>> = reading
+            .limits
+            .iter()
+            .filter(|limit| {
+                total.is_some_and(|total| limit.bytes as f64 / total as f64 <= HEALTHY_HEADROOM)
+            })
+            .map(|limit| limit.cgroup.clone())
+            .chain(
+                stalls
+                    .iter()
+                    .filter(|(_, percent)| *percent >= HEALTHY_STALL)
+                    .map(|(source, _)| reading.stall_cgroups.get(*source).cloned()),
+            )
+            .collect();
         if !comparable {
             // A forward gap discards stale evidence but not recovery spacing,
             // which expires on its own; a clock step back discards both.
-            let spacing = (self.version == VERSION && now > self.sampled_ms)
-                .then_some((self.recovered_ms, self.last_admission_ms));
+            let spacing = (self.version == VERSION && now > self.sampled_ms).then(|| {
+                (
+                    self.recovered_ms,
+                    self.last_admission_ms,
+                    std::mem::take(&mut self.blamed),
+                )
+            });
             *self = Self::default();
-            if let Some((recovered_ms, last_admission_ms)) = spacing {
+            if let Some((recovered_ms, last_admission_ms, blamed)) = spacing {
                 self.recovered_ms = recovered_ms;
                 self.last_admission_ms = last_admission_ms;
+                if recovered_ms.is_some() {
+                    self.blamed = blamed;
+                }
             }
         }
         self.valid = headroom.is_some() || stall_percent.is_some();
-        self.stalled = stalled;
         let bad = headroom.is_some_and(|v| v < BAD_HEADROOM)
             || stall_percent.is_some_and(|v| v >= BAD_STALL);
         let healthy = self.valid
@@ -293,6 +296,15 @@ impl State {
             .is_some_and(|start| now.saturating_sub(start) >= 5_000)
         {
             self.recovered_ms = None;
+        }
+        if self.pressured || self.recovered_ms.is_some() {
+            for scope in unhealthy {
+                if !self.blamed.contains(&scope) {
+                    self.blamed.push(scope);
+                }
+            }
+        } else {
+            self.blamed = unhealthy;
         }
         self.version = VERSION;
         self.sampled_ms = now;
@@ -516,7 +528,7 @@ mod tests {
             ),
             Some(vec!["0:7".into(), "0:8".into()])
         );
-        // Healthy again but still recovering: the smallest headroom.
+        // Nothing unhealthy and no pressure: the smallest headroom.
         assert_eq!(
             scopes_after(
                 vec![limit(None, 90), limit(Some("0:8"), 40)],
@@ -527,6 +539,34 @@ mod tests {
         );
         // Older readings carry no figures at all, so nothing is ruled out.
         assert_eq!(scopes_after(Vec::new(), cgroup_stalls, 0), None);
+    }
+
+    #[test]
+    fn recovery_keeps_blaming_what_started_the_pressure() {
+        let host_stalls = "/proc/pressure/memory";
+        // A child cgroup has the least headroom, but the host stalled.
+        let reading = |counter| Reading {
+            total: Some(100),
+            available: Some(40),
+            limits: vec![limit(None, 90), limit(Some("0:8"), 40)],
+            stalls: BTreeMap::from([(host_stalls.into(), counter)]),
+            ..Reading::default()
+        };
+        let mut state = State::default();
+        for (now, counter) in [(1_000, 0), (1_500, 250_000), (2_000, 500_000)] {
+            state.update(now, reading(counter));
+        }
+        assert!(state.pressured);
+        assert_eq!(state.short_scopes(), None);
+        // Five healthy seconds end the pressure; five more end recovery.
+        for now in (2_500..12_500).step_by(500) {
+            state.update(now, reading(500_000));
+            assert_eq!(state.short_scopes(), None, "at {now}");
+        }
+        assert!(!state.pressured && state.recovered_ms.is_some());
+        state.update(12_500, reading(500_000));
+        assert_eq!(state.recovered_ms, None);
+        assert_eq!(state.short_scopes(), Some(vec!["0:8".into()]));
     }
 
     /// Containers expose different cgroups at the same pathname. Each counter

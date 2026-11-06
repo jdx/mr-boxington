@@ -437,6 +437,10 @@ struct Lease {
     cgroups: Option<Vec<String>>,
     #[serde(default)]
     bytes_per_permit: u64,
+    /// When the lease file was written, read from the file rather than
+    /// stored in it.
+    #[serde(skip)]
+    written: Option<std::time::SystemTime>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -746,27 +750,31 @@ fn scope_used<'a>(leases: impl Iterator<Item = &'a Lease>) -> Resources {
 ///
 /// So under lasting pressure each cgroup still runs one compilation at a time
 /// rather than none, and a host short of memory still runs one in the pool.
-fn holds_short_memory(
-    live: &[Lease],
-    short: Option<&[String]>,
-    contains: fn(&str, &[String]) -> bool,
-) -> bool {
+fn holds_short_memory(live: &[Lease], short: Option<&[String]>, contains: CgroupContains) -> bool {
     live.iter().any(|lease| match (short, &lease.cgroups) {
-        (Some(scopes), Some(cgroups)) => scopes.iter().any(|scope| contains(scope, cgroups)),
+        (Some(scopes), Some(cgroups)) => scopes
+            .iter()
+            .any(|scope| contains(scope, cgroups, lease.written)),
         _ => true,
     })
 }
 
-/// Whether a process in `cgroups` is charged to `scope`; see
-/// `cgroup::contains`. Without cgroups, nothing can be ruled out.
-fn cgroup_contains(scope: &str, cgroups: &[String]) -> bool {
+/// Whether a process that recorded `cgroups` at a time is charged to a scope.
+type CgroupContains = fn(&str, &[String], Option<std::time::SystemTime>) -> bool;
+
+/// See `cgroup::contains`. Without cgroups, nothing can be ruled out.
+fn cgroup_contains(
+    scope: &str,
+    cgroups: &[String],
+    written: Option<std::time::SystemTime>,
+) -> bool {
     #[cfg(target_os = "linux")]
     {
-        crate::cgroup::contains(scope, cgroups)
+        crate::cgroup::contains(scope, cgroups, written)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (scope, cgroups);
+        let _ = (scope, cgroups, written);
         true
     }
 }
@@ -1608,7 +1616,7 @@ pub(crate) struct Pool {
     memory_cgroups: &'static [String],
     /// Whether a lease's cgroups sit inside a short cgroup, injectable for
     /// tests.
-    cgroup_contains: fn(&str, &[String]) -> bool,
+    cgroup_contains: CgroupContains,
     clock: fn() -> u64,
     /// Source of the counter in lease names, injectable for tests.
     lease_nonce: fn() -> u64,
@@ -2362,16 +2370,16 @@ impl Pool {
         }
         if let Some(pressure) = &pressure
             && pressure.valid
-            && holds_short_memory(
-                &live,
-                pressure.short_scopes().as_deref(),
-                self.cgroup_contains,
-            )
             && (pressure.pressured
                 || (pressure.recovered_ms.is_some()
                     && pressure.last_admission_ms.is_some_and(|last| {
                         now.saturating_sub(last) < crate::pressure::INTERVAL_MS
                     })))
+            && holds_short_memory(
+                &live,
+                pressure.short_scopes().as_deref(),
+                self.cgroup_contains,
+            )
         {
             self.gated(state, "pressure", events, || {
                 self.waiting_record(resources, weight, demand, first_arrival_ms, u64::MAX)
@@ -2530,6 +2538,7 @@ impl Pool {
             domain: Some(self.pressure_domain.into()),
             cgroups: (!self.memory_cgroups.is_empty()).then(|| self.memory_cgroups.to_vec()),
             bytes_per_permit: self.bytes_per_permit,
+            written: None,
         })?;
         self.lock_record(leases, &lease)
     }
@@ -3919,6 +3928,7 @@ fn scan_leases(leases: &Path) -> Result<Vec<Lease>> {
                     build_id: None,
                     domain: None,
                     cgroups: None,
+                    written: None,
                     bytes_per_permit: 0,
                 },
                 |mut lease| {
@@ -3926,6 +3936,10 @@ fn scan_leases(leases: &Path) -> Result<Vec<Lease>> {
                     lease
                 },
             );
+        let mut lease = lease;
+        lease.written = std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .ok();
         live.push(lease);
     }
     Ok(live)

@@ -9,7 +9,7 @@ use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::SystemTime;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Memory {
@@ -85,57 +85,90 @@ pub(crate) fn identity(path: &Path) -> Option<String> {
     Some(format!("{}:{}", metadata.dev(), metadata.ino()))
 }
 
-/// How long one walk of a cgroup's subtree is trusted. A compilation in a
-/// cgroup created since can go uncounted for at most this long.
+/// How long one walk of a cgroup's subtree is reused for leases older than it.
 const SUBTREE_REFRESH: std::time::Duration = std::time::Duration::from_secs(1);
+/// File times are kept at the kernel's clock-tick granularity, so a lease
+/// written just after a walk began can carry a time just before it.
+const WRITE_TIME_SLACK: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Whether a process sitting in `cgroups` is charged to the cgroup `scope`,
-/// one of this process's own memory cgroups.
+/// one of this process's own memory cgroups. `written` is when the process
+/// recorded its cgroups, if known.
 ///
 /// Finding `scope` in the list is not enough. A process sees only the cgroups
 /// its namespace shows, so a compilation in a container nested below `scope`
 /// lists none of the ancestors above its container. So this looks for any of
 /// its cgroups in `scope`'s subtree instead, which this process can see
-/// whenever it can see `scope`. A scope that cannot be found here contains
-/// everything.
-pub(crate) fn contains(scope: &str, cgroups: &[String]) -> bool {
-    type Walks = BTreeMap<String, (Instant, HashSet<String>)>;
+/// whenever it can see `scope`.
+///
+/// Only a complete walk that began after the cgroups were recorded can show
+/// they are outside `scope`: the cgroups existed by then, so the walk saw
+/// them. Anything less -- a scope this process cannot find, a subtree it
+/// cannot fully read, a record of unknown age -- counts as inside.
+pub(crate) fn contains(scope: &str, cgroups: &[String], written: Option<SystemTime>) -> bool {
+    type Walks = BTreeMap<String, (SystemTime, Option<HashSet<String>>)>;
     static WALKED: Mutex<Walks> = Mutex::new(BTreeMap::new());
     if cgroups.iter().any(|id| id == scope) {
         return true;
     }
-    let Some((path, _)) = directories().iter().find(|(_, id)| id == scope) else {
+    let Some(((path, _), written)) = directories()
+        .iter()
+        .find(|(_, id)| id == scope)
+        .zip(written)
+    else {
         return true;
     };
     let mut walked = WALKED.lock().unwrap_or_else(|error| error.into_inner());
-    let walk = walked
-        .entry(scope.into())
-        .or_insert_with(|| (Instant::now(), subtree(path)));
-    if walk.0.elapsed() >= SUBTREE_REFRESH {
-        *walk = (Instant::now(), subtree(path));
+    let walk = |path| (SystemTime::now(), subtree(path));
+    let found = |walk: &(SystemTime, Option<HashSet<String>>)| {
+        walk.1
+            .as_ref()
+            .is_none_or(|members| cgroups.iter().any(|id| members.contains(id)))
+    };
+    let cached = walked.entry(scope.into()).or_insert_with(|| walk(path));
+    let stale = cached
+        .0
+        .elapsed()
+        .map_or(true, |age| age >= SUBTREE_REFRESH);
+    if found(cached) && !stale {
+        return true;
     }
-    cgroups.iter().any(|id| walk.1.contains(id))
+    // A walk begun after the record was read is always later than it.
+    let after_written = written + WRITE_TIME_SLACK < cached.0;
+    if stale || !after_written {
+        *cached = walk(path);
+    }
+    found(cached)
 }
 
-/// The identities of every cgroup below `path`.
-fn subtree(path: &Path) -> HashSet<String> {
+/// The identities of every cgroup below `path`, or `None` when some part of
+/// it could not be read.
+fn subtree(path: &Path) -> Option<HashSet<String>> {
     let mut members = HashSet::new();
     let mut pending = vec![path.to_path_buf()];
+    // A cgroup removed during the walk takes its descendants with it, so it
+    // hides nothing; any other failure might.
+    let gone = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
     while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(&directory)
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            if entry.file_type().is_ok_and(|kind| kind.is_dir())
-                && let Ok(metadata) = entry.metadata()
-            {
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if gone(&error) => continue,
+            Err(_) => return None,
+        };
+        for entry in entries {
+            let entry = entry.ok()?;
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) if gone(&error) => continue,
+                Err(_) => return None,
+            };
+            if metadata.is_dir() {
                 members.insert(format!("{}:{}", metadata.dev(), metadata.ino()));
                 pending.push(entry.path());
             }
         }
     }
-    members
+    Some(members)
 }
 
 pub(crate) fn memory() -> Memory {
@@ -437,7 +470,7 @@ mod tests {
         let outside = temp.path().join("outside");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
-        let members = subtree(&scope);
+        let members = subtree(&scope).unwrap();
         // A container below the scope lists only what its namespace shows.
         assert!(members.contains(&identity(&nested).unwrap()));
         assert!(members.contains(&identity(&scope.join("container")).unwrap()));
@@ -446,9 +479,49 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_subtree_proves_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let hidden = temp.path().join("delegated");
+        std::fs::create_dir_all(hidden.join("container")).unwrap();
+        std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read_dir(&hidden).is_ok();
+        let members = subtree(temp.path());
+        std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Root reads through any mode, so there is nothing to show there.
+        if !readable {
+            assert_eq!(members, None);
+        }
+    }
+
+    #[test]
     fn a_scope_this_process_cannot_find_contains_everything() {
-        assert!(contains("0:0", &["1:1".into()]));
-        assert!(contains("1:1", &["1:1".into()]));
+        assert!(contains(
+            "0:0",
+            &["1:1".into()],
+            Some(SystemTime::UNIX_EPOCH)
+        ));
+        assert!(contains(
+            "1:1",
+            &["1:1".into()],
+            Some(SystemTime::UNIX_EPOCH)
+        ));
+    }
+
+    #[test]
+    fn only_a_walk_begun_after_the_record_rules_a_cgroup_out() {
+        // This process's own cgroup holds nothing that "0:0" names.
+        let Some((path, scope)) = directories().first() else {
+            return;
+        };
+        if subtree(path).is_none() {
+            return;
+        }
+        let outside = ["0:0".to_string()];
+        let now = SystemTime::now();
+        // Written just now: the walk made for it must begin after it.
+        assert!(!contains(scope, &outside, Some(now)));
+        assert!(contains(scope, &outside, None), "a record of unknown age");
     }
 
     #[test]
