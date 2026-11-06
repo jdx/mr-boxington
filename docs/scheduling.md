@@ -249,7 +249,21 @@ mbx reads depend on the platform:
 - macOS: available-memory headroom only
 - Windows: neither, so pressure control does not pause admissions there
 
-At least one compilation can run when the pool is idle. After five healthy
+On Linux, available memory is the smaller of the host's `MemAvailable` and
+the headroom of the process's memory cgroups. Headroom counts page cache, the
+`active_file` and `inactive_file` figures in `memory.stat`, as available,
+because the kernel can reclaim it for a compiler. A container whose limit is
+filled by cached files is not short of memory. If reclaiming that cache does
+slow processes down, PSI shows the stalls and pressure control pauses
+admissions.
+
+Pressure control waits only for compilations that use the memory that is
+short. When a container's own limit is the smaller figure, that means the
+compilations inside the container. Compilations in other containers sharing
+the cache do not keep it waiting. When the host's figure is the smaller one,
+every compilation in the pool counts. So at least one compilation can run in
+a container that is short of its own memory, and at least one in the pool
+when the host is short. After five healthy
 seconds, mbx admits at most one compilation every half second for five seconds,
 then lifts that limit. Pressure control does not suspend running processes. To
 freeze them, see

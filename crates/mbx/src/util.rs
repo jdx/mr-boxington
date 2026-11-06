@@ -538,13 +538,34 @@ pub fn memory_total_bytes() -> Option<u64> {
     None
 }
 
+/// Memory a new process could get right now, and where the limit is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Available {
+    pub bytes: u64,
+    /// The cgroup whose headroom set `bytes`, as named by
+    /// `cgroup::identities`. `None` means the host's own figure set it, or
+    /// that no cgroup could be told apart, so any process may be holding the
+    /// memory that is short.
+    pub cgroup: Option<String>,
+}
+
+impl Available {
+    /// A figure no cgroup narrowed, which every process shares.
+    pub fn host(bytes: u64) -> Self {
+        Self {
+            bytes,
+            cgroup: None,
+        }
+    }
+}
+
 /// Memory the machine could hand a new process right now, when measurable.
 ///
 /// "Available" deliberately counts reclaimable memory rather than free pages
 /// alone: a machine whose RAM is full of page cache is not out of memory, and
 /// treating it as such would defer compilations that were going to run fine.
 #[cfg(target_os = "linux")]
-pub fn memory_available_bytes() -> Option<u64> {
+pub fn memory_available() -> Option<Available> {
     // `MemAvailable` is the kernel's own estimate of exactly this question,
     // accounting for reclaimable caches; summing fields by hand would just
     // reimplement it worse. It describes the host, though -- `/proc/meminfo`
@@ -560,12 +581,16 @@ pub fn memory_available_bytes() -> Option<u64> {
         .parse::<u64>()
         .ok()?;
     let host = kibibytes.checked_mul(1024)?;
-    let available = crate::cgroup::memory()
-        .headroom
-        .map_or(host, |free| host.min(free));
+    let cgroup = crate::cgroup::memory();
     // Zero is a real answer here -- a cgroup at its limit has nothing left --
     // and the caller has to be able to tell it from "cannot measure".
-    Some(available)
+    Some(match cgroup.headroom {
+        Some(free) if free < host => Available {
+            bytes: free,
+            cgroup: cgroup.limiting,
+        },
+        _ => Available::host(host),
+    })
 }
 
 /// Memory the machine could hand a new process right now, when measurable.
@@ -575,7 +600,7 @@ pub fn memory_available_bytes() -> Option<u64> {
 // to re-export them.
 #[allow(deprecated)]
 #[cfg(target_vendor = "apple")]
-pub fn memory_available_bytes() -> Option<u64> {
+pub fn memory_available() -> Option<Available> {
     let mut count = libc::HOST_VM_INFO64_COUNT;
     // SAFETY: the buffer is a zeroed `vm_statistics64` and `count` declares
     // its size in `integer_t` units, which is what the call requires.
@@ -599,12 +624,12 @@ pub fn memory_available_bytes() -> Option<u64> {
     let pages = u64::from(stats.free_count)
         .checked_add(u64::from(stats.inactive_count))?
         .checked_add(u64::from(stats.purgeable_count))?;
-    pages.checked_mul(page_size)
+    pages.checked_mul(page_size).map(Available::host)
 }
 
 /// Fallback for hosts with no supported probe.
 #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
-pub fn memory_available_bytes() -> Option<u64> {
+pub fn memory_available() -> Option<Available> {
     None
 }
 

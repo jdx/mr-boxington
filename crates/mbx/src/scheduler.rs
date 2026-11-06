@@ -430,6 +430,11 @@ struct Lease {
     build_id: Option<String>,
     #[serde(default)]
     domain: Option<String>,
+    /// The memory cgroups the holder sits in, named as in
+    /// `cgroup::identities`. `None` for older leases and holders whose
+    /// cgroups were not visible, which may sit anywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cgroups: Option<Vec<String>>,
     #[serde(default)]
     bytes_per_permit: u64,
 }
@@ -727,6 +732,38 @@ fn scope_used<'a>(leases: impl Iterator<Item = &'a Lease>) -> Resources {
             memory_bytes: used.memory_bytes.saturating_add(charge.memory_bytes),
         }
     })
+}
+
+/// Whether a live compilation holds memory that `limiting` says is short.
+///
+/// The memory gates wait only for compilations whose finishing would return
+/// that memory. When a cgroup's own headroom is the limit, that means the
+/// compilations inside it: one in another container sharing the pool frees
+/// nothing here, and waiting for it would stall this container for as long as
+/// any other keeps compiling. When the host's figure is the limit (`None`),
+/// every compilation uses that memory and all of them count. A lease that does
+/// not say where its holder sits counts too, as it might be anywhere.
+///
+/// So under lasting pressure each cgroup still runs one compilation at a time
+/// rather than none, and a host short of memory still runs one in the pool.
+fn holds_short_memory(live: &[Lease], limiting: Option<&str>) -> bool {
+    live.iter().any(|lease| {
+        limiting
+            .zip(lease.cgroups.as_ref())
+            .is_none_or(|(limiting, cgroups)| cgroups.iter().any(|id| id == limiting))
+    })
+}
+
+/// The memory cgroups this process sits in; see `cgroup::identities`.
+fn memory_cgroups() -> &'static [String] {
+    #[cfg(target_os = "linux")]
+    {
+        crate::cgroup::identities()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        &[]
+    }
 }
 
 fn domain_used(live: &[Lease], domain: &str) -> Resources {
@@ -1542,12 +1579,16 @@ pub(crate) struct Pool {
     events: bool,
     priority: SchedulerPriority,
     /// Probe for currently available memory, injectable for tests.
-    available_memory: fn() -> Option<u64>,
+    available_memory: fn() -> Option<crate::util::Available>,
     pressure: bool,
     pressure_probe: fn() -> crate::pressure::Reading,
     /// The memory domain `pressure_probe` reads, injectable for tests. Pools
     /// in different containers share leases but not pressure state.
     pressure_domain: &'static str,
+    /// The memory cgroups this process sits in, recorded in its leases so
+    /// that a waiter can tell which compilations hold the memory it is short
+    /// of. Injectable for tests.
+    memory_cgroups: &'static [String],
     clock: fn() -> u64,
     /// Source of the counter in lease names, injectable for tests.
     lease_nonce: fn() -> u64,
@@ -1862,10 +1903,11 @@ impl Pool {
             bytes_per_permit,
             events: true,
             priority,
-            available_memory: crate::util::memory_available_bytes,
+            available_memory: crate::util::memory_available,
             pressure: true,
             pressure_probe: crate::pressure::probe,
             pressure_domain: crate::pressure::domain(),
+            memory_cgroups: memory_cgroups(),
             clock: crate::pressure::now_ms,
             lease_nonce: next_lease_nonce,
         }
@@ -2297,9 +2339,9 @@ impl Pool {
             });
             return Ok(None);
         }
-        if !live.is_empty()
-            && let Some(pressure) = &pressure
+        if let Some(pressure) = &pressure
             && pressure.valid
+            && holds_short_memory(&live, pressure.limiting_cgroup())
             && (pressure.pressured
                 || (pressure.recovered_ms.is_some()
                     && pressure.last_admission_ms.is_some_and(|last| {
@@ -2318,14 +2360,14 @@ impl Pool {
         // ledger cannot see -- unmeasured crates already running, or memory
         // that was never the build's to spend.
         //
-        // Only while somebody else holds a permit, though. With an idle pool
-        // there is no compilation whose finishing would return the memory
-        // this one is short of, so deferring would stall the one thing that
-        // could proceed and wait out the deadline to reach the same answer.
-        if !live.is_empty()
-            && let Some(needed) = predicted
+        // Only while another compilation holds the memory that is short,
+        // though. Without one, no compilation's finishing would return it,
+        // so deferring would stall the one thing that could proceed and wait
+        // out the deadline to reach the same answer.
+        if let Some(needed) = predicted
             && let Some(available) = (self.available_memory)()
-            && available < needed
+            && available.bytes < needed
+            && holds_short_memory(&live, available.cgroup.as_deref())
         {
             self.gated(state, "available-memory", events, || {
                 self.waiting_record(resources, weight, demand, first_arrival_ms, u64::MAX)
@@ -2457,6 +2499,7 @@ impl Pool {
             priority: self.priority.as_str().into(),
             build_id: self.build.as_ref().map(|(id, _)| id.clone()),
             domain: Some(self.pressure_domain.into()),
+            cgroups: (!self.memory_cgroups.is_empty()).then(|| self.memory_cgroups.to_vec()),
             bytes_per_permit: self.bytes_per_permit,
         })?;
         self.lock_record(leases, &lease)
@@ -3846,6 +3889,7 @@ fn scan_leases(leases: &Path) -> Result<Vec<Lease>> {
                     priority: SchedulerPriority::Normal.as_str().into(),
                     build_id: None,
                     domain: None,
+                    cgroups: None,
                     bytes_per_permit: 0,
                 },
                 |mut lease| {

@@ -5,12 +5,15 @@
 use crate::util::{parse_cgroup_stat, read_cgroup_text};
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Memory {
     pub limit: Option<u64>,
     pub headroom: Option<u64>,
+    /// The cgroup whose headroom is `headroom`, named as in `identities`.
+    pub limiting: Option<String>,
 }
 
 #[derive(Debug)]
@@ -50,6 +53,27 @@ pub(crate) fn memory_directories() -> Vec<PathBuf> {
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+/// The kernel-wide identity of every directory in `memory_directories`.
+///
+/// A cgroup's device and inode name it whichever namespace or mount shows it,
+/// so two containers sharing a pool can tell whether one sits inside a cgroup
+/// the other reads. Computed once: a process does not change cgroup while it
+/// compiles.
+pub(crate) fn identities() -> &'static [String] {
+    static IDENTITIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    IDENTITIES.get_or_init(|| {
+        memory_directories()
+            .iter()
+            .filter_map(|path| identity(path))
+            .collect()
+    })
+}
+
+fn identity(path: &Path) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(format!("{}:{}", metadata.dev(), metadata.ino()))
 }
 
 pub(crate) fn memory() -> Memory {
@@ -156,13 +180,17 @@ fn snapshot(domains: &[Domain]) -> Memory {
             if !directory.starts_with(&domain.mount) {
                 break;
             }
-            let (limit_name, usage_name, reclaim_field) = if domain.v2 {
-                ("memory.max", "memory.current", "inactive_file")
+            let (limit_name, usage_name, reclaim_fields) = if domain.v2 {
+                (
+                    "memory.max",
+                    "memory.current",
+                    ["active_file", "inactive_file"],
+                )
             } else {
                 (
                     "memory.limit_in_bytes",
                     "memory.usage_in_bytes",
-                    "total_inactive_file",
+                    ["total_active_file", "total_inactive_file"],
                 )
             };
             let Some(limit) = std::fs::read_to_string(directory.join(limit_name))
@@ -180,15 +208,27 @@ fn snapshot(domains: &[Domain]) -> Memory {
             let usage = std::fs::read_to_string(directory.join(usage_name))
                 .ok()
                 .and_then(|s| s.trim().parse::<u64>().ok());
-            let reclaimable = std::fs::read_to_string(directory.join("memory.stat"))
-                .ok()
-                .and_then(|s| parse_cgroup_stat(&s, reclaim_field))
-                .unwrap_or(0);
+            // Usage counts page cache, which the kernel reclaims when a process
+            // needs the memory. Both file lists count, not just the inactive
+            // one: a cache read over and over sits on the active list, and
+            // treating it as used would hold back compilations in a container
+            // that is only full of cache. Whether reclaiming it hurts shows up
+            // in the stall figures, which the pressure gate reads as well.
+            // Shared memory and tmpfs sit on the anonymous lists, so neither
+            // field includes memory that cannot be reclaimed without swap.
+            let stat = std::fs::read_to_string(directory.join("memory.stat")).ok();
+            let reclaimable = reclaim_fields
+                .iter()
+                .filter_map(|field| parse_cgroup_stat(stat.as_deref()?, field))
+                .fold(0, u64::saturating_add);
             let headroom = usage.map_or(limit, |used| {
                 limit.saturating_sub(used.saturating_sub(reclaimable))
             });
             result.limit = Some(result.limit.map_or(limit, |old| old.min(limit)));
-            result.headroom = Some(result.headroom.map_or(headroom, |old| old.min(headroom)));
+            if result.headroom.is_none_or(|old| headroom < old) {
+                result.headroom = Some(headroom);
+                result.limiting = identity(directory);
+            }
         }
     }
     result
@@ -199,19 +239,25 @@ mod tests {
     use super::*;
 
     fn write_memory(path: &Path, limit: &str, usage: u64, inactive: u64, v2: bool) {
+        write_cache(path, limit, usage, 0, inactive, v2);
+    }
+
+    fn write_cache(path: &Path, limit: &str, usage: u64, active: u64, inactive: u64, v2: bool) {
         std::fs::create_dir_all(path).unwrap();
-        let (limit_name, usage_name, field) = if v2 {
-            ("memory.max", "memory.current", "inactive_file")
+        let (limit_name, usage_name, prefix) = if v2 {
+            ("memory.max", "memory.current", "")
         } else {
-            (
-                "memory.limit_in_bytes",
-                "memory.usage_in_bytes",
-                "total_inactive_file",
-            )
+            ("memory.limit_in_bytes", "memory.usage_in_bytes", "total_")
         };
         std::fs::write(path.join(limit_name), limit).unwrap();
         std::fs::write(path.join(usage_name), usage.to_string()).unwrap();
-        std::fs::write(path.join("memory.stat"), format!("{field} {inactive}\n")).unwrap();
+        // The shape of a real `memory.stat`, including the `file` total that
+        // also counts shared memory and must not be read as reclaimable.
+        let stat = format!(
+            "{prefix}anon 9\n{prefix}file {}\n{prefix}active_file {active}\n{prefix}inactive_file {inactive}\n{prefix}shmem 7\n",
+            active + inactive + 7
+        );
+        std::fs::write(path.join("memory.stat"), stat).unwrap();
     }
 
     #[test]
@@ -227,7 +273,8 @@ mod tests {
             snapshot(&domains),
             Memory {
                 limit: Some(800),
-                headroom: Some(150)
+                headroom: Some(150),
+                limiting: identity(&mount.join("slice")),
             }
         );
         write_memory(&mount.join("slice"), "1000", 1100, 0, true);
@@ -248,7 +295,8 @@ mod tests {
             snapshot(&found),
             Memory {
                 limit: Some(1000),
-                headroom: Some(350)
+                headroom: Some(350),
+                limiting: identity(&mount),
             }
         );
         assert!(domains("3:memory:/slice-other/build", &mounts).is_empty());
@@ -286,9 +334,26 @@ mod tests {
             snapshot(&domains),
             Memory {
                 limit: Some(0),
-                headroom: Some(0)
+                headroom: Some(0),
+                limiting: identity(temp.path()),
             }
         );
+    }
+
+    #[test]
+    fn active_and_inactive_file_cache_both_count_as_headroom() {
+        for v2 in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            // A container at its limit, nearly all of it page cache read
+            // often enough to sit on the active list.
+            write_cache(temp.path(), "1000", 1000, 800, 100, v2);
+            let domains = [Domain {
+                mount: temp.path().into(),
+                current: temp.path().into(),
+                v2,
+            }];
+            assert_eq!(snapshot(&domains).headroom, Some(900), "v2: {v2}");
+        }
     }
 
     #[test]

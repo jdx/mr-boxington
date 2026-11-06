@@ -26,6 +26,9 @@ static UNSAVED: Mutex<Option<(PathBuf, State)>> = Mutex::new(None);
 pub(crate) struct Reading {
     pub total: Option<u64>,
     pub available: Option<u64>,
+    /// The cgroup whose headroom set `available`; see `util::Available`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup: Option<String>,
     /// Full-stall microseconds, keyed by the source (never sum nested groups).
     pub stalls: BTreeMap<String, u64>,
 }
@@ -71,16 +74,12 @@ pub(crate) fn domain() -> &'static str {
         #[cfg(target_os = "linux")]
         {
             use sha2::Digest;
-            use std::os::unix::fs::MetadataExt;
-            let mut hasher = sha2::Sha256::new();
-            let mut identified = false;
-            for path in crate::cgroup::memory_directories() {
-                if let Ok(metadata) = std::fs::metadata(&path) {
-                    hasher.update(format!("{}:{}\n", metadata.dev(), metadata.ino()));
-                    identified = true;
+            let identities = crate::cgroup::identities();
+            if !identities.is_empty() {
+                let mut hasher = sha2::Sha256::new();
+                for identity in identities {
+                    hasher.update(format!("{identity}\n"));
                 }
-            }
-            if identified {
                 return hex::encode(&hasher.finalize()[..8]);
             }
         }
@@ -125,9 +124,11 @@ fn prune(directory: &Path, now: std::time::SystemTime) {
 
 pub(crate) fn probe() -> Reading {
     #[allow(unused_mut)]
+    let available = crate::util::memory_available();
     let mut reading = Reading {
         total: crate::util::memory_total_bytes(),
-        available: crate::util::memory_available_bytes(),
+        available: available.as_ref().map(|available| available.bytes),
+        cgroup: available.and_then(|available| available.cgroup),
         ..Reading::default()
     };
     #[cfg(target_os = "linux")]
@@ -156,6 +157,12 @@ fn full_total(text: &str) -> Option<u64> {
 }
 
 impl State {
+    /// The cgroup whose headroom the latest sample measured, or `None` when
+    /// the host's figure set it.
+    pub(crate) fn limiting_cgroup(&self) -> Option<&str> {
+        self.reading.cgroup.as_deref()
+    }
+
     fn update(&mut self, now: u64, reading: Reading) {
         let elapsed = now
             .checked_sub(self.sampled_ms)
@@ -391,6 +398,7 @@ mod tests {
         Reading {
             total: Some(100),
             available: Some(50),
+            cgroup: None,
             stalls: BTreeMap::from([("/sys/fs/cgroup/memory.pressure".into(), counter)]),
         }
     }
