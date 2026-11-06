@@ -189,17 +189,10 @@ impl State {
     /// the stalls of the host or of any cgroup above this process. Each one
     /// that was unhealthy during this episode names memory some compilations
     /// are using, and all of those compilations count, not just those behind
-    /// the smallest headroom. With nothing blamed, the smallest headroom is
-    /// what any gate is waiting on.
+    /// the smallest headroom. A state with nothing blamed -- written by an
+    /// older version, or describing no episode -- names no cause, so every
+    /// compilation counts.
     pub(crate) fn short_scopes(&self) -> Option<Vec<String>> {
-        if self.blamed.is_empty() {
-            return crate::util::short_scopes([self
-                .reading
-                .limits
-                .iter()
-                .min_by_key(|limit| limit.bytes)
-                .and_then(|limit| limit.cgroup.clone())]);
-        }
         crate::util::short_scopes(self.blamed.iter().cloned())
     }
 
@@ -528,14 +521,14 @@ mod tests {
             ),
             Some(vec!["0:7".into(), "0:8".into()])
         );
-        // Nothing unhealthy and no pressure: the smallest headroom.
+        // Nothing unhealthy names no cause.
         assert_eq!(
             scopes_after(
                 vec![limit(None, 90), limit(Some("0:8"), 40)],
                 cgroup_stalls,
                 0
             ),
-            Some(vec!["0:8".into()])
+            None
         );
         // Older readings carry no figures at all, so nothing is ruled out.
         assert_eq!(scopes_after(Vec::new(), cgroup_stalls, 0), None);
@@ -566,7 +559,28 @@ mod tests {
         assert!(!state.pressured && state.recovered_ms.is_some());
         state.update(12_500, reading(500_000));
         assert_eq!(state.recovered_ms, None);
+        assert!(state.blamed.is_empty(), "the episode is over");
+    }
+
+    #[test]
+    fn a_pressured_state_from_an_older_version_blames_the_host() {
+        // Older versions keep the same state version but drop `blamed`.
+        let mut state = State::default();
+        let reading = Reading {
+            total: Some(100),
+            available: Some(2),
+            limits: vec![limit(None, 90), limit(Some("0:8"), 2)],
+            ..Reading::default()
+        };
+        state.update(1_000, reading.clone());
+        state.update(1_500, reading);
+        assert!(state.pressured);
         assert_eq!(state.short_scopes(), Some(vec!["0:8".into()]));
+        let mut older: serde_json::Value = serde_json::to_value(&state).unwrap();
+        older.as_object_mut().unwrap().remove("blamed");
+        let older: State = serde_json::from_value(older).unwrap();
+        assert!(older.pressured);
+        assert_eq!(older.short_scopes(), None);
     }
 
     /// Containers expose different cgroups at the same pathname. Each counter
