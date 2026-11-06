@@ -149,6 +149,10 @@ struct ChurnState {
     sources: String,
     /// Consecutive compilations whose sources had changed.
     streak: u32,
+    /// The dep-info the unit last compiled with, for a Cargo that empties the
+    /// unit's output directory before recompiling it; see [`save_dep_info`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dep_info: Option<String>,
 }
 
 /// An output this checkout last compiled with private incremental state.
@@ -319,6 +323,9 @@ pub(crate) fn compile(
     // Verification may select a consumer of an unsampled private artifact,
     // and Cargo may also retain such an artifact from an earlier build. The
     // consumer must stay private even when it compiles without incremental state.
+    if learned_enabled {
+        restore_dep_info(&compilation, &outputs);
+    }
     let private_inputs = links_private_artifact(&compilation);
     let mut learned = if !verify
         && ((eager_requested && incremental_safe) || (learned_enabled && private_inputs))
@@ -365,6 +372,7 @@ pub(crate) fn compile(
                 }
                 if learned_enabled && source_is_in_workspace(&compilation) {
                     record_learned_baseline(&compilation, &discovered);
+                    save_dep_info(&compilation, &outputs);
                 }
                 if verify {
                     verification = Some(cached);
@@ -1004,6 +1012,9 @@ pub(crate) fn compile(
         }
         Ok(ExitCode::FAILURE)
     } else {
+        if learned_enabled && output.status.success() {
+            save_dep_info(&compilation, &outputs);
+        }
         // Forwarded output already reached Cargo while rustc ran, so a
         // dependent could start against this crate's metadata before its code
         // generation and this publication finished. Otherwise it goes out now.
@@ -2712,9 +2723,77 @@ fn write_churn_state(path: &Path, sources: &CacheDigest, streak: u32) -> Result<
         version: CHURN_STATE_VERSION,
         sources: sources.key(),
         streak,
+        dep_info: read_churn_state(path).and_then(|previous| previous.dep_info),
     };
     crate::util::write_advisory(path, &serde_json::to_vec(&state)?)
         .wrap_err("failed to record what this crate last compiled")
+}
+
+/// Whether `directory` is a unit's own output directory,
+/// `build/<package>/<hash>/out`, which Cargo has used since 1.100.
+fn is_unit_output_directory(directory: &Path) -> bool {
+    directory.file_name() == Some(OsStr::new("out"))
+        && directory.ancestors().nth(3).and_then(Path::file_name) == Some(OsStr::new("build"))
+}
+
+/// The churn record that keeps a workspace unit's dep-info, when the unit has
+/// an output directory of its own.
+fn dep_info_record(compilation: &Compilation<'_>, outputs: &RustcOutputs) -> Option<PathBuf> {
+    if !outputs
+        .dep_info
+        .parent()
+        .is_some_and(is_unit_output_directory)
+        || !source_is_in_workspace(compilation)
+    {
+        return None;
+    }
+    let (unit, _) = incremental_unit_identity(compilation).ok()?;
+    churn_state_path(&unit)
+}
+
+/// Keep the dep-info a workspace unit just compiled with.
+///
+/// Cargo empties a unit's output directory before it recompiles the unit, from
+/// 1.101, so the dep-info the next build reads to recognize an edit and to key
+/// a lookup is gone by the time the shim runs. The churn record outlives it.
+fn save_dep_info(compilation: &Compilation<'_>, outputs: &RustcOutputs) {
+    let Some(path) = dep_info_record(compilation, outputs) else {
+        return;
+    };
+    let Ok(dep_info) = std::fs::read_to_string(&outputs.dep_info) else {
+        return;
+    };
+    let Some(mut state) = read_churn_state(&path) else {
+        return;
+    };
+    if state.dep_info.as_deref() == Some(dep_info.as_str()) {
+        return;
+    }
+    state.dep_info = Some(dep_info);
+    if let Err(error) = serde_json::to_vec(&state)
+        .map_err(eyre::Report::from)
+        .and_then(|bytes| crate::util::write_advisory(&path, &bytes))
+    {
+        session::report_shim_warning(&format!("dep-info was not kept for this crate: {error:#}"));
+    }
+}
+
+/// Put back the dep-info that [`save_dep_info`] kept, when the output directory
+/// Cargo handed over is empty. A dep-info file already there is the compiler's
+/// and is left alone.
+fn restore_dep_info(compilation: &Compilation<'_>, outputs: &RustcOutputs) {
+    if outputs.dep_info.exists() {
+        return;
+    }
+    let Some(path) = dep_info_record(compilation, outputs) else {
+        return;
+    };
+    let Some(dep_info) = read_churn_state(&path).and_then(|state| state.dep_info) else {
+        return;
+    };
+    if outputs.dep_info.parent().is_some_and(Path::is_dir) {
+        let _ = std::fs::write(&outputs.dep_info, dep_info);
+    }
 }
 
 fn restore_predicted_result(
@@ -2840,6 +2919,9 @@ fn restore_prediction_payload(
             cached.restore.avoided_compiler_duration_ns = input_prediction.compiler_duration_ns;
             if learned_enabled && source_is_in_workspace(compilation) {
                 record_learned_baseline(compilation, &discovered);
+                if restore_outputs {
+                    save_dep_info(compilation, outputs);
+                }
             }
             if restore_outputs {
                 let diagnostic = candidates
