@@ -97,6 +97,11 @@ const WRITE_TIME_SLACK_MS: u64 = 100;
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Walk {
     began_ms: u64,
+    /// The newest lease time this walk is known to have begun after: it was
+    /// made for a lease already written, whatever that lease's file time
+    /// says. Leases this old need no walk of their own.
+    #[serde(default)]
+    covers_ms: u64,
     /// `None` when part of the subtree could not be read.
     members: Option<BTreeSet<String>>,
 }
@@ -150,16 +155,22 @@ pub(crate) fn contains(
     let cached = std::fs::read(&file)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Walk>(&bytes).ok());
+    let mut covers_ms = written_ms;
     if let Some(walk) = &cached {
         let fresh = walk.began_ms <= now && now - walk.began_ms < SUBTREE_REFRESH_MS;
-        if fresh && (found(walk) || written_ms + WRITE_TIME_SLACK_MS < walk.began_ms) {
+        let after =
+            written_ms <= walk.covers_ms || written_ms + WRITE_TIME_SLACK_MS < walk.began_ms;
+        if fresh && (found(walk) || after) {
             return found(walk);
         }
+        // Whatever the last walk was made for, this one begins later still.
+        covers_ms = covers_ms.max(walk.covers_ms);
     } else {
         crate::pressure::prune(&directory, SystemTime::now());
     }
     let walk = Walk {
         began_ms: now,
+        covers_ms,
         members: subtree(path),
     };
     if let Ok(bytes) = serde_json::to_vec(&walk) {
@@ -573,6 +584,7 @@ mod tests {
         let file = pool.path().join(SUBTREES_DIR).join(format!("{scope}.json"));
         let shared = Walk {
             began_ms: crate::pressure::now_ms() - 500,
+            covers_ms: 0,
             members: Some(BTreeSet::from(["0:5".to_string()])),
         };
         std::fs::write(&file, serde_json::to_vec(&shared).unwrap()).unwrap();
@@ -584,6 +596,10 @@ mod tests {
         let now = Some(SystemTime::now());
         assert!(!contains(pool.path(), scope, &["0:0".into()], now));
         assert_ne!(read().members, shared.members, "walked again");
+        // Other waiters reuse that walk for the same lease, inside the slack.
+        let again = read().began_ms;
+        assert!(!contains(pool.path(), scope, &["0:0".into()], now));
+        assert_eq!(read().began_ms, again, "not walked a third time");
     }
 
     #[test]
