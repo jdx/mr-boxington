@@ -272,8 +272,10 @@ the lock is looking at a build that has ended, however it ended, because the
 operating system releases the lock when the process exits.
 
 Collection bounds session history automatically. It removes a session file
-once the file is a week old or is no longer among the newest 256, but never
-one a build is still writing. A single build stops adding rows after 16 MiB by
+when it exceeds [`gc.events_max_age`](/configuration#gc-events-max-age)
+(default `7d`) or [`gc.events_max_sessions`](/configuration#gc-events-max-sessions)
+(default `256`), but never one a build is still writing. Set either limit to
+`"none"` to disable it. A single build stops adding rows after 16 MiB by
 default, though it still records its totals; change that cap with
 [`events_max_size`](/configuration#events-max-size). `mbx gc --dry-run` reports
 what it would drop alongside everything else.

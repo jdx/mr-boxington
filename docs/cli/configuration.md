@@ -160,6 +160,26 @@ Cargo can then start a dependent against a crate's metadata while that crate's c
 
 Sweep after a build when collection is due.
 
+### `gc.events_max_age`
+
+- **Type:** `duration`
+- **Default:** `7d`
+- **Set with:** `MBX_GC_EVENTS_MAX_AGE`
+
+Keep finished session event files this long, or `"none"` for no age limit.
+
+Both event limits apply: whichever removes a session first wins. A session a build is still writing is never removed. Each file can grow to `events_max_size` (16 MiB by default).
+
+### `gc.events_max_sessions`
+
+- **Type:** `string`
+- **Default:** `256`
+- **Set with:** `MBX_GC_EVENTS_MAX_SESSIONS`
+
+Keep at most this many newest session event files, or `"none"` for no count limit.
+
+Both event limits apply: whichever removes a session first wins. A session a build is still writing is never removed. Each file can grow to `events_max_size` (16 MiB by default).
+
 ### `gc.incremental_max_age`
 
 - **Type:** `duration`

@@ -670,6 +670,20 @@ struct RawGc {
     /// Collect learned incremental units unused this long, or `"none"`.
     #[usage(env = "MBX_GC_INCREMENTAL_MAX_AGE", default = "30d", ty = "duration")]
     incremental_max_age: String,
+    /// Keep finished session event files this long, or `"none"` for no age limit.
+    ///
+    /// Both event limits apply: whichever removes a session first wins. A
+    /// session a build is still writing is never removed. Each file can grow
+    /// to `events_max_size` (16 MiB by default).
+    #[usage(env = "MBX_GC_EVENTS_MAX_AGE", default = "7d", ty = "duration")]
+    events_max_age: String,
+    /// Keep at most this many newest session event files, or `"none"` for no count limit.
+    ///
+    /// Both event limits apply: whichever removes a session first wins. A
+    /// session a build is still writing is never removed. Each file can grow
+    /// to `events_max_size` (16 MiB by default).
+    #[usage(env = "MBX_GC_EVENTS_MAX_SESSIONS", default = "256")]
+    events_max_sessions: String,
     /// Collect cached Rust compilations for compiler versions unused this
     /// long, or `"none"`.
     ///
@@ -1019,6 +1033,8 @@ pub(crate) struct RetentionSettings {
     pub target_max_age: Option<Duration>,
     pub incremental_max_bytes: Option<u64>,
     pub incremental_max_age: Option<Duration>,
+    pub events_max_age: Option<Duration>,
+    pub events_max_sessions: Option<usize>,
     /// Age past which a compiler version's cached results are collected;
     /// `None` never does.
     pub rustc_max_age: Option<Duration>,
@@ -1179,6 +1195,16 @@ impl std::str::FromStr for SavingsStyle {
 /// `Default` cannot probe a disk it has not been told about. Collection still
 /// happens, which is the property that matters: a default that pruned nothing
 /// would make every unconfigured path a leak.
+impl RetentionSettings {
+    /// The session event limits, as the store's collection takes them.
+    pub(crate) fn sessions(&self) -> crate::store::SessionRetention {
+        crate::store::SessionRetention {
+            max_age: self.events_max_age,
+            max_sessions: self.events_max_sessions,
+        }
+    }
+}
+
 impl Default for RetentionSettings {
     fn default() -> Self {
         Self {
@@ -1186,6 +1212,8 @@ impl Default for RetentionSettings {
             target_max_age: Some(DEFAULT_TARGET_MAX_AGE),
             incremental_max_bytes: Some(INCREMENTAL_BUDGET.fallback),
             incremental_max_age: Some(DEFAULT_TARGET_MAX_AGE),
+            events_max_age: crate::store::SessionRetention::default().max_age,
+            events_max_sessions: crate::store::SessionRetention::default().max_sessions,
             rustc_max_age: None,
             max_total_bytes: None,
             target_precedence: crate::target::Precedence::default(),
@@ -1395,6 +1423,18 @@ impl Config {
             }),
             incremental_max_age: parse_optional_duration(&raw.gc.incremental_max_age)
                 .wrap_err(Invalid("gc.incremental_max_age"))?,
+            events_max_age: parse_optional_duration(&raw.gc.events_max_age)
+                .wrap_err(Invalid("gc.events_max_age"))?,
+            events_max_sessions: if is_no_limit(&raw.gc.events_max_sessions) {
+                None
+            } else {
+                Some(
+                    raw.gc
+                        .events_max_sessions
+                        .parse::<usize>()
+                        .wrap_err(Invalid("gc.events_max_sessions"))?,
+                )
+            },
             rustc_max_age: parse_optional_duration(&raw.gc.rustc_max_age)
                 .wrap_err(Invalid("gc.rustc_max_age"))?,
             max_total_bytes: total_budget,
@@ -3601,5 +3641,36 @@ default = "rust-lld"
         assert!(spec.contains(r#"default="quips""#));
         // The declared log default is the filter the logger actually installs.
         assert!(spec.contains(&format!(r#"default="{}""#, crate::logging::DEFAULT_FILTER)));
+    }
+    #[test]
+    fn session_retention_settings_parse_defaults_files_and_environment() {
+        let (_, retention) = configured_retention(None, &[]).unwrap();
+        assert_eq!(
+            retention.events_max_age,
+            Some(Duration::from_secs(7 * 86_400))
+        );
+        assert_eq!(retention.events_max_sessions, Some(256));
+        let (_, retention) = configured_retention(
+            Some("[gc]\nevents_max_age = \"2d\"\nevents_max_sessions = 512"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            retention.events_max_age,
+            Some(Duration::from_secs(2 * 86_400))
+        );
+        assert_eq!(retention.events_max_sessions, Some(512));
+        let (_, retention) = configured_retention(
+            Some("[gc]\nevents_max_age = \"2d\"\nevents_max_sessions = 512"),
+            &[
+                ("MBX_GC_EVENTS_MAX_AGE", "none"),
+                ("MBX_GC_EVENTS_MAX_SESSIONS", "none"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(retention.events_max_age, None);
+        assert_eq!(retention.events_max_sessions, None);
+        assert!(configured_retention(None, &[("MBX_GC_EVENTS_MAX_AGE", "bad")]).is_err());
+        assert!(configured_retention(None, &[("MBX_GC_EVENTS_MAX_SESSIONS", "bad")]).is_err());
     }
 }

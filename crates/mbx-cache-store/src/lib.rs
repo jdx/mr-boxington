@@ -53,6 +53,22 @@ const SESSION_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const TASK_MANIFEST_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_SESSIONS: usize = 256;
 
+/// Limits on finished session event files. `None` disables a limit.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionRetention {
+    pub max_age: Option<Duration>,
+    pub max_sessions: Option<usize>,
+}
+
+impl Default for SessionRetention {
+    fn default() -> Self {
+        Self {
+            max_age: Some(SESSION_RETENTION),
+            max_sessions: Some(MAX_SESSIONS),
+        }
+    }
+}
+
 /// How long a checkout's claim outlives the last build that renewed it.
 ///
 /// Existence alone is not enough to keep a claim alive. An identity covers one
@@ -2019,12 +2035,42 @@ fn checkout_record_path(store: &Path, identity: &str, workspace_root: &Path) -> 
 /// was written ranks by its write. Evicting a live object costs a recompile,
 /// never correctness.
 pub fn gc(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
-    gc_with_mode(store, max_bytes, false, HashSet::new())
+    gc_with_mode(
+        store,
+        max_bytes,
+        false,
+        HashSet::new(),
+        SessionRetention::default(),
+    )
 }
 
 /// Describe the collection `gc` would perform without changing the store.
 pub fn gc_dry_run(store: &Path, max_bytes: u64) -> Result<GcOutcome> {
-    gc_with_mode(store, max_bytes, true, HashSet::new())
+    gc_with_mode(
+        store,
+        max_bytes,
+        true,
+        HashSet::new(),
+        SessionRetention::default(),
+    )
+}
+
+/// Collect with explicit session event retention limits.
+pub fn gc_with_sessions(
+    store: &Path,
+    max_bytes: u64,
+    sessions: SessionRetention,
+) -> Result<GcOutcome> {
+    gc_with_mode(store, max_bytes, false, HashSet::new(), sessions)
+}
+
+/// Report collection with explicit session event retention limits.
+pub fn gc_dry_run_with_sessions(
+    store: &Path,
+    max_bytes: u64,
+    sessions: SessionRetention,
+) -> Result<GcOutcome> {
+    gc_with_mode(store, max_bytes, true, HashSet::new(), sessions)
 }
 
 #[cfg(test)]
@@ -2045,6 +2091,7 @@ fn gc_with_mode(
     max_bytes: u64,
     dry_run: bool,
     already_removed: HashSet<PathBuf>,
+    sessions: SessionRetention,
 ) -> Result<GcOutcome> {
     let mut objects = walk_files(&store.join(CAS_DIR))?;
     let mut results = walk_files(&store.join(ACTION_RESULTS_DIR))?;
@@ -2214,7 +2261,7 @@ fn gc_with_mode(
         }
     }
 
-    let sessions = prune_sessions(store, dry_run)?;
+    let sessions = prune_sessions(store, dry_run, sessions)?;
     outcome.removed_session_streams += sessions.removed_streams;
     outcome.removed_bytes += sessions.removed_bytes;
     prune_import_staging(store, dry_run);
@@ -2298,8 +2345,23 @@ pub fn gc_dry_run_after_compilers(
     max_bytes: u64,
     selection: &CompilerSelection,
 ) -> Result<GcOutcome> {
+    gc_dry_run_after_compilers_with_sessions(
+        store,
+        max_bytes,
+        selection,
+        SessionRetention::default(),
+    )
+}
+
+/// Report compiler and budget collection with explicit session event retention limits.
+pub fn gc_dry_run_after_compilers_with_sessions(
+    store: &Path,
+    max_bytes: u64,
+    selection: &CompilerSelection,
+    sessions: SessionRetention,
+) -> Result<GcOutcome> {
     let (mut stale, planned) = stale_compilers_pass(store, selection, true)?;
-    let budget = gc_with_mode(store, max_bytes, true, planned)?;
+    let budget = gc_with_mode(store, max_bytes, true, planned, sessions)?;
     stale.removed_objects += budget.removed_objects;
     stale.removed_action_results += budget.removed_action_results;
     stale.removed_checkout_records += budget.removed_checkout_records;
@@ -2552,10 +2614,16 @@ struct SessionPrune {
     removed_bytes: u64,
 }
 
-fn prune_sessions(store: &Path, dry_run: bool) -> Result<SessionPrune> {
+fn prune_sessions(
+    store: &Path,
+    dry_run: bool,
+    retention: SessionRetention,
+) -> Result<SessionPrune> {
     let mut prune = SessionPrune::default();
     let ids = events::session_ids(store);
-    let surplus = ids.len().saturating_sub(MAX_SESSIONS);
+    let surplus = retention
+        .max_sessions
+        .map_or(0, |limit| ids.len().saturating_sub(limit));
     for (index, id) in ids.iter().enumerate() {
         let paths = events::session_paths(store, id);
         let metadata = match std::fs::metadata(&paths.events) {
@@ -2566,7 +2634,7 @@ fn prune_sessions(store: &Path, dry_run: bool) -> Result<SessionPrune> {
             .modified()
             .ok()
             .and_then(|at| SystemTime::now().duration_since(at).ok())
-            .is_some_and(|age| age > SESSION_RETENTION);
+            .is_some_and(|age| retention.max_age.is_some_and(|limit| age > limit));
         if index >= surplus && !stale {
             continue;
         }

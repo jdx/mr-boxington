@@ -80,8 +80,10 @@ mbx compares each compilation with this workspace's most recent earlier
 recording of the same compilation unit. When this workspace has none, mbx uses
 the most recent one from another checkout of the same project.
 `mbx explain --last` uses the same baseline. Recordings come from
-[session history](/tui#recording), which keeps a week of builds, at most 256
-of them.
+[session history](/tui#recording), which by default keeps a week of builds, at
+most 256 of them; [`gc.events_max_age`](/configuration#gc-events-max-age) and
+[`gc.events_max_sessions`](/configuration#gc-events-max-sessions) change those
+limits.
 
 ## Critical path
 
