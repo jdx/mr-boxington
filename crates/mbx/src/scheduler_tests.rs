@@ -1177,21 +1177,23 @@ fn a_container_short_of_its_own_memory_waits_only_for_its_own_compilations() {
     drop((second, elsewhere));
 }
 
-#[cfg(target_os = "linux")]
 #[test]
-fn a_supervised_lease_also_names_the_cgroup_root_its_compiler_may_move_to() {
+fn a_lease_follows_its_compiler_into_a_supervised_cgroup() {
     let directory = tempfile::tempdir().unwrap();
-    let root = tempfile::tempdir().unwrap();
     let mut pool = pool_at(directory.path(), 4, 100);
     pool.memory_cgroups = cgroups(&["0:1"]);
-    pool.place_leases(Some(root.path()));
-    let root_id = crate::cgroup::identity(root.path()).unwrap();
-    assert_eq!(pool.memory_cgroups, ["0:1".to_string(), root_id]);
-    // A root that cannot be found moves nothing.
-    pool.memory_cgroups = cgroups(&["0:1"]);
-    pool.place_leases(Some(&root.path().join("missing")));
-    pool.place_leases(None);
-    assert_eq!(pool.memory_cgroups, ["0:1".to_string()]);
+    let earlier = pool.try_admit(1, None).unwrap().unwrap();
+    let compiler = pool.try_admit(1, None).unwrap().unwrap();
+    pool.relocate_lease("0:9");
+    let read = |permit: &Permit| {
+        serde_json::from_slice::<Lease>(&std::fs::read(&permit.path).unwrap())
+            .unwrap()
+            .cgroups
+    };
+    // Only the lease for the compiler just launched moves.
+    assert_eq!(read(&compiler), Some(vec!["0:9".to_string()]));
+    assert_eq!(read(&earlier), Some(vec!["0:1".to_string()]));
+    drop((earlier, compiler));
 }
 
 #[test]

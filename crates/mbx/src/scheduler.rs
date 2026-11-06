@@ -205,6 +205,11 @@ const SLOW_WAIT_NOTICE: Duration = Duration::from_secs(60);
 /// forever: past this deadline the permit arithmetic alone decides.
 const GATE_DEADLINE: Duration = Duration::from_secs(120);
 
+/// The lease this process was granted most recently in each pool; see
+/// `relocate_lease`.
+static LAST_GRANT: std::sync::Mutex<BTreeMap<PathBuf, PathBuf>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
 /// Distinguishes leases created by one process, which may hold several.
 static LEASE_NONCE: AtomicU64 = AtomicU64::new(0);
 
@@ -1684,12 +1689,6 @@ fn resolve_pool() -> Option<Pool> {
                     .unwrap_or_else(|| capacity.saturating_mul(pool.bytes_per_permit)),
             );
             pool.pressure = env_number(SCHED_PRESSURE_ENV) == Some(1);
-            pool.place_leases(
-                (env_number(SCHED_SUSPEND_ENV) == Some(1))
-                    .then(|| std::env::var_os("MBX_SCHED_CGROUP_ROOT").map(PathBuf::from))
-                    .flatten()
-                    .as_deref(),
-            );
             pool.build = std::env::var(SCHED_BUILD_ID_ENV)
                 .ok()
                 .filter(|id| !id.is_empty())
@@ -1956,25 +1955,43 @@ impl Pool {
         }
     }
 
-    /// Add `supervised`, the `scheduler.cgroup_root` compiler supervision
-    /// moves compilers under, to the cgroups this process's leases record.
+    /// Rewrite the lease this process was last granted to say its compiler
+    /// now sits in `cgroup`, after compiler supervision moved it there.
     ///
-    /// Supervision decides after admission whether a compiler moves, and it
-    /// falls back to leaving the compiler where it is, so a lease names both
-    /// places. That can only make a gate wait for a compilation that holds
-    /// none of its memory, never ignore one that does. A root that cannot be
-    /// found is one supervision cannot use either, so nothing moves.
-    fn place_leases(&mut self, supervised: Option<&Path>) {
-        #[cfg(target_os = "linux")]
-        if let Some(root) = supervised.and_then(crate::cgroup::identity)
-            && !self.memory_cgroups.is_empty()
-        {
-            let mut cgroups = self.memory_cgroups.to_vec();
-            cgroups.push(root);
-            self.memory_cgroups = Box::leak(cgroups.into_boxed_slice());
+    /// A lease is written at admission, before supervision decides whether
+    /// the compiler moves, so it first names this process's own cgroups. A
+    /// moved compiler's memory is charged under `scheduler.cgroup_root`
+    /// instead, and a gate short of that memory has to find it there. Only
+    /// compiler wrappers are supervised, and each launches the compiler its
+    /// last grant admitted. Rewritten under the registrar lock, so no
+    /// admission reads a lease half-written; a lease that cannot be rewritten
+    /// keeps its old place.
+    pub(crate) fn relocate_lease(&self, cgroup: &str) {
+        let Some(path) = LAST_GRANT
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&self.dir)
+            .cloned()
+        else {
+            return;
+        };
+        let Ok(mut registrar) = fslock::LockFile::open(&self.dir.join(POOL_LOCK)) else {
+            return;
+        };
+        if registrar.lock().is_err() {
+            return;
         }
-        #[cfg(not(target_os = "linux"))]
-        let _ = supervised;
+        let Some(mut lease) = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Lease>(&bytes).ok())
+        else {
+            return;
+        };
+        lease.cgroups = Some(vec![cgroup.into()]);
+        if let Ok(record) = serde_json::to_vec(&lease) {
+            // Truncating and rewriting keeps the holder's lock on the file.
+            let _ = std::fs::write(&path, record);
+        }
     }
 
     fn from_config(config: &Config) -> Option<Self> {
@@ -1991,7 +2008,6 @@ impl Pool {
             pool.set_memory_capacity(scheduler.memory_bytes.unwrap_or(0));
             pool.events = config.events;
             pool.pressure = scheduler.pressure;
-            pool.place_leases(crate::supervision::destination(scheduler).as_deref());
             pool
         })
     }
@@ -2576,7 +2592,12 @@ impl Pool {
             bytes_per_permit: self.bytes_per_permit,
             written: None,
         })?;
-        self.lock_record(leases, &lease)
+        let permit = self.lock_record(leases, &lease)?;
+        LAST_GRANT
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(self.dir.clone(), permit.path.clone());
+        Ok(permit)
     }
 
     fn lock_record(&self, leases: &Path, record: &[u8]) -> Result<Permit> {

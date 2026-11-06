@@ -184,6 +184,13 @@ impl Action {
         if !populated(&self.path) {
             return;
         }
+        // The compiler's memory is now charged here, not where its lease
+        // said at admission.
+        if let Some(pool) = crate::scheduler::pool()
+            && let Some(cgroup) = crate::cgroup::identity(&self.path)
+        {
+            pool.relocate_lease(&cgroup);
+        }
         let _ = write(
             &self.registry.join(format!("{}.json", self.id)),
             &crate::pressure::now_ms(),

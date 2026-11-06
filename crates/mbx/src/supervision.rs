@@ -23,7 +23,11 @@ pub(crate) fn prepare(command: &mut Command, eligible: bool) -> Option<Action> {
     }
     let pool = crate::scheduler::pool()?;
     let settings = crate::config::Config::load().ok()?.scheduler;
-    if !enabled(&settings) {
+    let enabled = std::env::var("MBX_SCHED_SUSPEND").ok().map_or(
+        settings.suspend && settings.pressure && settings.memory_bytes.is_some(),
+        |v| v == "1",
+    );
+    if !enabled {
         return None;
     }
     #[cfg(target_os = "linux")]
@@ -31,7 +35,11 @@ pub(crate) fn prepare(command: &mut Command, eligible: bool) -> Option<Action> {
         if !linux::direct_driver(command.get_program()) {
             return None;
         }
-        match root(&settings)
+        let root = std::env::var_os("MBX_SCHED_CGROUP_ROOT")
+            .map(std::path::PathBuf::from)
+            .or(settings.cgroup_root);
+        match root
+            .filter(|p| !p.as_os_str().is_empty())
             .ok_or_else(|| eyre::eyre!("scheduler.cgroup_root is not configured"))
             .and_then(|root| linux::prepare(command, &pool.dir, &root))
         {
@@ -51,30 +59,6 @@ pub(crate) fn prepare(command: &mut Command, eligible: bool) -> Option<Action> {
         );
     }
     None
-}
-
-/// Whether supervision is on, the session's word overriding configuration.
-fn enabled(settings: &crate::config::SchedulerSettings) -> bool {
-    std::env::var("MBX_SCHED_SUSPEND").ok().map_or(
-        settings.suspend && settings.pressure && settings.memory_bytes.is_some(),
-        |v| v == "1",
-    )
-}
-
-/// The configured cgroup root compilers are moved under, if any.
-fn root(settings: &crate::config::SchedulerSettings) -> Option<std::path::PathBuf> {
-    std::env::var_os("MBX_SCHED_CGROUP_ROOT")
-        .map(std::path::PathBuf::from)
-        .or_else(|| settings.cgroup_root.clone())
-        .filter(|p| !p.as_os_str().is_empty())
-}
-
-/// Where supervision would move compilers, when it is on; `prepare` may
-/// still leave one where it is.
-pub(crate) fn destination(
-    settings: &crate::config::SchedulerSettings,
-) -> Option<std::path::PathBuf> {
-    enabled(settings).then(|| root(settings)).flatten()
 }
 
 fn warn_once(pool: &std::path::Path, message: &str) {
