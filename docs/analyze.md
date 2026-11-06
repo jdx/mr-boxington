@@ -86,7 +86,7 @@ where that state came from, with compiler time and count for each source:
 
 ```text
 private incremental state for 42 compilations
- 6m 12s  reused this checkout's state (30)
+ 6m 12s  started from this checkout's earlier state (30)
  1m 40s  seeded from another checkout, copying 1.2 GiB in 3.1s (8)
     52s  started empty: no other checkout had it (4)
 ```
@@ -94,9 +94,11 @@ private incremental state for 42 compilations
 Seeded state is copied from the checkout that used it most recently, so a new
 checkout does not start from nothing. State starts empty when no other
 checkout has state for the same compilation, while a one-time discard of older
-state is pending, or when the compilation's state cannot be shared between
-checkouts. `reused this checkout's state` means the state directory was
-already there; rustc decides how much of it to reuse.
+state is pending, when the compilation's state cannot be shared between
+checkouts, or when this checkout's state directory exists but holds no
+finished session, as after a compilation that failed early; seeding passes
+such a directory over. `started from this checkout's earlier state` means the
+directory held a finished session; rustc decides how much of it to reuse.
 
 ## What it compares against
 

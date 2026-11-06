@@ -34,13 +34,16 @@ pub struct CompileMetadata {
 /// Where a compilation's private incremental state came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncrementalState {
-    /// `existing` (the unit's state directory was already there, which does
-    /// not prove rustc could reuse it), `seeded` (copied from another
-    /// checkout), `cold` (started empty), or `failed` (seeding errored).
+    /// `existing` (the unit's state directory already held a finished rustc
+    /// session; rustc decides how much of it to reuse), `seeded` (copied from
+    /// another checkout), `cold` (started empty), or `failed` (seeding
+    /// errored).
     pub source: String,
     /// Why state started cold: `no-donor` (no other checkout had it),
-    /// `not-ready` (a one-time state discard is still pending), or
-    /// `seeding-off` (this compilation's state cannot be shared).
+    /// `not-ready` (a one-time state discard is still pending),
+    /// `seeding-off` (this compilation's state cannot be shared), or
+    /// `empty-directory` (its state directory held no finished session, so
+    /// seeding passed it over).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// The workspace root of the checkout seeded state was copied from.

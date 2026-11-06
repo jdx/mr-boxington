@@ -2108,7 +2108,11 @@ fn incremental_directory_with_state(
         return (None, None);
     };
     let directory = root.join(shard);
-    let state = if directory.is_dir() {
+    // A directory that is there but holds no finished rustc session, as after
+    // a compilation that failed before rustc saved one, gives rustc nothing to
+    // start from, and seeding passes it over too. Report that as an empty
+    // start rather than as state this checkout already had.
+    let state = if directory.is_dir() && incremental::holds_finished_session(&directory) {
         IncrementalState {
             source: "existing".into(),
             reason: None,
@@ -2117,6 +2121,8 @@ fn incremental_directory_with_state(
             bytes: None,
             copy_ns: None,
         }
+    } else if directory.is_dir() {
+        cold_state("empty-directory")
     } else if !seedable {
         cold_state("seeding-off")
     } else {

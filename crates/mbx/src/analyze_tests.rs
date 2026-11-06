@@ -698,7 +698,10 @@ fn the_report_says_where_private_incremental_state_came_from() {
         text.contains("started empty: no other checkout had it (1)"),
         "{text}"
     );
-    assert!(text.contains("reused this checkout's state (1)"), "{text}");
+    assert!(
+        text.contains("started from this checkout's earlier state (1)"),
+        "{text}"
+    );
 }
 
 #[test]

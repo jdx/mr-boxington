@@ -451,7 +451,7 @@ impl Analysis {
         ranked.sort_by(|left, right| right.1.1.cmp(&left.1.1).then_with(|| left.0.cmp(right.0)));
         for ((source, reason), (count, duration_ns)) in ranked {
             let label = match (source.as_str(), reason.as_deref()) {
-                ("existing", _) => "reused this checkout's state".to_string(),
+                ("existing", _) => "started from this checkout's earlier state".to_string(),
                 ("seeded", _) => format!(
                     "seeded from another checkout, copying {} in {}",
                     crate::stats::size(self.private_state.seeded_bytes),
@@ -463,6 +463,9 @@ impl Analysis {
                 }
                 ("cold", Some("seeding-off")) => {
                     "started empty: this state cannot be shared between checkouts".into()
+                }
+                ("cold", Some("empty-directory")) => {
+                    "started empty: this checkout's state directory held no finished session".into()
                 }
                 ("cold", _) => "started empty".into(),
                 ("failed", _) => "seeding failed, so it started empty".into(),

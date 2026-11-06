@@ -1691,7 +1691,7 @@ fn is_unfinished_session(name: &std::ffi::OsStr) -> bool {
 
 /// Whether a unit's directory holds a session rustc finished:
 /// `<crate>-<hash>/s-...`.
-fn holds_finished_session(unit: &Path) -> bool {
+pub(crate) fn holds_finished_session(unit: &Path) -> bool {
     let Ok(crates) = std::fs::read_dir(unit) else {
         return false;
     };
