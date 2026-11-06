@@ -197,6 +197,10 @@ impl State {
     }
 
     fn update(&mut self, now: u64, reading: Reading) {
+        // An episode under way with nothing blamed was recorded by a version
+        // that kept no causes. Its cause stays unknown until it ends.
+        let unknown_cause =
+            (self.pressured || self.recovered_ms.is_some()) && self.blamed.is_empty();
         let elapsed = now
             .checked_sub(self.sampled_ms)
             .filter(|n| *n > 0 && *n <= STALE_MS);
@@ -291,7 +295,7 @@ impl State {
             self.recovered_ms = None;
         }
         if self.pressured || self.recovered_ms.is_some() {
-            for scope in unhealthy {
+            for scope in unknown_cause.then_some(None).into_iter().chain(unhealthy) {
                 if !self.blamed.contains(&scope) {
                     self.blamed.push(scope);
                 }
@@ -578,9 +582,22 @@ mod tests {
         assert_eq!(state.short_scopes(), Some(vec!["0:8".into()]));
         let mut older: serde_json::Value = serde_json::to_value(&state).unwrap();
         older.as_object_mut().unwrap().remove("blamed");
-        let older: State = serde_json::from_value(older).unwrap();
+        let mut older: State = serde_json::from_value(older).unwrap();
         assert!(older.pressured);
         assert_eq!(older.short_scopes(), None);
+        // Later samples blaming a child do not narrow the unknown cause.
+        older.update(2_000, reading_short_child());
+        assert!(older.pressured);
+        assert_eq!(older.short_scopes(), None);
+    }
+
+    fn reading_short_child() -> Reading {
+        Reading {
+            total: Some(100),
+            available: Some(8),
+            limits: vec![limit(None, 90), limit(Some("0:8"), 8)],
+            ..Reading::default()
+        }
     }
 
     /// Containers expose different cgroups at the same pathname. Each counter

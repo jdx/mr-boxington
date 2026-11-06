@@ -115,6 +115,8 @@ const SCHED_PRESSURE_ENV: &str = "MBX_SCHED_PRESSURE";
 /// The session's resolved events gate, including workspace overrides.
 const SCHED_EVENTS_ENV: &str = "MBX_SCHED_EVENTS";
 const SCHED_BUILD_ID_ENV: &str = "MBX_SCHED_BUILD_ID";
+/// Whether compiler supervision may move compilers into their own cgroups.
+const SCHED_SUSPEND_ENV: &str = "MBX_SCHED_SUSPEND";
 /// Most CPU cores one Cargo build may hold at once.
 const SCHED_BUILD_SLOTS_ENV: &str = "MBX_SCHED_BUILD_SLOTS";
 
@@ -1652,6 +1654,7 @@ pub(crate) fn reservation_pool(config: &Config, priority: SchedulerPriority) -> 
         pool.set_memory_capacity(scheduler.memory_bytes.unwrap_or(0));
         pool.events = config.events;
         pool.pressure = scheduler.pressure;
+        pool.place_leases(suspends(scheduler));
         pool
     })
 }
@@ -1680,6 +1683,7 @@ fn resolve_pool() -> Option<Pool> {
                     .unwrap_or_else(|| capacity.saturating_mul(pool.bytes_per_permit)),
             );
             pool.pressure = env_number(SCHED_PRESSURE_ENV) == Some(1);
+            pool.place_leases(env_number(SCHED_SUSPEND_ENV) == Some(1));
             pool.build = std::env::var(SCHED_BUILD_ID_ENV)
                 .ok()
                 .filter(|id| !id.is_empty())
@@ -1754,9 +1758,8 @@ pub(crate) fn session_environment_with_jobs(
             scheduler.priority.as_str().into(),
         ),
         (
-            "MBX_SCHED_SUSPEND".into(),
-            u8::from(scheduler.suspend && scheduler.pressure && scheduler.memory_bytes.is_some())
-                .to_string(),
+            SCHED_SUSPEND_ENV.into(),
+            u8::from(suspends(scheduler)).to_string(),
         ),
         (
             "MBX_SCHED_CGROUP_ROOT".into(),
@@ -1768,6 +1771,11 @@ pub(crate) fn session_environment_with_jobs(
         (SCHED_BUILD_ID_ENV.into(), crate::util::random_string(12)),
         (SCHED_BUILD_SLOTS_ENV.into(), build_permits.to_string()),
     ]
+}
+
+/// Whether compiler supervision is on; see `supervision::prepare`.
+fn suspends(scheduler: &crate::config::SchedulerSettings) -> bool {
+    scheduler.suspend && scheduler.pressure && scheduler.memory_bytes.is_some()
 }
 
 fn bytes_per_permit(memory_bytes: Option<u64>, cpus: u64) -> u64 {
@@ -1942,6 +1950,15 @@ impl Pool {
         }
     }
 
+    /// Record this process's cgroups in its leases unless supervision may
+    /// run its compilers in other cgroups, under `scheduler.cgroup_root`.
+    /// Leases that do not say where their compiler sits count everywhere.
+    fn place_leases(&mut self, supervised: bool) {
+        if supervised {
+            self.memory_cgroups = &[];
+        }
+    }
+
     fn from_config(config: &Config) -> Option<Self> {
         let scheduler = &config.scheduler;
         let permits = scheduler.permits();
@@ -1956,6 +1973,7 @@ impl Pool {
             pool.set_memory_capacity(scheduler.memory_bytes.unwrap_or(0));
             pool.events = config.events;
             pool.pressure = scheduler.pressure;
+            pool.place_leases(suspends(scheduler));
             pool
         })
     }
