@@ -97,11 +97,12 @@ const WRITE_TIME_SLACK_MS: u64 = 100;
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Walk {
     began_ms: u64,
-    /// The newest lease time this walk is known to have begun after: it was
-    /// made for a lease already written, whatever that lease's file time
-    /// says. Leases this old need no walk of their own.
+    /// Cgroups known to exist when this walk began: those of the leases it
+    /// was made for, already written by then. One of them missing from
+    /// `members` is outside for good, since a cgroup never moves and its
+    /// ancestors are outside whatever it is outside of.
     #[serde(default)]
-    covers_ms: u64,
+    existed: BTreeSet<String>,
     /// `None` when part of the subtree could not be read.
     members: Option<BTreeSet<String>>,
 }
@@ -155,22 +156,22 @@ pub(crate) fn contains(
     let cached = std::fs::read(&file)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Walk>(&bytes).ok());
-    let mut covers_ms = written_ms;
+    let mut existed: BTreeSet<String> = cgroups.iter().cloned().collect();
     if let Some(walk) = &cached {
         let fresh = walk.began_ms <= now && now - walk.began_ms < SUBTREE_REFRESH_MS;
-        let after =
-            written_ms <= walk.covers_ms || written_ms + WRITE_TIME_SLACK_MS < walk.began_ms;
-        if fresh && (found(walk) || after) {
+        let seen = cgroups.iter().any(|id| walk.existed.contains(id))
+            || written_ms + WRITE_TIME_SLACK_MS < walk.began_ms;
+        if fresh && (found(walk) || seen) {
             return found(walk);
         }
         // Whatever the last walk was made for, this one begins later still.
-        covers_ms = covers_ms.max(walk.covers_ms);
+        existed.extend(walk.existed.iter().cloned());
     } else {
         crate::pressure::prune(&directory, SystemTime::now());
     }
     let walk = Walk {
         began_ms: now,
-        covers_ms,
+        existed,
         members: subtree(path),
     };
     if let Ok(bytes) = serde_json::to_vec(&walk) {
@@ -584,7 +585,7 @@ mod tests {
         let file = pool.path().join(SUBTREES_DIR).join(format!("{scope}.json"));
         let shared = Walk {
             began_ms: crate::pressure::now_ms() - 500,
-            covers_ms: 0,
+            existed: BTreeSet::new(),
             members: Some(BTreeSet::from(["0:5".to_string()])),
         };
         std::fs::write(&file, serde_json::to_vec(&shared).unwrap()).unwrap();
@@ -600,6 +601,10 @@ mod tests {
         let again = read().began_ms;
         assert!(!contains(pool.path(), scope, &["0:0".into()], now));
         assert_eq!(read().began_ms, again, "not walked a third time");
+        // A new cgroup written in the same instant is not covered by it.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(!contains(pool.path(), scope, &["0:1".into()], now));
+        assert_ne!(read().began_ms, again, "walked for the new cgroup");
     }
 
     #[test]
