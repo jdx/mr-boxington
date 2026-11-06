@@ -154,6 +154,7 @@ pub(super) fn prepare(command: &mut Command, pool: &Path, root: &Path) -> Result
         path,
         id,
         _lease: lease,
+        relocated: false,
     };
     command.env("MBX_CONTROL_CHILD", "1");
     // SAFETY: only an async-signal-safe write is performed between fork and exec.
@@ -176,6 +177,8 @@ pub(crate) struct Action {
     path: PathBuf,
     id: String,
     _lease: fslock::LockFile,
+    /// Whether the scheduler lease now names this action's cgroup.
+    relocated: bool,
 }
 impl Action {
     /// Publish only after spawn's exec handshake. Freezing before then could
@@ -189,7 +192,8 @@ impl Action {
         if let Some(pool) = crate::scheduler::pool()
             && let Some(cgroup) = crate::cgroup::identity(&self.path)
         {
-            pool.relocate_lease(&cgroup);
+            pool.relocate_lease(Some(&cgroup));
+            self.relocated = true;
         }
         let _ = write(
             &self.registry.join(format!("{}.json", self.id)),
@@ -218,6 +222,11 @@ impl Drop for Action {
         }
         let _ = std::fs::remove_dir(&self.path);
         let _ = std::fs::remove_file(self.registry.join(format!("{}.lease", self.id)));
+        if self.relocated
+            && let Some(pool) = crate::scheduler::pool()
+        {
+            pool.relocate_lease(None);
+        }
     }
 }
 fn enable_memory(group: &Path) -> Result<()> {

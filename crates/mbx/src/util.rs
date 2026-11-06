@@ -591,6 +591,12 @@ pub fn short_scopes(scopes: impl IntoIterator<Item = Option<String>>) -> Option<
         .filter(|scopes| !scopes.is_empty())
 }
 
+/// Memory the machine could hand a new process right now, when measurable;
+/// the figure `memory_available` reports with its limits.
+pub fn memory_available_bytes() -> Option<u64> {
+    memory_available().map(|available| available.bytes)
+}
+
 /// Memory the machine could hand a new process right now, when measurable.
 ///
 /// "Available" deliberately counts reclaimable memory rather than free pages

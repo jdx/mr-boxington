@@ -1184,7 +1184,7 @@ fn a_lease_follows_its_compiler_into_a_supervised_cgroup() {
     pool.memory_cgroups = cgroups(&["0:1"]);
     let earlier = pool.try_admit(1, None).unwrap().unwrap();
     let compiler = pool.try_admit(1, None).unwrap().unwrap();
-    pool.relocate_lease("0:9");
+    pool.relocate_lease(Some("0:9"));
     let read = |permit: &Permit| {
         serde_json::from_slice::<Lease>(&std::fs::read(&permit.path).unwrap())
             .unwrap()
@@ -1193,6 +1193,9 @@ fn a_lease_follows_its_compiler_into_a_supervised_cgroup() {
     // Only the lease for the compiler just launched moves.
     assert_eq!(read(&compiler), Some(vec!["0:9".to_string()]));
     assert_eq!(read(&earlier), Some(vec!["0:1".to_string()]));
+    // A finished supervised compiler puts the lease back for a retry.
+    pool.relocate_lease(None);
+    assert_eq!(read(&compiler), Some(vec!["0:1".to_string()]));
     drop((earlier, compiler));
 }
 

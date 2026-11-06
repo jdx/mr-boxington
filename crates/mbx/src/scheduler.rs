@@ -1956,7 +1956,9 @@ impl Pool {
     }
 
     /// Rewrite the lease this process was last granted to say its compiler
-    /// now sits in `cgroup`, after compiler supervision moved it there.
+    /// now sits in `cgroup`, after compiler supervision moved it there, or,
+    /// with `None` once that compiler is done, back where it was granted:
+    /// one permit can cover a retried compiler that runs unsupervised.
     ///
     /// A lease is written at admission, before supervision decides whether
     /// the compiler moves, so it first names this process's own cgroups. A
@@ -1966,7 +1968,7 @@ impl Pool {
     /// last grant admitted. Rewritten under the registrar lock, so no
     /// admission reads a lease half-written; a lease that cannot be rewritten
     /// keeps its old place.
-    pub(crate) fn relocate_lease(&self, cgroup: &str) {
+    pub(crate) fn relocate_lease(&self, cgroup: Option<&str>) {
         let Some(path) = LAST_GRANT
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -1987,7 +1989,10 @@ impl Pool {
         else {
             return;
         };
-        lease.cgroups = Some(vec![cgroup.into()]);
+        lease.cgroups = match cgroup {
+            Some(cgroup) => Some(vec![cgroup.into()]),
+            None => (!self.memory_cgroups.is_empty()).then(|| self.memory_cgroups.to_vec()),
+        };
         if let Ok(record) = serde_json::to_vec(&lease) {
             // Truncating and rewriting keeps the holder's lock on the file.
             let _ = std::fs::write(&path, record);
