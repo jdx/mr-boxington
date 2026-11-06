@@ -157,15 +157,19 @@ fn subtree(path: &Path) -> Option<HashSet<String>> {
         };
         for entry in entries {
             let entry = entry.ok()?;
+            // Every cgroup holds dozens of control files. The entry's own
+            // type, read with the directory, skips them without a `stat`
+            // each, so the walk costs one call per cgroup.
+            if !entry.file_type().ok()?.is_dir() {
+                continue;
+            }
             let metadata = match entry.metadata() {
                 Ok(metadata) => metadata,
                 Err(error) if gone(&error) => continue,
                 Err(_) => return None,
             };
-            if metadata.is_dir() {
-                members.insert(format!("{}:{}", metadata.dev(), metadata.ino()));
-                pending.push(entry.path());
-            }
+            members.insert(format!("{}:{}", metadata.dev(), metadata.ino()));
+            pending.push(entry.path());
         }
     }
     Some(members)
