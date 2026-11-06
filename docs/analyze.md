@@ -5,7 +5,10 @@ description: Rank where a build's uncached compiler time went, and see what woul
 
 `mbx analyze` reads the most recent recorded build of the current workspace,
 groups its uncached compiler time by cause, largest first, and shows the chain
-of units the build waited on. It runs nothing.
+of units the build waited on. It runs nothing. The workspace is the deepest
+recorded one that contains the current directory, so a checkout nested inside
+another project's directory reports its own builds; the report names the
+workspace it read.
 
 ```sh
 cargo check
@@ -19,6 +22,7 @@ report after editing `engine` begins like this:
 
 ```text
 last recorded build: cargo check
+workspace: /home/me/demo
 compiler time: 47.7ms in 3 uncached compilations
 
 uncached compiler time by cause
