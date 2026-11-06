@@ -34,7 +34,7 @@ fn pool_at(dir: &Path, capacity: u64, bytes_per_permit: u64) -> Pool {
 }
 
 /// Membership by the lists alone, for cgroups that exist only in a test.
-fn listed(_: &Path, scope: &str, cgroups: &[String], _: Option<std::time::SystemTime>) -> bool {
+fn listed(_: &Path, scope: &str, cgroups: &[String], _: Option<u64>) -> bool {
     cgroups.iter().any(|id| id == scope)
 }
 
@@ -297,7 +297,7 @@ fn a_dead_holders_lease_is_reclaimed() {
             build_id: None,
             domain: None,
             cgroups: None,
-            written: None,
+            written_ms: None,
             bytes_per_permit: 0,
         })
         .unwrap(),
@@ -2793,7 +2793,7 @@ fn sim_lease(record: &Waiting) -> Lease {
         build_id: record.build.as_ref().map(|(id, _)| id.clone()),
         domain: Some(record.domain.clone()),
         cgroups: None,
-        written: None,
+        written_ms: None,
         bytes_per_permit: record.bytes_per_permit,
     }
 }

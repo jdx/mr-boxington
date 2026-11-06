@@ -89,28 +89,20 @@ pub(crate) fn identity(path: &Path) -> Option<String> {
 const SUBTREES_DIR: &str = "subtrees";
 /// How long one walk of a cgroup's subtree is reused for leases older than it.
 const SUBTREE_REFRESH_MS: u64 = 1_000;
-/// File times are kept at the kernel's clock-tick granularity, so a lease
-/// written just after a walk began can carry a time just before it.
-const WRITE_TIME_SLACK_MS: u64 = 100;
 
 /// One walk of a cgroup's subtree, by wall-clock time so processes can share it.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Walk {
     began_ms: u64,
-    /// Cgroups known to exist when this walk began: those of the leases it
-    /// was made for, already written by then. One of them missing from
-    /// `members` is outside for good, since a cgroup never moves and its
-    /// ancestors are outside whatever it is outside of.
-    #[serde(default)]
-    existed: BTreeSet<String>,
     /// `None` when part of the subtree could not be read.
     members: Option<BTreeSet<String>>,
 }
 
 /// Whether a process sitting in `cgroups` is charged to the cgroup `scope`,
-/// one of this process's own memory cgroups. `written` is when the process
-/// recorded its cgroups, if known. Called under the registrar lock of
-/// `pool`, which also guards the walks shared there.
+/// one of this process's own memory cgroups. `written_ms` is when the
+/// process recorded its cgroups, if known, by the clock `pressure::now_ms`
+/// reads. Called under the registrar lock of `pool`, which also guards the
+/// walks shared there.
 ///
 /// Finding `scope` in the list is not enough. A process sees only the cgroups
 /// its namespace shows, so a compilation in a container nested below `scope`
@@ -118,10 +110,11 @@ struct Walk {
 /// its cgroups in `scope`'s subtree instead, which this process can see
 /// whenever it can see `scope`.
 ///
-/// Only a complete walk that began after the cgroups were recorded can show
-/// they are outside `scope`: the cgroups existed by then, so the walk saw
-/// them. Anything less -- a scope this process cannot find, a subtree it
-/// cannot fully read, a record of unknown age -- counts as inside.
+/// Only a complete walk that began in a later millisecond than the cgroups
+/// were recorded can show they are outside `scope`: the cgroups existed by
+/// then, so the walk saw them. Anything less -- a scope this process cannot
+/// find, a subtree it cannot fully read, a record of unknown age, a walk
+/// begun in the same millisecond -- counts as inside.
 ///
 /// Every waiter asks this on each poll, so one walk is shared through the
 /// pool rather than repeated in each process: a cgroup is walked at most
@@ -130,21 +123,18 @@ pub(crate) fn contains(
     pool: &Path,
     scope: &str,
     cgroups: &[String],
-    written: Option<SystemTime>,
+    written_ms: Option<u64>,
 ) -> bool {
     if cgroups.iter().any(|id| id == scope) {
         return true;
     }
-    let Some(((path, _), written)) = directories()
+    let Some(((path, _), written_ms)) = directories()
         .iter()
         .find(|(_, id)| id == scope)
-        .zip(written)
+        .zip(written_ms)
     else {
         return true;
     };
-    let written_ms = written
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |time| time.as_millis().min(u128::from(u64::MAX)) as u64);
     let found = |walk: &Walk| {
         walk.members
             .as_ref()
@@ -156,28 +146,23 @@ pub(crate) fn contains(
     let cached = std::fs::read(&file)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Walk>(&bytes).ok());
-    let mut existed: BTreeSet<String> = cgroups.iter().cloned().collect();
     if let Some(walk) = &cached {
         let fresh = walk.began_ms <= now && now - walk.began_ms < SUBTREE_REFRESH_MS;
-        let seen = cgroups.iter().any(|id| walk.existed.contains(id))
-            || written_ms + WRITE_TIME_SLACK_MS < walk.began_ms;
-        if fresh && (found(walk) || seen) {
+        if fresh && (found(walk) || written_ms < walk.began_ms) {
             return found(walk);
         }
-        // Whatever the last walk was made for, this one begins later still.
-        existed.extend(walk.existed.iter().cloned());
     } else {
         crate::pressure::prune(&directory, SystemTime::now());
     }
     let walk = Walk {
         began_ms: now,
-        existed,
         members: subtree(path),
     };
     if let Ok(bytes) = serde_json::to_vec(&walk) {
         let _ = crate::util::write_advisory(&file, &bytes);
     }
-    found(&walk)
+    // A record from this same millisecond cannot be ordered against the walk.
+    found(&walk) || written_ms >= walk.began_ms
 }
 
 /// The identities of every cgroup below `path`, or `None` when some part of
@@ -540,9 +525,8 @@ mod tests {
     #[test]
     fn a_scope_this_process_cannot_find_contains_everything() {
         let pool = tempfile::tempdir().unwrap();
-        let old = Some(SystemTime::UNIX_EPOCH);
-        assert!(contains(pool.path(), "0:0", &["1:1".into()], old));
-        assert!(contains(pool.path(), "1:1", &["1:1".into()], old));
+        assert!(contains(pool.path(), "0:0", &["1:1".into()], Some(0)));
+        assert!(contains(pool.path(), "1:1", &["1:1".into()], Some(0)));
     }
 
     #[test]
@@ -557,12 +541,12 @@ mod tests {
         let pool = tempfile::tempdir().unwrap();
         let outside = ["0:0".to_string()];
         // Written just now: the walk made for it must begin after it.
-        assert!(!contains(
-            pool.path(),
-            scope,
-            &outside,
-            Some(SystemTime::now())
-        ));
+        let written = crate::pressure::now_ms();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(!contains(pool.path(), scope, &outside, Some(written)));
+        // A record from the walk's own millisecond cannot be ordered.
+        let same = crate::pressure::now_ms() + 1_000;
+        assert!(contains(pool.path(), scope, &outside, Some(same)));
         assert!(
             contains(pool.path(), scope, &outside, None),
             "a record of unknown age"
@@ -578,14 +562,13 @@ mod tests {
             return;
         }
         let pool = tempfile::tempdir().unwrap();
-        let old = Some(SystemTime::UNIX_EPOCH);
+        let old = Some(0);
         assert!(!contains(pool.path(), scope, &["0:0".into()], old));
         // Another process's fresh walk is believed as it is, both in what
         // it found and, for leases older than it, in what it did not.
         let file = pool.path().join(SUBTREES_DIR).join(format!("{scope}.json"));
         let shared = Walk {
             began_ms: crate::pressure::now_ms() - 500,
-            existed: BTreeSet::new(),
             members: Some(BTreeSet::from(["0:5".to_string()])),
         };
         std::fs::write(&file, serde_json::to_vec(&shared).unwrap()).unwrap();
@@ -594,17 +577,18 @@ mod tests {
         let read = || serde_json::from_slice::<Walk>(&std::fs::read(&file).unwrap()).unwrap();
         assert_eq!(read().members, shared.members, "no walk was needed");
         // A lease newer than that walk gets a walk of its own.
-        let now = Some(SystemTime::now());
-        assert!(!contains(pool.path(), scope, &["0:0".into()], now));
-        assert_ne!(read().members, shared.members, "walked again");
-        // Other waiters reuse that walk for the same lease, inside the slack.
-        let again = read().began_ms;
-        assert!(!contains(pool.path(), scope, &["0:0".into()], now));
-        assert_eq!(read().began_ms, again, "not walked a third time");
-        // A new cgroup written in the same instant is not covered by it.
+        let newer = Some(shared.began_ms + 1);
         std::thread::sleep(std::time::Duration::from_millis(2));
-        assert!(!contains(pool.path(), scope, &["0:1".into()], now));
-        assert_ne!(read().began_ms, again, "walked for the new cgroup");
+        assert!(!contains(pool.path(), scope, &["0:0".into()], newer));
+        assert_ne!(read().members, shared.members, "walked again");
+        // Other waiters reuse that walk for the same lease.
+        let again = read().began_ms;
+        assert!(!contains(pool.path(), scope, &["0:0".into()], newer));
+        assert_eq!(read().began_ms, again, "not walked a third time");
+        // A lease from the walk's own millisecond gets a walk of its own.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(!contains(pool.path(), scope, &["0:1".into()], Some(again)));
+        assert_ne!(read().began_ms, again, "walked for the same-instant lease");
     }
 
     #[test]

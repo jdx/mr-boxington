@@ -444,10 +444,10 @@ struct Lease {
     cgroups: Option<Vec<String>>,
     #[serde(default)]
     bytes_per_permit: u64,
-    /// When the lease file was written, read from the file rather than
-    /// stored in it.
-    #[serde(skip)]
-    written: Option<std::time::SystemTime>,
+    /// When the holder recorded `cgroups`, by the clock
+    /// `pressure::now_ms` reads; `None` in leases from older versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    written_ms: Option<u64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -766,28 +766,28 @@ fn holds_short_memory(
     live.iter().any(|lease| match (short, &lease.cgroups) {
         (Some(scopes), Some(cgroups)) => scopes
             .iter()
-            .any(|scope| contains(pool, scope, cgroups, lease.written)),
+            .any(|scope| contains(pool, scope, cgroups, lease.written_ms)),
         _ => true,
     })
 }
 
 /// Whether a process that recorded `cgroups` at a time is charged to a scope.
-type CgroupContains = fn(&Path, &str, &[String], Option<std::time::SystemTime>) -> bool;
+type CgroupContains = fn(&Path, &str, &[String], Option<u64>) -> bool;
 
 /// See `cgroup::contains`. Without cgroups, nothing can be ruled out.
 fn cgroup_contains(
     pool: &Path,
     scope: &str,
     cgroups: &[String],
-    written: Option<std::time::SystemTime>,
+    written_ms: Option<u64>,
 ) -> bool {
     #[cfg(target_os = "linux")]
     {
-        crate::cgroup::contains(pool, scope, cgroups, written)
+        crate::cgroup::contains(pool, scope, cgroups, written_ms)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (pool, scope, cgroups, written);
+        let _ = (pool, scope, cgroups, written_ms);
         true
     }
 }
@@ -1999,6 +1999,7 @@ impl Pool {
             Some(cgroup) => Some(vec![cgroup.into()]),
             None => (!self.memory_cgroups.is_empty()).then(|| self.memory_cgroups.to_vec()),
         };
+        lease.written_ms = Some(crate::pressure::now_ms());
         if let Ok(record) = serde_json::to_vec(&lease) {
             // Truncating and rewriting keeps the holder's lock on the file.
             let _ = std::fs::write(&path, record);
@@ -2603,7 +2604,7 @@ impl Pool {
             domain: Some(self.pressure_domain.into()),
             cgroups: (!self.memory_cgroups.is_empty()).then(|| self.memory_cgroups.to_vec()),
             bytes_per_permit: self.bytes_per_permit,
-            written: None,
+            written_ms: Some(crate::pressure::now_ms()),
         })?;
         let permit = self.lock_record(leases, &lease)?;
         LAST_GRANT
@@ -3998,7 +3999,7 @@ fn scan_leases(leases: &Path) -> Result<Vec<Lease>> {
                     build_id: None,
                     domain: None,
                     cgroups: None,
-                    written: None,
+                    written_ms: None,
                     bytes_per_permit: 0,
                 },
                 |mut lease| {
@@ -4006,10 +4007,6 @@ fn scan_leases(leases: &Path) -> Result<Vec<Lease>> {
                     lease
                 },
             );
-        let mut lease = lease;
-        lease.written = std::fs::metadata(&path)
-            .and_then(|metadata| metadata.modified())
-            .ok();
         live.push(lease);
     }
     Ok(live)
