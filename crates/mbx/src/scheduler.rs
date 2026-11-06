@@ -444,10 +444,10 @@ struct Lease {
     cgroups: Option<Vec<String>>,
     #[serde(default)]
     bytes_per_permit: u64,
-    /// When the holder recorded `cgroups`, by the clock
-    /// `pressure::now_ms` reads; `None` in leases from older versions.
+    /// When the holder recorded `cgroups`; `None` in leases from older
+    /// versions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    written_ms: Option<u64>,
+    written: Option<crate::util::Stamp>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -766,28 +766,28 @@ fn holds_short_memory(
     live.iter().any(|lease| match (short, &lease.cgroups) {
         (Some(scopes), Some(cgroups)) => scopes
             .iter()
-            .any(|scope| contains(pool, scope, cgroups, lease.written_ms)),
+            .any(|scope| contains(pool, scope, cgroups, lease.written)),
         _ => true,
     })
 }
 
 /// Whether a process that recorded `cgroups` at a time is charged to a scope.
-type CgroupContains = fn(&Path, &str, &[String], Option<u64>) -> bool;
+type CgroupContains = fn(&Path, &str, &[String], Option<crate::util::Stamp>) -> bool;
 
 /// See `cgroup::contains`. Without cgroups, nothing can be ruled out.
 fn cgroup_contains(
     pool: &Path,
     scope: &str,
     cgroups: &[String],
-    written_ms: Option<u64>,
+    written: Option<crate::util::Stamp>,
 ) -> bool {
     #[cfg(target_os = "linux")]
     {
-        crate::cgroup::contains(pool, scope, cgroups, written_ms)
+        crate::cgroup::contains(pool, scope, cgroups, written)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (pool, scope, cgroups, written_ms);
+        let _ = (pool, scope, cgroups, written);
         true
     }
 }
@@ -1973,7 +1973,8 @@ impl Pool {
     /// compiler wrappers are supervised, and each launches the compiler its
     /// last grant admitted. Rewritten under the registrar lock, so no
     /// admission reads a lease half-written; a lease that cannot be rewritten
-    /// keeps its old place.
+    /// keeps its old place. Only Linux supervision moves compilers.
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn relocate_lease(&self, cgroup: Option<&str>) {
         let Some(path) = LAST_GRANT
             .lock()
@@ -1999,7 +2000,7 @@ impl Pool {
             Some(cgroup) => Some(vec![cgroup.into()]),
             None => (!self.memory_cgroups.is_empty()).then(|| self.memory_cgroups.to_vec()),
         };
-        lease.written_ms = Some(crate::pressure::now_ms());
+        lease.written = Some(crate::util::Stamp::now());
         if let Ok(record) = serde_json::to_vec(&lease) {
             // Truncating and rewriting keeps the holder's lock on the file.
             let _ = std::fs::write(&path, record);
@@ -2604,7 +2605,7 @@ impl Pool {
             domain: Some(self.pressure_domain.into()),
             cgroups: (!self.memory_cgroups.is_empty()).then(|| self.memory_cgroups.to_vec()),
             bytes_per_permit: self.bytes_per_permit,
-            written_ms: Some(crate::pressure::now_ms()),
+            written: Some(crate::util::Stamp::now()),
         })?;
         let permit = self.lock_record(leases, &lease)?;
         LAST_GRANT
@@ -3999,7 +4000,7 @@ fn scan_leases(leases: &Path) -> Result<Vec<Lease>> {
                     build_id: None,
                     domain: None,
                     cgroups: None,
-                    written_ms: None,
+                    written: None,
                     bytes_per_permit: 0,
                 },
                 |mut lease| {

@@ -538,6 +538,63 @@ pub fn memory_total_bytes() -> Option<u64> {
     None
 }
 
+/// A moment read from two clocks, so that neither alone can misorder two
+/// events: the wall clock can step backward, and the boot clock can be
+/// offset per container by a time namespace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Stamp {
+    pub wall_ms: u64,
+    /// Milliseconds since boot, which no clock adjustment moves; zero where
+    /// there is no such clock.
+    pub boot_ms: u64,
+}
+
+impl Stamp {
+    pub fn now() -> Self {
+        Self {
+            wall_ms: wall_ms(),
+            boot_ms: boot_ms(),
+        }
+    }
+
+    /// Whether this moment came before `later` by both clocks.
+    pub fn before(&self, later: &Stamp) -> bool {
+        self.wall_ms < later.wall_ms && self.boot_ms < later.boot_ms
+    }
+
+    /// Milliseconds from this moment to `later` by the clock that says
+    /// most, or `None` when either says `later` came first.
+    pub fn until(&self, later: &Stamp) -> Option<u64> {
+        let wall = later.wall_ms.checked_sub(self.wall_ms)?;
+        let boot = later.boot_ms.checked_sub(self.boot_ms)?;
+        Some(wall.max(boot))
+    }
+}
+
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.as_millis().min(u128::from(u64::MAX)) as u64)
+}
+
+#[cfg(target_os = "linux")]
+fn boot_ms() -> u64 {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `time` is a valid out parameter for the call.
+    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut time) } != 0 {
+        return 0;
+    }
+    (time.tv_sec as u64).saturating_mul(1_000) + time.tv_nsec as u64 / 1_000_000
+}
+
+#[cfg(not(target_os = "linux"))]
+fn boot_ms() -> u64 {
+    0
+}
+
 /// One figure that bounds the memory a new process could get: the host's
 /// own (`cgroup: None`) or the headroom of one cgroup it sits in.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
