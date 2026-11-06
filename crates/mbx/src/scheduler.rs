@@ -1684,7 +1684,12 @@ fn resolve_pool() -> Option<Pool> {
                     .unwrap_or_else(|| capacity.saturating_mul(pool.bytes_per_permit)),
             );
             pool.pressure = env_number(SCHED_PRESSURE_ENV) == Some(1);
-            pool.place_leases(env_number(SCHED_SUSPEND_ENV) == Some(1));
+            pool.place_leases(
+                (env_number(SCHED_SUSPEND_ENV) == Some(1))
+                    .then(|| std::env::var_os("MBX_SCHED_CGROUP_ROOT").map(PathBuf::from))
+                    .flatten()
+                    .as_deref(),
+            );
             pool.build = std::env::var(SCHED_BUILD_ID_ENV)
                 .ok()
                 .filter(|id| !id.is_empty())
@@ -1951,13 +1956,25 @@ impl Pool {
         }
     }
 
-    /// Record this process's cgroups in its leases unless supervision may
-    /// run its compilers in other cgroups, under `scheduler.cgroup_root`.
-    /// Leases that do not say where their compiler sits count everywhere.
-    fn place_leases(&mut self, supervised: bool) {
-        if supervised {
-            self.memory_cgroups = &[];
+    /// Add `supervised`, the `scheduler.cgroup_root` compiler supervision
+    /// moves compilers under, to the cgroups this process's leases record.
+    ///
+    /// Supervision decides after admission whether a compiler moves, and it
+    /// falls back to leaving the compiler where it is, so a lease names both
+    /// places. That can only make a gate wait for a compilation that holds
+    /// none of its memory, never ignore one that does. A root that cannot be
+    /// found is one supervision cannot use either, so nothing moves.
+    fn place_leases(&mut self, supervised: Option<&Path>) {
+        #[cfg(target_os = "linux")]
+        if let Some(root) = supervised.and_then(crate::cgroup::identity)
+            && !self.memory_cgroups.is_empty()
+        {
+            let mut cgroups = self.memory_cgroups.to_vec();
+            cgroups.push(root);
+            self.memory_cgroups = Box::leak(cgroups.into_boxed_slice());
         }
+        #[cfg(not(target_os = "linux"))]
+        let _ = supervised;
     }
 
     fn from_config(config: &Config) -> Option<Self> {
@@ -1974,7 +1991,11 @@ impl Pool {
             pool.set_memory_capacity(scheduler.memory_bytes.unwrap_or(0));
             pool.events = config.events;
             pool.pressure = scheduler.pressure;
-            pool.place_leases(suspends(scheduler));
+            pool.place_leases(
+                suspends(scheduler)
+                    .then_some(scheduler.cgroup_root.as_deref())
+                    .flatten(),
+            );
             pool
         })
     }
