@@ -2059,9 +2059,10 @@ fn run_transparent_rustc(
     // Most probes carry no --crate-name; the target-info queries carry the
     // placeholder name `___` alongside `--print`, and compile nothing.
     let is_query = is_compiler_query(described);
-    let incremental_flag = bypassed
-        .then(|| crate::rustc::bypassed_library_incremental_flag(described))
-        .flatten();
+    let (incremental_flag, incremental_state) = bypassed
+        .then(|| crate::rustc::bypassed_library_incremental(described))
+        .flatten()
+        .map_or((None, None), |(flag, state)| (Some(flag), state));
     let demand = crate_name.as_deref().filter(|_| !is_query).map(|name| {
         transparent_compiler_demand(
             name,
@@ -2142,6 +2143,7 @@ fn run_transparent_rustc(
                 }
                 record_transparent_compilation(
                     incremental_flag.is_some(),
+                    incremental_state,
                     crate_name.as_deref(),
                     described,
                     duration_ns(started.elapsed()),
@@ -2184,6 +2186,7 @@ fn run_transparent_rustc(
                 }
                 record_transparent_compilation(
                     incremental_flag.is_some(),
+                    incremental_state,
                     crate_name.as_deref(),
                     described,
                     duration_ns(started.elapsed()),
@@ -2204,10 +2207,11 @@ fn run_transparent_rustc(
 }
 
 /// Record a compilation the transparent wrapper ran without the cache, and
-/// whether mbx gave it private incremental state. Both platforms report it the
-/// same way, so their session rows match.
+/// whether mbx gave it private incremental state and where that came from.
+/// Both platforms report it the same way, so their session rows match.
 fn record_transparent_compilation(
     incremental: bool,
+    incremental_state: Option<mbx_cache_core::IncrementalState>,
     crate_name: Option<&str>,
     arguments: &[OsString],
     duration_ns: u64,
@@ -2221,8 +2225,10 @@ fn record_transparent_compilation(
         crate_name,
         duration_ns,
         None,
-        crate_name.map(|name| mbx_cache_core::CompileMetadata {
-            unit_kind: crate::rustc::compiler_unit_kind(arguments, name),
+        Some(mbx_cache_core::CompileMetadata {
+            unit_kind: crate_name
+                .and_then(|name| crate::rustc::compiler_unit_kind(arguments, name)),
+            incremental_state,
             ..Default::default()
         }),
     );

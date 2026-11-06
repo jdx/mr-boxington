@@ -2039,22 +2039,6 @@ fn release_at_least(rustc_version: &str, minimum: (u32, u32)) -> bool {
     matches!((next(), next()), (Some(major), Some(minor)) if (major, minor) >= minimum)
 }
 
-/// Where one unit keeps its incremental state.
-///
-/// A session gives it a persistent per-checkout root outside Cargo's target
-/// directory. A standalone shim falls back to its target directory when one is
-/// available, and compiles normally when it has nowhere to put state.
-///
-/// A `seedable` unit starting without state here takes another checkout's
-/// first, so the checkout's first edit to it compiles incrementally too.
-pub(crate) fn incremental_directory(
-    invocation: &CacheDigest,
-    crate_name: &str,
-    seedable: bool,
-) -> Option<PathBuf> {
-    incremental_directory_with_state(invocation, crate_name, seedable).0
-}
-
 /// Why a compilation that ran without a lookup had none, for its event row.
 ///
 /// The first decision in wrapper order wins. Private inputs and eager state are
@@ -2102,6 +2086,15 @@ fn cold_state(reason: &str) -> IncrementalState {
     }
 }
 
+/// Where one unit keeps its incremental state, and where that state came from
+/// for the compilation's event row.
+///
+/// A session gives it a persistent per-checkout root outside Cargo's target
+/// directory. A standalone shim falls back to its target directory when one is
+/// available, and compiles normally when it has nowhere to put state.
+///
+/// A `seedable` unit starting without state here takes another checkout's
+/// first, so the checkout's first edit to it compiles incrementally too.
 fn incremental_directory_with_state(
     invocation: &CacheDigest,
     crate_name: &str,
@@ -2255,7 +2248,17 @@ fn bypassed_library_incremental_is_enabled(
     learned_requested && !verify && mbx_incremental_is_safe(arguments)
 }
 
+#[cfg(test)]
 pub(crate) fn bypassed_library_incremental_flag(arguments: &[OsString]) -> Option<OsString> {
+    bypassed_library_incremental(arguments).map(|(flag, _)| flag)
+}
+
+/// The flag that gives an uncacheable workspace library private incremental
+/// state, and where that state came from for the compilation's event row.
+/// This path never seeds, so the state either already existed or starts empty.
+pub(crate) fn bypassed_library_incremental(
+    arguments: &[OsString],
+) -> Option<(OsString, Option<IncrementalState>)> {
     if !bypassed_library_incremental_is_enabled(
         arguments,
         session::learned_incremental_requested(),
@@ -2284,12 +2287,13 @@ pub(crate) fn bypassed_library_incremental_flag(arguments: &[OsString]) -> Optio
     if !in_workspace {
         return None;
     }
-    let directory =
-        incremental_directory(&bypassed_library_identity(arguments), &crate_name, false)?;
+    let (directory, state) =
+        incremental_directory_with_state(&bypassed_library_identity(arguments), &crate_name, false);
+    let directory = directory?;
     if incremental_state_exceeds_backstop(&directory, session::incremental_budget()) {
         return None;
     }
-    Some(private_incremental_flag(&directory))
+    Some((private_incremental_flag(&directory), state))
 }
 
 /// The arguments a bypassed library's private incremental directory is keyed

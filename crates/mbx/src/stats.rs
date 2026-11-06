@@ -201,7 +201,7 @@ impl Lifetime {
                     |counted| {
                         // Verifications only appear where sampling is on.
                         let verified = if counted.verifications > 0 {
-                            format!(", {} verified", counted.verifications)
+                            format!(", {} rebuilt to verify", counted.verifications)
                         } else {
                             String::new()
                         };
@@ -414,7 +414,7 @@ mod tests {
         assert_eq!(json["compilations"]["compiler_ns"]["unconsulted"], 5);
         assert_eq!(
             row(&report),
-            "7 hits, 2 misses, 3 not looked up, 1 bypassed, 4 verified since 2027-01-15"
+            "7 hits, 2 misses, 3 not looked up, 1 bypassed, 4 rebuilt to verify since 2027-01-15"
         );
     }
 
