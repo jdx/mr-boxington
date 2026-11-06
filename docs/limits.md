@@ -189,9 +189,11 @@ they enter the key as text:
 
 macOS needs one adjustment of its own. A debug-info link records absolute
 object paths and their timestamps in the binary's debug map, so mbx passes
-ld64 `-oso_prefix` for the build's target directory, which lets those links
-cache. The same prefix covers `-Csplit-debuginfo=unpacked`, which keeps debug
-information in the objects rather than beside the binary.
+ld64 `-oso_prefix` for the build's profile directory (such as `target/debug`),
+which lets those links cache and leaves the debug map naming `deps/...` in
+every profile that shares the link. The same prefix covers
+`-Csplit-debuginfo=unpacked`, which keeps debug information in the objects
+rather than beside the binary.
 
 ## Native libraries are inputs where nothing links
 
@@ -316,6 +318,12 @@ checkout-specific key by default. `mbx settings set cc_store_path_specific
 false` (or `MBX_CC_STORE_PATH_SPECIFIC=0`) skips storing those objects; existing
 entries remain readable. Windows debug information can also record the object
 output path.
+
+A Rust artifact shared between two Cargo profiles that compile it the same
+way can likewise name the profile that built it. A debug map in which a link
+passes its own `-oso_prefix` that strips only the target directory names the
+other profile's objects, and on Windows an executable or DLL records the path
+of the PDB its link wrote, in whichever profile that was.
 
 These path differences can affect debugging and byte-for-byte comparisons.
 `MBX_VERIFY=1` reports them as divergences, but a divergence alone does not

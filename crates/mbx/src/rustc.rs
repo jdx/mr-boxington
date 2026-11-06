@@ -1,3 +1,4 @@
+use crate::cargo_layout::{profile_dir, standalone_target_root};
 use crate::materialize::{
     CachedCompilation, CachedOutput, Materialization, StagedOutputs, apply_file_mode,
     denormalize_output_json, denormalize_output_text, executable_mode_matches, exit_code,
@@ -3275,8 +3276,9 @@ fn selected_clippy_config(working_dir: &Path) -> Option<PathBuf> {
 ///
 /// On macOS a linked binary records the absolute path and timestamp of every
 /// object behind it, which is what makes a debug-info link unportable across
-/// checkouts. The target root covers both the executable's output directory
-/// and its dependencies, including sibling directories for examples. When
+/// checkouts. The profile directory covers both the executable's output
+/// directory and its dependencies, including sibling directories for
+/// examples, and leaves the profile's name out of the debug map. When
 /// native links are being cached on this platform, the shim appends the
 /// prefix itself rather than asking anyone to discover it. An invocation that
 /// already carries one keeps what its caller chose, and an invocation without
@@ -3314,12 +3316,18 @@ fn with_oso_prefix(arguments: &[OsString], cache_links: bool) -> Cow<'_, [OsStri
         return Cow::Borrowed(arguments);
     };
     // Examples link rlibs from the sibling deps directory, and build scripts
-    // can live further below build/. Strip the shared target root rather than
-    // only the directory receiving this particular executable.
-    let prefix = std::env::var_os(session::TARGET_DIR_ENV)
-        .map(PathBuf::from)
-        .filter(|root| root.is_absolute() && out_dir.starts_with(root))
-        .unwrap_or_else(|| standalone_target_root(&out_dir, None));
+    // can live further below build/. Strip the whole profile directory rather
+    // than only the directory receiving this particular executable, and no
+    // more than it: a debug map naming `deps/x.o` is the same in every profile
+    // that shares the unit. An output outside Cargo's layout falls back to the
+    // session's target root, or else to the output directory itself.
+    let prefix = match profile_dir(&out_dir) {
+        Some(profile) => profile.to_path_buf(),
+        None => std::env::var_os(session::TARGET_DIR_ENV)
+            .map(PathBuf::from)
+            .filter(|root| root.is_absolute() && out_dir.starts_with(root))
+            .unwrap_or_else(|| out_dir.clone()),
+    };
     // ld64 resolves archive paths through Cargo's target symlink before
     // recording them, so the prefix must use the same physical spelling.
     let prefix = std::fs::canonicalize(&prefix).unwrap_or(prefix);
@@ -4287,8 +4295,10 @@ struct Portable {
 
 impl Portable {
     fn map_external_native_paths(&mut self, invocation: &RustcInvocation, working_dir: &Path) {
+        let mut resolved = resolved_mappings(&self.mappings);
         for path in invocation.native_search_paths() {
-            if normalize_mapped_path(path, working_dir, &self.mappings).is_ok() {
+            if mbx_cache_core::normalize_resolved_mapped_path(path, working_dir, &resolved).is_ok()
+            {
                 continue;
             }
             let path = working_dir.join(path);
@@ -4303,6 +4313,7 @@ impl Portable {
             // remapped in the compiler's output. Only explicitly named search
             // directories are admitted, and discovery hashes their contents.
             let placeholder = format!("native_{}", CacheDigest::blake3(text.as_bytes()).hash);
+            resolved.push(mbx_cache_core::PathMapping::new(&identity, &placeholder));
             self.mappings.push(PathMapping::new(path, placeholder));
         }
         self.mappings = PathMapping::ordered(&self.mappings);
@@ -4321,6 +4332,7 @@ impl Portable {
         if !session::share_out_dir_requested() {
             return portable;
         }
+        let resolved = resolved_mappings(&portable.mappings);
         for name in PORTABLE_ENVIRONMENT {
             let Some(value) = std::env::var(name)
                 .ok()
@@ -4330,9 +4342,11 @@ impl Portable {
             };
             // A value under no known root is one no key could agree on anyway,
             // so there is nothing to remap and nothing to promise.
-            let Ok(placeholder) =
-                normalize_mapped_path(Path::new(&value), working_dir, &portable.mappings)
-            else {
+            let Ok(placeholder) = mbx_cache_core::normalize_resolved_mapped_path(
+                Path::new(&value),
+                working_dir,
+                &resolved,
+            ) else {
                 continue;
             };
             let mut flag = OsString::from("--remap-path-prefix=");
@@ -4382,6 +4396,17 @@ impl Portable {
         applied.extend(self.arguments.iter().cloned());
         applied
     }
+}
+
+/// `mappings` with their roots' aliases resolved, for normalizing several
+/// paths without resolving every root again for each.
+fn resolved_mappings(mappings: &[PathMapping]) -> Vec<mbx_cache_core::PathMapping> {
+    mbx_cache_core::resolve_path_mappings(
+        &mappings
+            .iter()
+            .map(|mapping| mbx_cache_core::PathMapping::new(&mapping.root, &mapping.placeholder))
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn path_mappings(
@@ -4454,6 +4479,14 @@ fn path_mappings_with_env(
             .filter(|root| root.is_absolute())
             .map(|output| standalone_target_root(output, target))
     }) {
+        // Deeper still, a profile directory the target root holds: a profile
+        // compiling a unit as another does differs from it only in this path.
+        if let Some(profile) = target_output
+            .and_then(profile_dir)
+            .filter(|profile| profile.starts_with(&root) && *profile != root)
+        {
+            add_mapping(&mut mappings, &mut roots, profile.to_path_buf(), "profile");
+        }
         add_mapping(&mut mappings, &mut roots, root, "target");
     }
     if let Some(root) = environment(session::WORKSPACE_ROOT_ENV)
@@ -4532,41 +4565,6 @@ fn path_mappings_with_env(
         add_mapping(&mut mappings, &mut roots, root, "home");
     }
     mappings
-}
-
-/// Infer the profile subtree shared by rustc outputs and build-script output.
-///
-/// Before 1.100, Cargo writes compilations to `<target>/<profile>/deps` (or
-/// the same shape below a target-triple directory) and build scripts to
-/// `<profile>/build/<unit>`. From 1.100 every unit writes to
-/// `<profile>/build/<package>/<hash>/out`. Mapping the profile parent, rather
-/// than only the output directory, also covers the other units' outputs and
-/// generated inputs below `build/`.
-fn standalone_target_root(output: &Path, target: Option<&str>) -> PathBuf {
-    let profile = if matches!(
-        output.file_name().and_then(OsStr::to_str),
-        Some("deps" | "examples")
-    ) {
-        output.parent()
-    } else if output.parent().and_then(Path::file_name) == Some(OsStr::new("build")) {
-        output.parent().and_then(Path::parent)
-    } else if output.file_name() == Some(OsStr::new("out"))
-        && output.ancestors().nth(3).and_then(Path::file_name) == Some(OsStr::new("build"))
-    {
-        output.ancestors().nth(4)
-    } else {
-        None
-    };
-    if let Some(profile_root) = profile.and_then(Path::parent) {
-        let target_component = target.and_then(|target| Path::new(target).file_stem());
-        if target_component.is_some_and(|target| profile_root.file_name() == Some(target))
-            && let Some(root) = profile_root.parent()
-        {
-            return root.to_path_buf();
-        }
-        return profile_root.to_path_buf();
-    }
-    output.to_path_buf()
 }
 
 fn add_mapping(

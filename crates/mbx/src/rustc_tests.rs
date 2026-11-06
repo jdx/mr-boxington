@@ -793,50 +793,124 @@ fn cargo_registry_mapping_follows_a_child_symlink() {
     );
 }
 
+/// Ordered mappings for a compilation writing to `output`, with
+/// `session_target` as the session's target root when there is one.
+fn output_mappings(
+    working_dir: &Path,
+    output: &Path,
+    target: Option<&str>,
+    session_target: Option<&Path>,
+) -> Vec<PathMapping> {
+    PathMapping::ordered(&path_mappings_with_env(
+        working_dir,
+        Some(output),
+        target,
+        |name| match name {
+            session::TARGET_DIR_ENV => session_target.map(|root| root.as_os_str().to_owned()),
+            _ => None,
+        },
+    ))
+}
+
+/// The profile placeholder each output directory gets, beside the target
+/// root's, from mappings for a compilation writing there.
+fn profile_mappings(
+    output: &Path,
+    target: Option<&str>,
+    session_target: Option<&Path>,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    let mappings = output_mappings(output, output, target, session_target);
+    let root = |placeholder: &str| {
+        mappings
+            .iter()
+            .find(|mapping| mapping.placeholder == placeholder)
+            .map(|mapping| mapping.root.clone())
+    };
+    (root("profile"), root("target"))
+}
+
 #[test]
-fn standalone_target_mapping_covers_the_profile_tree() {
-    assert_eq!(
-        standalone_target_root(Path::new("/tmp/target/debug/deps"), None),
-        Path::new("/tmp/target")
-    );
-    assert_eq!(
-        standalone_target_root(
-            Path::new("/tmp/target/x86_64-unknown-linux-gnu/release/deps"),
-            Some("x86_64-unknown-linux-gnu"),
+fn profile_directories_map_beneath_the_target_root() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target");
+    let triple = "x86_64-unknown-linux-gnu";
+    let custom = directory.path().join("targets/custom.json");
+    let custom = custom.to_str().unwrap();
+    for (profile, output, platform) in [
+        ("debug", "debug/deps", None),
+        ("alt", "alt/deps", None),
+        ("alt", "alt/build/widget-0123456789abcdef", None),
+        ("alt", "alt/build/widget/0123456789abcdef/out", None),
+        (
+            "x86_64-unknown-linux-gnu/alt",
+            "x86_64-unknown-linux-gnu/alt/deps",
+            Some(triple),
         ),
-        Path::new("/tmp/target")
-    );
+        ("custom/release", "custom/release/deps", Some(custom)),
+    ] {
+        let expected = (Some(target.join(profile)), Some(target.clone()));
+        assert_eq!(
+            profile_mappings(&target.join(output), platform, None),
+            expected,
+            "standalone {output}"
+        );
+        assert_eq!(
+            profile_mappings(&target.join(output), platform, Some(&target)),
+            expected,
+            "session {output}"
+        );
+    }
+
+    // rustdoc writes outside every profile.
     assert_eq!(
-        standalone_target_root(
-            Path::new("/tmp/target/custom/release/deps"),
-            Some("/tmp/targets/custom.json"),
-        ),
-        Path::new("/tmp/target")
+        profile_mappings(&target.join("doc"), None, Some(&target)),
+        (None, Some(target.clone()))
     );
-    // Cargo 1.100 gives every unit its own directory below `build/`.
+    // A separate build directory holds the profile, outside the session's
+    // target root, so nothing is claimed for it.
+    let build_dir = directory.path().join("build");
     assert_eq!(
-        standalone_target_root(
-            Path::new("/tmp/target/debug/build/widget/0123456789abcdef/out"),
+        profile_mappings(&build_dir.join("debug/deps"), None, Some(&target)),
+        (None, Some(target.clone()))
+    );
+}
+
+/// Dep-info published from one profile restores naming the receiving
+/// profile's own outputs and generated sources.
+#[test]
+fn dep_info_restores_into_the_receiving_profile() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target");
+    let mappings = |profile: &str| {
+        output_mappings(
+            directory.path(),
+            &target.join(profile).join("deps"),
             None,
-        ),
-        Path::new("/tmp/target")
+            Some(&target),
+        )
+    };
+    let dep_info = |profile: &str| {
+        let profile = target.join(profile);
+        format!(
+            "{}: {}\n",
+            profile.join("deps/libwidget-0abc.rmeta").display(),
+            profile.join("build/widget-0def/out/generated.rs").display(),
+        )
+    };
+
+    let stored = normalize_output_text(dep_info("debug").as_bytes(), &mappings("debug"));
+    assert_eq!(
+        stored,
+        normalize_output_text(dep_info("alt").as_bytes(), &mappings("alt"))
+    );
+    assert!(
+        String::from_utf8_lossy(&stored).starts_with("${profile}"),
+        "{}",
+        String::from_utf8_lossy(&stored)
     );
     assert_eq!(
-        standalone_target_root(
-            Path::new(
-                "/tmp/target/x86_64-unknown-linux-gnu/debug/build/widget/0123456789abcdef/out"
-            ),
-            Some("x86_64-unknown-linux-gnu"),
-        ),
-        Path::new("/tmp/target")
-    );
-    // A pre-1.100 build script's OUT_DIR is not a unit output directory.
-    assert_eq!(
-        standalone_target_root(
-            Path::new("/tmp/target/debug/build/widget-0123456789abcdef/out"),
-            None,
-        ),
-        Path::new("/tmp/target/debug/build/widget-0123456789abcdef/out")
+        String::from_utf8(denormalize_output_text(&stored, &mappings("alt"))).unwrap(),
+        dep_info("alt")
     );
 }
 
@@ -1424,7 +1498,7 @@ fn the_shim_appends_an_oso_prefix_for_cached_links() {
     let extended = with_oso_prefix(&base, true);
     assert_eq!(
         extended.last().unwrap(),
-        &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/target/"),
+        &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/target/debug/"),
     );
     let example = arguments(&["--out-dir=/work/target/debug/examples", "examples/app.rs"]);
     assert_eq!(with_oso_prefix(&example, true).last(), extended.last());
@@ -1462,12 +1536,31 @@ fn the_shim_appends_an_oso_prefix_for_cached_links() {
         with_oso_prefix(&split_target, true).len(),
         split_target.len()
     );
+    // A Cargo 1.100 unit directory belongs to its profile too, and a custom
+    // profile is stripped like `debug`, so a shared unit's debug map names
+    // `deps/...` in both.
+    let unit = arguments(&[
+        "--out-dir=/work/target/debug/build/app/0123456789abcdef/out",
+        "src/main.rs",
+    ]);
+    assert_eq!(with_oso_prefix(&unit, true).last(), extended.last());
+    let alt = arguments(&["--out-dir=/work/target/alt/deps", "src/main.rs"]);
+    assert_eq!(
+        with_oso_prefix(&alt, true).last().unwrap(),
+        &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/target/alt/"),
+    );
+    // An output outside Cargo's layout keeps stripping its own directory.
+    let chosen_dir = arguments(&["--out-dir=/work/out", "src/main.rs"]);
+    assert_eq!(
+        with_oso_prefix(&chosen_dir, true).last().unwrap(),
+        &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/out/"),
+    );
     let relative = arguments(&["--out-dir", "target/debug/deps", "src/main.rs"]);
     assert_eq!(with_oso_prefix(&relative, true).len(), relative.len());
     let split = arguments(&["--out-dir=/work/target/debug/deps", "src/main.rs"]);
     assert_eq!(
         with_oso_prefix(&split, true).last().unwrap(),
-        &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/target/"),
+        &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/target/debug/"),
     );
 }
 

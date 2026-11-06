@@ -127,7 +127,11 @@ fn context(inputs: &[(&str, &str)]) -> ActionContext {
 }
 
 fn common_invocation() -> RustcInvocation {
-    let output = workspace().join("target/debug/deps");
+    common_invocation_in(&workspace().join("target/debug/deps"))
+}
+
+/// [`common_invocation`], writing to and linking from `output`.
+fn common_invocation_in(output: &Path) -> RustcInvocation {
     RustcInvocation::parse(&[
         "--crate-name".into(),
         "widget".into(),
@@ -140,7 +144,7 @@ fn common_invocation() -> RustcInvocation {
         "-C".into(),
         "metadata=abc123".into(),
         "--out-dir".into(),
-        output.clone().into_os_string(),
+        output.as_os_str().to_owned(),
         format!("-Ldependency={}", output.display()).into(),
         "--extern".into(),
         format!("serde={}", output.join("libserde.rlib").display()).into(),
@@ -1270,6 +1274,37 @@ fn equivalent_worktrees_produce_the_same_action_key() {
     ];
     let second = invocation.action(second_context).unwrap();
     assert_eq!(first.digest, second.digest);
+}
+
+/// Cargo gives a profile that compiles a unit identically -- one inheriting
+/// `dev` unchanged -- the same metadata hash, so the profile directory is all
+/// that tells the two invocations apart. Mapped to its own placeholder, it no
+/// longer does.
+#[test]
+fn equivalent_profiles_produce_the_same_action_key() {
+    let keyed = |profile: &str, mapped: bool| {
+        let invocation =
+            common_invocation_in(&workspace().join("target").join(profile).join("deps"));
+        let serde = format!("target/{profile}/deps/libserde.rlib");
+        let mut context = context(&[("src/lib.rs", "source"), (&serde, "serde")]);
+        if mapped {
+            context.path_mappings.insert(
+                0,
+                PathMapping::new(workspace().join("target").join(profile), "profile"),
+            );
+        }
+        invocation.action(context).unwrap()
+    };
+
+    let debug = keyed("debug", true);
+    assert_eq!(debug.digest, keyed("alt", true).digest);
+    let json = String::from_utf8(debug.bytes).unwrap();
+    assert!(
+        json.contains(r#""--extern=serde=${profile}/deps/libserde.rlib""#),
+        "{json}"
+    );
+    // Without the mapping the profile's name stays in the key.
+    assert_ne!(keyed("debug", false).digest, keyed("alt", false).digest);
 }
 
 #[test]

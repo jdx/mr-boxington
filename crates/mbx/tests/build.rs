@@ -3914,6 +3914,110 @@ fn a_second_checkout_starts_warm() {
     );
 }
 
+/// Write a binary with a path dependency and a build script, and a custom
+/// profile that inherits `dev` unchanged.
+fn write_inherited_profile_project(directory: &Path) {
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::create_dir_all(directory.join("base/src")).unwrap();
+    std::fs::write(
+        directory.join("Cargo.toml"),
+        "[package]\nname = \"profile-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         [dependencies]\nbase = { path = \"base\" }\n\n\
+         [profile.alt]\ninherits = \"dev\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("base/Cargo.toml"),
+        "[package]\nname = \"base\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("base/src/lib.rs"),
+        "pub fn value() -> u32 { 21 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("build.rs"),
+        "fn main() {\n\
+             let out = std::path::PathBuf::from(std::env::var_os(\"OUT_DIR\").unwrap());\n\
+             std::fs::write(out.join(\"generated.rs\"), \"pub const FACTOR: u32 = 2;\\n\").unwrap();\n\
+             println!(\"cargo:rerun-if-changed=build.rs\");\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("src/main.rs"),
+        "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n\
+         fn main() { println!(\"{}\", base::value() * FACTOR); }\n",
+    )
+    .unwrap();
+    generate_lockfile(directory);
+}
+
+/// A profile that compiles every unit as `dev` does restores every
+/// compilation from what `dev` stored, though Cargo writes it to another
+/// directory. The build script runs again: it could read the profile out of
+/// its `OUT_DIR`, so its run stays per profile.
+#[test]
+fn a_profile_inheriting_dev_restores_what_dev_stored() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_inherited_profile_project(project.path());
+
+    let dev = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("dev.json"),
+    );
+    assert!(count(&dev, "stored_bytes") > 0, "{dev}");
+
+    let build_alt = |report: &str| {
+        cargo_with(
+            project.path(),
+            store.path(),
+            &reports.path().join(report),
+            &["build", "--offline", "--profile", "alt"],
+            &[],
+        )
+        .0
+    };
+    let alt = build_alt("alt.json");
+    assert!(count(&alt, "hits") > 0, "{alt}");
+    assert_eq!(
+        count(&alt, "misses"),
+        1,
+        "every compilation should restore from dev: {alt}"
+    );
+    assert_eq!(
+        alt["slow_compilations"],
+        serde_json::json!([{
+            "crate_name": "profile-fixture build script",
+            "duration_ns": alt["slow_compilations"][0]["duration_ns"],
+        }]),
+        "only the build script should run again: {alt}"
+    );
+    assert_eq!(
+        count(&alt, "unconsulted"),
+        0,
+        "every unit should be predicted from dev: {alt}"
+    );
+
+    let binary = project
+        .path()
+        .join("target/alt")
+        .join(format!("profile-fixture{}", std::env::consts::EXE_SUFFIX));
+    let output = Command::new(&binary)
+        .output()
+        .expect("the binary should run");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "42\n");
+
+    let fresh = build_alt("fresh.json");
+    assert_eq!(count(&fresh, "hits"), 0, "{fresh}");
+    assert_eq!(count(&fresh, "misses"), 0, "{fresh}");
+}
+
 #[test]
 fn a_release_marker_does_not_disable_the_cache() {
     let store = tempfile::tempdir().unwrap();
