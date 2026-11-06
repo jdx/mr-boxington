@@ -34,7 +34,7 @@ fn pool_at(dir: &Path, capacity: u64, bytes_per_permit: u64) -> Pool {
 }
 
 /// Membership by the lists alone, for cgroups that exist only in a test.
-fn listed(scope: &str, cgroups: &[String], _: Option<std::time::SystemTime>) -> bool {
+fn listed(_: &Path, scope: &str, cgroups: &[String], _: Option<std::time::SystemTime>) -> bool {
     cgroups.iter().any(|id| id == scope)
 }
 

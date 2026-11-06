@@ -757,31 +757,37 @@ fn scope_used<'a>(leases: impl Iterator<Item = &'a Lease>) -> Resources {
 ///
 /// So under lasting pressure each cgroup still runs one compilation at a time
 /// rather than none, and a host short of memory still runs one in the pool.
-fn holds_short_memory(live: &[Lease], short: Option<&[String]>, contains: CgroupContains) -> bool {
+fn holds_short_memory(
+    pool: &Path,
+    live: &[Lease],
+    short: Option<&[String]>,
+    contains: CgroupContains,
+) -> bool {
     live.iter().any(|lease| match (short, &lease.cgroups) {
         (Some(scopes), Some(cgroups)) => scopes
             .iter()
-            .any(|scope| contains(scope, cgroups, lease.written)),
+            .any(|scope| contains(pool, scope, cgroups, lease.written)),
         _ => true,
     })
 }
 
 /// Whether a process that recorded `cgroups` at a time is charged to a scope.
-type CgroupContains = fn(&str, &[String], Option<std::time::SystemTime>) -> bool;
+type CgroupContains = fn(&Path, &str, &[String], Option<std::time::SystemTime>) -> bool;
 
 /// See `cgroup::contains`. Without cgroups, nothing can be ruled out.
 fn cgroup_contains(
+    pool: &Path,
     scope: &str,
     cgroups: &[String],
     written: Option<std::time::SystemTime>,
 ) -> bool {
     #[cfg(target_os = "linux")]
     {
-        crate::cgroup::contains(scope, cgroups, written)
+        crate::cgroup::contains(pool, scope, cgroups, written)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (scope, cgroups, written);
+        let _ = (pool, scope, cgroups, written);
         true
     }
 }
@@ -2433,6 +2439,7 @@ impl Pool {
                         now.saturating_sub(last) < crate::pressure::INTERVAL_MS
                     })))
             && holds_short_memory(
+                &self.dir,
                 &live,
                 pressure.short_scopes().as_deref(),
                 self.cgroup_contains,
@@ -2458,6 +2465,7 @@ impl Pool {
             && let Some(available) = (self.available_memory)()
             && available.bytes < needed
             && holds_short_memory(
+                &self.dir,
                 &live,
                 available.short_of(needed).as_deref(),
                 self.cgroup_contains,

@@ -3,12 +3,11 @@
 //! Parent usage includes sibling workloads. Subtracting only the leaf's usage
 //! from a parent's limit would overestimate how much memory a compiler can use.
 use crate::util::{parse_cgroup_stat, read_cgroup_text};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
 use std::time::SystemTime;
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -85,15 +84,27 @@ pub(crate) fn identity(path: &Path) -> Option<String> {
     Some(format!("{}:{}", metadata.dev(), metadata.ino()))
 }
 
+/// Pool subdirectory holding the latest walk of each short cgroup, shared by
+/// every process using the pool.
+const SUBTREES_DIR: &str = "subtrees";
 /// How long one walk of a cgroup's subtree is reused for leases older than it.
-const SUBTREE_REFRESH: std::time::Duration = std::time::Duration::from_secs(1);
+const SUBTREE_REFRESH_MS: u64 = 1_000;
 /// File times are kept at the kernel's clock-tick granularity, so a lease
 /// written just after a walk began can carry a time just before it.
-const WRITE_TIME_SLACK: std::time::Duration = std::time::Duration::from_millis(100);
+const WRITE_TIME_SLACK_MS: u64 = 100;
+
+/// One walk of a cgroup's subtree, by wall-clock time so processes can share it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Walk {
+    began_ms: u64,
+    /// `None` when part of the subtree could not be read.
+    members: Option<BTreeSet<String>>,
+}
 
 /// Whether a process sitting in `cgroups` is charged to the cgroup `scope`,
 /// one of this process's own memory cgroups. `written` is when the process
-/// recorded its cgroups, if known.
+/// recorded its cgroups, if known. Called under the registrar lock of
+/// `pool`, which also guards the walks shared there.
 ///
 /// Finding `scope` in the list is not enough. A process sees only the cgroups
 /// its namespace shows, so a compilation in a container nested below `scope`
@@ -105,9 +116,16 @@ const WRITE_TIME_SLACK: std::time::Duration = std::time::Duration::from_millis(1
 /// they are outside `scope`: the cgroups existed by then, so the walk saw
 /// them. Anything less -- a scope this process cannot find, a subtree it
 /// cannot fully read, a record of unknown age -- counts as inside.
-pub(crate) fn contains(scope: &str, cgroups: &[String], written: Option<SystemTime>) -> bool {
-    type Walks = BTreeMap<String, (SystemTime, Option<HashSet<String>>)>;
-    static WALKED: Mutex<Walks> = Mutex::new(BTreeMap::new());
+///
+/// Every waiter asks this on each poll, so one walk is shared through the
+/// pool rather than repeated in each process: a cgroup is walked at most
+/// once a second, and again only for a lease newer than the last walk.
+pub(crate) fn contains(
+    pool: &Path,
+    scope: &str,
+    cgroups: &[String],
+    written: Option<SystemTime>,
+) -> bool {
     if cgroups.iter().any(|id| id == scope) {
         return true;
     }
@@ -118,33 +136,42 @@ pub(crate) fn contains(scope: &str, cgroups: &[String], written: Option<SystemTi
     else {
         return true;
     };
-    let mut walked = WALKED.lock().unwrap_or_else(|error| error.into_inner());
-    let walk = |path| (SystemTime::now(), subtree(path));
-    let found = |walk: &(SystemTime, Option<HashSet<String>>)| {
-        walk.1
+    let written_ms = written
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |time| time.as_millis().min(u128::from(u64::MAX)) as u64);
+    let found = |walk: &Walk| {
+        walk.members
             .as_ref()
             .is_none_or(|members| cgroups.iter().any(|id| members.contains(id)))
     };
-    let cached = walked.entry(scope.into()).or_insert_with(|| walk(path));
-    let stale = cached
-        .0
-        .elapsed()
-        .map_or(true, |age| age >= SUBTREE_REFRESH);
-    if found(cached) && !stale {
-        return true;
+    let directory = pool.join(SUBTREES_DIR);
+    let file = directory.join(format!("{scope}.json"));
+    let now = crate::pressure::now_ms();
+    let cached = std::fs::read(&file)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Walk>(&bytes).ok());
+    if let Some(walk) = &cached {
+        let fresh = walk.began_ms <= now && now - walk.began_ms < SUBTREE_REFRESH_MS;
+        if fresh && (found(walk) || written_ms + WRITE_TIME_SLACK_MS < walk.began_ms) {
+            return found(walk);
+        }
+    } else {
+        crate::pressure::prune(&directory, SystemTime::now());
     }
-    // A walk begun after the record was read is always later than it.
-    let after_written = written + WRITE_TIME_SLACK < cached.0;
-    if stale || !after_written {
-        *cached = walk(path);
+    let walk = Walk {
+        began_ms: now,
+        members: subtree(path),
+    };
+    if let Ok(bytes) = serde_json::to_vec(&walk) {
+        let _ = crate::util::write_advisory(&file, &bytes);
     }
-    found(cached)
+    found(&walk)
 }
 
 /// The identities of every cgroup below `path`, or `None` when some part of
 /// it could not be read.
-fn subtree(path: &Path) -> Option<HashSet<String>> {
-    let mut members = HashSet::new();
+fn subtree(path: &Path) -> Option<BTreeSet<String>> {
+    let mut members = BTreeSet::new();
     let mut pending = vec![path.to_path_buf()];
     // A cgroup removed during the walk takes its descendants with it, so it
     // hides nothing; any other failure might.
@@ -500,16 +527,10 @@ mod tests {
 
     #[test]
     fn a_scope_this_process_cannot_find_contains_everything() {
-        assert!(contains(
-            "0:0",
-            &["1:1".into()],
-            Some(SystemTime::UNIX_EPOCH)
-        ));
-        assert!(contains(
-            "1:1",
-            &["1:1".into()],
-            Some(SystemTime::UNIX_EPOCH)
-        ));
+        let pool = tempfile::tempdir().unwrap();
+        let old = Some(SystemTime::UNIX_EPOCH);
+        assert!(contains(pool.path(), "0:0", &["1:1".into()], old));
+        assert!(contains(pool.path(), "1:1", &["1:1".into()], old));
     }
 
     #[test]
@@ -521,11 +542,48 @@ mod tests {
         if subtree(path).is_none() {
             return;
         }
+        let pool = tempfile::tempdir().unwrap();
         let outside = ["0:0".to_string()];
-        let now = SystemTime::now();
         // Written just now: the walk made for it must begin after it.
-        assert!(!contains(scope, &outside, Some(now)));
-        assert!(contains(scope, &outside, None), "a record of unknown age");
+        assert!(!contains(
+            pool.path(),
+            scope,
+            &outside,
+            Some(SystemTime::now())
+        ));
+        assert!(
+            contains(pool.path(), scope, &outside, None),
+            "a record of unknown age"
+        );
+    }
+
+    #[test]
+    fn processes_share_one_walk_through_the_pool() {
+        let Some((path, scope)) = directories().first() else {
+            return;
+        };
+        if subtree(path).is_none() {
+            return;
+        }
+        let pool = tempfile::tempdir().unwrap();
+        let old = Some(SystemTime::UNIX_EPOCH);
+        assert!(!contains(pool.path(), scope, &["0:0".into()], old));
+        // Another process's fresh walk is believed as it is, both in what
+        // it found and, for leases older than it, in what it did not.
+        let file = pool.path().join(SUBTREES_DIR).join(format!("{scope}.json"));
+        let shared = Walk {
+            began_ms: crate::pressure::now_ms() - 500,
+            members: Some(BTreeSet::from(["0:5".to_string()])),
+        };
+        std::fs::write(&file, serde_json::to_vec(&shared).unwrap()).unwrap();
+        assert!(contains(pool.path(), scope, &["0:5".into()], old));
+        assert!(!contains(pool.path(), scope, &["0:0".into()], old));
+        let read = || serde_json::from_slice::<Walk>(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(read().members, shared.members, "no walk was needed");
+        // A lease newer than that walk gets a walk of its own.
+        let now = Some(SystemTime::now());
+        assert!(!contains(pool.path(), scope, &["0:0".into()], now));
+        assert_ne!(read().members, shared.members, "walked again");
     }
 
     #[test]

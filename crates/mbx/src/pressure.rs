@@ -121,7 +121,8 @@ pub(crate) fn domain_state(pool: &Path, domain: &str) -> PathBuf {
     path
 }
 
-fn prune(directory: &Path, now: std::time::SystemTime) {
+/// Remove `.json` files in `directory` left unwritten for a day.
+pub(crate) fn prune(directory: &Path, now: std::time::SystemTime) {
     for entry in std::fs::read_dir(directory).into_iter().flatten().flatten() {
         let path = entry.path();
         let old = entry
