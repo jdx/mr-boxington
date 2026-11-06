@@ -538,13 +538,129 @@ pub fn memory_total_bytes() -> Option<u64> {
     None
 }
 
+/// A moment read from two clocks, so that neither alone can misorder two
+/// events: the wall clock can step backward, and the boot clock can be
+/// offset per container by a time namespace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Stamp {
+    pub wall_ms: u64,
+    /// Milliseconds since boot, which no clock adjustment moves; zero where
+    /// there is no such clock.
+    pub boot_ms: u64,
+}
+
+impl Stamp {
+    pub fn now() -> Self {
+        Self {
+            wall_ms: wall_ms(),
+            boot_ms: boot_ms(),
+        }
+    }
+
+    /// Whether this moment came before `later` by both clocks.
+    pub fn before(&self, later: &Stamp) -> bool {
+        self.wall_ms < later.wall_ms && self.boot_ms < later.boot_ms
+    }
+
+    /// Milliseconds from this moment to `later` by the clock that says
+    /// most, or `None` when either says `later` came first.
+    pub fn until(&self, later: &Stamp) -> Option<u64> {
+        let wall = later.wall_ms.checked_sub(self.wall_ms)?;
+        let boot = later.boot_ms.checked_sub(self.boot_ms)?;
+        Some(wall.max(boot))
+    }
+}
+
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.as_millis().min(u128::from(u64::MAX)) as u64)
+}
+
+#[cfg(target_os = "linux")]
+fn boot_ms() -> u64 {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `time` is a valid out parameter for the call.
+    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut time) } != 0 {
+        return 0;
+    }
+    (time.tv_sec as u64).saturating_mul(1_000) + time.tv_nsec as u64 / 1_000_000
+}
+
+#[cfg(not(target_os = "linux"))]
+fn boot_ms() -> u64 {
+    0
+}
+
+/// One figure that bounds the memory a new process could get: the host's
+/// own (`cgroup: None`) or the headroom of one cgroup it sits in.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Limit {
+    /// The cgroup, as named by `cgroup::identities`. `None` is the host, or
+    /// a cgroup that could not be named, which might hold any process.
+    pub cgroup: Option<String>,
+    pub bytes: u64,
+}
+
+/// Memory a new process could get right now, and every figure bounding it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Available {
+    /// The smallest of `limits`.
+    pub bytes: u64,
+    pub limits: Vec<Limit>,
+}
+
+impl Available {
+    /// A figure no cgroup narrowed, which every process shares.
+    pub fn host(bytes: u64) -> Self {
+        Self {
+            bytes,
+            limits: vec![Limit {
+                cgroup: None,
+                bytes,
+            }],
+        }
+    }
+
+    /// Where memory is short of `needed`; see `short_scopes`.
+    pub fn short_of(&self, needed: u64) -> Option<Vec<String>> {
+        short_scopes(
+            self.limits
+                .iter()
+                .filter(|limit| limit.bytes < needed)
+                .map(|limit| limit.cgroup.clone()),
+        )
+    }
+}
+
+/// The cgroups whose memory is short, or `None` when the host's is.
+///
+/// Every process on the machine uses the host's memory, so one short host
+/// figure makes the answer "everywhere". An empty list says the same, because
+/// it means nothing could be blamed and every process might be responsible.
+pub fn short_scopes(scopes: impl IntoIterator<Item = Option<String>>) -> Option<Vec<String>> {
+    scopes
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .filter(|scopes| !scopes.is_empty())
+}
+
+/// Memory the machine could hand a new process right now, when measurable;
+/// the figure `memory_available` reports with its limits.
+pub fn memory_available_bytes() -> Option<u64> {
+    memory_available().map(|available| available.bytes)
+}
+
 /// Memory the machine could hand a new process right now, when measurable.
 ///
 /// "Available" deliberately counts reclaimable memory rather than free pages
 /// alone: a machine whose RAM is full of page cache is not out of memory, and
 /// treating it as such would defer compilations that were going to run fine.
 #[cfg(target_os = "linux")]
-pub fn memory_available_bytes() -> Option<u64> {
+pub fn memory_available() -> Option<Available> {
     // `MemAvailable` is the kernel's own estimate of exactly this question,
     // accounting for reclaimable caches; summing fields by hand would just
     // reimplement it worse. It describes the host, though -- `/proc/meminfo`
@@ -560,11 +676,16 @@ pub fn memory_available_bytes() -> Option<u64> {
         .parse::<u64>()
         .ok()?;
     let host = kibibytes.checked_mul(1024)?;
-    let available = crate::cgroup::memory()
-        .headroom
-        .map_or(host, |free| host.min(free));
+    let mut available = Available::host(host);
+    available.limits.extend(crate::cgroup::memory().levels);
     // Zero is a real answer here -- a cgroup at its limit has nothing left --
     // and the caller has to be able to tell it from "cannot measure".
+    available.bytes = available
+        .limits
+        .iter()
+        .map(|limit| limit.bytes)
+        .min()
+        .unwrap_or(host);
     Some(available)
 }
 
@@ -575,7 +696,7 @@ pub fn memory_available_bytes() -> Option<u64> {
 // to re-export them.
 #[allow(deprecated)]
 #[cfg(target_vendor = "apple")]
-pub fn memory_available_bytes() -> Option<u64> {
+pub fn memory_available() -> Option<Available> {
     let mut count = libc::HOST_VM_INFO64_COUNT;
     // SAFETY: the buffer is a zeroed `vm_statistics64` and `count` declares
     // its size in `integer_t` units, which is what the call requires.
@@ -599,12 +720,12 @@ pub fn memory_available_bytes() -> Option<u64> {
     let pages = u64::from(stats.free_count)
         .checked_add(u64::from(stats.inactive_count))?
         .checked_add(u64::from(stats.purgeable_count))?;
-    pages.checked_mul(page_size)
+    pages.checked_mul(page_size).map(Available::host)
 }
 
 /// Fallback for hosts with no supported probe.
 #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
-pub fn memory_available_bytes() -> Option<u64> {
+pub fn memory_available() -> Option<Available> {
     None
 }
 
@@ -665,6 +786,31 @@ mod tests {
                 .to_string()
                 .contains("failed to capture compiler input snapshot")
         );
+    }
+
+    #[test]
+    fn a_request_is_short_of_every_figure_below_it() {
+        let limit = |cgroup: Option<&str>, bytes| Limit {
+            cgroup: cgroup.map(Into::into),
+            bytes,
+        };
+        let nested = Available {
+            bytes: 1,
+            limits: vec![
+                limit(None, 100),
+                limit(Some("child"), 1),
+                limit(Some("parent"), 2),
+            ],
+        };
+        // Both cgroups are too small, so compilations under either count.
+        assert_eq!(
+            nested.short_of(3),
+            Some(vec!["child".into(), "parent".into()])
+        );
+        assert_eq!(nested.short_of(2), Some(vec!["child".into()]));
+        assert_eq!(nested.short_of(101), None, "the host is short too");
+        assert_eq!(Available::host(1).short_of(2), None);
+        assert_eq!(Available::default().short_of(2), None, "nothing to blame");
     }
 
     #[test]

@@ -26,7 +26,35 @@ fn pool_at(dir: &Path, capacity: u64, bytes_per_permit: u64) -> Pool {
     pool.domain_memory_capacity = capacity.saturating_mul(bytes_per_permit);
     pool.available_memory = || None;
     pool.pressure = false;
+    // Leases that do not say where they sit count against every gate, which
+    // is what the tests that do not care about cgroups expect.
+    pool.memory_cgroups = &[];
+    pool.cgroup_contains = listed;
     pool
+}
+
+/// Membership by the lists alone, for cgroups that exist only in a test.
+fn listed(_: &Path, scope: &str, cgroups: &[String], _: Option<crate::util::Stamp>) -> bool {
+    cgroups.iter().any(|id| id == scope)
+}
+
+/// A reading whose only short figure is `cgroup`'s headroom.
+fn cgroup_short(cgroup: &str) -> crate::pressure::Reading {
+    crate::pressure::Reading {
+        total: Some(100),
+        available: Some(0),
+        limits: vec![
+            crate::util::Limit {
+                cgroup: None,
+                bytes: 50,
+            },
+            crate::util::Limit {
+                cgroup: Some(cgroup.into()),
+                bytes: 0,
+            },
+        ],
+        ..Default::default()
+    }
 }
 
 /// A low-priority pool with the same host independence as `pool_at`.
@@ -268,6 +296,8 @@ fn a_dead_holders_lease_is_reclaimed() {
             priority: "normal".into(),
             build_id: None,
             domain: None,
+            cgroups: None,
+            written: None,
             bytes_per_permit: 0,
         })
         .unwrap(),
@@ -287,7 +317,7 @@ fn a_demand_heavier_than_the_pool_runs_alone_rather_than_never() {
     // Heavier than the whole machine, and gated by a probe that reports no
     // memory at all: it still compiles, alone.
     let mut short = pool_at(directory.path(), 2, 0);
-    short.available_memory = || Some(0);
+    short.available_memory = || Some(crate::util::Available::host(0));
     let permit = short.try_admit(10, Some(u64::MAX)).unwrap();
     assert!(permit.is_some(), "an oversized demand is admitted alone");
     // And while it runs, nothing else fits.
@@ -334,7 +364,7 @@ fn a_predicted_heavy_compile_does_not_wait_out_the_gate_on_an_idle_machine() {
     let bytes_per_permit = 1024;
     let mut pool = pool_at(directory.path(), 4, bytes_per_permit);
     // Short of memory, and nothing running that could give any back.
-    pool.available_memory = || Some(1);
+    pool.available_memory = || Some(crate::util::Available::host(1));
     // Through `plan`, because that is the only weight production ever asks
     // for -- and it clamps to the capacity, so a rule written against
     // heavier-than-capacity weights would never fire for a real compilation.
@@ -379,7 +409,7 @@ fn the_reserve_never_swallows_the_whole_pool() {
 fn a_prediction_that_exactly_fits_available_memory_is_admitted() {
     let directory = tempfile::tempdir().unwrap();
     let mut pool = pool_at(directory.path(), 8, 1024);
-    pool.available_memory = || Some(1024);
+    pool.available_memory = || Some(crate::util::Available::host(1024));
     let running = pool.try_admit(1, None).unwrap().expect("first permit");
     let fitting = pool.try_admit(1, Some(1024)).unwrap();
     assert!(fitting.is_some(), "all predicted bytes are available");
@@ -390,7 +420,7 @@ fn a_prediction_that_exactly_fits_available_memory_is_admitted() {
 fn the_memory_gate_defers_predicted_heavy_work() {
     let directory = tempfile::tempdir().unwrap();
     let mut pool = pool_at(directory.path(), 8, 0);
-    pool.available_memory = || Some(1024);
+    pool.available_memory = || Some(crate::util::Available::host(1024));
 
     let running = pool.try_admit(1, None).unwrap().expect("first permit");
     assert!(
@@ -1030,6 +1060,7 @@ fn containers_sharing_a_pool_are_gated_by_their_own_pressure() {
             available: Some(50),
             // The same pathname names a different cgroup in each container.
             stalls: [("/sys/fs/cgroup/memory.pressure".into(), counter)].into(),
+            ..Default::default()
         }
     }
     let directory = tempfile::tempdir().unwrap();
@@ -1069,6 +1100,211 @@ fn containers_sharing_a_pool_are_gated_by_their_own_pressure() {
         assert!(short.try_admit(1, None).unwrap().is_none());
     }
     drop(held);
+}
+
+/// A pool in its own container, sitting in `cgroups`, whose pressure lives in
+/// `domain` and is read by `probe`.
+fn container_pool(
+    directory: &Path,
+    domain: &'static str,
+    cgroups: &'static [String],
+    probe: fn() -> crate::pressure::Reading,
+    clock: fn() -> u64,
+) -> Pool {
+    let mut pool = pool_at(directory, 64, 100);
+    pool.pressure = true;
+    pool.pressure_domain = domain;
+    pool.memory_cgroups = cgroups;
+    pool.pressure_probe = probe;
+    pool.clock = clock;
+    pool
+}
+
+fn cgroups(ids: &[&str]) -> &'static [String] {
+    Box::leak(ids.iter().map(|id| id.to_string()).collect())
+}
+
+/// Latch `pool`'s pressure without admitting anything.
+fn latch_pressure(pool: &Pool, start: u64) {
+    let state = crate::pressure::domain_state(&pool.dir, pool.pressure_domain);
+    for now in [start, start + 500] {
+        let state = crate::pressure::sample(&state, now, pool.pressure_probe).unwrap();
+        assert!(state.pressured || now == start);
+    }
+}
+
+#[test]
+fn a_container_short_of_its_own_memory_waits_only_for_its_own_compilations() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CLOCK: AtomicU64 = AtomicU64::new(1_000);
+    let clock = || CLOCK.load(Ordering::SeqCst);
+    let directory = tempfile::tempdir().unwrap();
+    let other = container_pool(
+        directory.path(),
+        "other",
+        cgroups(&["0:1", "0:20"]),
+        || crate::pressure::Reading {
+            total: Some(100),
+            available: Some(50),
+            ..Default::default()
+        },
+        clock,
+    );
+    // At its own limit: the container's cgroup, not the host, is short.
+    let short = container_pool(
+        directory.path(),
+        "short",
+        cgroups(&["0:1", "0:30"]),
+        || cgroup_short("0:30"),
+        clock,
+    );
+    let elsewhere = other.try_admit(1, None).unwrap().expect("healthy");
+    latch_pressure(&short, 1_000);
+    CLOCK.store(1_500, Ordering::SeqCst);
+    // Another container's compilation returns nothing to this one, so it
+    // does not hold this container's admissions closed.
+    let first = short.try_admit(1, None).unwrap();
+    assert!(first.is_some(), "another container's work gated this one");
+    // Its own compilation does: this container runs one at a time.
+    for now in [2_000, 2_500] {
+        CLOCK.store(now, Ordering::SeqCst);
+        assert!(short.try_admit(1, None).unwrap().is_none());
+    }
+    drop(first);
+    CLOCK.store(3_000, Ordering::SeqCst);
+    let second = short.try_admit(1, None).unwrap();
+    assert!(second.is_some(), "a finished compilation lets the next run");
+    drop((second, elsewhere));
+}
+
+#[test]
+fn a_lease_follows_its_compiler_into_a_supervised_cgroup() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut pool = pool_at(directory.path(), 4, 100);
+    pool.memory_cgroups = cgroups(&["0:1"]);
+    let earlier = pool.try_admit(1, None).unwrap().unwrap();
+    let compiler = pool.try_admit(1, None).unwrap().unwrap();
+    pool.relocate_lease(Some("0:9"));
+    let read = |permit: &Permit| {
+        serde_json::from_slice::<Lease>(&std::fs::read(&permit.path).unwrap())
+            .unwrap()
+            .cgroups
+    };
+    // Only the lease for the compiler just launched moves.
+    assert_eq!(read(&compiler), Some(vec!["0:9".to_string()]));
+    assert_eq!(read(&earlier), Some(vec!["0:1".to_string()]));
+    // A finished supervised compiler puts the lease back for a retry.
+    pool.relocate_lease(None);
+    assert_eq!(read(&compiler), Some(vec!["0:1".to_string()]));
+    drop((earlier, compiler));
+}
+
+#[test]
+fn a_host_short_of_memory_or_an_unplaced_lease_still_gates_every_container() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CLOCK: AtomicU64 = AtomicU64::new(1_000);
+    let clock = || CLOCK.load(Ordering::SeqCst);
+    let healthy = || crate::pressure::Reading {
+        total: Some(100),
+        available: Some(50),
+        ..Default::default()
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let other = container_pool(
+        directory.path(),
+        "other",
+        cgroups(&["0:20"]),
+        healthy,
+        clock,
+    );
+    // The host's own figure is the smaller one, so every compilation on the
+    // machine holds memory this container is short of.
+    let host_short = container_pool(
+        directory.path(),
+        "host-short",
+        cgroups(&["0:30"]),
+        || crate::pressure::Reading {
+            total: Some(100),
+            available: Some(0),
+            ..Default::default()
+        },
+        clock,
+    );
+    let elsewhere = other.try_admit(1, None).unwrap().expect("healthy");
+    latch_pressure(&host_short, 1_000);
+    CLOCK.store(1_500, Ordering::SeqCst);
+    assert!(host_short.try_admit(1, None).unwrap().is_none());
+    drop(elsewhere);
+
+    // A lease that does not say where it sits, as older wrappers write, may
+    // be inside the cgroup that is short.
+    let unplaced = container_pool(directory.path(), "unplaced", &[], healthy, clock);
+    let unplaced = unplaced.try_admit(1, None).unwrap().expect("healthy");
+    let short = container_pool(
+        directory.path(),
+        "short",
+        cgroups(&["0:40"]),
+        || cgroup_short("0:40"),
+        clock,
+    );
+    latch_pressure(&short, 1_000);
+    assert!(short.try_admit(1, None).unwrap().is_none());
+    drop(unplaced);
+    assert!(short.try_admit(1, None).unwrap().is_some());
+}
+
+#[test]
+fn the_available_memory_gate_waits_only_for_compilations_holding_the_short_memory() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut other = pool_at(directory.path(), 64, 100);
+    other.memory_cgroups = cgroups(&["0:20"]);
+    let elsewhere = other.try_admit(1, None).unwrap().unwrap();
+    let mut short = pool_at(directory.path(), 64, 100);
+    short.memory_cgroups = cgroups(&["0:30"]);
+    short.available_memory = || {
+        Some(crate::util::Available {
+            bytes: 0,
+            limits: vec![
+                crate::util::Limit {
+                    cgroup: None,
+                    bytes: 1_000,
+                },
+                crate::util::Limit {
+                    cgroup: Some("0:30".into()),
+                    bytes: 0,
+                },
+            ],
+        })
+    };
+    let first = short.try_admit(1, Some(100)).unwrap();
+    assert!(first.is_some(), "another container's work gated this one");
+    assert!(short.try_admit(1, Some(100)).unwrap().is_none());
+    // A sibling under a parent cgroup that is also too small counts.
+    drop(first);
+    let mut sibling = pool_at(directory.path(), 64, 100);
+    sibling.memory_cgroups = cgroups(&["0:31", "0:10"]);
+    let beside = sibling.try_admit(1, None).unwrap().unwrap();
+    short.available_memory = || {
+        Some(crate::util::Available {
+            bytes: 0,
+            limits: vec![
+                crate::util::Limit {
+                    cgroup: Some("0:30".into()),
+                    bytes: 0,
+                },
+                crate::util::Limit {
+                    cgroup: Some("0:10".into()),
+                    bytes: 50,
+                },
+            ],
+        })
+    };
+    assert!(short.try_admit(1, Some(100)).unwrap().is_none());
+    drop(beside);
+    // Short on the host's figure, the other container's work counts too.
+    short.available_memory = || Some(crate::util::Available::host(0));
+    assert!(short.try_admit(1, Some(100)).unwrap().is_none());
+    drop(elsewhere);
 }
 
 #[test]
@@ -1722,7 +1958,7 @@ fn an_available_memory_gate_releases_the_waiters_place() {
             .unwrap()
             .is_none()
     );
-    pool.available_memory = || Some(0);
+    pool.available_memory = || Some(crate::util::Available::host(0));
     assert!(
         pool.try_admit_queued(2, Some(2048), &mut queued)
             .unwrap()
@@ -2556,6 +2792,8 @@ fn sim_lease(record: &Waiting) -> Lease {
         priority: record.priority.clone(),
         build_id: record.build.as_ref().map(|(id, _)| id.clone()),
         domain: Some(record.domain.clone()),
+        cgroups: None,
+        written: None,
         bytes_per_permit: record.bytes_per_permit,
     }
 }
@@ -4918,7 +5156,7 @@ fn repredicted_waiter_gate_logs_current_charge_and_dequeues_old_record() {
     ledger.memory_windows.insert(key.clone(), vec![10; 4]);
     let refreshed = pool.demand_vector_with_ledger(&demand, &ledger);
     assert!(refreshed.resources.memory_bytes < plan.resources.memory_bytes);
-    pool.available_memory = || Some(0);
+    pool.available_memory = || Some(crate::util::Available::host(0));
     for _ in 0..2 {
         assert!(
             pool.try_admit_state(

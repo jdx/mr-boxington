@@ -10,6 +10,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub(crate) const INTERVAL_MS: u64 = 500;
+/// Headroom, as a share of total memory, below which a sample is bad.
+const BAD_HEADROOM: f64 = 0.05;
+/// Headroom a sample needs, above this share, to count as healthy.
+const HEALTHY_HEADROOM: f64 = 0.10;
+/// Full-stall percentage at which a sample is bad.
+const BAD_STALL: f64 = 10.0;
+/// Full-stall percentage a sample must stay below to count as healthy.
+const HEALTHY_STALL: f64 = 2.0;
 const STALE_MS: u64 = 3_000;
 const VERSION: u8 = 1;
 /// Pool subdirectory holding one state file per memory domain.
@@ -26,8 +34,15 @@ static UNSAVED: Mutex<Option<(PathBuf, State)>> = Mutex::new(None);
 pub(crate) struct Reading {
     pub total: Option<u64>,
     pub available: Option<u64>,
+    /// Every figure bounding `available`; see `util::Available`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limits: Vec<crate::util::Limit>,
     /// Full-stall microseconds, keyed by the source (never sum nested groups).
     pub stalls: BTreeMap<String, u64>,
+    /// The cgroup each stall source describes, by identity. A source missing
+    /// here describes the whole host.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stall_cgroups: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -37,6 +52,12 @@ pub(crate) struct State {
     reading: Reading,
     bad_samples: u8,
     healthy_since: Option<u64>,
+    /// Every figure found unhealthy since this episode of pressure began,
+    /// by scope: a cgroup identity, or `None` for the host. Kept until
+    /// recovery ends, because the figures that started the pressure are what
+    /// recovery protects even after they read healthy again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    blamed: Vec<Option<String>>,
     pub pressured: bool,
     pub valid: bool,
     pub recovered_ms: Option<u64>,
@@ -71,16 +92,12 @@ pub(crate) fn domain() -> &'static str {
         #[cfg(target_os = "linux")]
         {
             use sha2::Digest;
-            use std::os::unix::fs::MetadataExt;
-            let mut hasher = sha2::Sha256::new();
-            let mut identified = false;
-            for path in crate::cgroup::memory_directories() {
-                if let Ok(metadata) = std::fs::metadata(&path) {
-                    hasher.update(format!("{}:{}\n", metadata.dev(), metadata.ino()));
-                    identified = true;
+            let identities = crate::cgroup::identities();
+            if !identities.is_empty() {
+                let mut hasher = sha2::Sha256::new();
+                for identity in identities {
+                    hasher.update(format!("{identity}\n"));
                 }
-            }
-            if identified {
                 return hex::encode(&hasher.finalize()[..8]);
             }
         }
@@ -104,7 +121,8 @@ pub(crate) fn domain_state(pool: &Path, domain: &str) -> PathBuf {
     path
 }
 
-fn prune(directory: &Path, now: std::time::SystemTime) {
+/// Remove `.json` files in `directory` left unwritten for a day.
+pub(crate) fn prune(directory: &Path, now: std::time::SystemTime) {
     for entry in std::fs::read_dir(directory).into_iter().flatten().flatten() {
         let path = entry.path();
         let old = entry
@@ -124,10 +142,14 @@ fn prune(directory: &Path, now: std::time::SystemTime) {
 }
 
 pub(crate) fn probe() -> Reading {
+    let available = crate::util::memory_available();
     #[allow(unused_mut)]
     let mut reading = Reading {
         total: crate::util::memory_total_bytes(),
-        available: crate::util::memory_available_bytes(),
+        available: available.as_ref().map(|available| available.bytes),
+        limits: available
+            .map(|available| available.limits)
+            .unwrap_or_default(),
         ..Reading::default()
     };
     #[cfg(target_os = "linux")]
@@ -138,9 +160,15 @@ pub(crate) fn probe() -> Reading {
             .ok()
             .and_then(|s| full_total(&s))
         {
-            reading
-                .stalls
-                .insert(path.to_string_lossy().into_owned(), total);
+            let source = path.to_string_lossy().into_owned();
+            if let Some(cgroup) = path
+                .parent()
+                .filter(|_| !path.starts_with("/proc"))
+                .and_then(crate::cgroup::identity)
+            {
+                reading.stall_cgroups.insert(source.clone(), cgroup);
+            }
+            reading.stalls.insert(source, total);
         }
     }
     reading
@@ -156,44 +184,86 @@ fn full_total(text: &str) -> Option<u64> {
 }
 
 impl State {
+    /// Where memory is short, as `util::short_scopes` reports it.
+    ///
+    /// Pressure can come from any figure: a cgroup's headroom, the host's, or
+    /// the stalls of the host or of any cgroup above this process. Each one
+    /// that was unhealthy during this episode names memory some compilations
+    /// are using, and all of those compilations count, not just those behind
+    /// the smallest headroom. A state with nothing blamed -- written by an
+    /// older version, or describing no episode -- names no cause, so every
+    /// compilation counts.
+    pub(crate) fn short_scopes(&self) -> Option<Vec<String>> {
+        crate::util::short_scopes(self.blamed.iter().cloned())
+    }
+
     fn update(&mut self, now: u64, reading: Reading) {
+        // A bad sample or an episode under way with nothing blamed was
+        // recorded by a version that kept no causes. Its cause stays unknown
+        // until the episode it starts or belongs to ends.
+        let unknown_cause = (self.bad_samples > 0 || self.pressured || self.recovered_ms.is_some())
+            && self.blamed.is_empty();
         let elapsed = now
             .checked_sub(self.sampled_ms)
             .filter(|n| *n > 0 && *n <= STALE_MS);
         let comparable = self.version == VERSION && elapsed.is_some();
-        let stall_percent = comparable
-            .then(|| {
-                reading
-                    .stalls
-                    .iter()
-                    .filter_map(|(source, value)| {
-                        let delta = value.checked_sub(*self.reading.stalls.get(source)?)?;
-                        Some(delta as f64 / (elapsed.unwrap() as f64 * 10.0))
-                    })
-                    .reduce(f64::max)
-            })
-            .flatten();
-        let headroom = reading
-            .total
-            .filter(|n| *n > 0)
+        let stalls: Vec<(&String, f64)> = if comparable {
+            reading
+                .stalls
+                .iter()
+                .filter_map(|(source, value)| {
+                    let delta = value.checked_sub(*self.reading.stalls.get(source)?)?;
+                    Some((source, delta as f64 / (elapsed.unwrap() as f64 * 10.0)))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let stall_percent = stalls.iter().map(|(_, percent)| *percent).reduce(f64::max);
+        let total = reading.total.filter(|n| *n > 0);
+        let headroom = total
             .zip(reading.available)
             .map(|(total, available)| available as f64 / total as f64);
+        // The scope of every figure that is not healthy now.
+        let unhealthy: Vec<Option<String>> = reading
+            .limits
+            .iter()
+            .filter(|limit| {
+                total.is_some_and(|total| limit.bytes as f64 / total as f64 <= HEALTHY_HEADROOM)
+            })
+            .map(|limit| limit.cgroup.clone())
+            .chain(
+                stalls
+                    .iter()
+                    .filter(|(_, percent)| *percent >= HEALTHY_STALL)
+                    .map(|(source, _)| reading.stall_cgroups.get(*source).cloned()),
+            )
+            .collect();
         if !comparable {
             // A forward gap discards stale evidence but not recovery spacing,
             // which expires on its own; a clock step back discards both.
-            let spacing = (self.version == VERSION && now > self.sampled_ms)
-                .then_some((self.recovered_ms, self.last_admission_ms));
+            let spacing = (self.version == VERSION && now > self.sampled_ms).then(|| {
+                (
+                    self.recovered_ms,
+                    self.last_admission_ms,
+                    std::mem::take(&mut self.blamed),
+                )
+            });
             *self = Self::default();
-            if let Some((recovered_ms, last_admission_ms)) = spacing {
+            if let Some((recovered_ms, last_admission_ms, blamed)) = spacing {
                 self.recovered_ms = recovered_ms;
                 self.last_admission_ms = last_admission_ms;
+                if recovered_ms.is_some() {
+                    self.blamed = blamed;
+                }
             }
         }
         self.valid = headroom.is_some() || stall_percent.is_some();
-        let bad = headroom.is_some_and(|v| v < 0.05) || stall_percent.is_some_and(|v| v >= 10.0);
+        let bad = headroom.is_some_and(|v| v < BAD_HEADROOM)
+            || stall_percent.is_some_and(|v| v >= BAD_STALL);
         let healthy = self.valid
-            && headroom.is_none_or(|v| v > 0.10)
-            && stall_percent.is_none_or(|v| v < 2.0);
+            && headroom.is_none_or(|v| v > HEALTHY_HEADROOM)
+            && stall_percent.is_none_or(|v| v < HEALTHY_STALL);
         if !self.valid {
             self.pressured = false;
             self.bad_samples = 0;
@@ -225,6 +295,15 @@ impl State {
             .is_some_and(|start| now.saturating_sub(start) >= 5_000)
         {
             self.recovered_ms = None;
+        }
+        if self.pressured || self.recovered_ms.is_some() {
+            for scope in unknown_cause.then_some(None).into_iter().chain(unhealthy) {
+                if !self.blamed.contains(&scope) {
+                    self.blamed.push(scope);
+                }
+            }
+        } else {
+            self.blamed = unhealthy;
         }
         self.version = VERSION;
         self.sampled_ms = now;
@@ -384,6 +463,166 @@ mod tests {
         let state = sample(&path, 1_600, || panic!("too soon")).unwrap();
         assert!(state.pressured);
     }
+    fn limit(cgroup: Option<&str>, bytes: u64) -> crate::util::Limit {
+        crate::util::Limit {
+            cgroup: cgroup.map(Into::into),
+            bytes,
+        }
+    }
+
+    /// Two samples a second apart in which `source` stalled for `stall_ms`.
+    fn scopes_after(
+        limits: Vec<crate::util::Limit>,
+        source: &str,
+        stall_ms: u64,
+    ) -> Option<Vec<String>> {
+        let reading = |counter| Reading {
+            total: Some(100),
+            available: limits.iter().map(|limit| limit.bytes).min(),
+            limits: limits.clone(),
+            stalls: BTreeMap::from([(source.into(), counter)]),
+            stall_cgroups: BTreeMap::from([(
+                "/sys/fs/cgroup/memory.pressure".into(),
+                "0:7".into(),
+            )]),
+        };
+        let mut state = State::default();
+        state.update(1_000, reading(0));
+        state.update(2_000, reading(stall_ms * 1_000));
+        state.short_scopes()
+    }
+
+    #[test]
+    fn each_unhealthy_figure_names_the_memory_that_is_short() {
+        let cgroup_stalls = "/sys/fs/cgroup/memory.pressure";
+        let host_stalls = "/proc/pressure/memory";
+        // A cgroup stalling is short even when the host's headroom is smaller.
+        assert_eq!(
+            scopes_after(
+                vec![limit(None, 20), limit(Some("0:7"), 30)],
+                cgroup_stalls,
+                500
+            ),
+            Some(vec!["0:7".into()])
+        );
+        // The host stalling is short even when a cgroup's headroom is smaller.
+        assert_eq!(
+            scopes_after(
+                vec![limit(None, 50), limit(Some("0:7"), 3)],
+                host_stalls,
+                500
+            ),
+            None
+        );
+        // Every short cgroup counts, not just the one with least headroom.
+        assert_eq!(
+            scopes_after(
+                vec![
+                    limit(None, 90),
+                    limit(Some("0:7"), 3),
+                    limit(Some("0:8"), 8)
+                ],
+                cgroup_stalls,
+                0
+            ),
+            Some(vec!["0:7".into(), "0:8".into()])
+        );
+        // Nothing unhealthy names no cause.
+        assert_eq!(
+            scopes_after(
+                vec![limit(None, 90), limit(Some("0:8"), 40)],
+                cgroup_stalls,
+                0
+            ),
+            None
+        );
+        // Older readings carry no figures at all, so nothing is ruled out.
+        assert_eq!(scopes_after(Vec::new(), cgroup_stalls, 0), None);
+    }
+
+    #[test]
+    fn recovery_keeps_blaming_what_started_the_pressure() {
+        let host_stalls = "/proc/pressure/memory";
+        // A child cgroup has the least headroom, but the host stalled.
+        let reading = |counter| Reading {
+            total: Some(100),
+            available: Some(40),
+            limits: vec![limit(None, 90), limit(Some("0:8"), 40)],
+            stalls: BTreeMap::from([(host_stalls.into(), counter)]),
+            ..Reading::default()
+        };
+        let mut state = State::default();
+        for (now, counter) in [(1_000, 0), (1_500, 250_000), (2_000, 500_000)] {
+            state.update(now, reading(counter));
+        }
+        assert!(state.pressured);
+        assert_eq!(state.short_scopes(), None);
+        // Five healthy seconds end the pressure; five more end recovery.
+        for now in (2_500..12_500).step_by(500) {
+            state.update(now, reading(500_000));
+            assert_eq!(state.short_scopes(), None, "at {now}");
+        }
+        assert!(!state.pressured && state.recovered_ms.is_some());
+        state.update(12_500, reading(500_000));
+        assert_eq!(state.recovered_ms, None);
+        assert!(state.blamed.is_empty(), "the episode is over");
+    }
+
+    #[test]
+    fn a_pressured_state_from_an_older_version_blames_the_host() {
+        // Older versions keep the same state version but drop `blamed`.
+        let mut state = State::default();
+        let reading = Reading {
+            total: Some(100),
+            available: Some(2),
+            limits: vec![limit(None, 90), limit(Some("0:8"), 2)],
+            ..Reading::default()
+        };
+        state.update(1_000, reading.clone());
+        state.update(1_500, reading);
+        assert!(state.pressured);
+        assert_eq!(state.short_scopes(), Some(vec!["0:8".into()]));
+        let mut older: serde_json::Value = serde_json::to_value(&state).unwrap();
+        older.as_object_mut().unwrap().remove("blamed");
+        let mut older: State = serde_json::from_value(older).unwrap();
+        assert!(older.pressured);
+        assert_eq!(older.short_scopes(), None);
+        // Later samples blaming a child do not narrow the unknown cause.
+        older.update(2_000, reading_short_child());
+        assert!(older.pressured);
+        assert_eq!(older.short_scopes(), None);
+    }
+
+    #[test]
+    fn a_first_bad_sample_from_an_older_version_blames_the_host() {
+        let mut state = State::default();
+        state.update(1_000, reading_short_child_bad());
+        assert_eq!(state.bad_samples, 1);
+        let mut older: serde_json::Value = serde_json::to_value(&state).unwrap();
+        older.as_object_mut().unwrap().remove("blamed");
+        let mut older: State = serde_json::from_value(older).unwrap();
+        older.update(1_500, reading_short_child_bad());
+        assert!(older.pressured);
+        assert_eq!(older.short_scopes(), None);
+    }
+
+    fn reading_short_child_bad() -> Reading {
+        Reading {
+            available: Some(2),
+            limits: vec![limit(None, 90), limit(Some("0:8"), 2)],
+            ..reading_short_child()
+        }
+    }
+
+    fn reading_short_child() -> Reading {
+        Reading {
+            total: Some(100),
+            available: Some(8),
+            limits: vec![limit(None, 90), limit(Some("0:8"), 8)],
+            ..Reading::default()
+        }
+    }
+
     /// Containers expose different cgroups at the same pathname. Each counter
     /// below is stationary, so no container is stalling at all.
     const COUNTERS: [u64; 3] = [21_764_622, 200_000_000, 393_795_795];
@@ -392,6 +631,7 @@ mod tests {
             total: Some(100),
             available: Some(50),
             stalls: BTreeMap::from([("/sys/fs/cgroup/memory.pressure".into(), counter)]),
+            ..Reading::default()
         }
     }
     #[test]

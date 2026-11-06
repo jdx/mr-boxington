@@ -115,6 +115,8 @@ const SCHED_PRESSURE_ENV: &str = "MBX_SCHED_PRESSURE";
 /// The session's resolved events gate, including workspace overrides.
 const SCHED_EVENTS_ENV: &str = "MBX_SCHED_EVENTS";
 const SCHED_BUILD_ID_ENV: &str = "MBX_SCHED_BUILD_ID";
+/// Whether compiler supervision may move compilers into their own cgroups.
+const SCHED_SUSPEND_ENV: &str = "MBX_SCHED_SUSPEND";
 /// Most CPU cores one Cargo build may hold at once.
 const SCHED_BUILD_SLOTS_ENV: &str = "MBX_SCHED_BUILD_SLOTS";
 
@@ -202,6 +204,11 @@ const SLOW_WAIT_NOTICE: Duration = Duration::from_secs(60);
 /// already short, but a machine that stays short must not starve a build
 /// forever: past this deadline the permit arithmetic alone decides.
 const GATE_DEADLINE: Duration = Duration::from_secs(120);
+
+/// The lease this process was granted most recently in each pool; see
+/// `relocate_lease`.
+static LAST_GRANT: std::sync::Mutex<BTreeMap<PathBuf, PathBuf>> =
+    std::sync::Mutex::new(BTreeMap::new());
 
 /// Distinguishes leases created by one process, which may hold several.
 static LEASE_NONCE: AtomicU64 = AtomicU64::new(0);
@@ -430,8 +437,17 @@ struct Lease {
     build_id: Option<String>,
     #[serde(default)]
     domain: Option<String>,
+    /// The memory cgroups the holder sits in, named as in
+    /// `cgroup::identities`. `None` for older leases and holders whose
+    /// cgroups were not visible, which may sit anywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cgroups: Option<Vec<String>>,
     #[serde(default)]
     bytes_per_permit: u64,
+    /// When the holder recorded `cgroups`; `None` in leases from older
+    /// versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    written: Option<crate::util::Stamp>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -727,6 +743,65 @@ fn scope_used<'a>(leases: impl Iterator<Item = &'a Lease>) -> Resources {
             memory_bytes: used.memory_bytes.saturating_add(charge.memory_bytes),
         }
     })
+}
+
+/// Whether a live compilation holds memory that `short` says is short.
+///
+/// The memory gates wait only for compilations whose finishing would return
+/// that memory. When cgroups are short (`Some`), that means the compilations
+/// inside any of them: one in another container sharing the pool frees
+/// nothing here, and waiting for it would stall this container for as long as
+/// any other keeps compiling. When the host is short (`None`), every
+/// compilation uses that memory and all of them count. A lease that does not
+/// say where its holder sits counts too, as it might be anywhere.
+///
+/// So under lasting pressure each cgroup still runs one compilation at a time
+/// rather than none, and a host short of memory still runs one in the pool.
+fn holds_short_memory(
+    pool: &Path,
+    live: &[Lease],
+    short: Option<&[String]>,
+    contains: CgroupContains,
+) -> bool {
+    live.iter().any(|lease| match (short, &lease.cgroups) {
+        (Some(scopes), Some(cgroups)) => scopes
+            .iter()
+            .any(|scope| contains(pool, scope, cgroups, lease.written)),
+        _ => true,
+    })
+}
+
+/// Whether a process that recorded `cgroups` at a time is charged to a scope.
+type CgroupContains = fn(&Path, &str, &[String], Option<crate::util::Stamp>) -> bool;
+
+/// See `cgroup::contains`. Without cgroups, nothing can be ruled out.
+fn cgroup_contains(
+    pool: &Path,
+    scope: &str,
+    cgroups: &[String],
+    written: Option<crate::util::Stamp>,
+) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::cgroup::contains(pool, scope, cgroups, written)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pool, scope, cgroups, written);
+        true
+    }
+}
+
+/// The memory cgroups this process sits in; see `cgroup::identities`.
+fn memory_cgroups() -> &'static [String] {
+    #[cfg(target_os = "linux")]
+    {
+        crate::cgroup::identities()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        &[]
+    }
 }
 
 fn domain_used(live: &[Lease], domain: &str) -> Resources {
@@ -1542,12 +1617,19 @@ pub(crate) struct Pool {
     events: bool,
     priority: SchedulerPriority,
     /// Probe for currently available memory, injectable for tests.
-    available_memory: fn() -> Option<u64>,
+    available_memory: fn() -> Option<crate::util::Available>,
     pressure: bool,
     pressure_probe: fn() -> crate::pressure::Reading,
     /// The memory domain `pressure_probe` reads, injectable for tests. Pools
     /// in different containers share leases but not pressure state.
     pressure_domain: &'static str,
+    /// The memory cgroups this process sits in, recorded in its leases so
+    /// that a waiter can tell which compilations hold the memory it is short
+    /// of. Injectable for tests.
+    memory_cgroups: &'static [String],
+    /// Whether a lease's cgroups sit inside a short cgroup, injectable for
+    /// tests.
+    cgroup_contains: CgroupContains,
     clock: fn() -> u64,
     /// Source of the counter in lease names, injectable for tests.
     lease_nonce: fn() -> u64,
@@ -1583,6 +1665,8 @@ pub(crate) fn reservation_pool(config: &Config, priority: SchedulerPriority) -> 
         pool.set_memory_capacity(scheduler.memory_bytes.unwrap_or(0));
         pool.events = config.events;
         pool.pressure = scheduler.pressure;
+        // A reserved command runs where it is started; supervision moves
+        // only compilers.
         pool
     })
 }
@@ -1685,9 +1769,8 @@ pub(crate) fn session_environment_with_jobs(
             scheduler.priority.as_str().into(),
         ),
         (
-            "MBX_SCHED_SUSPEND".into(),
-            u8::from(scheduler.suspend && scheduler.pressure && scheduler.memory_bytes.is_some())
-                .to_string(),
+            SCHED_SUSPEND_ENV.into(),
+            u8::from(suspends(scheduler)).to_string(),
         ),
         (
             "MBX_SCHED_CGROUP_ROOT".into(),
@@ -1699,6 +1782,11 @@ pub(crate) fn session_environment_with_jobs(
         (SCHED_BUILD_ID_ENV.into(), crate::util::random_string(12)),
         (SCHED_BUILD_SLOTS_ENV.into(), build_permits.to_string()),
     ]
+}
+
+/// Whether compiler supervision is on; see `supervision::prepare`.
+fn suspends(scheduler: &crate::config::SchedulerSettings) -> bool {
+    scheduler.suspend && scheduler.pressure && scheduler.memory_bytes.is_some()
 }
 
 fn bytes_per_permit(memory_bytes: Option<u64>, cpus: u64) -> u64 {
@@ -1862,12 +1950,60 @@ impl Pool {
             bytes_per_permit,
             events: true,
             priority,
-            available_memory: crate::util::memory_available_bytes,
+            available_memory: crate::util::memory_available,
             pressure: true,
             pressure_probe: crate::pressure::probe,
             pressure_domain: crate::pressure::domain(),
+            memory_cgroups: memory_cgroups(),
+            cgroup_contains,
             clock: crate::pressure::now_ms,
             lease_nonce: next_lease_nonce,
+        }
+    }
+
+    /// Rewrite the lease this process was last granted to say its compiler
+    /// now sits in `cgroup`, after compiler supervision moved it there, or,
+    /// with `None` once that compiler is done, back where it was granted:
+    /// one permit can cover a retried compiler that runs unsupervised.
+    ///
+    /// A lease is written at admission, before supervision decides whether
+    /// the compiler moves, so it first names this process's own cgroups. A
+    /// moved compiler's memory is charged under `scheduler.cgroup_root`
+    /// instead, and a gate short of that memory has to find it there. Only
+    /// compiler wrappers are supervised, and each launches the compiler its
+    /// last grant admitted. Rewritten under the registrar lock, so no
+    /// admission reads a lease half-written; a lease that cannot be rewritten
+    /// keeps its old place. Only Linux supervision moves compilers.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn relocate_lease(&self, cgroup: Option<&str>) {
+        let Some(path) = LAST_GRANT
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&self.dir)
+            .cloned()
+        else {
+            return;
+        };
+        let Ok(mut registrar) = fslock::LockFile::open(&self.dir.join(POOL_LOCK)) else {
+            return;
+        };
+        if registrar.lock().is_err() {
+            return;
+        }
+        let Some(mut lease) = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Lease>(&bytes).ok())
+        else {
+            return;
+        };
+        lease.cgroups = match cgroup {
+            Some(cgroup) => Some(vec![cgroup.into()]),
+            None => (!self.memory_cgroups.is_empty()).then(|| self.memory_cgroups.to_vec()),
+        };
+        lease.written = Some(crate::util::Stamp::now());
+        if let Ok(record) = serde_json::to_vec(&lease) {
+            // Truncating and rewriting keeps the holder's lock on the file.
+            let _ = std::fs::write(&path, record);
         }
     }
 
@@ -2297,14 +2433,19 @@ impl Pool {
             });
             return Ok(None);
         }
-        if !live.is_empty()
-            && let Some(pressure) = &pressure
+        if let Some(pressure) = &pressure
             && pressure.valid
             && (pressure.pressured
                 || (pressure.recovered_ms.is_some()
                     && pressure.last_admission_ms.is_some_and(|last| {
                         now.saturating_sub(last) < crate::pressure::INTERVAL_MS
                     })))
+            && holds_short_memory(
+                &self.dir,
+                &live,
+                pressure.short_scopes().as_deref(),
+                self.cgroup_contains,
+            )
         {
             self.gated(state, "pressure", events, || {
                 self.waiting_record(resources, weight, demand, first_arrival_ms, u64::MAX)
@@ -2318,14 +2459,19 @@ impl Pool {
         // ledger cannot see -- unmeasured crates already running, or memory
         // that was never the build's to spend.
         //
-        // Only while somebody else holds a permit, though. With an idle pool
-        // there is no compilation whose finishing would return the memory
-        // this one is short of, so deferring would stall the one thing that
-        // could proceed and wait out the deadline to reach the same answer.
-        if !live.is_empty()
-            && let Some(needed) = predicted
+        // Only while another compilation holds the memory that is short,
+        // though. Without one, no compilation's finishing would return it,
+        // so deferring would stall the one thing that could proceed and wait
+        // out the deadline to reach the same answer.
+        if let Some(needed) = predicted
             && let Some(available) = (self.available_memory)()
-            && available < needed
+            && available.bytes < needed
+            && holds_short_memory(
+                &self.dir,
+                &live,
+                available.short_of(needed).as_deref(),
+                self.cgroup_contains,
+            )
         {
             self.gated(state, "available-memory", events, || {
                 self.waiting_record(resources, weight, demand, first_arrival_ms, u64::MAX)
@@ -2457,9 +2603,16 @@ impl Pool {
             priority: self.priority.as_str().into(),
             build_id: self.build.as_ref().map(|(id, _)| id.clone()),
             domain: Some(self.pressure_domain.into()),
+            cgroups: (!self.memory_cgroups.is_empty()).then(|| self.memory_cgroups.to_vec()),
             bytes_per_permit: self.bytes_per_permit,
+            written: Some(crate::util::Stamp::now()),
         })?;
-        self.lock_record(leases, &lease)
+        let permit = self.lock_record(leases, &lease)?;
+        LAST_GRANT
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(self.dir.clone(), permit.path.clone());
+        Ok(permit)
     }
 
     fn lock_record(&self, leases: &Path, record: &[u8]) -> Result<Permit> {
@@ -3846,6 +3999,8 @@ fn scan_leases(leases: &Path) -> Result<Vec<Lease>> {
                     priority: SchedulerPriority::Normal.as_str().into(),
                     build_id: None,
                     domain: None,
+                    cgroups: None,
+                    written: None,
                     bytes_per_permit: 0,
                 },
                 |mut lease| {
