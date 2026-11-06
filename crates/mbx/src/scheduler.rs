@@ -1991,11 +1991,7 @@ impl Pool {
             pool.set_memory_capacity(scheduler.memory_bytes.unwrap_or(0));
             pool.events = config.events;
             pool.pressure = scheduler.pressure;
-            pool.place_leases(
-                suspends(scheduler)
-                    .then_some(scheduler.cgroup_root.as_deref())
-                    .flatten(),
-            );
+            pool.place_leases(crate::supervision::destination(scheduler).as_deref());
             pool
         })
     }
