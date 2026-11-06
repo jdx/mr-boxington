@@ -3,17 +3,20 @@
 //! Parent usage includes sibling workloads. Subtracting only the leaf's usage
 //! from a parent's limit would overestimate how much memory a compiler can use.
 use crate::util::{parse_cgroup_stat, read_cgroup_text};
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
+use std::time::Instant;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Memory {
     pub limit: Option<u64>,
     pub headroom: Option<u64>,
-    /// The cgroup whose headroom is `headroom`, named as in `identities`.
-    pub limiting: Option<String>,
+    /// The headroom of every limited cgroup, `headroom` being the smallest.
+    pub levels: Vec<crate::util::Limit>,
 }
 
 #[derive(Debug)]
@@ -63,17 +66,76 @@ pub(crate) fn memory_directories() -> Vec<PathBuf> {
 /// compiles.
 pub(crate) fn identities() -> &'static [String] {
     static IDENTITIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    IDENTITIES.get_or_init(|| {
+    IDENTITIES.get_or_init(|| directories().iter().map(|(_, id)| id.clone()).collect())
+}
+
+/// `memory_directories` paired with their identities, for those that have one.
+fn directories() -> &'static [(PathBuf, String)] {
+    static DIRECTORIES: std::sync::OnceLock<Vec<(PathBuf, String)>> = std::sync::OnceLock::new();
+    DIRECTORIES.get_or_init(|| {
         memory_directories()
-            .iter()
-            .filter_map(|path| identity(path))
+            .into_iter()
+            .filter_map(|path| identity(&path).map(|id| (path, id)))
             .collect()
     })
 }
 
-fn identity(path: &Path) -> Option<String> {
+pub(crate) fn identity(path: &Path) -> Option<String> {
     let metadata = std::fs::metadata(path).ok()?;
     Some(format!("{}:{}", metadata.dev(), metadata.ino()))
+}
+
+/// How long one walk of a cgroup's subtree is trusted. A compilation in a
+/// cgroup created since can go uncounted for at most this long.
+const SUBTREE_REFRESH: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether a process sitting in `cgroups` is charged to the cgroup `scope`,
+/// one of this process's own memory cgroups.
+///
+/// Finding `scope` in the list is not enough. A process sees only the cgroups
+/// its namespace shows, so a compilation in a container nested below `scope`
+/// lists none of the ancestors above its container. So this looks for any of
+/// its cgroups in `scope`'s subtree instead, which this process can see
+/// whenever it can see `scope`. A scope that cannot be found here contains
+/// everything.
+pub(crate) fn contains(scope: &str, cgroups: &[String]) -> bool {
+    type Walks = BTreeMap<String, (Instant, HashSet<String>)>;
+    static WALKED: Mutex<Walks> = Mutex::new(BTreeMap::new());
+    if cgroups.iter().any(|id| id == scope) {
+        return true;
+    }
+    let Some((path, _)) = directories().iter().find(|(_, id)| id == scope) else {
+        return true;
+    };
+    let mut walked = WALKED.lock().unwrap_or_else(|error| error.into_inner());
+    let walk = walked
+        .entry(scope.into())
+        .or_insert_with(|| (Instant::now(), subtree(path)));
+    if walk.0.elapsed() >= SUBTREE_REFRESH {
+        *walk = (Instant::now(), subtree(path));
+    }
+    cgroups.iter().any(|id| walk.1.contains(id))
+}
+
+/// The identities of every cgroup below `path`.
+fn subtree(path: &Path) -> HashSet<String> {
+    let mut members = HashSet::new();
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && let Ok(metadata) = entry.metadata()
+            {
+                members.insert(format!("{}:{}", metadata.dev(), metadata.ino()));
+                pending.push(entry.path());
+            }
+        }
+    }
+    members
 }
 
 pub(crate) fn memory() -> Memory {
@@ -225,10 +287,11 @@ fn snapshot(domains: &[Domain]) -> Memory {
                 limit.saturating_sub(used.saturating_sub(reclaimable))
             });
             result.limit = Some(result.limit.map_or(limit, |old| old.min(limit)));
-            if result.headroom.is_none_or(|old| headroom < old) {
-                result.headroom = Some(headroom);
-                result.limiting = identity(directory);
-            }
+            result.headroom = Some(result.headroom.map_or(headroom, |old| old.min(headroom)));
+            result.levels.push(crate::util::Limit {
+                cgroup: identity(directory),
+                bytes: headroom,
+            });
         }
     }
     result
@@ -237,6 +300,13 @@ fn snapshot(domains: &[Domain]) -> Memory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn level(path: &Path, bytes: u64) -> crate::util::Limit {
+        crate::util::Limit {
+            cgroup: identity(path),
+            bytes,
+        }
+    }
 
     fn write_memory(path: &Path, limit: &str, usage: u64, inactive: u64, v2: bool) {
         write_cache(path, limit, usage, 0, inactive, v2);
@@ -274,7 +344,10 @@ mod tests {
             Memory {
                 limit: Some(800),
                 headroom: Some(150),
-                limiting: identity(&mount.join("slice")),
+                levels: vec![
+                    level(&mount.join("slice/build"), 650),
+                    level(&mount.join("slice"), 150),
+                ],
             }
         );
         write_memory(&mount.join("slice"), "1000", 1100, 0, true);
@@ -296,7 +369,7 @@ mod tests {
             Memory {
                 limit: Some(1000),
                 headroom: Some(350),
-                limiting: identity(&mount),
+                levels: vec![level(&mount, 350)],
             }
         );
         assert!(domains("3:memory:/slice-other/build", &mounts).is_empty());
@@ -335,7 +408,7 @@ mod tests {
             Memory {
                 limit: Some(0),
                 headroom: Some(0),
-                limiting: identity(temp.path()),
+                levels: vec![level(temp.path(), 0)],
             }
         );
     }
@@ -354,6 +427,28 @@ mod tests {
             }];
             assert_eq!(snapshot(&domains).headroom, Some(900), "v2: {v2}");
         }
+    }
+
+    #[test]
+    fn a_subtree_holds_nested_cgroups_whose_own_lists_stop_below_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let scope = temp.path().join("scope");
+        let nested = scope.join("container/inner");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let members = subtree(&scope);
+        // A container below the scope lists only what its namespace shows.
+        assert!(members.contains(&identity(&nested).unwrap()));
+        assert!(members.contains(&identity(&scope.join("container")).unwrap()));
+        assert!(!members.contains(&identity(&outside).unwrap()));
+        assert!(!members.contains(&identity(&scope).unwrap()));
+    }
+
+    #[test]
+    fn a_scope_this_process_cannot_find_contains_everything() {
+        assert!(contains("0:0", &["1:1".into()]));
+        assert!(contains("1:1", &["1:1".into()]));
     }
 
     #[test]

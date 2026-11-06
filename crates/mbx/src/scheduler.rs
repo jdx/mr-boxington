@@ -734,24 +734,41 @@ fn scope_used<'a>(leases: impl Iterator<Item = &'a Lease>) -> Resources {
     })
 }
 
-/// Whether a live compilation holds memory that `limiting` says is short.
+/// Whether a live compilation holds memory that `short` says is short.
 ///
 /// The memory gates wait only for compilations whose finishing would return
-/// that memory. When a cgroup's own headroom is the limit, that means the
-/// compilations inside it: one in another container sharing the pool frees
+/// that memory. When cgroups are short (`Some`), that means the compilations
+/// inside any of them: one in another container sharing the pool frees
 /// nothing here, and waiting for it would stall this container for as long as
-/// any other keeps compiling. When the host's figure is the limit (`None`),
-/// every compilation uses that memory and all of them count. A lease that does
-/// not say where its holder sits counts too, as it might be anywhere.
+/// any other keeps compiling. When the host is short (`None`), every
+/// compilation uses that memory and all of them count. A lease that does not
+/// say where its holder sits counts too, as it might be anywhere.
 ///
 /// So under lasting pressure each cgroup still runs one compilation at a time
 /// rather than none, and a host short of memory still runs one in the pool.
-fn holds_short_memory(live: &[Lease], limiting: Option<&str>) -> bool {
-    live.iter().any(|lease| {
-        limiting
-            .zip(lease.cgroups.as_ref())
-            .is_none_or(|(limiting, cgroups)| cgroups.iter().any(|id| id == limiting))
+fn holds_short_memory(
+    live: &[Lease],
+    short: Option<&[String]>,
+    contains: fn(&str, &[String]) -> bool,
+) -> bool {
+    live.iter().any(|lease| match (short, &lease.cgroups) {
+        (Some(scopes), Some(cgroups)) => scopes.iter().any(|scope| contains(scope, cgroups)),
+        _ => true,
     })
+}
+
+/// Whether a process in `cgroups` is charged to `scope`; see
+/// `cgroup::contains`. Without cgroups, nothing can be ruled out.
+fn cgroup_contains(scope: &str, cgroups: &[String]) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::cgroup::contains(scope, cgroups)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (scope, cgroups);
+        true
+    }
 }
 
 /// The memory cgroups this process sits in; see `cgroup::identities`.
@@ -1589,6 +1606,9 @@ pub(crate) struct Pool {
     /// that a waiter can tell which compilations hold the memory it is short
     /// of. Injectable for tests.
     memory_cgroups: &'static [String],
+    /// Whether a lease's cgroups sit inside a short cgroup, injectable for
+    /// tests.
+    cgroup_contains: fn(&str, &[String]) -> bool,
     clock: fn() -> u64,
     /// Source of the counter in lease names, injectable for tests.
     lease_nonce: fn() -> u64,
@@ -1908,6 +1928,7 @@ impl Pool {
             pressure_probe: crate::pressure::probe,
             pressure_domain: crate::pressure::domain(),
             memory_cgroups: memory_cgroups(),
+            cgroup_contains,
             clock: crate::pressure::now_ms,
             lease_nonce: next_lease_nonce,
         }
@@ -2341,7 +2362,11 @@ impl Pool {
         }
         if let Some(pressure) = &pressure
             && pressure.valid
-            && holds_short_memory(&live, pressure.limiting_cgroup())
+            && holds_short_memory(
+                &live,
+                pressure.short_scopes().as_deref(),
+                self.cgroup_contains,
+            )
             && (pressure.pressured
                 || (pressure.recovered_ms.is_some()
                     && pressure.last_admission_ms.is_some_and(|last| {
@@ -2367,7 +2392,11 @@ impl Pool {
         if let Some(needed) = predicted
             && let Some(available) = (self.available_memory)()
             && available.bytes < needed
-            && holds_short_memory(&live, available.cgroup.as_deref())
+            && holds_short_memory(
+                &live,
+                available.short_of(needed).as_deref(),
+                self.cgroup_contains,
+            )
         {
             self.gated(state, "available-memory", events, || {
                 self.waiting_record(resources, weight, demand, first_arrival_ms, u64::MAX)

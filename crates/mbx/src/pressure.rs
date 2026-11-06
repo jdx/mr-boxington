@@ -10,6 +10,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub(crate) const INTERVAL_MS: u64 = 500;
+/// Headroom, as a share of total memory, below which a sample is bad.
+const BAD_HEADROOM: f64 = 0.05;
+/// Headroom a sample needs, above this share, to count as healthy.
+const HEALTHY_HEADROOM: f64 = 0.10;
+/// Full-stall percentage at which a sample is bad.
+const BAD_STALL: f64 = 10.0;
+/// Full-stall percentage a sample must stay below to count as healthy.
+const HEALTHY_STALL: f64 = 2.0;
 const STALE_MS: u64 = 3_000;
 const VERSION: u8 = 1;
 /// Pool subdirectory holding one state file per memory domain.
@@ -26,11 +34,15 @@ static UNSAVED: Mutex<Option<(PathBuf, State)>> = Mutex::new(None);
 pub(crate) struct Reading {
     pub total: Option<u64>,
     pub available: Option<u64>,
-    /// The cgroup whose headroom set `available`; see `util::Available`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cgroup: Option<String>,
+    /// Every figure bounding `available`; see `util::Available`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limits: Vec<crate::util::Limit>,
     /// Full-stall microseconds, keyed by the source (never sum nested groups).
     pub stalls: BTreeMap<String, u64>,
+    /// The cgroup each stall source describes, by identity. A source missing
+    /// here describes the whole host.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stall_cgroups: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -40,6 +52,9 @@ pub(crate) struct State {
     reading: Reading,
     bad_samples: u8,
     healthy_since: Option<u64>,
+    /// Stall sources the latest comparison found unhealthy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    stalled: Vec<String>,
     pub pressured: bool,
     pub valid: bool,
     pub recovered_ms: Option<u64>,
@@ -123,12 +138,14 @@ fn prune(directory: &Path, now: std::time::SystemTime) {
 }
 
 pub(crate) fn probe() -> Reading {
-    #[allow(unused_mut)]
     let available = crate::util::memory_available();
+    #[allow(unused_mut)]
     let mut reading = Reading {
         total: crate::util::memory_total_bytes(),
         available: available.as_ref().map(|available| available.bytes),
-        cgroup: available.and_then(|available| available.cgroup),
+        limits: available
+            .map(|available| available.limits)
+            .unwrap_or_default(),
         ..Reading::default()
     };
     #[cfg(target_os = "linux")]
@@ -139,9 +156,15 @@ pub(crate) fn probe() -> Reading {
             .ok()
             .and_then(|s| full_total(&s))
         {
-            reading
-                .stalls
-                .insert(path.to_string_lossy().into_owned(), total);
+            let source = path.to_string_lossy().into_owned();
+            if let Some(cgroup) = path
+                .parent()
+                .filter(|_| !path.starts_with("/proc"))
+                .and_then(crate::cgroup::identity)
+            {
+                reading.stall_cgroups.insert(source.clone(), cgroup);
+            }
+            reading.stalls.insert(source, total);
         }
     }
     reading
@@ -157,10 +180,40 @@ fn full_total(text: &str) -> Option<u64> {
 }
 
 impl State {
-    /// The cgroup whose headroom the latest sample measured, or `None` when
-    /// the host's figure set it.
-    pub(crate) fn limiting_cgroup(&self) -> Option<&str> {
-        self.reading.cgroup.as_deref()
+    /// Where memory is short, as `util::short_scopes` reports it.
+    ///
+    /// Pressure can come from any figure: a cgroup's headroom, the host's, or
+    /// the stalls of the host or of any cgroup above this process. Each one
+    /// that is not healthy names memory some compilations are using, and all
+    /// of those compilations count, not just those behind the smallest
+    /// headroom. When every figure is healthy again but recovery has not
+    /// finished, the smallest headroom is what recovery is waiting on.
+    pub(crate) fn short_scopes(&self) -> Option<Vec<String>> {
+        let total = self.reading.total.filter(|n| *n > 0);
+        let mut scopes: Vec<Option<String>> = self
+            .reading
+            .limits
+            .iter()
+            .filter(|limit| {
+                total.is_some_and(|total| limit.bytes as f64 / total as f64 <= HEALTHY_HEADROOM)
+            })
+            .map(|limit| limit.cgroup.clone())
+            .chain(
+                self.stalled
+                    .iter()
+                    .map(|source| self.reading.stall_cgroups.get(source).cloned()),
+            )
+            .collect();
+        if scopes.is_empty() {
+            scopes.push(
+                self.reading
+                    .limits
+                    .iter()
+                    .min_by_key(|limit| limit.bytes)
+                    .and_then(|limit| limit.cgroup.clone()),
+            );
+        }
+        crate::util::short_scopes(scopes)
     }
 
     fn update(&mut self, now: u64, reading: Reading) {
@@ -168,18 +221,24 @@ impl State {
             .checked_sub(self.sampled_ms)
             .filter(|n| *n > 0 && *n <= STALE_MS);
         let comparable = self.version == VERSION && elapsed.is_some();
-        let stall_percent = comparable
-            .then(|| {
-                reading
-                    .stalls
-                    .iter()
-                    .filter_map(|(source, value)| {
-                        let delta = value.checked_sub(*self.reading.stalls.get(source)?)?;
-                        Some(delta as f64 / (elapsed.unwrap() as f64 * 10.0))
-                    })
-                    .reduce(f64::max)
-            })
-            .flatten();
+        let stalls: Vec<(&String, f64)> = if comparable {
+            reading
+                .stalls
+                .iter()
+                .filter_map(|(source, value)| {
+                    let delta = value.checked_sub(*self.reading.stalls.get(source)?)?;
+                    Some((source, delta as f64 / (elapsed.unwrap() as f64 * 10.0)))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let stall_percent = stalls.iter().map(|(_, percent)| *percent).reduce(f64::max);
+        let stalled = stalls
+            .iter()
+            .filter(|(_, percent)| *percent >= HEALTHY_STALL)
+            .map(|(source, _)| (*source).clone())
+            .collect();
         let headroom = reading
             .total
             .filter(|n| *n > 0)
@@ -197,10 +256,12 @@ impl State {
             }
         }
         self.valid = headroom.is_some() || stall_percent.is_some();
-        let bad = headroom.is_some_and(|v| v < 0.05) || stall_percent.is_some_and(|v| v >= 10.0);
+        self.stalled = stalled;
+        let bad = headroom.is_some_and(|v| v < BAD_HEADROOM)
+            || stall_percent.is_some_and(|v| v >= BAD_STALL);
         let healthy = self.valid
-            && headroom.is_none_or(|v| v > 0.10)
-            && stall_percent.is_none_or(|v| v < 2.0);
+            && headroom.is_none_or(|v| v > HEALTHY_HEADROOM)
+            && stall_percent.is_none_or(|v| v < HEALTHY_STALL);
         if !self.valid {
             self.pressured = false;
             self.bad_samples = 0;
@@ -391,6 +452,83 @@ mod tests {
         let state = sample(&path, 1_600, || panic!("too soon")).unwrap();
         assert!(state.pressured);
     }
+    fn limit(cgroup: Option<&str>, bytes: u64) -> crate::util::Limit {
+        crate::util::Limit {
+            cgroup: cgroup.map(Into::into),
+            bytes,
+        }
+    }
+
+    /// Two samples a second apart in which `source` stalled for `stall_ms`.
+    fn scopes_after(
+        limits: Vec<crate::util::Limit>,
+        source: &str,
+        stall_ms: u64,
+    ) -> Option<Vec<String>> {
+        let reading = |counter| Reading {
+            total: Some(100),
+            available: limits.iter().map(|limit| limit.bytes).min(),
+            limits: limits.clone(),
+            stalls: BTreeMap::from([(source.into(), counter)]),
+            stall_cgroups: BTreeMap::from([(
+                "/sys/fs/cgroup/memory.pressure".into(),
+                "0:7".into(),
+            )]),
+        };
+        let mut state = State::default();
+        state.update(1_000, reading(0));
+        state.update(2_000, reading(stall_ms * 1_000));
+        state.short_scopes()
+    }
+
+    #[test]
+    fn each_unhealthy_figure_names_the_memory_that_is_short() {
+        let cgroup_stalls = "/sys/fs/cgroup/memory.pressure";
+        let host_stalls = "/proc/pressure/memory";
+        // A cgroup stalling is short even when the host's headroom is smaller.
+        assert_eq!(
+            scopes_after(
+                vec![limit(None, 20), limit(Some("0:7"), 30)],
+                cgroup_stalls,
+                500
+            ),
+            Some(vec!["0:7".into()])
+        );
+        // The host stalling is short even when a cgroup's headroom is smaller.
+        assert_eq!(
+            scopes_after(
+                vec![limit(None, 50), limit(Some("0:7"), 3)],
+                host_stalls,
+                500
+            ),
+            None
+        );
+        // Every short cgroup counts, not just the one with least headroom.
+        assert_eq!(
+            scopes_after(
+                vec![
+                    limit(None, 90),
+                    limit(Some("0:7"), 3),
+                    limit(Some("0:8"), 8)
+                ],
+                cgroup_stalls,
+                0
+            ),
+            Some(vec!["0:7".into(), "0:8".into()])
+        );
+        // Healthy again but still recovering: the smallest headroom.
+        assert_eq!(
+            scopes_after(
+                vec![limit(None, 90), limit(Some("0:8"), 40)],
+                cgroup_stalls,
+                0
+            ),
+            Some(vec!["0:8".into()])
+        );
+        // Older readings carry no figures at all, so nothing is ruled out.
+        assert_eq!(scopes_after(Vec::new(), cgroup_stalls, 0), None);
+    }
+
     /// Containers expose different cgroups at the same pathname. Each counter
     /// below is stationary, so no container is stalling at all.
     const COUNTERS: [u64; 3] = [21_764_622, 200_000_000, 393_795_795];
@@ -398,8 +536,8 @@ mod tests {
         Reading {
             total: Some(100),
             available: Some(50),
-            cgroup: None,
             stalls: BTreeMap::from([("/sys/fs/cgroup/memory.pressure".into(), counter)]),
+            ..Reading::default()
         }
     }
     #[test]

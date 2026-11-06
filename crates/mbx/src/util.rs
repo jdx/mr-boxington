@@ -538,15 +538,22 @@ pub fn memory_total_bytes() -> Option<u64> {
     None
 }
 
-/// Memory a new process could get right now, and where the limit is.
+/// One figure that bounds the memory a new process could get: the host's
+/// own (`cgroup: None`) or the headroom of one cgroup it sits in.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Limit {
+    /// The cgroup, as named by `cgroup::identities`. `None` is the host, or
+    /// a cgroup that could not be named, which might hold any process.
+    pub cgroup: Option<String>,
+    pub bytes: u64,
+}
+
+/// Memory a new process could get right now, and every figure bounding it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Available {
+    /// The smallest of `limits`.
     pub bytes: u64,
-    /// The cgroup whose headroom set `bytes`, as named by
-    /// `cgroup::identities`. `None` means the host's own figure set it, or
-    /// that no cgroup could be told apart, so any process may be holding the
-    /// memory that is short.
-    pub cgroup: Option<String>,
+    pub limits: Vec<Limit>,
 }
 
 impl Available {
@@ -554,9 +561,34 @@ impl Available {
     pub fn host(bytes: u64) -> Self {
         Self {
             bytes,
-            cgroup: None,
+            limits: vec![Limit {
+                cgroup: None,
+                bytes,
+            }],
         }
     }
+
+    /// Where memory is short of `needed`; see `short_scopes`.
+    pub fn short_of(&self, needed: u64) -> Option<Vec<String>> {
+        short_scopes(
+            self.limits
+                .iter()
+                .filter(|limit| limit.bytes < needed)
+                .map(|limit| limit.cgroup.clone()),
+        )
+    }
+}
+
+/// The cgroups whose memory is short, or `None` when the host's is.
+///
+/// Every process on the machine uses the host's memory, so one short host
+/// figure makes the answer "everywhere". An empty list says the same, because
+/// it means nothing could be blamed and every process might be responsible.
+pub fn short_scopes(scopes: impl IntoIterator<Item = Option<String>>) -> Option<Vec<String>> {
+    scopes
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .filter(|scopes| !scopes.is_empty())
 }
 
 /// Memory the machine could hand a new process right now, when measurable.
@@ -581,16 +613,17 @@ pub fn memory_available() -> Option<Available> {
         .parse::<u64>()
         .ok()?;
     let host = kibibytes.checked_mul(1024)?;
-    let cgroup = crate::cgroup::memory();
+    let mut available = Available::host(host);
+    available.limits.extend(crate::cgroup::memory().levels);
     // Zero is a real answer here -- a cgroup at its limit has nothing left --
     // and the caller has to be able to tell it from "cannot measure".
-    Some(match cgroup.headroom {
-        Some(free) if free < host => Available {
-            bytes: free,
-            cgroup: cgroup.limiting,
-        },
-        _ => Available::host(host),
-    })
+    available.bytes = available
+        .limits
+        .iter()
+        .map(|limit| limit.bytes)
+        .min()
+        .unwrap_or(host);
+    Some(available)
 }
 
 /// Memory the machine could hand a new process right now, when measurable.
@@ -690,6 +723,31 @@ mod tests {
                 .to_string()
                 .contains("failed to capture compiler input snapshot")
         );
+    }
+
+    #[test]
+    fn a_request_is_short_of_every_figure_below_it() {
+        let limit = |cgroup: Option<&str>, bytes| Limit {
+            cgroup: cgroup.map(Into::into),
+            bytes,
+        };
+        let nested = Available {
+            bytes: 1,
+            limits: vec![
+                limit(None, 100),
+                limit(Some("child"), 1),
+                limit(Some("parent"), 2),
+            ],
+        };
+        // Both cgroups are too small, so compilations under either count.
+        assert_eq!(
+            nested.short_of(3),
+            Some(vec!["child".into(), "parent".into()])
+        );
+        assert_eq!(nested.short_of(2), Some(vec!["child".into()]));
+        assert_eq!(nested.short_of(101), None, "the host is short too");
+        assert_eq!(Available::host(1).short_of(2), None);
+        assert_eq!(Available::default().short_of(2), None, "nothing to blame");
     }
 
     #[test]

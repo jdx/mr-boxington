@@ -29,7 +29,32 @@ fn pool_at(dir: &Path, capacity: u64, bytes_per_permit: u64) -> Pool {
     // Leases that do not say where they sit count against every gate, which
     // is what the tests that do not care about cgroups expect.
     pool.memory_cgroups = &[];
+    pool.cgroup_contains = listed;
     pool
+}
+
+/// Membership by the lists alone, for cgroups that exist only in a test.
+fn listed(scope: &str, cgroups: &[String]) -> bool {
+    cgroups.iter().any(|id| id == scope)
+}
+
+/// A reading whose only short figure is `cgroup`'s headroom.
+fn cgroup_short(cgroup: &str) -> crate::pressure::Reading {
+    crate::pressure::Reading {
+        total: Some(100),
+        available: Some(0),
+        limits: vec![
+            crate::util::Limit {
+                cgroup: None,
+                bytes: 50,
+            },
+            crate::util::Limit {
+                cgroup: Some(cgroup.into()),
+                bytes: 0,
+            },
+        ],
+        ..Default::default()
+    }
 }
 
 /// A low-priority pool with the same host independence as `pool_at`.
@@ -1032,9 +1057,9 @@ fn containers_sharing_a_pool_are_gated_by_their_own_pressure() {
         crate::pressure::Reading {
             total: Some(100),
             available: Some(50),
-            cgroup: None,
             // The same pathname names a different cgroup in each container.
             stalls: [("/sys/fs/cgroup/memory.pressure".into(), counter)].into(),
+            ..Default::default()
         }
     }
     let directory = tempfile::tempdir().unwrap();
@@ -1129,12 +1154,7 @@ fn a_container_short_of_its_own_memory_waits_only_for_its_own_compilations() {
         directory.path(),
         "short",
         cgroups(&["0:1", "0:30"]),
-        || crate::pressure::Reading {
-            total: Some(100),
-            available: Some(0),
-            cgroup: Some("0:30".into()),
-            ..Default::default()
-        },
+        || cgroup_short("0:30"),
         clock,
     );
     let elsewhere = other.try_admit(1, None).unwrap().expect("healthy");
@@ -1201,12 +1221,7 @@ fn a_host_short_of_memory_or_an_unplaced_lease_still_gates_every_container() {
         directory.path(),
         "short",
         cgroups(&["0:40"]),
-        || crate::pressure::Reading {
-            total: Some(100),
-            available: Some(0),
-            cgroup: Some("0:40".into()),
-            ..Default::default()
-        },
+        || cgroup_short("0:40"),
         clock,
     );
     latch_pressure(&short, 1_000);
@@ -1226,14 +1241,44 @@ fn the_available_memory_gate_waits_only_for_compilations_holding_the_short_memor
     short.available_memory = || {
         Some(crate::util::Available {
             bytes: 0,
-            cgroup: Some("0:30".into()),
+            limits: vec![
+                crate::util::Limit {
+                    cgroup: None,
+                    bytes: 1_000,
+                },
+                crate::util::Limit {
+                    cgroup: Some("0:30".into()),
+                    bytes: 0,
+                },
+            ],
         })
     };
     let first = short.try_admit(1, Some(100)).unwrap();
     assert!(first.is_some(), "another container's work gated this one");
     assert!(short.try_admit(1, Some(100)).unwrap().is_none());
-    // Short on the host's figure, the other container's work counts too.
+    // A sibling under a parent cgroup that is also too small counts.
     drop(first);
+    let mut sibling = pool_at(directory.path(), 64, 100);
+    sibling.memory_cgroups = cgroups(&["0:31", "0:10"]);
+    let beside = sibling.try_admit(1, None).unwrap().unwrap();
+    short.available_memory = || {
+        Some(crate::util::Available {
+            bytes: 0,
+            limits: vec![
+                crate::util::Limit {
+                    cgroup: Some("0:30".into()),
+                    bytes: 0,
+                },
+                crate::util::Limit {
+                    cgroup: Some("0:10".into()),
+                    bytes: 50,
+                },
+            ],
+        })
+    };
+    assert!(short.try_admit(1, Some(100)).unwrap().is_none());
+    drop(beside);
+    // Short on the host's figure, the other container's work counts too.
     short.available_memory = || Some(crate::util::Available::host(0));
     assert!(short.try_admit(1, Some(100)).unwrap().is_none());
     drop(elsewhere);

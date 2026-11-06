@@ -258,12 +258,13 @@ slow processes down, PSI shows the stalls and pressure control pauses
 admissions.
 
 Pressure control waits only for compilations that use the memory that is
-short. When a container's own limit is the smaller figure, that means the
-compilations inside the container. Compilations in other containers sharing
-the cache do not keep it waiting. When the host's figure is the smaller one,
-every compilation in the pool counts. So at least one compilation can run in
-a container that is short of its own memory, and at least one in the pool
-when the host is short. After five healthy
+short. When a container's own limit is low or its own cgroup stalls, that
+means the compilations inside that container, including any in nested
+containers. Compilations in other containers sharing the cache do not keep
+it waiting. When the host's memory is low or the host stalls, every
+compilation in the pool counts. So at least one compilation can run in a
+container that is short of its own memory, and at least one in the pool when
+the host is short. After five healthy
 seconds, mbx admits at most one compilation every half second for five seconds,
 then lifts that limit. Pressure control does not suspend running processes. To
 freeze them, see
