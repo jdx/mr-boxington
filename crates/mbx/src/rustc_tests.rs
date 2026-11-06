@@ -466,8 +466,21 @@ fn private_artifacts_are_recognized_only_while_marked() {
     ];
     assert!(!links_private_artifact_in(root.path(), &links));
 
-    record_private_artifacts(root.path(), &outputs).unwrap();
+    record_private_artifacts(root.path(), &outputs, "base").unwrap();
     assert!(links_private_artifact_in(root.path(), &links));
+    assert_eq!(
+        private_artifact_inputs_in(root.path(), &links).1,
+        vec!["base"]
+    );
+    let marker_path = private_artifact_path(root.path(), &deps.join("libbase-1.rmeta")).unwrap();
+    let mut old: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
+    old.as_object_mut().unwrap().remove("producer");
+    std::fs::write(&marker_path, serde_json::to_vec(&old).unwrap()).unwrap();
+    assert_eq!(
+        private_artifact_inputs_in(root.path(), &links),
+        (true, vec![], None)
+    );
     assert!(
         !links_private_artifact_in(root.path(), &[deps.join("libother-1.rlib")]),
         "a marker must not vouch for an artifact it was not written for"
@@ -2877,5 +2890,77 @@ fn bypassed_library_identity_ignores_a_single_diagnostic_width() {
     assert_ne!(
         base,
         identity(&["--crate-name=widget", "--diagnostic-width=x", "src/lib.rs"])
+    );
+}
+
+#[test]
+fn compiler_kind_comes_from_rustc_flags() {
+    let args = |xs: &[&str]| xs.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+    assert_eq!(
+        compiler_unit_kind(&args(&["--crate-type=rlib"]), "serde").as_deref(),
+        Some("lib")
+    );
+    assert_eq!(
+        compiler_unit_kind(&args(&["--crate-type", "proc-macro"]), "derive").as_deref(),
+        Some("proc-macro")
+    );
+    assert_eq!(
+        compiler_unit_kind(&args(&["--crate-type=bin"]), "app").as_deref(),
+        Some("bin")
+    );
+    assert_eq!(
+        compiler_unit_kind(&args(&["--crate-type=lib", "--test"]), "app").as_deref(),
+        Some("test")
+    );
+    assert_eq!(
+        compiler_unit_kind(&args(&["--crate-type=bin"]), "build_script_build").as_deref(),
+        Some("build-script")
+    );
+    assert_eq!(
+        compiler_unit_kind(&args(&["--crate-type=lib"]), "build_script_helper").as_deref(),
+        Some("lib")
+    );
+    assert_eq!(compiler_unit_kind(&args(&[]), "unknown"), None);
+}
+
+#[test]
+fn unconsulted_reasons_follow_wrapper_precedence() {
+    assert_eq!(
+        classify_skip_reason(false, true, true, true, true, true, false),
+        None
+    );
+    assert_eq!(
+        classify_skip_reason(true, true, true, true, true, true, false),
+        Some("private-dependency")
+    );
+    assert_eq!(
+        classify_skip_reason(true, false, true, true, true, true, false),
+        Some("eager")
+    );
+    // A key that cannot be shared is found before learned state is planned
+    // for it, so it names why that state was taken.
+    assert_eq!(
+        classify_skip_reason(true, false, true, false, true, true, false),
+        Some("unshareable-key")
+    );
+    assert_eq!(
+        classify_skip_reason(true, false, true, false, false, true, false),
+        Some("hot-reuse")
+    );
+    assert_eq!(
+        classify_skip_reason(true, false, false, false, true, true, false),
+        Some("unshareable-key")
+    );
+    assert_eq!(
+        classify_skip_reason(true, false, false, false, false, true, false),
+        Some("no-prediction")
+    );
+    assert_eq!(
+        classify_skip_reason(true, false, false, false, false, false, true),
+        Some("prediction-error")
+    );
+    assert_eq!(
+        classify_skip_reason(true, false, false, false, false, false, false),
+        Some("other")
     );
 }

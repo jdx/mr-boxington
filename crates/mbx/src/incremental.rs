@@ -1556,9 +1556,32 @@ fn cleanup_lock_dir(locks: &Path) {
     let _ = std::fs::remove_dir(locks);
 }
 
+/// What seeding did for one unit directory.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SeedOutcome {
+    /// State was copied from another checkout.
+    Seeded(SeedReport),
+    /// No other checkout had finished state for the unit.
+    NoDonor,
+    /// The one-time copy epoch is not complete, so seeding stays off.
+    NotReady,
+}
+
+/// Where seeded state came from, and what copying it cost.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SeedReport {
+    pub(crate) donor_workspace: PathBuf,
+    /// Files and bytes actually copied into this checkout, counting only the
+    /// donor that succeeded.
+    pub(crate) files: u64,
+    pub(crate) bytes: u64,
+    /// Time from starting this donor's copy through its rename, in nanoseconds.
+    pub(crate) duration_ns: u64,
+}
+
 /// Copy the other checkout's state for one unit used most recently into
-/// `checkout`, under the same unit name. Returns that checkout's workspace
-/// root, or `None` when no other checkout has state for the unit.
+/// `checkout`, under the same unit name. Returns where the state came from
+/// and what was copied, or why there was nothing to copy.
 ///
 /// Only worth doing for a compilation whose state does not depend on where
 /// the checkout lives (`-Zremap-cwd-prefix`): rustc ignores state recorded
@@ -1578,12 +1601,12 @@ fn cleanup_lock_dir(locks: &Path) {
 /// Files are independent copies, using a filesystem clone where supported.
 /// rustc can rewrite inherited files in place (including ThinLTO bitcode),
 /// so hard links would let a later compilation change the donor's session.
-pub(crate) fn seed(checkout: &Path, unit: &str) -> Result<Option<PathBuf>> {
+pub(crate) fn seed(checkout: &Path, unit: &str) -> Result<SeedOutcome> {
     let (Some(root), Some(own)) = (checkout.parent(), checkout.file_name()) else {
-        return Ok(None);
+        return Ok(SeedOutcome::NoDonor);
     };
     if !copy_state_ready(root) {
-        return Ok(None);
+        return Ok(SeedOutcome::NotReady);
     }
     let mut donors = Vec::new();
     for entry in std::fs::read_dir(root)?.flatten() {
@@ -1619,10 +1642,12 @@ pub(crate) fn seed(checkout: &Path, unit: &str) -> Result<Option<PathBuf>> {
         staging.push(format!(".seeding-{}", std::process::id()));
         let staging = PathBuf::from(staging);
         let mut held = Vec::new();
+        let started = std::time::Instant::now();
+        let mut counts = CopyCounts::default();
         let copied = destination
             .parent()
             .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| copy_state(&source, &staging, &mut held));
+            .and_then(|()| copy_state(&source, &staging, &mut held, &mut counts));
         // Every session the donor's compiler could have been removing was
         // skipped, so there may be nothing left to start from.
         let copied = copied.and_then(|()| {
@@ -1634,7 +1659,14 @@ pub(crate) fn seed(checkout: &Path, unit: &str) -> Result<Option<PathBuf>> {
         });
         drop(held);
         match copied {
-            Ok(true) => return Ok(Some(workspace_root)),
+            Ok(true) => {
+                return Ok(SeedOutcome::Seeded(SeedReport {
+                    donor_workspace: workspace_root,
+                    files: counts.files,
+                    bytes: counts.bytes,
+                    duration_ns: started.elapsed().as_nanos().try_into().unwrap_or(u64::MAX),
+                }));
+            }
             Ok(false) => {
                 let _ = std::fs::remove_dir_all(&staging);
             }
@@ -1647,7 +1679,7 @@ pub(crate) fn seed(checkout: &Path, unit: &str) -> Result<Option<PathBuf>> {
             }
         }
     }
-    failure.map_or(Ok(None), Err)
+    failure.map_or(Ok(SeedOutcome::NoDonor), Err)
 }
 
 /// rustc names a session it is still writing `s-<time>-<random>-working`,
@@ -1659,7 +1691,7 @@ fn is_unfinished_session(name: &std::ffi::OsStr) -> bool {
 
 /// Whether a unit's directory holds a session rustc finished:
 /// `<crate>-<hash>/s-...`.
-fn holds_finished_session(unit: &Path) -> bool {
+pub(crate) fn holds_finished_session(unit: &Path) -> bool {
     let Ok(crates) = std::fs::read_dir(unit) else {
         return false;
     };
@@ -1704,15 +1736,16 @@ fn copy_state(
     unit: &Path,
     destination: &Path,
     held: &mut Vec<std::fs::File>,
+    counts: &mut CopyCounts,
 ) -> std::io::Result<()> {
     std::fs::create_dir(destination)?;
     for entry in std::fs::read_dir(unit)? {
         let entry = entry?;
         let to = destination.join(entry.file_name());
         if entry.file_type()?.is_dir() {
-            copy_crate_state(&entry.path(), &to, held)?;
+            copy_crate_state(&entry.path(), &to, held, counts)?;
         } else {
-            copy_file(&entry.path(), &to)?;
+            counts.add(copy_file(&entry.path(), &to)?);
         }
     }
     Ok(())
@@ -1724,6 +1757,7 @@ fn copy_crate_state(
     krate: &Path,
     destination: &Path,
     held: &mut Vec<std::fs::File>,
+    counts: &mut CopyCounts,
 ) -> std::io::Result<()> {
     std::fs::create_dir(destination)?;
     let mut entries = Vec::new();
@@ -1757,25 +1791,39 @@ fn copy_crate_state(
         }
         let to = destination.join(name);
         if kind.is_dir() {
-            copy_tree(from, &to)?;
+            copy_tree(from, &to, counts)?;
         } else if kind.is_file() {
-            copy_file(from, &to)?;
+            counts.add(copy_file(from, &to)?);
         }
     }
     Ok(())
 }
 
+/// What a seeding copy has written so far.
+#[derive(Default)]
+struct CopyCounts {
+    files: u64,
+    bytes: u64,
+}
+
+impl CopyCounts {
+    fn add(&mut self, bytes: u64) {
+        self.files = self.files.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(bytes);
+    }
+}
+
 /// Copy a finished session's files as they are.
-fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
+fn copy_tree(source: &Path, destination: &Path, counts: &mut CopyCounts) -> std::io::Result<()> {
     std::fs::create_dir(destination)?;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         let to = destination.join(entry.file_name());
         let kind = entry.file_type()?;
         if kind.is_dir() {
-            copy_tree(&entry.path(), &to)?;
+            copy_tree(&entry.path(), &to, counts)?;
         } else if kind.is_file() {
-            copy_file(&entry.path(), &to)?;
+            counts.add(copy_file(&entry.path(), &to)?);
         }
     }
     Ok(())
@@ -1783,8 +1831,10 @@ fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
 
 /// Copy a state file without sharing its inode with the donor. The enclosing
 /// staging directory keeps partial copies out of rustc's session search.
-fn copy_file(from: &Path, to: &Path) -> std::io::Result<()> {
-    let modified = std::fs::metadata(from)?.modified()?;
+fn copy_file(from: &Path, to: &Path) -> std::io::Result<u64> {
+    let metadata = std::fs::metadata(from)?;
+    let modified = metadata.modified()?;
+    let bytes = metadata.len();
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     reflink_copy::reflink_or_copy(from, to)?;
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -1792,7 +1842,8 @@ fn copy_file(from: &Path, to: &Path) -> std::io::Result<()> {
     // rustc selects sessions by the timestamp in their name, but keep the
     // original mtime too, independent of the platform's copy implementation.
     crate::materialize::set_modified(to, modified)
-        .map_err(|error| std::io::Error::other(error.to_string()))
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    Ok(bytes)
 }
 
 fn read_record(path: &Path) -> Option<CheckoutRecord> {
@@ -1934,6 +1985,36 @@ pub(crate) fn tree_bytes(root: &Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The checkout a seed copied from. Its counts must describe exactly what
+    /// landed in `destination`, however long the copy took.
+    fn seeded_from(outcome: SeedOutcome, destination: Option<&Path>) -> PathBuf {
+        let SeedOutcome::Seeded(report) = outcome else {
+            panic!("expected seeded state, got {outcome:?}");
+        };
+        if let Some(destination) = destination {
+            fn walk(path: &Path, files: &mut u64, bytes: &mut u64) {
+                for entry in std::fs::read_dir(path).unwrap().flatten() {
+                    let metadata = entry.metadata().unwrap();
+                    if metadata.is_dir() {
+                        walk(&entry.path(), files, bytes);
+                    } else {
+                        *files += 1;
+                        *bytes += metadata.len();
+                    }
+                }
+            }
+            let (mut files, mut bytes) = (0, 0);
+            walk(destination, &mut files, &mut bytes);
+            assert!(
+                files > 0,
+                "nothing was copied into {}",
+                destination.display()
+            );
+            assert_eq!((report.files, report.bytes), (files, bytes));
+        }
+        report.donor_workspace
+    }
 
     #[test]
     fn a_lease_from_another_pid_namespace_does_not_block_a_session() {
@@ -3366,7 +3447,7 @@ mod tests {
             workspaces(cache.path()).unwrap(),
             [PathBuf::from("/work/own")]
         );
-        assert_eq!(seed(&own, unit).unwrap(), None);
+        assert_eq!(seed(&own, unit).unwrap(), SeedOutcome::NoDonor);
         collect(cache.path(), None, None, true, false, None).unwrap();
         assert!(retired.exists());
         assert!(nested.exists());
@@ -3596,7 +3677,10 @@ mod tests {
         assert_eq!(read_epoch(cache.path()).unwrap().pending, ["busy"]);
         assert!(busy.exists());
         assert!(!cache.path().join("idle").exists());
-        assert_eq!(seed(&checkout.directory, unit).unwrap(), None);
+        assert_eq!(
+            seed(&checkout.directory, unit).unwrap(),
+            SeedOutcome::NotReady
+        );
 
         let fresh_workspace = tempfile::tempdir().unwrap();
         let fresh = touch(cache.path(), fresh_workspace.path()).unwrap();
@@ -3611,16 +3695,16 @@ mod tests {
         let again = touch(cache.path(), workspace.path()).unwrap();
         assert!(session.exists());
         assert_eq!(read_epoch(cache.path()).unwrap().pending, ["busy"]);
-        assert_eq!(seed(&again.directory, unit).unwrap(), None);
+        assert_eq!(seed(&again.directory, unit).unwrap(), SeedOutcome::NotReady);
         drop(lease);
         let _last = touch(cache.path(), workspace.path()).unwrap();
         assert!(!busy.exists());
         assert!(session.exists());
         assert!(copy_state_ready(cache.path()));
-        assert_eq!(
+        assert!(matches!(
             seed(&checkout.directory, unit).unwrap(),
-            Some(fresh_workspace.path().to_path_buf())
-        );
+            SeedOutcome::Seeded(report) if report.donor_workspace == fresh_workspace.path()
+        ));
         assert_eq!(
             std::fs::read(
                 checkout
@@ -3659,14 +3743,14 @@ mod tests {
         let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
         checkout_with_sessions(cache.path(), "donor", 20, unit, &["s-2-b-finished"]);
         std::fs::remove_file(cache.path().join(EPOCH_FILE)).unwrap();
-        assert_eq!(seed(&own, unit).unwrap(), None);
+        assert_eq!(seed(&own, unit).unwrap(), SeedOutcome::NotReady);
         for content in [
             "invalid JSON",
             r#"{"epoch":0,"pending":[]}"#,
             r#"{"epoch":1,"pending":["donor"]}"#,
         ] {
             std::fs::write(cache.path().join(EPOCH_FILE), content).unwrap();
-            assert_eq!(seed(&own, unit).unwrap(), None);
+            assert_eq!(seed(&own, unit).unwrap(), SeedOutcome::NotReady);
         }
         std::fs::write(
             cache.path().join(EPOCH_FILE),
@@ -3674,8 +3758,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            seed(&own, unit).unwrap(),
-            Some(PathBuf::from("/work/donor"))
+            seeded_from(seed(&own, unit).unwrap(), Some(&own.join(unit))),
+            PathBuf::from("/work/donor")
         );
     }
 
@@ -3696,9 +3780,14 @@ mod tests {
             &["s-4-d-done"],
         );
 
-        let donor = seed(&own, unit).unwrap();
+        let SeedOutcome::Seeded(report) = seed(&own, unit).unwrap() else {
+            panic!("expected seeded outcome")
+        };
 
-        assert_eq!(donor, Some(PathBuf::from("/work/newer")));
+        assert_eq!(report.donor_workspace, PathBuf::from("/work/newer"));
+        assert_eq!(report.files, 2);
+        assert_eq!(report.bytes, 5);
+        assert!(report.duration_ns > 0);
         let copied = own.join(unit).join("widget-0abc");
         assert_eq!(
             std::fs::read_to_string(copied.join("s-2-b-finished/dep-graph.bin")).unwrap(),
@@ -3754,7 +3843,10 @@ mod tests {
         std::fs::write(&stamp, b"").unwrap();
         set_mtime(&stamp, 35);
 
-        assert_eq!(seed(&own, unit).unwrap(), Some(PathBuf::from("/work/hit")));
+        assert_eq!(
+            seeded_from(seed(&own, unit).unwrap(), Some(&own.join(unit))),
+            PathBuf::from("/work/hit")
+        );
     }
 
     #[test]
@@ -3772,12 +3864,12 @@ mod tests {
         };
 
         assert_eq!(
-            tied(&[("a", 20), ("b", 30)]),
-            Some(PathBuf::from("/work/b"))
+            seeded_from(tied(&[("a", 20), ("b", 30)]), None),
+            PathBuf::from("/work/b")
         );
         assert_eq!(
-            tied(&[("b", 20), ("a", 20)]),
-            Some(PathBuf::from("/work/a"))
+            seeded_from(tied(&[("b", 20), ("a", 20)]), None),
+            PathBuf::from("/work/a")
         );
     }
 
@@ -3794,7 +3886,10 @@ mod tests {
             &["s-1-a-finished", "s-2-b-working"],
         );
 
-        assert_eq!(seed(&own, "blake3/9999999999").unwrap(), None);
+        assert_eq!(
+            seed(&own, "blake3/9999999999").unwrap(),
+            SeedOutcome::NoDonor
+        );
         assert!(!own.join("blake3/9999999999").exists());
 
         seed(&own, unit).unwrap();
@@ -3851,8 +3946,8 @@ mod tests {
         let _removing = lock_exclusively(&busy, unit, "s-2-b-finished");
 
         assert_eq!(
-            seed(&own, unit).unwrap(),
-            Some(PathBuf::from("/work/older"))
+            seeded_from(seed(&own, unit).unwrap(), Some(&own.join(unit))),
+            PathBuf::from("/work/older")
         );
         assert!(
             own.join(unit)
@@ -3889,8 +3984,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            seed(&own, unit).unwrap(),
-            Some(PathBuf::from("/work/donor"))
+            seeded_from(seed(&own, unit).unwrap(), Some(&own.join(unit))),
+            PathBuf::from("/work/donor")
         );
         assert!(
             own.join(unit)
@@ -3906,6 +4001,6 @@ mod tests {
         let own = checkout_with_sessions(cache.path(), "own", 40, unit, &["s-1-a-finished"]);
         std::fs::remove_dir_all(own.join(unit)).unwrap();
 
-        assert_eq!(seed(&own, unit).unwrap(), None);
+        assert_eq!(seed(&own, unit).unwrap(), SeedOutcome::NoDonor);
     }
 }

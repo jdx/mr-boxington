@@ -3652,6 +3652,38 @@ fn a_staticlib_above_the_incremental_backstop_leaves_existing_sessions_alone() {
     );
 }
 
+/// The incremental state source of every bypassed compilation that kept
+/// private state, across the store's session streams in the order recorded.
+fn bypassed_incremental_states(store: &Path) -> Vec<(String, Option<String>)> {
+    let mut streams: Vec<_> = std::fs::read_dir(store.join("actions/sessions/v1"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .collect();
+    streams.sort();
+    let mut states = Vec::new();
+    for stream in streams {
+        for line in std::fs::read_to_string(stream).unwrap().lines() {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            if event["type"] == "action"
+                && event["outcome"]["kind"] == "bypass"
+                && event["incremental"] == true
+            {
+                let state = &event["incremental_state"];
+                states.push((
+                    state["source"].as_str().unwrap_or("missing").to_string(),
+                    state["reason"].as_str().map(str::to_string),
+                ));
+            }
+        }
+    }
+    states
+}
+
 #[test]
 fn a_staticlib_the_cache_bypasses_still_compiles_incrementally() {
     let store = tempfile::tempdir().unwrap();
@@ -3692,6 +3724,15 @@ fn a_staticlib_the_cache_bypasses_still_compiles_incrementally() {
         learned_sessions(store.path()),
         1,
         "an edit should reuse the library's state rather than start another"
+    );
+    // Each build's row says where that state came from. This path never
+    // seeds, so the first build starts it empty and the edit reuses it.
+    assert_eq!(
+        bypassed_incremental_states(store.path()),
+        [
+            ("cold".to_string(), Some("seeding-off".to_string())),
+            ("existing".to_string(), None),
+        ]
     );
 
     // The opt-out is checked against a store of its own, where any state at

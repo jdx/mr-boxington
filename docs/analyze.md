@@ -71,8 +71,38 @@ listed on one final `expected, nothing to cache:` line. They count as uncached
 work only when they took compiler time.
 
 A crate you are editing keeps private [incremental state](/incremental)
-instead of publishing its result, so a later build does not restore it from
-the cache even when the report names it as a first build.
+instead of publishing its result, and so does every crate that links it. None
+of them looks anything up in the cache. Recordings from this mbx version say
+why. The report charges each crate that links the edited crate to the same
+cause as the edited crate. An edited crate that skipped the lookup is charged
+to `inputs of <crate> changed`. One that looked up and missed first is
+classified like any other miss; when its recording lacks key details, as for
+an incremental miss, that is `misses with no earlier recording`. A crate that links an edited
+crate's private output is charged to that crate even when it was edited as
+well, because mbx does not check its own sources on that path. Older
+recordings lack this, and the report names these compilations as a first
+build.
+
+## Private incremental state
+
+When the build kept private incremental state, a section after the causes says
+where that state came from, with compiler time and count for each source:
+
+```text
+private incremental state for 42 compilations
+ 6m 12s  started from this checkout's earlier state (30)
+ 1m 40s  seeded from another checkout, copying 1.2 GiB in 3.1s (8)
+    52s  started empty: no other checkout had it (4)
+```
+
+Seeded state is copied from the checkout that used it most recently, so a new
+checkout does not start from nothing. State starts empty when no other
+checkout has state for the same compilation, while a one-time discard of older
+state is pending, when the compilation's state cannot be shared between
+checkouts, or when this checkout's state directory exists but holds no
+finished session, as after a compilation that failed early; seeding passes
+such a directory over. `started from this checkout's earlier state` means the
+directory held a finished session; rustc decides how much of it to reuse.
 
 ## What it compares against
 

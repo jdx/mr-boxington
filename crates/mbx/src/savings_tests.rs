@@ -86,6 +86,93 @@ fn counters_from_a_newer_mbx_survive_a_write_by_this_one() {
     assert_eq!(written["version"], 2, "and its version is left alone");
 }
 
+fn outcomes(hits: u64, misses: u64, unconsulted: u64, unconsulted_compiler_ns: u64) -> Outcomes {
+    Outcomes {
+        hits,
+        misses,
+        unconsulted,
+        unconsulted_compiler_ns,
+        ..Outcomes::default()
+    }
+}
+
+#[test]
+fn compilation_outcomes_accumulate_from_their_own_start() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    // A tally from before outcomes were counted: its builds stay, and the
+    // outcome counters start at zero with no claim about the past.
+    crate::util::write_atomic(
+        &store.join(TALLY_FILE),
+        br#"{"version":1,"since_secs":1700000000,"builds":40,"cached_compilations":900}"#,
+    )
+    .unwrap();
+
+    let quiet = record(store, &Delta::default()).unwrap();
+    assert_eq!(
+        quiet.outcomes.since_secs, 0,
+        "nothing counted, nothing started"
+    );
+
+    let first = record(
+        store,
+        &Delta {
+            outcomes: outcomes(3, 1, 2, 50),
+            ..session_delta(3)
+        },
+    )
+    .unwrap();
+    assert_ne!(first.outcomes.since_secs, 0);
+    assert_eq!(
+        first.since_secs, 1_700_000_000,
+        "the tally's own start stays"
+    );
+    let second = record(
+        store,
+        &Delta {
+            outcomes: Outcomes {
+                incremental: 2,
+                ..outcomes(4, 0, 2, 70)
+            },
+            ..session_delta(4)
+        },
+    )
+    .unwrap();
+    assert_eq!(second.outcomes.since_secs, first.outcomes.since_secs);
+    assert_eq!(second.outcomes.hits, 7);
+    assert_eq!(second.outcomes.misses, 1);
+    assert_eq!(second.outcomes.unconsulted, 4);
+    assert_eq!(second.outcomes.unconsulted_compiler_ns, 120);
+    assert_eq!(second.outcomes.incremental, 2);
+    assert_eq!(second.cached_compilations, 907);
+}
+
+#[test]
+fn outcome_counters_from_a_newer_mbx_survive_a_write_by_this_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    crate::util::write_atomic(
+        &store.join(TALLY_FILE),
+        br#"{"version":1,"outcomes":{"since_secs":5,"hits":1,"something_new":3}}"#,
+    )
+    .unwrap();
+
+    let tally = record(
+        store,
+        &Delta {
+            outcomes: outcomes(1, 0, 0, 0),
+            ..session_delta(1)
+        },
+    )
+    .unwrap();
+
+    assert_eq!(tally.outcomes.hits, 2);
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(store.join(TALLY_FILE)).unwrap()).unwrap();
+    assert_eq!(written["outcomes"]["something_new"], 3, "{written}");
+    assert_eq!(written["outcomes"]["since_secs"], 5);
+}
+
 #[test]
 fn a_sweep_during_a_help_run_still_counts_what_it_freed() {
     let directory = tempfile::tempdir().unwrap();

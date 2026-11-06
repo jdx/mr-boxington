@@ -53,6 +53,8 @@ pub(crate) struct Tally {
     /// so this counter has its own start date instead of backfilling a guess.
     pub auto_pruned_bytes: u64,
     pub auto_pruned_since_secs: u64,
+    /// Compilations by what the cache did with them.
+    pub outcomes: Outcomes,
     /// Logical bytes the user asked to have removed: a confirmed `target/` migration,
     /// or `mbx cache remove`. Kept apart from the collection counters because
     /// every line about those brags that nobody had to do anything -- which is
@@ -68,7 +70,7 @@ pub(crate) struct Tally {
 }
 
 /// What one command contributed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Delta {
     pub builds: u64,
     pub cached_compilations: u64,
@@ -83,6 +85,72 @@ pub(crate) struct Delta {
     pub freed_store_bytes: u64,
     pub auto_pruned_bytes: u64,
     pub freed_requested_bytes: u64,
+    /// This run's compilations by outcome; `since_secs` is unused here.
+    pub outcomes: Outcomes,
+}
+
+/// Compilations by what the cache did with them, counted from `since_secs`.
+///
+/// These began after the other totals, and the builds before them cannot be
+/// recovered, so they carry their own start date rather than claiming the
+/// tally's. An older mbx sharing the store carries them through untouched but
+/// does not add its own builds, so a mixed period undercounts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct Outcomes {
+    pub since_secs: u64,
+    pub hits: u64,
+    pub misses: u64,
+    /// Compilations that ran without a lookup, for want of a key or because
+    /// they kept private incremental state.
+    pub unconsulted: u64,
+    pub bypasses: u64,
+    pub verifications: u64,
+    /// Compilations that kept private incremental state. Each is also counted
+    /// under its outcome above.
+    pub incremental: u64,
+    pub miss_compiler_ns: u64,
+    pub unconsulted_compiler_ns: u64,
+    pub bypass_compiler_ns: u64,
+    pub verification_compiler_ns: u64,
+    /// Counters a newer mbx added here, carried through as the tally's are.
+    #[serde(flatten)]
+    unknown: BTreeMap<String, serde_json::Value>,
+}
+
+impl Outcomes {
+    fn counts_anything(&self) -> bool {
+        self.hits
+            | self.misses
+            | self.unconsulted
+            | self.bypasses
+            | self.verifications
+            | self.incremental
+            != 0
+    }
+
+    fn add(&mut self, other: &Self) {
+        for (total, value) in [
+            (&mut self.hits, other.hits),
+            (&mut self.misses, other.misses),
+            (&mut self.unconsulted, other.unconsulted),
+            (&mut self.bypasses, other.bypasses),
+            (&mut self.verifications, other.verifications),
+            (&mut self.incremental, other.incremental),
+            (&mut self.miss_compiler_ns, other.miss_compiler_ns),
+            (
+                &mut self.unconsulted_compiler_ns,
+                other.unconsulted_compiler_ns,
+            ),
+            (&mut self.bypass_compiler_ns, other.bypass_compiler_ns),
+            (
+                &mut self.verification_compiler_ns,
+                other.verification_compiler_ns,
+            ),
+        ] {
+            *total = total.saturating_add(value);
+        }
+    }
 }
 
 impl Delta {
@@ -128,6 +196,10 @@ pub(crate) fn record(store: &Path, delta: &Delta) -> Result<Tally> {
     if tally.auto_pruned_since_secs == 0 {
         tally.auto_pruned_since_secs = now_secs();
     }
+    if delta.outcomes.counts_anything() && tally.outcomes.since_secs == 0 {
+        tally.outcomes.since_secs = now_secs();
+    }
+    tally.outcomes.add(&delta.outcomes);
     tally.auto_pruned_bytes = tally
         .auto_pruned_bytes
         .saturating_add(delta.auto_pruned_bytes);
