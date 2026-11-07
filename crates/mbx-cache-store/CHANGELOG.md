@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.2.2...mbx-cache-store-v0.2.3) - 2026-11-07
+
+### Added
+
+- *(gc)* make session history retention configurable ([#912](https://github.com/jdx/mr-boxington/pull/912))
+
+### Fixed
+
+- *(cache)* rank store eviction by real use on macOS, Windows and noatime mounts ([#903](https://github.com/jdx/mr-boxington/pull/903))
+
 ## [0.2.2](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.2.1...mbx-cache-store-v0.2.2) - 2026-11-02
 
 ### Other
