@@ -1194,6 +1194,7 @@ pub(super) fn cargo_help_requested(arguments: &[String]) -> bool {
     arguments.first().is_some_and(|argument| argument == "help")
         || arguments
             .iter()
+            .take_while(|argument| *argument != "--")
             .any(|argument| argument == "--help" || argument == "-h")
 }
 
