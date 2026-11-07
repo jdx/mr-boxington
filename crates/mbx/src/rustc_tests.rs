@@ -86,6 +86,28 @@ fn compiler_environment_keys_only_what_is_set() {
     );
 }
 
+/// rustc stamps the Apple deployment target into the objects it emits without
+/// recording it in dep-info, so changing it must change the key.
+#[test]
+fn compiler_environment_keys_apple_deployment_targets() {
+    for name in [
+        "IPHONEOS_DEPLOYMENT_TARGET",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "TVOS_DEPLOYMENT_TARGET",
+        "WATCHOS_DEPLOYMENT_TARGET",
+        "XROS_DEPLOYMENT_TARGET",
+    ] {
+        let keyed = |value: &'static str| {
+            compiler_environment(|variable| (variable == name).then(|| value.into()))
+        };
+        assert_eq!(
+            keyed("18.0"),
+            BTreeMap::from([(name.into(), Some("18.0".into()))])
+        );
+        assert_ne!(keyed("18.0"), keyed("26.0"));
+    }
+}
+
 #[test]
 fn action_diagnostics_name_key_parts_without_retaining_their_values() {
     let bytes = br#"{"adapter_version":1,"arguments":["--crate-name=example","--codegen=metadata=unit-a","--codegen=opt-level=2","--cfg=feature=\"secret-feature\""],"compiler":{"host":"host","rustc_version":"version","toolchain":"toolchain"},"environment":{"SECRET":"do-not-record"},"inputs":[{"digest":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"path":"${workspace}/src/lib.rs"}],"kind":"rustc","version":1}"#.to_vec();
