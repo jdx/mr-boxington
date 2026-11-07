@@ -329,6 +329,16 @@ fn cargo_help_does_not_trigger_target_migration() {
     assert!(cargo_help_requested(&["build".into(), "--help".into()]));
     assert!(cargo_help_requested(&["help".into(), "build".into()]));
     assert!(!cargo_help_requested(&["build".into(), "--release".into()]));
+    assert!(!cargo_help_requested(&[
+        "run".into(),
+        "--".into(),
+        "-h".into()
+    ]));
+    assert!(!cargo_help_requested(&[
+        "run".into(),
+        "--".into(),
+        "--help".into()
+    ]));
 }
 
 #[test]
