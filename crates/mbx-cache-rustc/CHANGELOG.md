@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.20.8...mbx-cache-rustc-v0.21.0) - 2026-11-07
+
+### Fixed
+
+- *(rustc)* share workspace crate cache entries between terminal and piped builds ([#907](https://github.com/jdx/mr-boxington/pull/907))
+
 ## [0.20.8](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.20.7...mbx-cache-rustc-v0.20.8) - 2026-11-02
 
 ### Fixed

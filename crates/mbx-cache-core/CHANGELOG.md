@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.20.8...mbx-cache-core-v0.21.0) - 2026-11-07
+
+### Added
+
+- record why compilations skip the cache and where incremental state comes from ([#911](https://github.com/jdx/mr-boxington/pull/911))
+
+### Fixed
+
+- *(cache)* rank store eviction by real use on macOS, Windows and noatime mounts ([#903](https://github.com/jdx/mr-boxington/pull/903))
+
 ## [0.20.8](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.20.7...mbx-cache-core-v0.20.8) - 2026-11-02
 
 ### Fixed
