@@ -751,10 +751,7 @@ impl Screen {
             .saturating_sub(1)
     }
     fn height(&self) -> u16 {
-        terminal::size()
-            .map_or(24, |s| s.1.max(3))
-            .saturating_sub(2)
-            .min(27)
+        block_height(terminal::size().map_or(24, |s| s.1))
     }
     /// Write one composed frame. A block that is erased or repainted goes out in
     /// a single DEC 2026 synchronized update, which unsupported terminals ignore.
@@ -816,3 +813,21 @@ impl Drop for Screen {
         let _ = terminal::disable_raw_mode();
     }
 }
+
+/// Rows for the progress block in a terminal `rows` tall.
+///
+/// A terminal that shrinks pushes the top of an inline block into scrollback,
+/// where the cursor cannot reach it to erase it. Keeping the block to half the
+/// screen means a shrink to a little over half the old height still fits it.
+/// It never goes below [`MIN_BLOCK_HEIGHT`], the rows the layout needs to keep
+/// the progress bar and cache totals in view, so short terminals are unchanged.
+fn block_height(rows: u16) -> u16 {
+    let rows = rows.max(3);
+    (rows - 2)
+        .min((rows / 2).max(MIN_BLOCK_HEIGHT))
+        .clamp(1, 27)
+}
+
+/// Rows `render_content` needs to show the progress bar, cache totals and
+/// elapsed time with one crate slot.
+const MIN_BLOCK_HEIGHT: u16 = 14;
