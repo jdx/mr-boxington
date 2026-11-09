@@ -3,7 +3,7 @@
 //! Parent usage includes sibling workloads. Subtracting only the leaf's usage
 //! from a parent's limit would overestimate how much memory a compiler can use.
 use crate::util::{Stamp, parse_cgroup_stat, read_cgroup_text};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
@@ -98,6 +98,13 @@ struct Walk {
     boot: String,
     /// `None` when part of the subtree could not be read.
     members: Option<BTreeSet<String>>,
+    /// Cgroups of leases read before a walk began, with when that walk
+    /// began. They existed by then, so this walk, begun no earlier, would
+    /// have found any inside the subtree, whatever their leases' clocks
+    /// say. Kept only for a refresh interval, so the list stays as short as
+    /// the leases checked in that time.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    vouched: BTreeMap<String, Stamp>,
 }
 
 /// This boot's ID, or empty where the kernel does not say.
@@ -121,11 +128,13 @@ fn boot_id() -> &'static str {
 /// its cgroups in `scope`'s subtree instead, which this process can see
 /// whenever it can see `scope`.
 ///
-/// Only a complete walk that began after the cgroups were recorded, by both
-/// the wall clock and the boot clock, can show they are outside `scope`: the
-/// cgroups existed by then, so the walk saw them. Anything less -- a scope
-/// this process cannot find, a subtree it cannot fully read, a record of
-/// unknown age, a walk the clocks cannot order after it -- counts as inside.
+/// Only a complete walk known to have begun after the cgroups existed can
+/// show they are outside `scope`. A walk made here for this lease is: the
+/// lease was read before it began. A walk shared by another process is when
+/// both the wall clock and the boot clock place it after the lease was
+/// written, or when it was made for these cgroups itself. Anything less --
+/// a scope this process cannot find, a subtree it cannot fully read, a
+/// record of unknown age -- counts as inside.
 ///
 /// Every waiter asks this on each poll, so one walk is shared through the
 /// pool rather than repeated in each process: a cgroup is walked at most
@@ -163,23 +172,36 @@ pub(crate) fn contains(
                 .began
                 .until(&now)
                 .is_some_and(|age| age < SUBTREE_REFRESH_MS);
-        if fresh && (found(walk) || written.before(&walk.began)) {
+        let vouched = cgroups.iter().any(|id| walk.vouched.contains_key(id));
+        if fresh && (found(walk) || vouched || written.before(&walk.began)) {
             return found(walk);
         }
     } else {
         crate::pressure::prune(&directory, SystemTime::now());
     }
+    // Earlier walks' cgroups stay vouched for while recent, since this walk
+    // begins later still; the clocks of a lease they cannot order then cost
+    // one walk per refresh interval rather than one per poll.
+    let mut vouched: BTreeMap<String, Stamp> = cached
+        .filter(|walk| walk.boot == boot_id())
+        .map(|walk| walk.vouched)
+        .unwrap_or_default();
+    vouched.retain(|_, began| {
+        began
+            .until(&now)
+            .is_some_and(|age| age < SUBTREE_REFRESH_MS)
+    });
+    vouched.extend(cgroups.iter().map(|id| (id.clone(), now)));
     let walk = Walk {
         began: now,
         boot: boot_id().to_owned(),
         members: subtree(path),
+        vouched,
     };
     if let Ok(bytes) = serde_json::to_vec(&walk) {
         let _ = crate::util::write_advisory(&file, &bytes);
     }
-    // A record the clocks cannot place before the walk -- from the same
-    // millisecond, or after a clock change -- is not ruled out by it.
-    found(&walk) || !written.before(&walk.began)
+    found(&walk)
 }
 
 /// The identities of every cgroup below `path`, or `None` when some part of
@@ -558,27 +580,70 @@ mod tests {
     }
 
     #[test]
-    fn only_a_walk_both_clocks_place_after_the_record_rules_a_cgroup_out() {
+    fn a_walk_made_after_reading_a_lease_rules_it_out_whatever_its_clocks() {
         // This process's own cgroup holds nothing that "0:0" names.
         let Some(scope) = own_scope() else {
             return;
         };
         let pool = tempfile::tempdir().unwrap();
-        let outside = ["0:0".to_string()];
-        let written = Stamp::now();
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        assert!(!contains(pool.path(), scope, &outside, Some(written)));
+        let file = pool.path().join(SUBTREES_DIR).join(format!("{scope}.json"));
+        let read = || serde_json::from_slice::<Walk>(&std::fs::read(&file).unwrap()).unwrap();
         assert!(
-            contains(pool.path(), scope, &outside, None),
+            contains(pool.path(), scope, &["0:0".into()], None),
             "a record of unknown age"
         );
-        // One clock alone placing the record first is not enough: the wall
-        // clock may have stepped back, or the boot clock may be offset.
+        // Clocks that cannot be ordered against any walk -- a boot clock
+        // offset into the future, as in another time namespace -- still get
+        // an answer from the walk made for them.
         let now = Stamp::now();
-        let stepped = stamp(now.wall_ms.saturating_sub(60_000), now.boot_ms + 60_000);
-        assert!(contains(pool.path(), scope, &outside, Some(stepped)));
-        let offset = stamp(now.wall_ms + 60_000, now.boot_ms.saturating_sub(60_000));
-        assert!(contains(pool.path(), scope, &outside, Some(offset)));
+        let ahead = Some(stamp(now.wall_ms, now.boot_ms + 3_600_000));
+        assert!(!contains(pool.path(), scope, &["0:2".into()], ahead));
+        let first = read().began;
+        // And that walk answers for them on every later poll, rather than
+        // each poll walking again.
+        for _ in 0..3 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            assert!(!contains(pool.path(), scope, &["0:2".into()], ahead));
+            assert_eq!(read().began, first, "not walked again");
+        }
+        // A cached walk the clocks cannot place after a lease it was not
+        // made for does not answer for that lease.
+        let stepped = Some(stamp(now.wall_ms.saturating_sub(60_000), now.boot_ms + 60_000));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(!contains(pool.path(), scope, &["0:3".into()], stepped));
+        assert_ne!(read().began, first, "walked for the new lease");
+        // Both leases' cgroups stay vouched for across that walk.
+        assert!(read().vouched.contains_key("0:2"));
+        assert!(read().vouched.contains_key("0:3"));
+    }
+
+    #[test]
+    fn vouching_expires_with_the_refresh_interval() {
+        let Some(scope) = own_scope() else {
+            return;
+        };
+        let pool = tempfile::tempdir().unwrap();
+        let file = pool.path().join(SUBTREES_DIR).join(format!("{scope}.json"));
+        let now = Stamp::now();
+        let old = stamp(now.wall_ms - 5_000, now.boot_ms - 5_000);
+        let walk = Walk {
+            began: now,
+            boot: boot_id().to_owned(),
+            members: Some(BTreeSet::new()),
+            vouched: BTreeMap::from([("0:4".to_string(), old)]),
+        };
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, serde_json::to_vec(&walk).unwrap()).unwrap();
+        let read = || serde_json::from_slice::<Walk>(&std::fs::read(&file).unwrap()).unwrap();
+        let ahead = Some(stamp(now.wall_ms, now.boot_ms + 3_600_000));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        // A fresh walk vouching for "0:4" still answers for it...
+        assert!(!contains(pool.path(), scope, &["0:4".into()], ahead));
+        assert_eq!(read().began, now, "not walked again");
+        // ...but the next walk drops it, as its vouching is old.
+        assert!(!contains(pool.path(), scope, &["0:5".into()], ahead));
+        assert!(!read().vouched.contains_key("0:4"));
+        assert!(read().vouched.contains_key("0:5"));
     }
 
     #[test]
@@ -597,6 +662,7 @@ mod tests {
             began: stamp(now.wall_ms - 500, now.boot_ms - 500),
             boot: boot_id().to_owned(),
             members: Some(BTreeSet::from(["0:5".to_string()])),
+            vouched: BTreeMap::new(),
         };
         let write = |walk: &Walk| std::fs::write(&file, serde_json::to_vec(walk).unwrap()).unwrap();
         write(&shared);
