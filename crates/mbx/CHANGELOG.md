@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.30.0](https://github.com/jdx/mr-boxington/compare/v1.29.2...v1.30.0) - 2026-11-09
+
+### Added
+
+- record why compilations skip the cache and where incremental state comes from ([#911](https://github.com/jdx/mr-boxington/pull/911))
+- *(gc)* make session history retention configurable ([#912](https://github.com/jdx/mr-boxington/pull/912))
+- *(shim)* prefer blaze over ra-jit and drop the fallback in 2.0 ([#904](https://github.com/jdx/mr-boxington/pull/904))
+
+### Fixed
+
+- *(pretty)* shrink the progress block so a terminal resize strands fewer rows in scrollback ([#922](https://github.com/jdx/mr-boxington/pull/922))
+- *(cargo)* keep cargo run -- -h under mbx ([#918](https://github.com/jdx/mr-boxington/pull/918))
+- *(explain)* find builds recorded for checkouts nested inside another project ([#910](https://github.com/jdx/mr-boxington/pull/910))
+- *(rustc)* keep edited workspace crates incremental under nightly Cargo's emptied output directories ([#909](https://github.com/jdx/mr-boxington/pull/909))
+- *(rustc)* share workspace crate cache entries between terminal and piped builds ([#907](https://github.com/jdx/mr-boxington/pull/907))
+- *(cache)* rank store eviction by real use on macOS, Windows and noatime mounts ([#903](https://github.com/jdx/mr-boxington/pull/903))
+- *(gc)* keep a target whose programs run between builds ([#905](https://github.com/jdx/mr-boxington/pull/905))
+
 ## [1.29.2](https://github.com/jdx/mr-boxington/compare/v1.29.1...v1.29.2) - 2026-11-02
 
 ### Fixed
