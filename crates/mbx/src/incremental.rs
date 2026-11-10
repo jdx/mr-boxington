@@ -33,6 +33,113 @@ const COLLECTION_LOG_CAP: u64 = 8 * 1024 * 1024;
 
 /// Diagnostic history only: never included in the state budget. The separate
 /// lock serializes rotation and appends across collectors and epoch migration.
+/// Markers saying why each retired tree was retired, so whichever pass finally
+/// deletes it records that reason, once. Kept with the root's bookkeeping
+/// rather than inside the tree, so a tree's measured size is its state alone.
+const COLLECTED_MARKERS: &str = "collected";
+
+/// A retired tree's marker: its path below the root, with separators escaped.
+fn collected_marker(root: &Path, tree: &Path) -> Option<PathBuf> {
+    let relative = tree
+        .strip_prefix(root)
+        .ok()?
+        .to_str()?
+        .replace(['/', '\\'], "%");
+    Some(
+        root.join(LOCKS_DIR)
+            .join(COLLECTED_MARKERS)
+            .join(format!("{relative}.json")),
+    )
+}
+
+#[derive(Serialize, Deserialize)]
+struct CollectedMarker {
+    reason: String,
+    workspace_root: Option<PathBuf>,
+}
+
+fn mark_collected(root: &Path, tree: &Path, reason: &str, workspace: Option<&Path>) {
+    let marker = CollectedMarker {
+        reason: reason.to_owned(),
+        workspace_root: workspace.map(Path::to_path_buf),
+    };
+    let Some(path) = collected_marker(root, tree) else {
+        return;
+    };
+    if let Err(error) = serde_json::to_vec(&marker)
+        .map_err(std::io::Error::other)
+        .and_then(|bytes| {
+            std::fs::create_dir_all(path.parent().expect("a marker has a parent"))?;
+            std::fs::write(&path, bytes)
+        })
+    {
+        log::debug!("could not mark retired incremental state: {error}");
+    }
+}
+
+/// The ledger lines a retired tree's deletion will write: one per unit, with
+/// the reason left at retirement. Measured before the deletion, which is the
+/// only time the bytes are there to measure.
+struct PendingCollection {
+    marker: Option<PathBuf>,
+    reason: String,
+    workspace_root: Option<PathBuf>,
+    units: Vec<(PathBuf, u64)>,
+}
+
+impl PendingCollection {
+    fn of(root: &Path, tree: &Path) -> Self {
+        let marker_path = collected_marker(root, tree);
+        let marker = marker_path
+            .as_ref()
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<CollectedMarker>(&bytes).ok());
+        let checkout = tree.parent() == Some(root);
+        let units = if checkout {
+            nested_entries(&tree.join("blake3"))
+                .into_iter()
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                .map(|entry| (entry.path(), tree_bytes(&entry.path())))
+                .collect()
+        } else {
+            vec![(tree.to_path_buf(), tree_bytes(tree))]
+        };
+        let workspace_root = marker
+            .as_ref()
+            .and_then(|marker| marker.workspace_root.clone())
+            .or_else(|| {
+                let record = if checkout {
+                    tree.join(RECORD_FILE)
+                } else {
+                    tree.parent()?.parent()?.join(RECORD_FILE)
+                };
+                read_record(&record).map(|record| record.workspace_root)
+            });
+        Self {
+            marker: marker_path,
+            // Retired by an mbx without markers.
+            reason: marker.map_or_else(|| "retired".to_owned(), |marker| marker.reason),
+            workspace_root,
+            units,
+        }
+    }
+
+    fn record(self, root: &Path) {
+        for (unit, bytes) in self.units {
+            record_collection(
+                root,
+                &unit,
+                self.workspace_root.as_deref(),
+                &self.reason,
+                bytes,
+            );
+        }
+        if let Some(marker) = self.marker {
+            let _ = std::fs::remove_file(marker);
+        }
+    }
+}
+
 fn record_collection(root: &Path, unit: &Path, workspace: Option<&Path>, reason: &str, bytes: u64) {
     use std::io::Write;
     let result = (|| -> std::io::Result<()> {
@@ -174,17 +281,14 @@ fn discard_pre_copy_state(root: &Path) -> Result<()> {
                         return Err(error.into());
                     }
                 }
-                for unit in nested_entries(&tree.path().join("blake3")) {
-                    if unit.file_type().is_ok_and(|kind| kind.is_dir()) {
-                        record_collection(
-                            root,
-                            &unit.path(),
-                            workspace.as_ref().map(|r| r.workspace_root.as_path()),
-                            "epoch-discard",
-                            tree_bytes(&unit.path()),
-                        );
-                    }
-                }
+                // Only a marker here: the registrar is held, and the units
+                // are recorded when the sweep deletes them.
+                mark_collected(
+                    root,
+                    tree.path(),
+                    "epoch-discard",
+                    workspace.as_ref().map(|r| r.workspace_root.as_path()),
+                );
                 retired_count += 1;
             }
             cleanup_lock_dir(&locks);
@@ -452,18 +556,7 @@ fn collect_with_retire_and_unlink(
             break;
         }
         let entry = &entries[index];
-        let reason = if expired(unit) {
-            "age"
-        } else if exceeds_backstop(&unit.directory, backstop_budget) {
-            "backstop"
-        } else {
-            "size-budget"
-        };
-        let unit_bytes = if dry_run {
-            0
-        } else {
-            tree_bytes(&unit.directory)
-        };
+        let mut reason = if expired(unit) { "age" } else { "size-budget" };
         // seed() holds the donor's checkout lease while linking its sessions.
         let guard = match deletion_guard(root, &entry.key, !dry_run) {
             Ok(guard) => guard,
@@ -478,14 +571,16 @@ fn collect_with_retire_and_unlink(
             active.insert(index);
             // The compiler's backstop, by the same measure: state it would
             // reject is not kept however recently hits refreshed it.
-            if hot_floor
-                && !expired(unit)
-                && now.saturating_sub(unit.last_used) < HOT_FLOOR_SECS
-                && !exceeds_backstop(&unit.directory, backstop_budget)
-            {
-                outcome.kept_hot_units += 1;
-                continue;
+            if hot_floor && !expired(unit) && now.saturating_sub(unit.last_used) < HOT_FLOOR_SECS {
+                if !exceeds_backstop(&unit.directory, backstop_budget) {
+                    outcome.kept_hot_units += 1;
+                    continue;
+                }
+                // The hot floor would have kept it; only the backstop let
+                // this state go.
+                reason = "backstop";
             }
+            let trimmed_from = inodes.bytes;
             if !dry_run && let Err(error) = lease_for_trimming(&mut trimming, root, &entry.key) {
                 log::debug!("incremental checkout could not be leased: {error}");
                 outcome.skipped_active_units += 1;
@@ -534,7 +629,7 @@ fn collect_with_retire_and_unlink(
                         &unit.directory,
                         entry.workspace_root.as_deref(),
                         reason,
-                        unit_bytes.saturating_sub(tree_bytes(&unit.directory)),
+                        trimmed_from.saturating_sub(inodes.bytes),
                     );
                 }
                 outcome.session_units.insert(unit.directory.clone());
@@ -580,7 +675,14 @@ fn collect_with_retire_and_unlink(
                 continue;
             }
             match (hooks.retire)(&unit.directory) {
-                Ok(tree) => tree,
+                Ok(tree) => {
+                    // If the deletion below fails, the sweep finishes it and
+                    // records it with this reason.
+                    if let Some(tree) = &tree {
+                        mark_collected(root, tree.path(), reason, entry.workspace_root.as_deref());
+                    }
+                    tree
+                }
                 Err(error) => {
                     log::warn!(
                         "could not retire incremental unit {}: {error}",
@@ -593,6 +695,7 @@ fn collect_with_retire_and_unlink(
             }
         };
         drop(guard);
+        let removed_from = inodes.bytes;
         let unit_removed = dry_run
             || retired_unit
                 .as_ref()
@@ -624,7 +727,7 @@ fn collect_with_retire_and_unlink(
                     &unit.directory,
                     entry.workspace_root.as_deref(),
                     reason,
-                    unit_bytes,
+                    removed_from.saturating_sub(inodes.bytes),
                 );
             }
             remaining[index] -= 1;
@@ -781,33 +884,9 @@ fn sweep_retired(root: &Path, dry_run: bool) -> u64 {
     }
     let measured = inodes.bytes;
     for tree in &trees {
-        let checkout = tree.parent() == Some(root);
-        let workspace = if checkout {
-            read_record(&tree.join(RECORD_FILE))
-        } else {
-            tree.parent()
-                .and_then(Path::parent)
-                .and_then(|p| read_record(&p.join(RECORD_FILE)))
-        };
-        let removed_units = if checkout {
-            nested_entries(&tree.join("blake3"))
-                .into_iter()
-                .filter(|e| e.file_type().is_ok_and(|k| k.is_dir()))
-                .map(|e| (e.path(), tree_bytes(&e.path())))
-                .collect::<Vec<_>>()
-        } else {
-            vec![(tree.clone(), tree_bytes(tree))]
-        };
+        let pending = PendingCollection::of(root, tree);
         if remove_tree(tree, false, &mut inodes) {
-            for (unit, bytes) in removed_units {
-                record_collection(
-                    root,
-                    &unit,
-                    workspace.as_ref().map(|r| r.workspace_root.as_path()),
-                    "retired-sweep",
-                    bytes,
-                );
-            }
+            pending.record(root);
         }
     }
     measured.saturating_sub(inodes.bytes)
@@ -1415,19 +1494,10 @@ fn remove_workspace_with_unlink(
     };
     guard.cleanup();
     drop(guard);
-    if let Some(tree) = &tree {
-        for unit in nested_entries(&tree.path().join("blake3")) {
-            if unit.file_type().is_ok_and(|kind| kind.is_dir()) {
-                record_collection(
-                    root,
-                    &unit.path(),
-                    Some(workspace_root),
-                    "checkout-removed",
-                    tree_bytes(&unit.path()),
-                );
-            }
-        }
-    }
+    let pending = tree.as_ref().map(|tree| {
+        mark_collected(root, tree.path(), "checkout-removed", Some(workspace_root));
+        PendingCollection::of(root, tree.path())
+    });
     on_retired();
     let bytes = tree
         .as_ref()
@@ -1435,6 +1505,9 @@ fn remove_workspace_with_unlink(
         .saturating_add(record_bytes);
     if let Some(tree) = tree {
         tree.remove()?;
+    }
+    if let Some(pending) = pending {
+        pending.record(root);
     }
     Ok(RemoveOutcome::Removed(bytes))
 }
@@ -2168,14 +2241,30 @@ mod tests {
     }
 
     #[test]
-    fn collection_history_records_epoch_discard_and_backstop() {
+    fn collection_history_records_an_epoch_discard_once_and_inactive_eviction_as_budget() {
         let cache = tempfile::tempdir().unwrap();
         let unit = "blake3/0123456789";
         checkout_with_sessions(cache.path(), "other", 1, unit, &["s-1-a-finished"]);
         std::fs::remove_file(cache.path().join(EPOCH_FILE)).unwrap();
         discard_pre_copy_state(cache.path()).unwrap();
+        // Retirement under the registrar only leaves a marker; the sweep that
+        // deletes the tree records it, once, with the retirement's reason.
+        assert!(!cache.path().join("collected.jsonl").exists());
+        collect(cache.path(), None, None, false, false, None).unwrap();
+        collect(cache.path(), None, None, false, false, None).unwrap();
         let history = std::fs::read_to_string(cache.path().join("collected.jsonl")).unwrap();
-        assert!(history.contains("epoch-discard"));
+        assert_eq!(history.lines().count(), 1, "{history}");
+        assert!(history.contains("epoch-discard"), "{history}");
+        assert!(
+            !cache
+                .path()
+                .join(LOCKS_DIR)
+                .join(COLLECTED_MARKERS)
+                .read_dir()
+                .unwrap()
+                .any(|_| true),
+            "the marker goes with the tree"
+        );
         checkout_with_sessions(cache.path(), "fresh", 1, unit, &["s-1-a-finished"]);
         set_mtime(
             &cache
@@ -2187,7 +2276,31 @@ mod tests {
         );
         collect(cache.path(), Some(0), None, false, false, Some(0)).unwrap();
         let history = std::fs::read_to_string(cache.path().join("collected.jsonl")).unwrap();
-        assert!(history.contains("backstop"));
+        // No lease and no hot floor: the backstop decided nothing.
+        let last = history.lines().last().unwrap();
+        assert!(last.contains("size-budget"), "{history}");
+    }
+
+    #[test]
+    fn collection_history_names_the_backstop_only_when_it_overrides_the_hot_floor() {
+        let cache = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let state = touch(cache.path(), workspace.path()).unwrap();
+        let directory =
+            unit_with_sessions(&state.directory, "unit", &[("s-1-a-x", 0), ("s-2-b-x", 0)]);
+        for session in ["s-1-a-x", "s-2-b-x"] {
+            set_mtime(&directory.join("widget-0abc").join(session), 0);
+        }
+        let stamp = use_stamp_path(&directory);
+        std::fs::write(&stamp, b"").unwrap();
+        set_mtime(&stamp, now_secs() - 120);
+        // Recently used in a leased checkout, so only the backstop lets the
+        // collector trim it.
+        assert!(exceeds_backstop(&directory, Some(1)));
+        collect(cache.path(), Some(1), None, false, true, Some(1)).unwrap();
+        let history = std::fs::read_to_string(cache.path().join("collected.jsonl")).unwrap();
+        assert!(history.contains("backstop"), "{history}");
+        drop(state);
     }
 
     #[test]
@@ -3719,7 +3832,8 @@ mod tests {
         assert!(!nested.exists());
         let history = std::fs::read_to_string(cache.path().join("collected.jsonl")).unwrap();
         assert_eq!(history.lines().count(), 2);
-        assert!(history.contains("retired-sweep"));
+        // Retired without a marker, as an older mbx leaves it.
+        assert!(history.contains(r#""reason":"retired""#), "{history}");
     }
 
     #[test]

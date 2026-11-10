@@ -140,11 +140,17 @@ real run keeps.
 ### Storage and collection
 
 Collection keeps diagnostic history in `collected.jsonl` under the incremental
-root, rotating at 8 MiB to `collected.1.jsonl`. Each line records the unit,
-workspace when known, timestamp, reason, and bytes of removed state. Active-unit
-trimming records the bytes removed from its sessions. Epoch discards and retired
-sweeps also record each unit. This best-effort history is excluded from budgets
-and is never written by dry runs.
+root, rotating at 8 MiB to `collected.1.jsonl`. Each line records a unit whose
+state was removed: the unit, the checkout's workspace when known, the time, the
+bytes, and why. The reason is `age` or `size-budget` for collection, `backstop`
+for recently used state that was kept past the hot floor only until it grew too
+large, `checkout-removed` for an explicit removal, or `epoch-discard` for the
+one-time discard of state from older versions. A unit is recorded once, when its
+state is actually deleted; trimming a unit still in use records the bytes its
+sessions freed. State left retired by an older mbx is recorded as `retired`.
+This best-effort history is excluded from budgets and is never written by dry
+runs. Matching a session row's `incremental_state.unit` against it shows
+whether a missing donor existed and why it went.
 
 
 `gc.incremental_max_size` bounds private state across all checkouts. It
