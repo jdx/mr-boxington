@@ -2146,8 +2146,8 @@ fn incremental_directory_with_state(
                 state.candidates = Some(0);
                 state
             }
-            Ok(incremental::SeedOutcome::NoFinishedDonor { candidates }) => {
-                let mut state = cold_state("no-finished-donor");
+            Ok(incremental::SeedOutcome::NoUsableDonor { candidates }) => {
+                let mut state = cold_state("no-usable-donor");
                 state.candidates = Some(candidates);
                 state
             }

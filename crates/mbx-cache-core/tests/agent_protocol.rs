@@ -211,7 +211,7 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
                     incremental_state: Some(
                         serde_json::from_value(serde_json::json!({
                             "unit": "blake3/012345678", "source": "cold",
-                            "reason": "no-finished-donor", "candidates": 2
+                            "reason": "no-usable-donor", "candidates": 2
                         }))
                         .unwrap(),
                     ),

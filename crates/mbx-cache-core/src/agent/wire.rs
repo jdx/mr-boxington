@@ -46,7 +46,8 @@ pub struct IncrementalState {
     /// errored).
     pub source: String,
     /// Why state started cold: `no-donor` (no other checkout had it),
-    /// `no-finished-donor` (other checkouts had it but none supplied finished state),
+    /// `no-usable-donor` (other checkouts had it, but none had state seeding could
+    /// copy: unfinished, still locked by rustc, or with an unreadable record),
     /// `not-ready` (a one-time state discard is still pending),
     /// `seeding-off` (this compilation's state cannot be shared), or
     /// `empty-directory` (its state directory held no finished session, so

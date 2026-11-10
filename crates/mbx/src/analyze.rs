@@ -469,8 +469,8 @@ impl Analysis {
                     duration(self.private_state.seeded_copy_ns),
                 ),
                 ("cold", Some("no-donor")) => "started empty: no other checkout had it".into(),
-                ("cold", Some("no-finished-donor")) => {
-                    "started empty: other checkouts had this state but none finished".into()
+                ("cold", Some("no-usable-donor")) => {
+                    "started empty: other checkouts had this state but none could be copied".into()
                 }
                 ("cold", Some("not-ready")) => {
                     "started empty: seeding waits for a one-time state discard".into()

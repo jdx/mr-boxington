@@ -331,7 +331,7 @@ fn action_metadata_is_additive_to_v1() {
             incremental_state: Some(
                 serde_json::from_value(serde_json::json!({
                     "unit": "blake3/012345678", "source": "cold",
-                    "reason": "no-finished-donor", "candidates": 2
+                    "reason": "no-usable-donor", "candidates": 2
                 }))
                 .unwrap(),
             ),
@@ -349,10 +349,7 @@ fn action_metadata_is_additive_to_v1() {
     assert_eq!(values[1]["unit_kind"], "lib");
     assert_eq!(values[1]["incremental"], true);
     assert_eq!(values[1]["incremental_state"]["unit"], "blake3/012345678");
-    assert_eq!(
-        values[1]["incremental_state"]["reason"],
-        "no-finished-donor"
-    );
+    assert_eq!(values[1]["incremental_state"]["reason"], "no-usable-donor");
     assert_eq!(values[1]["incremental_state"]["candidates"], 2);
     assert_eq!(values[1]["private_dependencies"][0], "x");
     assert_eq!(parse_events(&rows).len(), 2);

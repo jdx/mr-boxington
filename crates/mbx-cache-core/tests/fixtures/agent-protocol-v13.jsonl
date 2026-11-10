@@ -10,7 +10,7 @@ request.record_bypass	{"kind":"compiler-query","type":"record_bypass"}
 request.record_unconsulted	{"type":"record_unconsulted"}
 request.record_warning	{"message":"cc result was not restored: blob missing","type":"record_warning"}
 request.record_error	{"message":"compilation result was discarded","type":"record_error"}
-request.record_compiler_invocation	{"crate_name":"fixture","duration_ns":19,"metadata":{"incremental_state":{"candidates":2,"reason":"no-finished-donor","source":"cold","unit":"blake3/012345678"}},"outcome":"miss","type":"record_compiler_invocation"}
+request.record_compiler_invocation	{"crate_name":"fixture","duration_ns":19,"metadata":{"incremental_state":{"candidates":2,"reason":"no-usable-donor","source":"cold","unit":"blake3/012345678"}},"outcome":"miss","type":"record_compiler_invocation"}
 request.record_action_verification	{"matched":true,"restore":{"avoided_compiler_duration_ns":10,"copied_output_bytes":17,"copied_output_files":16,"duration_ns":11,"hardlinked_output_bytes":21,"hardlinked_output_files":20,"output_bytes":13,"output_files":12,"reflinked_output_bytes":15,"reflinked_output_files":14,"reused_output_bytes":19,"reused_output_files":18},"type":"record_action_verification"}
 request.store_action_result	{"result":{"action":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"metadata":null,"output_root":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"version":1},"type":"store_action_result"}
 request.find_action_prediction	{"invocation":{"algorithm":"blake3","hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":7},"task":"task-id","type":"find_action_prediction"}

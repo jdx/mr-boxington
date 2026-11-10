@@ -147,7 +147,8 @@ for recently used state that was kept past the hot floor only until it grew too
 large, `checkout-removed` for an explicit removal, or `epoch-discard` for the
 one-time discard of state from older versions. A unit is recorded once, when its
 state is actually deleted; trimming a unit still in use records the bytes its
-sessions freed. State left retired by an older mbx is recorded as `retired`.
+sessions freed, and its line says `"trimmed": true`, since the unit and possibly
+some finished state remain. State left retired by an older mbx is recorded as `retired`.
 This best-effort history is excluded from budgets and is never written by dry
 runs. Matching a session row's `incremental_state.unit` against it shows
 whether a missing donor existed and why it went.

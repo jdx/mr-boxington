@@ -107,7 +107,10 @@ directory held a finished session; rustc decides how much of it to reuse.
 Session event rows include the unit directory key and, when donors were searched,
 the number of other checkouts with that unit. The private-state section reports
 candidate totals across compilations. `started empty: other checkouts had this
-state but none finished` distinguishes unfinished donors from no donor.
+state but none could be copied` means other checkouts had state for the same
+compilation but none that seeding could use, because it was unfinished, still
+in use by rustc, or its checkout record was unreadable; it is told apart from
+`no other checkout had it`.
 
 ## What it compares against
 

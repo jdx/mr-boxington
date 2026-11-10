@@ -211,6 +211,19 @@ impl PendingCollection {
 }
 
 fn record_collection(root: &Path, unit: &Path, workspace: Option<&Path>, reason: &str, bytes: u64) {
+    record_collection_of(root, unit, workspace, reason, bytes, false);
+}
+
+/// `trimmed` marks a unit that lost only some of its sessions and is still
+/// there, possibly with finished state another checkout could seed from.
+fn record_collection_of(
+    root: &Path,
+    unit: &Path,
+    workspace: Option<&Path>,
+    reason: &str,
+    bytes: u64,
+    trimmed: bool,
+) {
     use std::io::Write;
     let result = (|| -> std::io::Result<()> {
         let locks = root.join(LOCKS_DIR);
@@ -229,10 +242,14 @@ fn record_collection(root: &Path, unit: &Path, workspace: Option<&Path>, reason:
         } else {
             name.to_owned()
         };
-        let mut line = serde_json::to_vec(&serde_json::json!({
+        let mut entry = serde_json::json!({
             "ts_ms": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
             "unit": name, "workspace_root": workspace, "reason": reason, "bytes": bytes,
-        }))?;
+        });
+        if trimmed {
+            entry["trimmed"] = serde_json::Value::Bool(true);
+        }
+        let mut line = serde_json::to_vec(&entry)?;
         line.push(b'\n');
         if line.len() as u64 > COLLECTION_LOG_CAP {
             return Err(std::io::Error::other("collection ledger line exceeds cap"));
@@ -694,12 +711,13 @@ fn collect_with_retire_and_unlink(
             }
             if evicted {
                 if !dry_run {
-                    record_collection(
+                    record_collection_of(
                         root,
                         &unit.directory,
                         entry.workspace_root.as_deref(),
                         reason,
                         trimmed_from.saturating_sub(inodes.bytes),
+                        true,
                     );
                 }
                 outcome.session_units.insert(unit.directory.clone());
@@ -1851,8 +1869,9 @@ pub(crate) enum SeedOutcome {
     Seeded(SeedReport),
     /// No other checkout had a directory for the unit.
     NoDonor,
-    /// Directories existed, but none supplied a usable finished session.
-    NoFinishedDonor { candidates: u64 },
+    /// Other checkouts had the unit, but none had state seeding could copy:
+    /// unfinished, still locked by rustc, or with an unreadable record.
+    NoUsableDonor { candidates: u64 },
     /// The one-time copy epoch is not complete, so seeding stays off.
     NotReady,
 }
@@ -1977,7 +1996,7 @@ pub(crate) fn seed(checkout: &Path, unit: &str) -> Result<SeedOutcome> {
         Ok(if candidates == 0 {
             SeedOutcome::NoDonor
         } else {
-            SeedOutcome::NoFinishedDonor { candidates }
+            SeedOutcome::NoUsableDonor { candidates }
         }),
         Err,
     )
@@ -2481,6 +2500,8 @@ mod tests {
         collect(cache.path(), Some(1), None, false, true, Some(1)).unwrap();
         let history = std::fs::read_to_string(cache.path().join("collected.jsonl")).unwrap();
         assert!(history.contains("backstop"), "{history}");
+        // The unit is still there, so its line says it was only trimmed.
+        assert!(history.contains(r#""trimmed":true"#), "{history}");
         drop(state);
     }
 
@@ -2538,7 +2559,7 @@ mod tests {
         checkout_with_sessions(cache.path(), "other", 20, unit, &["s-1-a-working"]);
         assert_eq!(
             seed(&own, unit).unwrap(),
-            SeedOutcome::NoFinishedDonor { candidates: 1 }
+            SeedOutcome::NoUsableDonor { candidates: 1 }
         );
     }
 

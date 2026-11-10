@@ -719,7 +719,7 @@ fn recordings_without_private_state_details_leave_the_section_out() {
 
 #[test]
 fn report_distinguishes_unfinished_donors() {
-    let mut unfinished = state("cold", Some("no-finished-donor"));
+    let mut unfinished = state("cold", Some("no-usable-donor"));
     unfinished.candidates = Some(2);
     let text = analyze(
         Vec::new(),
@@ -727,5 +727,7 @@ fn report_distinguishes_unfinished_donors() {
     )
     .text();
     assert!(text.contains("2 candidate checkouts across these compilations"));
-    assert!(text.contains("started empty: other checkouts had this state but none finished"));
+    assert!(
+        text.contains("started empty: other checkouts had this state but none could be copied")
+    );
 }
