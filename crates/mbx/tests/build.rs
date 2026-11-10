@@ -9463,21 +9463,57 @@ fn late_workspace_wrappers_keep_objects_when_they_skip_rustc() {
 #[cfg(unix)]
 #[test]
 fn workspace_compilations_skip_flights_but_keep_scheduler_admission() {
+    workspace_compilation_skips_flight(false);
+}
+
+/// A dependency member has no CARGO_PRIMARY_PACKAGE marker. Its exemption
+/// therefore has to reach the compiler through the session membership file.
+#[cfg(unix)]
+#[test]
+fn unselected_workspace_members_skip_flights_but_keep_scheduler_admission() {
+    workspace_compilation_skips_flight(true);
+}
+
+/// Exercise a selected crate or an unselected member under its invocation lock.
+#[cfg(unix)]
+fn workspace_compilation_skips_flight(as_dependency: bool) {
     use std::time::{Duration, Instant};
 
     let directory = tempfile::tempdir().unwrap();
     let project = directory.path().join("project");
     let store = directory.path().join("store");
     write_project(&project);
+    if as_dependency {
+        let manifest = std::fs::read_to_string(project.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            project.join("Cargo.toml"),
+            format!("{manifest}\n[workspace]\nmembers = [\"consumer\"]\nresolver = \"2\"\n"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.join("consumer/src")).unwrap();
+        std::fs::write(
+            project.join("consumer/Cargo.toml"),
+            "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nfixture = { path = \"..\" }\n",
+        )
+        .unwrap();
+        std::fs::write(project.join("consumer/src/lib.rs"), "pub use fixture::*;\n").unwrap();
+        generate_lockfile(&project);
+    }
+    let arguments: &[&str] = if as_dependency {
+        &["build", "--offline", "-p", "consumer"]
+    } else {
+        &["build", "--offline"]
+    };
     let settings = [
         ("MBX_TARGET_VIEWS", "0"),
         ("MBX_LEARNED_INCREMENTAL", "0"),
         ("CARGO_INCREMENTAL", "0"),
     ];
-    build_with(
+    cargo_with(
         &project,
         &store,
         &directory.path().join("seed.json"),
+        arguments,
         &settings,
     );
     let prediction = find_files(&store.join("actions/task-manifests/v1"), |path| {
@@ -9517,7 +9553,7 @@ fn workspace_compilations_skip_flights_but_keep_scheduler_admission() {
         &project,
         &store,
         &report,
-        &["build", "--offline"],
+        arguments,
         &settings,
     );
     command
@@ -9549,10 +9585,11 @@ fn workspace_compilations_skip_flights_but_keep_scheduler_admission() {
     // A completed workspace result remains shareable even though its compile
     // does not participate in invocation deduplication.
     std::fs::remove_dir_all(project.join("target")).unwrap();
-    let (warm, stderr) = build_with(
+    let (warm, stderr) = cargo_with(
         &project,
         &store,
         &directory.path().join("warm.json"),
+        arguments,
         &settings,
     );
     assert!(warm["hits"].as_u64().unwrap() > 0, "{warm}\n{stderr}");
