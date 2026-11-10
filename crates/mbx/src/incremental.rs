@@ -68,8 +68,9 @@ fn retire_marked(
 ) -> std::io::Result<Option<RetiredTree>> {
     let mut announced = None;
     let result = RetiredTree::retire_announced(live, |retired| {
-        mark_collected(root, retired, reason, workspace);
-        announced = Some(retired.to_path_buf());
+        if mark_collected(root, retired, reason, workspace) {
+            announced = Some(retired.to_path_buf());
+        }
     });
     if !matches!(result, Ok(Some(_)))
         && let Some(marker) = announced.and_then(|retired| collected_marker(root, &retired))
@@ -106,13 +107,14 @@ fn unmark_collected(root: &Path, tree: &Path) {
     }
 }
 
-fn mark_collected(root: &Path, tree: &Path, reason: &str, workspace: Option<&Path>) {
+/// Whether the marker was written.
+fn mark_collected(root: &Path, tree: &Path, reason: &str, workspace: Option<&Path>) -> bool {
     let marker = CollectedMarker {
         reason: reason.to_owned(),
         workspace_root: workspace.map(Path::to_path_buf),
     };
     let Some(path) = collected_marker(root, tree) else {
-        return;
+        return false;
     };
     if let Err(error) = serde_json::to_vec(&marker)
         .map_err(std::io::Error::other)
@@ -122,7 +124,9 @@ fn mark_collected(root: &Path, tree: &Path, reason: &str, workspace: Option<&Pat
         })
     {
         log::debug!("could not mark retired incremental state: {error}");
+        return false;
     }
+    true
 }
 
 /// The ledger lines a retired tree's deletion will write: one per unit, with
@@ -140,6 +144,10 @@ struct PendingCollection {
 
 impl PendingCollection {
     fn of(root: &Path, tree: &Path) -> Self {
+        // Checked before the units are listed. Every pass claims a marker only
+        // after deleting its tree, so a marker gone by now means the tree is
+        // gone too and the listing below finds nothing to record twice.
+        let marked = collected_marker(root, tree).is_some_and(|marker| marker.exists());
         let checkout = tree.parent() == Some(root);
         let units = if checkout {
             nested_entries(&tree.join("blake3"))
@@ -147,8 +155,11 @@ impl PendingCollection {
                 .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
                 .map(|entry| (entry.path(), tree_bytes(&entry.path())))
                 .collect()
-        } else {
+        } else if tree.is_dir() {
             vec![(tree.to_path_buf(), tree_bytes(tree))]
+        } else {
+            // A retired use stamp or churn record, not a unit's state.
+            Vec::new()
         };
         let workspace_root = {
             let record = if checkout {
@@ -164,7 +175,7 @@ impl PendingCollection {
         };
         Self {
             tree: tree.to_path_buf(),
-            marked: collected_marker(root, tree).is_some_and(|marker| marker.exists()),
+            marked,
             workspace_root,
             units,
         }
@@ -702,6 +713,7 @@ fn collect_with_retire_and_unlink(
         // Detach the unit and its stamps before another lease can recreate
         // either name. The recursive walk runs without the registrar.
         let mut retired_records = Vec::new();
+        let mut unit_marked = false;
         let retired_unit = if dry_run {
             None
         } else {
@@ -729,9 +741,9 @@ fn collect_with_retire_and_unlink(
                 Ok(tree) => {
                     // If the deletion below fails, the sweep finishes it and
                     // records it with this reason.
-                    if let Some(tree) = &tree {
-                        mark_collected(root, tree.path(), reason, entry.workspace_root.as_deref());
-                    }
+                    unit_marked = tree.as_ref().is_some_and(|tree| {
+                        mark_collected(root, tree.path(), reason, entry.workspace_root.as_deref())
+                    });
                     tree
                 }
                 Err(error) => {
@@ -772,10 +784,11 @@ fn collect_with_retire_and_unlink(
             } else {
                 kept_records.insert(index);
             }
-            // A concurrent sweep that deleted the tree first has recorded it.
+            // A concurrent sweep that deleted the tree first claimed its
+            // marker and recorded it. Without a marker, nothing else could.
             if !dry_run
                 && let Some(tree) = &retired_unit
-                && claim_marker(root, tree.path()).is_some()
+                && (!unit_marked || matches!(claim_marker(root, tree.path()), Some(Some(_))))
             {
                 record_collection(
                     root,
@@ -2340,6 +2353,36 @@ mod tests {
     fn markers_left(root: &Path) -> usize {
         std::fs::read_dir(root.join(LOCKS_DIR).join(COLLECTED_MARKERS))
             .map_or(0, |entries| entries.count())
+    }
+
+    #[test]
+    fn a_pass_measuring_after_another_claimed_records_nothing() {
+        let cache = tempfile::tempdir().unwrap();
+        let unit = "blake3/0123456789";
+        let live = checkout_with_sessions(cache.path(), "gone", 1, unit, &["s-1-a-finished"]);
+        let tree = retire_marked(cache.path(), &live, "checkout-removed", None)
+            .unwrap()
+            .unwrap();
+        let sweep = PendingCollection::of(cache.path(), tree.path());
+        let path = tree.path().to_path_buf();
+        tree.remove().unwrap();
+        sweep.record(cache.path());
+        // The explicit removal measures only now, after the sweep's claim.
+        PendingCollection::of(cache.path(), &path).record(cache.path());
+        let history = std::fs::read_to_string(cache.path().join("collected.jsonl")).unwrap();
+        assert_eq!(history.lines().count(), 1, "{history}");
+        assert!(history.contains("checkout-removed"), "{history}");
+    }
+
+    #[test]
+    fn a_retired_stamp_is_not_recorded_as_a_unit() {
+        let cache = tempfile::tempdir().unwrap();
+        let checkout = cache.path().join("own").join("blake3");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let stamp = checkout.join("0123456789.json.retired-1-abc");
+        std::fs::write(&stamp, b"{}").unwrap();
+        PendingCollection::of(cache.path(), &stamp).record(cache.path());
+        assert!(!cache.path().join("collected.jsonl").exists());
     }
 
     #[test]
