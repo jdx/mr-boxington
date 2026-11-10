@@ -138,6 +138,9 @@ struct PendingCollection {
     /// only by the pass that claims its marker; one without was retired by an
     /// mbx that left none.
     marked: bool,
+    /// Whether the tree was still there once its units were listed. A tree
+    /// another pass deleted meanwhile is that pass's to record.
+    listed: bool,
     workspace_root: Option<PathBuf>,
     units: Vec<(PathBuf, u64)>,
 }
@@ -173,15 +176,20 @@ impl PendingCollection {
                 .and_then(|record| read_record(&record))
                 .map(|record| record.workspace_root)
         };
+        let listed = tree.exists();
         Self {
             tree: tree.to_path_buf(),
             marked,
+            listed,
             workspace_root,
             units,
         }
     }
 
     fn record(self, root: &Path) {
+        if !self.listed {
+            return;
+        }
         let marker = if self.marked {
             match claim_marker(root, &self.tree) {
                 Some(Some(marker)) => Some(marker),
@@ -2369,6 +2377,30 @@ mod tests {
         sweep.record(cache.path());
         // The explicit removal measures only now, after the sweep's claim.
         PendingCollection::of(cache.path(), &path).record(cache.path());
+        let history = std::fs::read_to_string(cache.path().join("collected.jsonl")).unwrap();
+        assert_eq!(history.lines().count(), 1, "{history}");
+        assert!(history.contains("checkout-removed"), "{history}");
+    }
+
+    #[test]
+    fn a_pass_that_listed_a_vanished_tree_leaves_the_marker_to_its_deleter() {
+        let cache = tempfile::tempdir().unwrap();
+        let unit = "blake3/0123456789";
+        let live = checkout_with_sessions(cache.path(), "gone", 1, unit, &["s-1-a-finished"]);
+        let tree = retire_marked(cache.path(), &live, "checkout-removed", None)
+            .unwrap()
+            .unwrap();
+        let path = tree.path().to_path_buf();
+        // The explicit removal measures the full tree; the sweep sees the
+        // marker but lists only after the removal has deleted the tree.
+        let removal = PendingCollection::of(cache.path(), &path);
+        let marked = collected_marker(cache.path(), &path).unwrap();
+        let marker = std::fs::read(&marked).unwrap();
+        tree.remove().unwrap();
+        std::fs::write(&marked, &marker).unwrap();
+        let sweep = PendingCollection::of(cache.path(), &path);
+        sweep.record(cache.path());
+        removal.record(cache.path());
         let history = std::fs::read_to_string(cache.path().join("collected.jsonl")).unwrap();
         assert_eq!(history.lines().count(), 1, "{history}");
         assert!(history.contains("checkout-removed"), "{history}");
