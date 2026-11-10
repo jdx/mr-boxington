@@ -10,6 +10,15 @@ impl RetiredTree {
     /// Call while holding the lock that owns the live name. Rename only
     /// after the final probe; finish bookkeeping before releasing that lock.
     pub(crate) fn retire(live: &Path) -> io::Result<Option<Self>> {
+        Self::retire_announced(live, |_| {})
+    }
+
+    /// Like [`Self::retire`], but tell `announce` the retired path before the
+    /// rename, so anything kept about the tree exists before the tree does.
+    pub(crate) fn retire_announced(
+        live: &Path,
+        announce: impl FnOnce(&Path),
+    ) -> io::Result<Option<Self>> {
         let Some(name) = live.file_name() else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -22,6 +31,7 @@ impl RetiredTree {
             std::process::id(),
             crate::util::random_string(24)
         ));
+        announce(&live.with_file_name(&retired));
         // macOS requires a writable directory for rename. Do not change
         // file modes: incremental files can share inodes with other trees.
         #[cfg(unix)]
