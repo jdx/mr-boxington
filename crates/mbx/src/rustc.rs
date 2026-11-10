@@ -3661,11 +3661,16 @@ struct InvocationFlight {
     invocation: CacheDigest,
 }
 
-/// Join the flight for this invocation, when one can be keyed.
+/// Join the flight for a dependency outside the workspace, when one can be keyed.
 ///
-/// `None` -- an invocation whose digest cannot be built, or a machine with
-/// scheduling off -- just compiles, the way everything here degrades.
+/// Workspace crates still use cache lookups and scheduler admission, but edits
+/// in different worktrees must not wait behind the same invocation arguments.
+/// `None` also covers an invocation whose digest cannot be built or a machine
+/// with scheduling off.
 fn join_flight(compilation: &Compilation<'_>) -> Option<InvocationFlight> {
+    if session::workspace::compiling_member() {
+        return None;
+    }
     let invocation = (|| -> Result<CacheDigest> {
         let context = base_action_context(
             compilation.rustc,

@@ -520,6 +520,13 @@ fn cargo_with_settings_bypass_log_and_roots(
             Err(error) => return Err(error),
         };
         let mut environment = wrapper_environment.clone();
+        if config.scheduler.enabled {
+            session::workspace::record_members(
+                roots.workspace_members.as_deref(),
+                session_dir.path(),
+                &mut environment,
+            );
+        }
         if let Some(rustc) = &rustc {
             environment.insert("RUSTC".into(), rustc.to_string_lossy().into_owned());
         }
@@ -1420,6 +1427,7 @@ pub(super) fn exit_code(status: std::process::ExitStatus) -> ExitCode {
 /// Settings the shim maps out of its cache keys.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Roots {
+    pub(super) workspace_members: Option<Vec<PathBuf>>,
     pub(super) workspace_root: PathBuf,
     pub(super) target_dir: PathBuf,
     pub(super) build_dir: Option<PathBuf>,
@@ -1498,6 +1506,7 @@ pub(super) fn resolve_roots_with(
 ) -> Roots {
     let resolved = mbx_cache_cargo::resolve(cargo, arguments, working_dir, target_dir_env);
     Roots {
+        workspace_members: None,
         workspace_root: resolved.workspace_root,
         target_dir: resolved.target_dir,
         build_dir: resolved.build_dir,
@@ -1569,13 +1578,14 @@ pub(super) fn cargo_roots_reported(
         return remote_install_roots(arguments, &working_dir, target_dir_env)
             .ok_or_else(|| eyre::eyre!("could not resolve remote install storage"));
     }
-    let resolved = mbx_cache_cargo::try_resolve_reported(
+    let (resolved, workspace_members) = mbx_cache_cargo::try_resolve_reported_with_members(
         cargo,
         arguments,
         &working_dir,
         target_dir_env.map(std::ffi::OsStr::to_os_string),
     )?;
     Ok(Roots {
+        workspace_members,
         workspace_root: resolved.workspace_root,
         target_dir: resolved.target_dir,
         build_dir: resolved.build_dir,
@@ -1605,6 +1615,7 @@ fn remote_install_roots(
         mbx_cache_cargo::remote_install_target_dir(arguments, working_dir, target_dir_env)
             .unwrap_or_else(|| workspace_root.join("target"));
     Some(Roots {
+        workspace_members: None,
         workspace_root,
         target_dir,
         build_dir: None,
@@ -1648,6 +1659,7 @@ fn remote_install_scratch(
 pub(super) fn parse_cargo_roots(metadata: &[u8]) -> Option<Roots> {
     let metadata: serde_json::Value = serde_json::from_slice(metadata).ok()?;
     Some(Roots {
+        workspace_members: None,
         workspace_root: PathBuf::from(metadata.get("workspace_root")?.as_str()?),
         target_dir: PathBuf::from(metadata.get("target_directory")?.as_str()?),
         build_dir: metadata
