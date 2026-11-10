@@ -2077,6 +2077,8 @@ fn classify_skip_reason(
 
 fn cold_state(reason: &str) -> IncrementalState {
     IncrementalState {
+        unit: None,
+        candidates: None,
         source: "cold".into(),
         reason: Some(reason.into()),
         donor: None,
@@ -2112,8 +2114,10 @@ fn incremental_directory_with_state(
     // a compilation that failed before rustc saved one, gives rustc nothing to
     // start from, and seeding passes it over too. Report that as an empty
     // start rather than as state this checkout already had.
-    let state = if directory.is_dir() && incremental::holds_finished_session(&directory) {
+    let mut state = if directory.is_dir() && incremental::holds_finished_session(&directory) {
         IncrementalState {
+            unit: None,
+            candidates: None,
             source: "existing".into(),
             reason: None,
             donor: None,
@@ -2128,6 +2132,8 @@ fn incremental_directory_with_state(
     } else {
         match incremental::seed(&root, shard) {
             Ok(incremental::SeedOutcome::Seeded(report)) => IncrementalState {
+                unit: None,
+                candidates: Some(report.candidates),
                 source: "seeded".into(),
                 reason: None,
                 donor: Some(report.donor_workspace),
@@ -2135,13 +2141,24 @@ fn incremental_directory_with_state(
                 bytes: Some(report.bytes),
                 copy_ns: Some(report.duration_ns),
             },
-            Ok(incremental::SeedOutcome::NoDonor) => cold_state("no-donor"),
+            Ok(incremental::SeedOutcome::NoDonor) => {
+                let mut state = cold_state("no-donor");
+                state.candidates = Some(0);
+                state
+            }
+            Ok(incremental::SeedOutcome::NoFinishedDonor { candidates }) => {
+                let mut state = cold_state("no-finished-donor");
+                state.candidates = Some(candidates);
+                state
+            }
             Ok(incremental::SeedOutcome::NotReady) => cold_state("not-ready"),
             Err(error) => {
                 session::report_shim_warning(&format!(
                     "incremental state for {crate_name} was not seeded: {error:#}"
                 ));
                 IncrementalState {
+                    unit: None,
+                    candidates: None,
                     source: "failed".into(),
                     reason: None,
                     donor: None,
@@ -2152,6 +2169,7 @@ fn incremental_directory_with_state(
             }
         }
     };
+    state.unit = Some(shard.into());
     match std::fs::create_dir_all(&directory) {
         Ok(()) => (Some(directory), Some(state)),
         Err(error) => {

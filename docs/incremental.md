@@ -139,6 +139,14 @@ real run keeps.
 
 ### Storage and collection
 
+Collection keeps diagnostic history in `collected.jsonl` under the incremental
+root, rotating at 8 MiB to `collected.1.jsonl`. Each line records the unit,
+workspace when known, timestamp, reason, and bytes of removed state. Active-unit
+trimming records the bytes removed from its sessions. Epoch discards and retired
+sweeps also record each unit. This best-effort history is excluded from budgets
+and is never written by dry runs.
+
+
 `gc.incremental_max_size` bounds private state across all checkouts. It
 defaults to 5% of the cache disk, between 10 GiB and 100 GiB.
 `gc.incremental_max_age` defaults to 30 days. Collection removes expired units

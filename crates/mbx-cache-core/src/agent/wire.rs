@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Wire protocol version used between an in-process cache agent and its shims.
-pub const AGENT_PROTOCOL_VERSION: u8 = 12;
+pub const AGENT_PROTOCOL_VERSION: u8 = 13;
 
 /// Facts the compiler wrapper determined about one action, recorded on its
 /// session event row. Every field is optional, and absent means unknown.
@@ -34,12 +34,19 @@ pub struct CompileMetadata {
 /// Where a compilation's private incremental state came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncrementalState {
+    /// Unit directory key used for private state and donor matching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// Other checkouts with this unit directory when donors were searched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidates: Option<u64>,
     /// `existing` (the unit's state directory already held a finished rustc
     /// session; rustc decides how much of it to reuse), `seeded` (copied from
     /// another checkout), `cold` (started empty), or `failed` (seeding
     /// errored).
     pub source: String,
     /// Why state started cold: `no-donor` (no other checkout had it),
+    /// `no-finished-donor` (other checkouts had it but none supplied finished state),
     /// `not-ready` (a one-time state discard is still pending),
     /// `seeding-off` (this compilation's state cannot be shared), or
     /// `empty-directory` (its state directory held no finished session, so

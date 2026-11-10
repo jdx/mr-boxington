@@ -1949,6 +1949,27 @@ fn incremental_seed_keeps_the_donors_thin_lto_state_linkable() {
     build(second.path(), "second-initial");
     edit(second.path(), 2);
     build(second.path(), "second-edit");
+    let mut saw_seed = false;
+    for stream in std::fs::read_dir(store.path().join("actions/sessions/v1"))
+        .unwrap()
+        .flatten()
+    {
+        if stream.path().extension().is_some_and(|ext| ext == "jsonl") {
+            for line in std::fs::read_to_string(stream.path()).unwrap().lines() {
+                let event: serde_json::Value = serde_json::from_str(line).unwrap();
+                if event["incremental_state"]["source"] == "seeded" {
+                    assert!(
+                        event["incremental_state"]["unit"]
+                            .as_str()
+                            .is_some_and(|unit| !unit.is_empty()),
+                        "{event}"
+                    );
+                    saw_seed = true;
+                }
+            }
+        }
+    }
+    assert!(saw_seed, "the seeded compile must record its unit");
     assert!(
         !find_files(&incremental_checkout(store.path(), second.path()), |path| {
             file_name_is(path, |name| name == MARKER)
@@ -3674,6 +3695,10 @@ fn bypassed_incremental_states(store: &Path) -> Vec<(String, Option<String>)> {
                 && event["incremental"] == true
             {
                 let state = &event["incremental_state"];
+                assert!(
+                    state["unit"].as_str().is_some_and(|unit| !unit.is_empty()),
+                    "{event}"
+                );
                 states.push((
                     state["source"].as_str().unwrap_or("missing").to_string(),
                     state["reason"].as_str().map(str::to_string),

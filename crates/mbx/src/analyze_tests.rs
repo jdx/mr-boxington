@@ -609,6 +609,8 @@ fn private_compilation(
 
 fn state(source: &str, reason: Option<&str>) -> mbx_cache_core::IncrementalState {
     mbx_cache_core::IncrementalState {
+        unit: None,
+        candidates: None,
         source: source.into(),
         reason: reason.map(Into::into),
         donor: None,
@@ -713,4 +715,17 @@ fn recordings_without_private_state_details_leave_the_section_out() {
     .text();
 
     assert!(!text.contains("private incremental state"), "{text}");
+}
+
+#[test]
+fn report_distinguishes_unfinished_donors() {
+    let mut unfinished = state("cold", Some("no-finished-donor"));
+    unfinished.candidates = Some(2);
+    let text = analyze(
+        Vec::new(),
+        vec![private_compilation("store", 5, "core", &[], unfinished)],
+    )
+    .text();
+    assert!(text.contains("2 candidate checkouts across these compilations"));
+    assert!(text.contains("started empty: other checkouts had this state but none finished"));
 }

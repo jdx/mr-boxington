@@ -104,6 +104,11 @@ finished session, as after a compilation that failed early; seeding passes
 such a directory over. `started from this checkout's earlier state` means the
 directory held a finished session; rustc decides how much of it to reuse.
 
+Session event rows include the unit directory key and, when donors were searched,
+the number of other checkouts with that unit. The private-state section reports
+candidate totals across compilations. `started empty: other checkouts had this
+state but none finished` distinguishes unfinished donors from no donor.
+
 ## What it compares against
 
 mbx compares each compilation with this workspace's most recent earlier

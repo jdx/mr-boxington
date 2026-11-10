@@ -29,6 +29,62 @@ const REGISTRAR_FILE: &str = "registrar.lock";
 const EPOCH_FILE: &str = "epoch";
 const COPY_STATE_EPOCH: u64 = 1;
 
+const COLLECTION_LOG_CAP: u64 = 8 * 1024 * 1024;
+
+/// Diagnostic history only: never included in the state budget. The separate
+/// lock serializes rotation and appends across collectors and epoch migration.
+fn record_collection(root: &Path, unit: &Path, workspace: Option<&Path>, reason: &str, bytes: u64) {
+    use std::io::Write;
+    let result = (|| -> std::io::Result<()> {
+        let locks = root.join(LOCKS_DIR);
+        std::fs::create_dir_all(&locks)?;
+        let mut lock = fslock::LockFile::open(&locks.join("collected.lock"))?;
+        lock.lock()?;
+        let path = root.join("collected.jsonl");
+        let name = unit.file_name().unwrap_or_default().to_string_lossy();
+        let name = name.split(".retired-").next().unwrap_or(&name);
+        let name = if unit
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|parent| parent == "blake3")
+        {
+            format!("blake3/{name}")
+        } else {
+            name.to_owned()
+        };
+        let mut line = serde_json::to_vec(&serde_json::json!({
+            "ts_ms": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
+            "unit": name, "workspace_root": workspace, "reason": reason, "bytes": bytes,
+        }))?;
+        line.push(b'\n');
+        if line.len() as u64 > COLLECTION_LOG_CAP {
+            return Err(std::io::Error::other("collection ledger line exceeds cap"));
+        }
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() + line.len() as u64 > COLLECTION_LOG_CAP)
+        {
+            let old = root.join("collected.1.jsonl");
+            match std::fs::remove_file(&old) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+            std::fs::rename(&path, old)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        // Exactly one O_APPEND write per line; a short write is diagnostic loss.
+        if file.write(&line)? != line.len() {
+            return Err(std::io::Error::other("short collection ledger write"));
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        log::debug!("could not append incremental collection ledger: {error}");
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct StateEpoch {
     epoch: u64,
@@ -107,6 +163,7 @@ fn discard_pre_copy_state(root: &Path) -> Result<()> {
                 return Ok(false);
             }
             if let Some(tree) = RetiredTree::retire(&root.join(&key))? {
+                let workspace = read_record(&tree.path().join(RECORD_FILE));
                 match std::fs::remove_file(tree.path().join(RECORD_FILE)) {
                     Ok(()) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -115,6 +172,17 @@ fn discard_pre_copy_state(root: &Path) -> Result<()> {
                         // the pending key still refers to the old state.
                         std::fs::rename(tree.path(), root.join(&key))?;
                         return Err(error.into());
+                    }
+                }
+                for unit in nested_entries(&tree.path().join("blake3")) {
+                    if unit.file_type().is_ok_and(|kind| kind.is_dir()) {
+                        record_collection(
+                            root,
+                            &unit.path(),
+                            workspace.as_ref().map(|r| r.workspace_root.as_path()),
+                            "epoch-discard",
+                            tree_bytes(&unit.path()),
+                        );
                     }
                 }
                 retired_count += 1;
@@ -384,6 +452,18 @@ fn collect_with_retire_and_unlink(
             break;
         }
         let entry = &entries[index];
+        let reason = if expired(unit) {
+            "age"
+        } else if exceeds_backstop(&unit.directory, backstop_budget) {
+            "backstop"
+        } else {
+            "size-budget"
+        };
+        let unit_bytes = if dry_run {
+            0
+        } else {
+            tree_bytes(&unit.directory)
+        };
         // seed() holds the donor's checkout lease while linking its sessions.
         let guard = match deletion_guard(root, &entry.key, !dry_run) {
             Ok(guard) => guard,
@@ -448,6 +528,15 @@ fn collect_with_retire_and_unlink(
                 }
             }
             if evicted {
+                if !dry_run {
+                    record_collection(
+                        root,
+                        &unit.directory,
+                        entry.workspace_root.as_deref(),
+                        reason,
+                        unit_bytes.saturating_sub(tree_bytes(&unit.directory)),
+                    );
+                }
                 outcome.session_units.insert(unit.directory.clone());
             } else {
                 outcome.skipped_active_units += 1;
@@ -528,6 +617,15 @@ fn collect_with_retire_and_unlink(
                 }
             } else {
                 kept_records.insert(index);
+            }
+            if !dry_run && retired_unit.is_some() {
+                record_collection(
+                    root,
+                    &unit.directory,
+                    entry.workspace_root.as_deref(),
+                    reason,
+                    unit_bytes,
+                );
             }
             remaining[index] -= 1;
             removed.insert(unit.directory.clone());
@@ -683,7 +781,34 @@ fn sweep_retired(root: &Path, dry_run: bool) -> u64 {
     }
     let measured = inodes.bytes;
     for tree in &trees {
-        remove_tree(tree, false, &mut inodes);
+        let checkout = tree.parent() == Some(root);
+        let workspace = if checkout {
+            read_record(&tree.join(RECORD_FILE))
+        } else {
+            tree.parent()
+                .and_then(Path::parent)
+                .and_then(|p| read_record(&p.join(RECORD_FILE)))
+        };
+        let removed_units = if checkout {
+            nested_entries(&tree.join("blake3"))
+                .into_iter()
+                .filter(|e| e.file_type().is_ok_and(|k| k.is_dir()))
+                .map(|e| (e.path(), tree_bytes(&e.path())))
+                .collect::<Vec<_>>()
+        } else {
+            vec![(tree.clone(), tree_bytes(tree))]
+        };
+        if remove_tree(tree, false, &mut inodes) {
+            for (unit, bytes) in removed_units {
+                record_collection(
+                    root,
+                    &unit,
+                    workspace.as_ref().map(|r| r.workspace_root.as_path()),
+                    "retired-sweep",
+                    bytes,
+                );
+            }
+        }
     }
     measured.saturating_sub(inodes.bytes)
 }
@@ -1290,6 +1415,19 @@ fn remove_workspace_with_unlink(
     };
     guard.cleanup();
     drop(guard);
+    if let Some(tree) = &tree {
+        for unit in nested_entries(&tree.path().join("blake3")) {
+            if unit.file_type().is_ok_and(|kind| kind.is_dir()) {
+                record_collection(
+                    root,
+                    &unit.path(),
+                    Some(workspace_root),
+                    "checkout-removed",
+                    tree_bytes(&unit.path()),
+                );
+            }
+        }
+    }
     on_retired();
     let bytes = tree
         .as_ref()
@@ -1561,8 +1699,10 @@ fn cleanup_lock_dir(locks: &Path) {
 pub(crate) enum SeedOutcome {
     /// State was copied from another checkout.
     Seeded(SeedReport),
-    /// No other checkout had finished state for the unit.
+    /// No other checkout had a directory for the unit.
     NoDonor,
+    /// Directories existed, but none supplied a usable finished session.
+    NoFinishedDonor { candidates: u64 },
     /// The one-time copy epoch is not complete, so seeding stays off.
     NotReady,
 }
@@ -1570,6 +1710,7 @@ pub(crate) enum SeedOutcome {
 /// Where seeded state came from, and what copying it cost.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct SeedReport {
+    pub(crate) candidates: u64,
     pub(crate) donor_workspace: PathBuf,
     /// Files and bytes actually copied into this checkout, counting only the
     /// donor that succeeded.
@@ -1609,6 +1750,7 @@ pub(crate) fn seed(checkout: &Path, unit: &str) -> Result<SeedOutcome> {
         return Ok(SeedOutcome::NotReady);
     }
     let mut donors = Vec::new();
+    let mut candidates = 0;
     for entry in std::fs::read_dir(root)?.flatten() {
         let name = entry.file_name();
         if name == own
@@ -1618,6 +1760,7 @@ pub(crate) fn seed(checkout: &Path, unit: &str) -> Result<SeedOutcome> {
         {
             continue;
         }
+        candidates += 1;
         if let Some(record) = read_record(&entry.path().join(RECORD_FILE)) {
             let used = last_used(&entry.path().join(unit)).unwrap_or_default();
             donors.push((used, record.updated_secs, name, record.workspace_root));
@@ -1661,6 +1804,7 @@ pub(crate) fn seed(checkout: &Path, unit: &str) -> Result<SeedOutcome> {
         match copied {
             Ok(true) => {
                 return Ok(SeedOutcome::Seeded(SeedReport {
+                    candidates,
                     donor_workspace: workspace_root,
                     files: counts.files,
                     bytes: counts.bytes,
@@ -1679,7 +1823,14 @@ pub(crate) fn seed(checkout: &Path, unit: &str) -> Result<SeedOutcome> {
             }
         }
     }
-    failure.map_or(Ok(SeedOutcome::NoDonor), Err)
+    failure.map_or(
+        Ok(if candidates == 0 {
+            SeedOutcome::NoDonor
+        } else {
+            SeedOutcome::NoFinishedDonor { candidates }
+        }),
+        Err,
+    )
 }
 
 /// rustc names a session it is still writing `s-<time>-<random>-working`,
@@ -2014,6 +2165,117 @@ mod tests {
             assert_eq!((report.files, report.bytes), (files, bytes));
         }
         report.donor_workspace
+    }
+
+    #[test]
+    fn collection_history_records_epoch_discard_and_backstop() {
+        let cache = tempfile::tempdir().unwrap();
+        let unit = "blake3/0123456789";
+        checkout_with_sessions(cache.path(), "other", 1, unit, &["s-1-a-finished"]);
+        std::fs::remove_file(cache.path().join(EPOCH_FILE)).unwrap();
+        discard_pre_copy_state(cache.path()).unwrap();
+        let history = std::fs::read_to_string(cache.path().join("collected.jsonl")).unwrap();
+        assert!(history.contains("epoch-discard"));
+        checkout_with_sessions(cache.path(), "fresh", 1, unit, &["s-1-a-finished"]);
+        set_mtime(
+            &cache
+                .path()
+                .join("fresh")
+                .join(unit)
+                .join("widget-0abc/s-1-a.lock"),
+            1,
+        );
+        collect(cache.path(), Some(0), None, false, false, Some(0)).unwrap();
+        let history = std::fs::read_to_string(cache.path().join("collected.jsonl")).unwrap();
+        assert!(history.contains("backstop"));
+    }
+
+    #[test]
+    fn collection_history_rotates_and_is_outside_state_accounting() {
+        let cache = tempfile::tempdir().unwrap();
+        let before = stats(cache.path()).unwrap();
+        for reason in [
+            "age",
+            "size-budget",
+            "backstop",
+            "retired-sweep",
+            "epoch-discard",
+            "checkout-removed",
+        ] {
+            record_collection(
+                cache.path(),
+                Path::new("unit"),
+                Some(Path::new("/work/a")),
+                reason,
+                17,
+            );
+        }
+        let log = cache.path().join("collected.jsonl");
+        let lines = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(lines.lines().count(), 6);
+        for line in lines.lines() {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(row["unit"], "unit");
+            assert_eq!(row["bytes"], 17);
+        }
+        assert_eq!(stats(cache.path()).unwrap(), before);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&log)
+            .unwrap()
+            .set_len(COLLECTION_LOG_CAP)
+            .unwrap();
+        record_collection(cache.path(), Path::new("next"), None, "age", 2);
+        assert_eq!(
+            std::fs::metadata(cache.path().join("collected.1.jsonl"))
+                .unwrap()
+                .len(),
+            COLLECTION_LOG_CAP
+        );
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn seed_distinguishes_missing_and_unfinished_donors() {
+        let cache = tempfile::tempdir().unwrap();
+        let unit = "blake3/0123456789";
+        let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
+        assert_eq!(seed(&own, unit).unwrap(), SeedOutcome::NoDonor);
+        checkout_with_sessions(cache.path(), "other", 20, unit, &["s-1-a-working"]);
+        assert_eq!(
+            seed(&own, unit).unwrap(),
+            SeedOutcome::NoFinishedDonor { candidates: 1 }
+        );
+    }
+
+    #[test]
+    fn collection_history_records_age_and_size_but_never_previews() {
+        for (age, size, reason) in [
+            (Some(Duration::ZERO), None, "age"),
+            (None, Some(0), "size-budget"),
+        ] {
+            let cache = tempfile::tempdir().unwrap();
+            checkout_with_sessions(
+                cache.path(),
+                "other",
+                1,
+                "blake3/0123456789",
+                &["s-1-a-finished"],
+            );
+            set_mtime(
+                &cache
+                    .path()
+                    .join("other/blake3/0123456789/widget-0abc/s-1-a.lock"),
+                1,
+            );
+            collect(cache.path(), size, age, true, false, None).unwrap();
+            assert!(!cache.path().join("collected.jsonl").exists());
+            collect(cache.path(), size, age, false, false, None).unwrap();
+            let log = std::fs::read_to_string(cache.path().join("collected.jsonl")).unwrap();
+            assert!(log.contains(reason), "{log}");
+            let row: serde_json::Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+            assert_eq!(row["unit"], "blake3/0123456789");
+        }
     }
 
     #[test]
@@ -3455,6 +3717,9 @@ mod tests {
         assert!(outcome.removed_bytes >= bytes);
         assert!(!retired.exists());
         assert!(!nested.exists());
+        let history = std::fs::read_to_string(cache.path().join("collected.jsonl")).unwrap();
+        assert_eq!(history.lines().count(), 2);
+        assert!(history.contains("retired-sweep"));
     }
 
     #[test]
@@ -3543,6 +3808,8 @@ mod tests {
         let selected_state = touch(cache.path(), selected.path()).unwrap();
         let kept_state = touch(cache.path(), kept.path()).unwrap();
         let selected_directory = selected_state.directory.clone();
+        unit(&selected_directory, "first", 1);
+        unit(&selected_directory, "second", 1);
         drop(selected_state);
         drop(kept_state.lease);
 
@@ -3552,6 +3819,16 @@ mod tests {
         ));
         assert!(!selected_directory.exists());
         assert!(kept_state.directory.exists());
+        let history = std::fs::read_to_string(cache.path().join("collected.jsonl")).unwrap();
+        assert_eq!(history.lines().count(), 2);
+        for line in history.lines() {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(row["reason"], "checkout-removed");
+            assert_eq!(
+                row["workspace_root"],
+                selected.path().to_string_lossy().as_ref()
+            );
+        }
     }
 
     /// A checkout recorded at `updated_secs`, holding the given rustc session

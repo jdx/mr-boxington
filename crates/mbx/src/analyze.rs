@@ -120,6 +120,7 @@ struct PrivateState {
     /// Compilations and their compiler time, by source: `existing`, `seeded`,
     /// `failed`, or `cold` with its reason.
     sources: BTreeMap<(String, Option<String>), (u64, u64)>,
+    candidates: BTreeMap<(String, Option<String>), u64>,
     seeded_bytes: u64,
     seeded_copy_ns: u64,
 }
@@ -176,6 +177,13 @@ impl Analysis {
                     .or_default();
                 entry.0 += 1;
                 entry.1 = entry.1.saturating_add(*duration_ns);
+                if let Some(candidates) = state.candidates {
+                    let total = private_state
+                        .candidates
+                        .entry((state.source.clone(), state.reason.clone()))
+                        .or_default();
+                    *total = total.saturating_add(candidates);
+                }
                 private_state.seeded_bytes = private_state
                     .seeded_bytes
                     .saturating_add(state.bytes.unwrap_or(0));
@@ -461,6 +469,9 @@ impl Analysis {
                     duration(self.private_state.seeded_copy_ns),
                 ),
                 ("cold", Some("no-donor")) => "started empty: no other checkout had it".into(),
+                ("cold", Some("no-finished-donor")) => {
+                    "started empty: other checkouts had this state but none finished".into()
+                }
                 ("cold", Some("not-ready")) => {
                     "started empty: seeding waits for a one-time state discard".into()
                 }
@@ -474,7 +485,17 @@ impl Analysis {
                 ("failed", _) => "seeding failed, so it started empty".into(),
                 (other, _) => other.to_string(),
             };
-            let _ = writeln!(out, "{:>7}  {label} ({count})", duration(*duration_ns));
+            let candidates = self
+                .private_state
+                .candidates
+                .get(&(source.clone(), reason.clone()))
+                .map(|n| format!(", {n} candidate checkouts across these compilations"))
+                .unwrap_or_default();
+            let _ = writeln!(
+                out,
+                "{:>7}  {label} ({count}){candidates}",
+                duration(*duration_ns)
+            );
         }
     }
 
