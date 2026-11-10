@@ -2753,14 +2753,13 @@ fn a_changed_environment_value_keeps_private_state_without_a_prediction() {
         );
     }
 
-    // The churn records stay; the predictions go, including those finished
-    // flights leave behind.
+    // The churn records stay; the predictions go, including any that finished
+    // dependency flights left behind.
     std::fs::remove_dir_all(store.path().join("actions/task-manifests/v1")).unwrap();
     let flights = find_files(store.path(), |path| {
         path.extension()
             .is_some_and(|extension| extension == "prediction")
     });
-    assert!(!flights.is_empty());
     for flight in flights {
         std::fs::remove_file(flight).unwrap();
     }
@@ -9459,7 +9458,107 @@ fn late_workspace_wrappers_keep_objects_when_they_skip_rustc() {
     }
 }
 
-/// A waiter with different inputs must not serialize the builds behind it.
+/// A workspace edit must compile even while another build holds an old
+/// invocation lock. Cache lookup and scheduler admission still apply.
+#[cfg(unix)]
+#[test]
+fn workspace_compilations_skip_flights_but_keep_scheduler_admission() {
+    use std::time::{Duration, Instant};
+
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    let store = directory.path().join("store");
+    write_project(&project);
+    let settings = [
+        ("MBX_TARGET_VIEWS", "0"),
+        ("MBX_LEARNED_INCREMENTAL", "0"),
+        ("CARGO_INCREMENTAL", "0"),
+    ];
+    build_with(
+        &project,
+        &store,
+        &directory.path().join("seed.json"),
+        &settings,
+    );
+    let prediction = find_files(&store.join("actions/task-manifests/v1"), |path| {
+        path.extension().is_some_and(|ext| ext == "json")
+    })
+    .into_iter()
+    .flat_map(|path| {
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        manifest["predictions"].as_array().unwrap().clone()
+    })
+    .find(|prediction| {
+        prediction["adapter"] == "rustc"
+            && serde_json::from_str::<serde_json::Value>(prediction["payload"].as_str().unwrap())
+                .unwrap()["crate_name"]
+                == "fixture"
+    })
+    .expect("the workspace compilation published a cache prediction");
+    let flights = store.join("scheduler/inflight");
+    std::fs::create_dir_all(&flights).unwrap();
+    let lock_path = flights.join(format!(
+        "rustc-{}",
+        prediction["invocation"]["hash"].as_str().unwrap()
+    ));
+    let mut holder = fslock::LockFile::open(&lock_path).unwrap();
+    assert!(holder.try_lock().unwrap());
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn changed() -> u32 { 42 }\n",
+    )
+    .unwrap();
+
+    let report = directory.path().join("edited.json");
+    let log = directory.path().join("edited.stderr");
+    let mut command = isolated_cargo_command(
+        mbx_command(),
+        &project,
+        &store,
+        &report,
+        &["build", "--offline"],
+        &settings,
+    );
+    command
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap());
+    let mut child = BuildChildGuard::spawn_group(&mut command).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while child.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "workspace compilation waited for a dependency flight: {}",
+            std::fs::read_to_string(&log).unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    let stderr = std::fs::read_to_string(&log).unwrap();
+    assert!(output.status.success(), "{stderr}");
+    let stats: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    assert!(stats["misses"].as_u64().unwrap() > 0, "{stats}");
+    assert!(
+        stats["wrapper_phases_ns"]["permit_wait"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0,
+        "workspace compilation must still request scheduler admission: {stats}"
+    );
+
+    // A completed workspace result remains shareable even though its compile
+    // does not participate in invocation deduplication.
+    std::fs::remove_dir_all(project.join("target")).unwrap();
+    let (warm, stderr) = build_with(
+        &project,
+        &store,
+        &directory.path().join("warm.json"),
+        &settings,
+    );
+    assert!(warm["hits"].as_u64().unwrap() > 0, "{warm}\n{stderr}");
+}
+
+/// A dependency waiter with different inputs must not serialize the builds behind it.
 /// With no new publication it must retain occupancy, so the next build can
 /// reuse its own result. Compiler and flight barriers make both cases exact.
 #[cfg(unix)]
@@ -9474,11 +9573,29 @@ fn a_flight_waiter_releases_only_after_a_fresh_prediction_misses() {
         }
     }
 
-    for publishes in [true, false] {
+    for (publishes, vendored) in [(true, false), (false, false), (true, true)] {
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("project");
+        let dependency = if vendored {
+            project.join("vendor/fixture")
+        } else {
+            directory.path().join("dependency")
+        };
         let store = directory.path().join("store");
-        write_project(&project);
+        write_named_project(&project, "consumer");
+        write_project(&dependency);
+        let manifest = std::fs::read_to_string(project.join("Cargo.toml")).unwrap();
+        let dependency_path = if vendored {
+            "vendor/fixture"
+        } else {
+            "../dependency"
+        };
+        std::fs::write(
+            project.join("Cargo.toml"),
+            format!("{manifest}\n[workspace]\nexclude = [\"vendor/fixture\"]\n\n[dependencies]\nfixture = {{ path = \"{dependency_path}\" }}\n"),
+        )
+        .unwrap();
+        generate_lockfile(&project);
         let wrapper = directory.path().join("gated-rustc");
         let entered = directory.path().join("compiler-entered");
         let release = directory.path().join("release-compiler");
@@ -9533,7 +9650,7 @@ exec "$TEST_REAL_RUSTC" "$@"
             std::fs::write(record_path, serde_json::to_vec(&record).unwrap()).unwrap();
         }
         std::fs::write(
-            project.join("src/lib.rs"),
+            dependency.join("src/lib.rs"),
             "pub fn changed() -> u32 { 42 }\n",
         )
         .unwrap();

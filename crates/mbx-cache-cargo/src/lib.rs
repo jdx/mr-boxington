@@ -107,8 +107,14 @@ fn resolve_in(
         arguments,
         working_dir,
         target_dir_env.as_deref(),
+        false,
     );
-    resolve_with_reported(arguments, working_dir, target_dir_env, reported.ok())
+    resolve_with_reported(
+        arguments,
+        working_dir,
+        target_dir_env,
+        reported.ok().map(|metadata| metadata.roots),
+    )
 }
 
 /// Resolve one Cargo invocation only when Cargo successfully reports its roots.
@@ -207,6 +213,49 @@ fn try_resolve_reported_from_home(
     working_dir: &Path,
     target_dir_env: Option<OsString>,
 ) -> Result<CargoInvocation, ProbeFailure> {
+    resolve_reported_with_members_from_home(
+        cache,
+        cargo_home,
+        cargo,
+        arguments,
+        working_dir,
+        target_dir_env,
+        false,
+    )
+    .map(|(invocation, _)| invocation)
+}
+
+/// Resolve Cargo's roots and the manifests of its workspace members together.
+///
+/// This uses the same metadata probe and configuration as [`try_resolve_reported`].
+/// Missing membership fields yield `None`, allowing older/custom Cargo frontends
+/// to continue reporting roots without claiming workspace membership.
+pub fn try_resolve_reported_with_members(
+    cargo: &OsStr,
+    arguments: &[String],
+    working_dir: &Path,
+    target_dir_env: Option<OsString>,
+) -> Result<(CargoInvocation, Option<Vec<PathBuf>>), ProbeFailure> {
+    resolve_reported_with_members_from_home(
+        cache_root().as_deref(),
+        effective_cargo_home().as_deref(),
+        cargo,
+        arguments,
+        working_dir,
+        target_dir_env,
+        true,
+    )
+}
+
+fn resolve_reported_with_members_from_home(
+    cache: Option<&Path>,
+    cargo_home: Option<&Path>,
+    cargo: &OsStr,
+    arguments: &[String],
+    working_dir: &Path,
+    target_dir_env: Option<OsString>,
+    require_members: bool,
+) -> Result<(CargoInvocation, Option<Vec<PathBuf>>), ProbeFailure> {
     let (reported, arguments) = probed_roots(
         cache,
         cargo_home,
@@ -214,17 +263,22 @@ fn try_resolve_reported_from_home(
         arguments,
         working_dir,
         target_dir_env.as_deref(),
+        require_members,
     );
-    Ok(resolve_with_reported(
-        arguments,
-        working_dir,
-        target_dir_env,
-        Some(reported?),
-    ))
+    let metadata = reported?;
+    let invocation =
+        resolve_with_reported(arguments, working_dir, target_dir_env, Some(metadata.roots));
+    Ok((invocation, metadata.workspace_members))
 }
 
 /// The workspace root, target directory, and build directory Cargo reported.
 type ReportedRoots = (PathBuf, PathBuf, Option<PathBuf>);
+
+#[derive(Debug)]
+struct ReportedMetadata {
+    roots: ReportedRoots,
+    workspace_members: Option<Vec<PathBuf>>,
+}
 
 /// Probe the roots for `arguments`, and report which of them the answer is for.
 ///
@@ -242,7 +296,8 @@ fn probed_roots<'a>(
     arguments: &'a [String],
     working_dir: &Path,
     target_dir_env: Option<&OsStr>,
-) -> (Result<ReportedRoots, ProbeFailure>, &'a [String]) {
+    require_members: bool,
+) -> (Result<ReportedMetadata, ProbeFailure>, &'a [String]) {
     let probe = |arguments: &[String]| {
         recalled_cargo_roots(
             cache,
@@ -251,6 +306,7 @@ fn probed_roots<'a>(
             cargo_arguments(arguments),
             working_dir,
             target_dir_env,
+            require_members,
         )
     };
     let full = probe(arguments);
@@ -830,7 +886,8 @@ fn recalled_cargo_roots(
     arguments: &[String],
     working_dir: &Path,
     target_dir_env: Option<&OsStr>,
-) -> Result<(PathBuf, PathBuf, Option<PathBuf>), ProbeFailure> {
+    require_members: bool,
+) -> Result<ReportedMetadata, ProbeFailure> {
     if let Some(source) = path_install_dir(arguments, working_dir) {
         // `install --path` reads configuration from the source directory,
         // whereas metadata normally reads it from the caller's directory.
@@ -898,6 +955,7 @@ fn recalled_cargo_roots(
             &probe_args,
             &source,
             target.as_deref(),
+            require_members,
         );
     }
     let probe = cache.and_then(|cache| {
@@ -910,7 +968,9 @@ fn recalled_cargo_roots(
             target_dir_env,
         )
     });
-    if let Some(recalled) = probe.as_ref().and_then(ProbeRecord::recall) {
+    if let Some(recalled) = probe.as_ref().and_then(ProbeRecord::recall)
+        && (!require_members || recalled.workspace_members.is_some())
+    {
         return Ok(recalled);
     }
     let roots = cargo_roots(cargo, arguments, working_dir, target_dir_env)?;
@@ -922,7 +982,8 @@ fn recalled_cargo_roots(
 
 /// Version 3 stopped remembering probes whose pins were taken within a
 /// timestamp tick of a write; records from before may rest on such pins.
-const PROBE_RECORD_VERSION: u8 = 3;
+// Version 4 also records workspace membership alongside storage roots.
+const PROBE_RECORD_VERSION: u8 = 4;
 
 /// Everything a probe's answer was a function of, and the answer.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -940,6 +1001,7 @@ struct ProbeRecord {
     workspace_root: PathBuf,
     target_dir: PathBuf,
     build_dir: Option<PathBuf>,
+    workspace_members: Option<Vec<PathBuf>>,
 }
 
 /// The inputs that select a record: an identical key with intact pins is
@@ -1109,11 +1171,12 @@ impl ProbeRecord {
             workspace_root: PathBuf::new(),
             target_dir: PathBuf::new(),
             build_dir: None,
+            workspace_members: None,
         })
     }
 
     /// The answer an earlier probe left for this key, if its pins all hold.
-    fn recall(&self) -> Option<(PathBuf, PathBuf, Option<PathBuf>)> {
+    fn recall(&self) -> Option<ReportedMetadata> {
         let bytes = std::fs::read(&self.path).ok()?;
         let recorded: ProbeRecord = serde_json::from_slice(&bytes).ok()?;
         if recorded.version != PROBE_RECORD_VERSION
@@ -1122,16 +1185,37 @@ impl ProbeRecord {
         {
             return None;
         }
-        Some((
-            recorded.workspace_root,
-            recorded.target_dir,
-            recorded.build_dir,
-        ))
+        Some(ReportedMetadata {
+            roots: (
+                recorded.workspace_root,
+                recorded.target_dir,
+                recorded.build_dir,
+            ),
+            workspace_members: recorded.workspace_members,
+        })
     }
 
     /// Leave the answer behind for the next invocation. Best-effort: a
     /// record that cannot be written costs the next build a probe.
-    fn remember(mut self, roots: &(PathBuf, PathBuf, Option<PathBuf>)) {
+    fn remember(mut self, metadata: &ReportedMetadata) {
+        let roots = &metadata.roots;
+        if let Some(members) = &metadata.workspace_members {
+            for manifest in members {
+                if !self.pins.iter().any(|pin| pin.path == *manifest) {
+                    let Some(pin) = Pin::describe(manifest.clone()) else {
+                        return;
+                    };
+                    self.pins.push(pin);
+                }
+            }
+        }
+        // New directories can expand member globs without editing a manifest.
+        // Keep caching their roots, but refresh membership on the next build.
+        self.workspace_members = if workspace_has_member_globs(&roots.0) {
+            None
+        } else {
+            metadata.workspace_members.clone()
+        };
         let root_manifest = roots.0.join("Cargo.toml");
         if !self.pins.iter().any(|pin| pin.path == root_manifest) {
             let Some(pin) = Pin::describe(root_manifest) else {
@@ -1233,7 +1317,7 @@ fn cargo_roots(
     arguments: &[String],
     working_dir: &Path,
     target_dir_env: Option<&OsStr>,
-) -> Result<(PathBuf, PathBuf, Option<PathBuf>), ProbeFailure> {
+) -> Result<ReportedMetadata, ProbeFailure> {
     let mut command = Command::new(cargo);
     match target_dir_argument(arguments)
         .map(OsStr::new)
@@ -1256,10 +1340,15 @@ fn cargo_roots(
             stderr: stderr_tail(&output.stderr),
         });
     }
-    parse_metadata(&output.stdout)
+    parse_reported_metadata(&output.stdout)
 }
 
-fn parse_metadata(bytes: &[u8]) -> Result<(PathBuf, PathBuf, Option<PathBuf>), ProbeFailure> {
+#[cfg(test)]
+fn parse_metadata(bytes: &[u8]) -> Result<ReportedRoots, ProbeFailure> {
+    parse_reported_metadata(bytes).map(|metadata| metadata.roots)
+}
+
+fn parse_reported_metadata(bytes: &[u8]) -> Result<ReportedMetadata, ProbeFailure> {
     let metadata: serde_json::Value = serde_json::from_slice(bytes).map_err(ProbeFailure::Json)?;
     let required = |field: &'static str| {
         metadata
@@ -1268,14 +1357,58 @@ fn parse_metadata(bytes: &[u8]) -> Result<(PathBuf, PathBuf, Option<PathBuf>), P
             .map(PathBuf::from)
             .ok_or(ProbeFailure::Schema(field))
     };
-    Ok((
+    let roots = (
         required("workspace_root")?,
         required("target_directory")?,
         metadata
             .get("build_directory")
             .and_then(|value| value.as_str())
             .map(PathBuf::from),
-    ))
+    );
+    let workspace_members = (|| -> Option<Vec<PathBuf>> {
+        let ids: BTreeSet<_> = metadata
+            .get("workspace_members")?
+            .as_array()?
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Option<_>>()?;
+        let members: Vec<_> = metadata
+            .get("packages")?
+            .as_array()?
+            .iter()
+            .filter(|package| {
+                package
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .is_some_and(|id| ids.contains(id))
+            })
+            .map(|package| package.get("manifest_path")?.as_str().map(PathBuf::from))
+            .collect::<Option<_>>()?;
+        (members.len() == ids.len()).then_some(members)
+    })();
+    Ok(ReportedMetadata {
+        roots,
+        workspace_members,
+    })
+}
+
+fn workspace_has_member_globs(root: &Path) -> bool {
+    let Ok(contents) = std::fs::read_to_string(root.join("Cargo.toml")) else {
+        return true;
+    };
+    let Ok(manifest) = toml::from_str::<toml::Value>(&contents) else {
+        return true;
+    };
+    manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(toml::Value::as_array)
+        .is_some_and(|members| {
+            members
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .any(|member| member.contains(['*', '?', '[']))
+        })
 }
 
 fn stderr_tail(bytes: &[u8]) -> String {
@@ -2034,6 +2167,163 @@ mod tests {
         assert_eq!(probes(&log), 1, "{logged}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn workspace_members_reuse_the_probe_and_watch_member_manifests() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = cargo_fixture();
+        let root = fixture_root(directory.path());
+        let cache = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let member = root.join("member/Cargo.toml");
+        std::fs::create_dir_all(member.parent().unwrap()).unwrap();
+        std::fs::write(&member, "[package]\nname='member'\nversion='0.1.0'\n").unwrap();
+        let cargo = scratch.path().join("cargo");
+        let log = scratch.path().join("log");
+        std::fs::write(&cargo, "#!/bin/sh\ndir=$(dirname \"$0\")\nprintf '%s\\n' \"$*\" >> \"$dir/log\"\ncat \"$dir/metadata.json\"\n").unwrap();
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            scratch.path().join("metadata.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "workspace_root": root, "target_directory": root.join("target"),
+                "workspace_members": ["member"],
+                "packages": [{"id":"member", "manifest_path":member}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        settle();
+        let args = ["build", "--config=net.offline=true", "-Zbindeps"].map(String::from);
+        let resolve = || {
+            resolve_reported_with_members_from_home(
+                Some(cache.path()),
+                None,
+                cargo.as_os_str(),
+                &args,
+                &root,
+                None,
+                true,
+            )
+            .unwrap()
+        };
+        for _ in 0..2 {
+            assert_eq!(resolve().1, Some(vec![member.clone()]));
+        }
+        assert_eq!(probes(&log), 1);
+        let logged = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            logged.contains("--config net.offline=true -Zbindeps metadata"),
+            "{logged}"
+        );
+        std::fs::write(
+            &member,
+            "[package]\nname='member'\nversion='0.1.1'\n# changed\n",
+        )
+        .unwrap();
+        resolve();
+        assert_eq!(
+            probes(&log),
+            2,
+            "a member manifest edit must invalidate membership"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn glob_workspaces_refresh_members_without_discarding_cached_roots() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = cargo_fixture();
+        let root = fixture_root(directory.path());
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers=['crates/*']\n",
+        )
+        .unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let cargo = scratch.path().join("cargo");
+        let log = scratch.path().join("log");
+        std::fs::write(&cargo, "#!/bin/sh\ndir=$(dirname \"$0\")\nprintf '%s\\n' \"$*\" >> \"$dir/log\"\ncat \"$dir/metadata.json\"\n").unwrap();
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let args = ["build".to_owned()];
+        for count in 1..=2 {
+            let mut packages = Vec::new();
+            let mut ids = Vec::new();
+            for n in 0..count {
+                let manifest = root.join(format!("crates/member{n}/Cargo.toml"));
+                if !manifest.exists() {
+                    std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+                    std::fs::write(&manifest, "[package]\nname='member'\nversion='0.1.0'\n")
+                        .unwrap();
+                }
+                let id = format!("member{n}");
+                packages.push(serde_json::json!({"id":id, "manifest_path":manifest}));
+                ids.push(id);
+            }
+            std::fs::write(
+                scratch.path().join("metadata.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "workspace_root":root, "target_directory":root.join("target"),
+                    "workspace_members":ids, "packages":packages
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            settle();
+            let (_, members) = resolve_reported_with_members_from_home(
+                Some(cache.path()),
+                None,
+                cargo.as_os_str(),
+                &args,
+                &root,
+                None,
+                true,
+            )
+            .unwrap();
+            assert_eq!(members.unwrap().len(), count);
+            assert_eq!(probes(&log), count);
+            resolve_reported_from_home(
+                Some(cache.path()),
+                None,
+                cargo.as_os_str(),
+                &args,
+                &root,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                probes(&log),
+                count,
+                "root-only callers can still reuse the record"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_selects_only_workspace_members_and_rejects_incomplete_membership() {
+        let metadata = serde_json::json!({
+            "workspace_root":"/project", "target_directory":"/project/target",
+            "workspace_members":["member"],
+            "packages":[
+                {"id":"member", "manifest_path":"/project/member/Cargo.toml"},
+                {"id":"vendor", "manifest_path":"/project/vendor/dep/Cargo.toml"}
+            ]
+        });
+        let parsed = parse_reported_metadata(&serde_json::to_vec(&metadata).unwrap()).unwrap();
+        assert_eq!(
+            parsed.workspace_members,
+            Some(vec![PathBuf::from("/project/member/Cargo.toml")])
+        );
+        let mut incomplete = metadata;
+        incomplete["workspace_members"] = serde_json::json!(["missing"]);
+        assert!(
+            parse_reported_metadata(&serde_json::to_vec(&incomplete).unwrap())
+                .unwrap()
+                .workspace_members
+                .is_none()
+        );
+    }
+
     #[test]
     fn reported_intermediates_survive_resolution_and_cached_records() {
         let directory = cargo_fixture();
@@ -2059,8 +2349,14 @@ mod tests {
             .unwrap()
         };
         settle();
-        describe().remember(&roots);
-        assert_eq!(describe().recall(), Some(roots.clone()));
+        describe().remember(&ReportedMetadata {
+            roots: roots.clone(),
+            workspace_members: None,
+        });
+        assert_eq!(
+            describe().recall().map(|metadata| metadata.roots),
+            Some(roots.clone())
+        );
         let old_cargo =
             resolve_with_reported(&arguments, root, None, Some((roots.0, roots.1, None)));
         assert_eq!(old_cargo.build_dir, None);

@@ -334,6 +334,10 @@ action key from the promised input prediction, verify every input, and restore
 the published result. mbx fulfills the promise only after the action result
 and all referenced blobs are remotely durable.
 
+Rust workspace crates do not acquire action promises. They still look up and
+publish completed cache results; only dependencies outside the workspace wait
+for another runner's compilation.
+
 Claims are keyed by the pre-discovery invocation digest because a cold runner
 does not yet know the compiler-discovered inputs in the final action key. They
 are leases: a runner that dies or cannot publish leaves no durable cache record,

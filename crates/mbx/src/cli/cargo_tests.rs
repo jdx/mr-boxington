@@ -106,6 +106,7 @@ fn reads_the_roots_cargo_reports() {
     assert_eq!(
         parse_cargo_roots(metadata).unwrap(),
         Roots {
+            workspace_members: None,
             workspace_root: PathBuf::from("/elsewhere/project"),
             target_dir: PathBuf::from("/var/cache/shared-target"),
             build_dir: None,
@@ -509,6 +510,7 @@ fn rust_analyzer_target_is_a_child_of_the_managed_view() {
     let workspace = directory.path().join("project");
     std::fs::create_dir_all(&workspace).unwrap();
     let roots = Roots {
+        workspace_members: None,
         workspace_root: workspace.clone(),
         target_dir: workspace.join(RUST_ANALYZER_TARGET_DIR),
         build_dir: None,
@@ -542,6 +544,7 @@ fn an_existing_target_the_managed_root_can_hold_is_adopted_without_asking() {
     std::fs::write(target_dir.join("artifact"), b"old output").unwrap();
     let config = managed_target_config(directory.path());
     let roots = Roots {
+        workspace_members: None,
         workspace_root: workspace,
         target_dir: target_dir.clone(),
         build_dir: None,
@@ -566,6 +569,7 @@ fn a_failed_adoption_warns_only_when_this_build_moved_or_kept_the_outputs() {
     let target_dir = workspace.join("target");
     std::fs::create_dir_all(&workspace).unwrap();
     let roots = Roots {
+        workspace_members: None,
         workspace_root: workspace,
         target_dir: target_dir.clone(),
         build_dir: None,
@@ -605,6 +609,7 @@ fn a_configured_target_directory_is_neither_adopted_nor_asked_about() {
     std::fs::write(target_dir.join("artifact"), b"old output").unwrap();
     let config = managed_target_config(directory.path());
     let roots = Roots {
+        workspace_members: None,
         workspace_root: workspace,
         target_dir: target_dir.clone(),
         build_dir: None,
@@ -622,6 +627,7 @@ fn a_configured_target_directory_is_neither_adopted_nor_asked_about() {
 
 fn lane_roots(workspace: &Path) -> Roots {
     Roots {
+        workspace_members: None,
         workspace_root: workspace.to_path_buf(),
         target_dir: workspace.join("target"),
         build_dir: None,
@@ -726,6 +732,7 @@ fn a_lane_is_only_used_where_mbx_is_placing_an_undirected_target() {
 
     // A flag, the environment, or Cargo's configuration named the directory.
     let requested = Roots {
+        workspace_members: None,
         target_dir_requested: true,
         ..lane_roots(&workspace)
     };
@@ -736,6 +743,7 @@ fn a_lane_is_only_used_where_mbx_is_placing_an_undirected_target() {
 
     // Configuration moved the target somewhere other than the default.
     let elsewhere = Roots {
+        workspace_members: None,
         target_dir: directory.path().join("elsewhere"),
         ..lane_roots(&workspace)
     };
@@ -746,6 +754,7 @@ fn a_lane_is_only_used_where_mbx_is_placing_an_undirected_target() {
 
     // Cargo keeps its intermediate files, and the lock, out of the target.
     let separate = Roots {
+        workspace_members: None,
         build_dir: Some(directory.path().join("build")),
         ..lane_roots(&workspace)
     };
@@ -756,6 +765,7 @@ fn a_lane_is_only_used_where_mbx_is_placing_an_undirected_target() {
 
     // A build directory that is the target itself is not separate.
     let same = Roots {
+        workspace_members: None,
         build_dir: Some(workspace.join("target")),
         ..lane_roots(&workspace)
     };
@@ -839,6 +849,7 @@ fn a_config_naming_the_build_directory_rules_out_a_lane() {
     )
     .unwrap();
     let roots = Roots {
+        workspace_members: None,
         build_dir: Some(workspace.join("target")),
         ..lane_roots(&workspace)
     };
@@ -1031,6 +1042,7 @@ fn target_placement_without_a_lease_leaves_cargos_directory_alone() {
     let workspace = directory.path().join("project");
     std::fs::create_dir_all(&workspace).unwrap();
     let roots = Roots {
+        workspace_members: None,
         workspace_root: workspace.clone(),
         target_dir: workspace.join("target"),
         build_dir: None,

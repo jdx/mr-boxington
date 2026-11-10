@@ -34,6 +34,7 @@ mod shims;
 mod stats;
 pub(crate) use stats::{cache_misses, unexpected_bypasses};
 pub(crate) mod verification;
+pub(crate) mod workspace;
 
 #[cfg(test)]
 use client::validate_handshake_response;
