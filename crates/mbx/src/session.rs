@@ -2094,6 +2094,9 @@ fn run_transparent_rustc(
     }
     command.env_remove(PREVIOUS_RUSTC_WRAPPER_ENV);
     command.env_remove(PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV);
+    if let Some(permit) = &permit {
+        permit.mark_held(&mut command);
+    }
     #[cfg(unix)]
     let eligible = permit.is_some()
         && std::env::var_os(PREVIOUS_RUSTC_WRAPPER_ENV).is_none()
