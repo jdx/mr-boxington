@@ -1594,15 +1594,15 @@ fn collect_with(
         let files = ledger.measure(&directory, &HashSet::new());
         // Only a limit looks at it, so a collection with none does not walk
         // the tree a second time.
-        let changed = if max_bytes.is_some() || max_age.is_some() {
+        let (changed, seen) = if max_bytes.is_some() || max_age.is_some() {
             // An age that could not be read is no age: kept from the budget
             // as well, where ranking it newest would still let it go.
             let Some(secs) = newest_modification(&directory) else {
                 continue;
             };
-            secs.min(now)
+            (secs.min(now), secs)
         } else {
-            now
+            (now, now)
         };
         entries.push((
             record_path,
@@ -1611,7 +1611,10 @@ fn collect_with(
             files,
             true,
             Standing::Normal,
-            changed,
+            // What the walk saw, uncapped, for the recheck under the
+            // reservation to compare against: a write after the sweep's
+            // clock was read must still count as newer.
+            seen,
             true,
         ));
     }
@@ -1806,8 +1809,8 @@ fn collect_with(
             // Selected on the age it had then. A build that took no lease can
             // have written to it since and finished before the reservation,
             // and an age that cannot be read again is no age: next sweep.
-            let changed_since = untracked
-                && newest_modification(&directory).is_none_or(|secs| secs.min(now) > updated);
+            let changed_since =
+                untracked && newest_modification(&directory).is_none_or(|secs| secs > updated);
             let in_use = match cargo_locks(&directory) {
                 Ok(locks) => locks.is_none(),
                 Err(error) => {

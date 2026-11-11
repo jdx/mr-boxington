@@ -1605,3 +1605,41 @@ fn an_old_view_without_a_record_holding_a_cargo_lock_file_is_collected() {
     assert_eq!(outcome.removed_untracked_views, 1, "{outcome:?}");
     assert!(!view.exists());
 }
+
+/// The sweep's clock is read before the walk, so a write that lands after it
+/// has a time past `now`. It must still count as a change.
+#[test]
+fn a_write_past_the_sweeps_clock_keeps_a_view_without_a_record() {
+    if !in_own_process(
+        module_path!(),
+        "a_write_past_the_sweeps_clock_keeps_a_view_without_a_record",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let (_workspace, view) = unrecorded_view(directory.path(), &config, "lost", 0);
+
+    let outcome = collect_with(
+        &config.target.root,
+        Some(0),
+        None,
+        &Precedence::default(),
+        RunningPrograms::Spare,
+        false,
+        now_secs().saturating_sub(100),
+        || {},
+        |directory: &Path| {
+            let late = directory.join("late");
+            std::fs::write(&late, b"built").unwrap();
+            let after =
+                FileTime::from_system_time(std::time::SystemTime::now() + Duration::from_secs(50));
+            filetime::set_file_mtime(&late, after).unwrap();
+        },
+        || {},
+    )
+    .unwrap();
+
+    assert_eq!(outcome.removed_views, 0);
+    assert!(view.join("late").exists());
+}
