@@ -39,13 +39,14 @@ jobs:
 
       # Advisories only. Licenses, bans, and sources are policy over the
       # manifests, so they cannot change without a commit and CI already gates
-      # them; the advisory database changes on its own.
+      # them; the advisory database changes on its own. --all-features matches
+      # cargo-deny-action's default, so CI and this run audit the same graph.
       - name: Check advisories
         id: deny
         run: |
           set +e
           rm -rf ~/.cargo/advisory-dbs
-          cargo deny check advisories > "$RUNNER_TEMP/deny.txt" 2>&1
+          cargo deny --all-features check advisories > "$RUNNER_TEMP/deny.txt" 2>&1
           status=$?
           cat "$RUNNER_TEMP/deny.txt"
           echo "status=$status" >> "$GITHUB_OUTPUT"
