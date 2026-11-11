@@ -1576,3 +1576,32 @@ fn a_view_without_a_record_written_after_selection_is_kept() {
     assert_eq!(outcome.kept_active_views, 1);
     assert!(view.join("late").exists());
 }
+
+/// Taking and releasing Cargo's lock rewrites its file, which must not be
+/// read as a build's change when deciding whether the directory is old.
+#[test]
+fn an_old_view_without_a_record_holding_a_cargo_lock_file_is_collected() {
+    if !in_own_process(
+        module_path!(),
+        "an_old_view_without_a_record_holding_a_cargo_lock_file_is_collected",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let (_workspace, view) = unrecorded_view(directory.path(), &config, "lost", 3);
+    let lock = view.join("debug/.cargo-lock");
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    std::fs::write(&lock, b"").unwrap();
+    let then = FileTime::from_system_time(
+        std::time::SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60),
+    );
+    for path in [lock.parent().unwrap(), lock.as_path(), view.as_path()] {
+        filetime::set_file_mtime(path, then).unwrap();
+    }
+
+    let outcome = collect_aged(&config.target.root, false);
+
+    assert_eq!(outcome.removed_untracked_views, 1, "{outcome:?}");
+    assert!(!view.exists());
+}

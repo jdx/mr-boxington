@@ -1801,6 +1801,13 @@ fn collect_with(
         if !dry_run {
             let claimed_since = read_view_record(&record_path)
                 .is_some_and(|record| recently_claimed(root, &record, updated, now));
+            // Before Cargo's locks are taken: releasing them truncates the
+            // lock files, which would date this sweep's own touch as a build.
+            // Selected on the age it had then. A build that took no lease can
+            // have written to it since and finished before the reservation,
+            // and an age that cannot be read again is no age: next sweep.
+            let changed_since = untracked
+                && newest_modification(&directory).is_none_or(|secs| secs.min(now) > updated);
             let in_use = match cargo_locks(&directory) {
                 Ok(locks) => locks.is_none(),
                 Err(error) => {
@@ -1814,11 +1821,6 @@ fn collect_with(
             // A build that placed it meanwhile has written the record it
             // lacked, and is no longer an orphan to take.
             let recorded_since = untracked && record_path.exists();
-            // Selected on the age it had then. A build that took no lease can
-            // have written to it since and finished before the reservation,
-            // and an age that cannot be read again is no age: next sweep.
-            let changed_since = untracked
-                && newest_modification(&directory).is_none_or(|secs| secs.min(now) > updated);
             if claimed_since || in_use || recorded_since || changed_since {
                 outcome.kept_active_views += 1;
                 continue;
