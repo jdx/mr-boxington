@@ -1814,7 +1814,12 @@ fn collect_with(
             // A build that placed it meanwhile has written the record it
             // lacked, and is no longer an orphan to take.
             let recorded_since = untracked && record_path.exists();
-            if claimed_since || in_use || recorded_since {
+            // Selected on the age it had then. A build that took no lease can
+            // have written to it since and finished before the reservation,
+            // and an age that cannot be read again is no age: next sweep.
+            let changed_since = untracked
+                && newest_modification(&directory).is_none_or(|secs| secs.min(now) > updated);
+            if claimed_since || in_use || recorded_since || changed_since {
                 outcome.kept_active_views += 1;
                 continue;
             }

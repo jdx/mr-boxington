@@ -1542,3 +1542,37 @@ fn a_record_written_during_the_removal_keeps_the_directory() {
     assert!(view.join("artifact").exists());
     assert!(view_record_path(&config.target.root, &workspace).exists());
 }
+
+/// A build that took no lease can write to the directory after its age was
+/// read and finish before the reservation. Its outputs must not go on the
+/// strength of the old age.
+#[test]
+fn a_view_without_a_record_written_after_selection_is_kept() {
+    if !in_own_process(
+        module_path!(),
+        "a_view_without_a_record_written_after_selection_is_kept",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let (_workspace, view) = unrecorded_view(directory.path(), &config, "lost", 3);
+
+    let outcome = collect_with(
+        &config.target.root,
+        None,
+        Some(Duration::from_secs(24 * 60 * 60)),
+        &Precedence::default(),
+        RunningPrograms::Spare,
+        false,
+        now_secs(),
+        || {},
+        |directory: &Path| std::fs::write(directory.join("late"), b"built").unwrap(),
+        || {},
+    )
+    .unwrap();
+
+    assert_eq!(outcome.removed_views, 0);
+    assert_eq!(outcome.kept_active_views, 1);
+    assert!(view.join("late").exists());
+}
