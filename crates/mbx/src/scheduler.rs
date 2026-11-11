@@ -1541,6 +1541,9 @@ pub(crate) struct Pool {
     domain_memory_capacity: u64,
     /// A per-Cargo-build ceiling, separate from the machine-wide capacity.
     build: Option<(String, u64)>,
+    /// Whether admission exports `MBX_SCHED_PERMIT_HELD` to child processes.
+    /// Only the process-wide pool does, since the variable is process state.
+    export_permit_marker: bool,
     /// Original memory share, retained for fallback guesses and old readers.
     /// Zero disables memory predictions and the available-memory gate.
     bytes_per_permit: u64,
@@ -1616,6 +1619,7 @@ fn resolve_pool() -> Option<Pool> {
                     .unwrap_or_else(|| capacity.saturating_mul(pool.bytes_per_permit)),
             );
             pool.pressure = env_number(SCHED_PRESSURE_ENV) == Some(1);
+            pool.export_permit_marker = true;
             pool.build = std::env::var(SCHED_BUILD_ID_ENV)
                 .ok()
                 .filter(|id| !id.is_empty())
@@ -1864,6 +1868,7 @@ impl Pool {
                 local_memory,
             ),
             build: None,
+            export_permit_marker: false,
             bytes_per_permit,
             events: true,
             priority,
@@ -1901,7 +1906,7 @@ impl Pool {
     pub(crate) fn admit(&self, demand: &Demand) -> Option<Permit> {
         let permit = self.admit_unmarked(demand)?;
         if let Some((build, _)) = &self.build
-            && pool().is_some_and(|global| std::ptr::eq(global, self))
+            && self.export_permit_marker
         {
             // SAFETY: called on the compile path before this process spawns
             // the compiler that inherits it, and nothing else here mutates

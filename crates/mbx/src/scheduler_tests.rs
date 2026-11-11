@@ -5216,12 +5216,17 @@ fn a_compiler_beneath_a_permit_holder_does_not_ask_for_a_second_permit() {
     let dir = tempfile::tempdir().unwrap();
     let mut pool = pool_at(dir.path(), 1, 0);
     pool.build = Some(("nested-build".into(), 1));
-    let outer = pool.admit(&Demand::new("outer", false)).unwrap();
-    // The enclosing process marks its environment; a wrapper that re-enters
-    // mbx-rustc would otherwise block forever on this one-slot pool, since
-    // the only slot is held by its own parent.
+    pool.export_permit_marker = true;
     // SAFETY: only this test uses a build id of this name.
-    unsafe { std::env::set_var(SCHED_PERMIT_HELD_ENV, "nested-build") };
+    unsafe { std::env::remove_var(SCHED_PERMIT_HELD_ENV) };
+    let outer = pool.admit(&Demand::new("outer", false)).unwrap();
+    // The outer admission must export the marker its children inherit.
+    assert_eq!(
+        std::env::var(SCHED_PERMIT_HELD_ENV).as_deref(),
+        Ok("nested-build")
+    );
+    // A wrapper that re-enters mbx-rustc would otherwise block forever on
+    // this one-slot pool, since the only slot is held by its own parent.
     assert!(pool.admit(&Demand::new("inner", false)).is_none());
     unsafe { std::env::remove_var(SCHED_PERMIT_HELD_ENV) };
     drop(outer);
