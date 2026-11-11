@@ -345,6 +345,7 @@ pub(super) fn cache_stats(config: &Config, json: bool) -> Result<()> {
             stale_checkouts: stats.stale_checkouts,
             target_directories: views.views,
             target_bytes: views.bytes,
+            target_untracked_directories: views.untracked,
             incremental_directories: incremental.directories,
             incremental_units: incremental.units,
             incremental_bytes: incremental.bytes,
@@ -375,8 +376,12 @@ pub(super) fn cache_stats(config: &Config, json: bool) -> Result<()> {
         "checkouts: {} live, {} stale",
         stats.live_checkouts, stats.stale_checkouts
     );
+    let without_record = match views.untracked {
+        0 => String::new(),
+        count => format!(", {count} without a record"),
+    };
     println!(
-        "target directories: {} ({})",
+        "target directories: {} ({}){without_record}",
         views.views,
         ByteSize::b(views.bytes).display().iec()
     );
@@ -421,6 +426,8 @@ pub(super) struct CacheStatsReport {
     stale_checkouts: u64,
     target_directories: u64,
     target_bytes: u64,
+    /// The part of `target_directories` with no record beside it.
+    target_untracked_directories: u64,
     incremental_directories: u64,
     incremental_units: u64,
     incremental_bytes: u64,

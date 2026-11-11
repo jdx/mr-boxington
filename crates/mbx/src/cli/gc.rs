@@ -623,14 +623,19 @@ pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool
     let verb = if dry_run { "would remove" } else { "removed" };
     let mut lines = Vec::new();
     let mut kept_alone = None;
-    let kept = if outcome.kept_active_views > 0 {
-        format!(
+    let mut kept = String::new();
+    if outcome.removed_untracked_views > 0 {
+        kept.push_str(&format!(
+            ", {} without a record",
+            outcome.removed_untracked_views
+        ));
+    }
+    if outcome.kept_active_views > 0 {
+        kept.push_str(&format!(
             ", {} kept for running commands or builds that started meanwhile",
             outcome.kept_active_views
-        )
-    } else {
-        String::new()
-    };
+        ));
+    }
     if outcome.removed_views > 0 {
         lines.push(format!(
             "{verb} {} target directories ({} logical, {} abandoned and {} live{kept}); {} logical remain",
@@ -1557,6 +1562,9 @@ impl LowDiskCollection {
         total.removed_live_views = total
             .removed_live_views
             .saturating_add(outcome.removed_live_views);
+        total.removed_untracked_views = total
+            .removed_untracked_views
+            .saturating_add(outcome.removed_untracked_views);
         total.kept_active_views = outcome.kept_active_views;
         total.removed_units = total.removed_units.saturating_add(outcome.removed_units);
         total.removed_unit_bytes = total
