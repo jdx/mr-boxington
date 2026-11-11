@@ -661,8 +661,11 @@ fn mise_cargo_wrapper_is_configured() -> bool {
     crate::cli::mise_wrapper_is_configured_in_files(files.iter().map(PathBuf::as_path))
 }
 
+/// Config file paths from `mise config ls --json`, reordered from lowest to
+/// highest precedence. The JSON lists the highest-precedence file first, unlike
+/// the table output.
 fn mise_config_paths(listing: &[u8]) -> Vec<PathBuf> {
-    serde_json::from_slice::<serde_json::Value>(listing)
+    let mut paths: Vec<PathBuf> = serde_json::from_slice::<serde_json::Value>(listing)
         .ok()
         .and_then(|value| {
             value.as_array().map(|entries| {
@@ -672,7 +675,9 @@ fn mise_config_paths(listing: &[u8]) -> Vec<PathBuf> {
                     .collect()
             })
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    paths.reverse();
+    paths
 }
 
 fn cargo_on_path(path: &OsStr) -> Option<PathBuf> {
@@ -1041,7 +1046,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(&project, "[tools]\nnode = \"22\"\n").unwrap();
-        let listing = serde_json::json!([{ "path": &global }, { "path": &project }]).to_string();
+        let listing = serde_json::json!([{ "path": &project }, { "path": &global }]).to_string();
         let files = mise_config_paths(listing.as_bytes());
         assert_eq!(files, vec![global.clone(), project.clone()]);
         assert!(crate::cli::mise_wrapper_is_configured_in_files(
