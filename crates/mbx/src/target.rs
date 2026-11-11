@@ -1595,7 +1595,12 @@ fn collect_with(
         // Only a limit looks at it, so a collection with none does not walk
         // the tree a second time.
         let changed = if max_bytes.is_some() || max_age.is_some() {
-            newest_modification(&directory).map_or(now, |secs| secs.min(now))
+            // An age that could not be read is no age: kept from the budget
+            // as well, where ranking it newest would still let it go.
+            let Some(secs) = newest_modification(&directory) else {
+                continue;
+            };
+            secs.min(now)
         } else {
             now
         };
