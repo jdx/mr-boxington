@@ -1592,7 +1592,13 @@ fn collect_with(
     for (record_path, directory) in untracked_views(root)? {
         total_views += 1;
         let files = ledger.measure(&directory, &HashSet::new());
-        let changed = newest_modification(&directory).map_or(now, |secs| secs.min(now));
+        // Only a limit looks at it, so a collection with none does not walk
+        // the tree a second time.
+        let changed = if max_bytes.is_some() || max_age.is_some() {
+            newest_modification(&directory).map_or(now, |secs| secs.min(now))
+        } else {
+            now
+        };
         entries.push((
             record_path,
             directory,
@@ -2046,24 +2052,24 @@ fn untracked_views(root: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
 
 /// When anything under `directory` last changed, in seconds since the epoch.
 /// Symlinks are not followed.
+///
+/// `None` when any part of the tree could not be inspected: what an unreadable
+/// directory holds may be the newest change, so the age is unknown, and the
+/// caller must treat it as just changed.
 fn newest_modification(directory: &Path) -> Option<u64> {
     let mut newest: Option<std::time::SystemTime> = None;
     let mut pending = vec![directory.to_path_buf()];
     while let Some(current) = pending.pop() {
-        if let Ok(modified) = std::fs::symlink_metadata(&current).and_then(|m| m.modified()) {
-            newest = newest.max(Some(modified));
-        }
-        let Ok(listing) = std::fs::read_dir(&current) else {
-            continue;
-        };
-        for entry in listing.flatten() {
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            if kind.is_dir() {
+        let modified = std::fs::symlink_metadata(&current)
+            .and_then(|metadata| metadata.modified())
+            .ok()?;
+        newest = newest.max(Some(modified));
+        for entry in std::fs::read_dir(&current).ok()? {
+            let entry = entry.ok()?;
+            if entry.file_type().ok()?.is_dir() {
                 pending.push(entry.path());
-            } else if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
-                newest = newest.max(Some(modified));
+            } else {
+                newest = newest.max(Some(entry.metadata().ok()?.modified().ok()?));
             }
         }
     }
