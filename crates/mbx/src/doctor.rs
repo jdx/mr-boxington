@@ -645,17 +645,39 @@ fn setup_check_at(
     )
 }
 
+/// Whether any config file mise loads from the current directory configures
+/// the mbx wrapper. `mise config get` reads only the nearest file, so it misses
+/// a global wrapper whenever the project has its own `mise.toml`.
 fn mise_cargo_wrapper_is_configured() -> bool {
-    let config_value = |key: &str| {
-        Command::new("mise")
-            .args(["config", "get", key])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    let Some(output) = Command::new("mise")
+        .args(["config", "ls", "--json"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+    else {
+        return false;
     };
-    config_value("wrappers.cargo.command").as_deref() == Some("mbx")
-        && config_value("wrappers.cargo.env.MBX_CARGO_SHIM_MODE").as_deref() == Some("1")
+    let files = mise_config_paths(&output.stdout);
+    crate::cli::mise_wrapper_is_configured_in_files(files.iter().map(PathBuf::as_path))
+}
+
+/// Config file paths from `mise config ls --json`, reordered from lowest to
+/// highest precedence. The JSON lists the highest-precedence file first, unlike
+/// the table output.
+fn mise_config_paths(listing: &[u8]) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = serde_json::from_slice::<serde_json::Value>(listing)
+        .ok()
+        .and_then(|value| {
+            value.as_array().map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| entry.get("path")?.as_str().map(PathBuf::from))
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    paths.reverse();
+    paths
 }
 
 fn cargo_on_path(path: &OsStr) -> Option<PathBuf> {
@@ -1011,6 +1033,40 @@ mod tests {
         let active = setup_check_at(&executable, &shim, Some(&wrapper_first), true);
         assert_eq!(active.severity, Severity::Pass);
         assert!(active.detail.contains("mise Cargo wrapper is active"));
+    }
+
+    #[test]
+    fn mise_wrapper_is_found_in_any_loaded_config_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let global = directory.path().join("config.toml");
+        let project = directory.path().join("mise.toml");
+        std::fs::write(
+            &global,
+            "[wrappers]\ncargo = { command = \"mbx\", env = { MBX_CARGO_SHIM_MODE = \"1\" } }\n",
+        )
+        .unwrap();
+        std::fs::write(&project, "[tools]\nnode = \"22\"\n").unwrap();
+        let listing = serde_json::json!([{ "path": &project }, { "path": &global }]).to_string();
+        let files = mise_config_paths(listing.as_bytes());
+        assert_eq!(files, vec![global.clone(), project.clone()]);
+        assert!(crate::cli::mise_wrapper_is_configured_in_files(
+            files.iter().map(PathBuf::as_path)
+        ));
+        assert!(!crate::cli::mise_wrapper_is_configured_in_files([
+            project.as_path()
+        ]));
+        assert!(mise_config_paths(b"not json").is_empty());
+
+        let other = directory.path().join("other.toml");
+        std::fs::write(&other, "[wrappers]\ncargo = \"something-else\"\n").unwrap();
+        assert!(!crate::cli::mise_wrapper_is_configured_in_files([
+            global.as_path(),
+            other.as_path()
+        ]));
+        assert!(crate::cli::mise_wrapper_is_configured_in_files([
+            other.as_path(),
+            global.as_path()
+        ]));
     }
 
     #[cfg(unix)]
