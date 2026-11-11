@@ -655,6 +655,9 @@ pub(crate) fn compile(
             return Ok(ExitCode::FAILURE);
         }
     };
+    if let Some(permit) = &permit {
+        permit.mark_held(&mut command);
+    }
     let private_outputs = private_inputs || learned.engaged();
     if private_outputs {
         // Before the compiler starts, so that a dependent Cargo pipelines
@@ -746,6 +749,9 @@ pub(crate) fn compile(
             incremental_flag.as_deref(),
             IncrementalSeedMode::Disabled,
         )?;
+        if let Some(permit) = &permit {
+            permit.mark_held(&mut command);
+        }
         output = crate::phase_timing::measure("compiler", || {
             run_compiler(&mut command, forwarded, eligible, &portable.mappings)
         })
@@ -1361,6 +1367,9 @@ fn compile_execution_only_build_script(
     let forwarded = session::forward_compiler_notifications_requested();
     let mut command = compiler_command(rustc, wrapper_argument);
     command.args(arguments).current_dir(working_dir);
+    if let Some(permit) = &permit {
+        permit.mark_held(&mut command);
+    }
     crate::materialize::clear_linked_outputs(
         outputs
             .files

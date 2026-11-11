@@ -5230,9 +5230,9 @@ fn a_compiler_beneath_a_permit_holder_does_not_ask_for_a_second_permit() {
     );
     // A nested mbx-rustc inherits it. Without this it would block forever on
     // this one-slot pool, since the only slot is held by its own parent.
-    // SAFETY: only this test uses a build id of this name.
-    unsafe { std::env::set_var(SCHED_PERMIT_HELD_ENV, "nested-build") };
-    assert!(pool.admit(&Demand::new("inner", false)).is_none());
-    unsafe { std::env::remove_var(SCHED_PERMIT_HELD_ENV) };
+    assert!(
+        pool.admit_unless_held(&Demand::new("inner", false), Some("nested-build"))
+            .is_none()
+    );
     drop(outer);
 }

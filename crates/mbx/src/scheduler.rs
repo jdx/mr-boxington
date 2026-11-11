@@ -1918,16 +1918,18 @@ impl Pool {
     /// `None` means the pool could not be used and the compilation should run
     /// unscheduled; it never means the compilation should not run.
     pub(crate) fn admit(&self, demand: &Demand) -> Option<Permit> {
-        let mut permit = self.admit_unmarked(demand)?;
+        let held = std::env::var(SCHED_PERMIT_HELD_ENV).ok();
+        let mut permit = self.admit_unless_held(demand, held.as_deref())?;
         if self.export_permit_marker {
             permit.held_for_build = self.build.as_ref().map(|(build, _)| build.clone());
         }
         Some(permit)
     }
 
-    fn admit_unmarked(&self, demand: &Demand) -> Option<Permit> {
+    /// `held` is the build an enclosing compiler says it holds a permit for.
+    fn admit_unless_held(&self, demand: &Demand, held: Option<&str>) -> Option<Permit> {
         if let Some((build, _)) = &self.build
-            && std::env::var(SCHED_PERMIT_HELD_ENV).is_ok_and(|held| &held == build)
+            && held == Some(build.as_str())
         {
             debug!(
                 "an enclosing compiler already holds this build's permit; not asking for another ({})",
