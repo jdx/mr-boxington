@@ -405,6 +405,20 @@ pub(crate) struct Permit {
     /// it -- is what lets the lease go away rather than accumulate.
     lock: Option<fslock::LockFile>,
     path: PathBuf,
+    /// The build whose permit this is, when children should be told so.
+    held_for_build: Option<String>,
+}
+
+impl Permit {
+    /// Tell a compiler this permit pays for that it need not ask for another.
+    /// A wrapper such as `cargo-llvm-cov` can run a second `mbx-rustc` beneath
+    /// it; that process does the same work, so it must not wait for a slot
+    /// its own parent holds.
+    pub(crate) fn mark_held(&self, command: &mut std::process::Command) {
+        if let Some(build) = &self.held_for_build {
+            command.env(SCHED_PERMIT_HELD_ENV, build);
+        }
+    }
 }
 
 impl Drop for Permit {
@@ -1541,8 +1555,8 @@ pub(crate) struct Pool {
     domain_memory_capacity: u64,
     /// A per-Cargo-build ceiling, separate from the machine-wide capacity.
     build: Option<(String, u64)>,
-    /// Whether admission exports `MBX_SCHED_PERMIT_HELD` to child processes.
-    /// Only the process-wide pool does, since the variable is process state.
+    /// Whether a permit from this pool lets its compiler's children skip
+    /// admission (`MBX_SCHED_PERMIT_HELD`). Only the process-wide pool does.
     export_permit_marker: bool,
     /// Original memory share, retained for fallback guesses and old readers.
     /// Zero disables memory predictions and the available-memory gate.
@@ -1904,14 +1918,9 @@ impl Pool {
     /// `None` means the pool could not be used and the compilation should run
     /// unscheduled; it never means the compilation should not run.
     pub(crate) fn admit(&self, demand: &Demand) -> Option<Permit> {
-        let permit = self.admit_unmarked(demand)?;
-        if let Some((build, _)) = &self.build
-            && self.export_permit_marker
-        {
-            // SAFETY: called on the compile path before this process spawns
-            // the compiler that inherits it, and nothing else here mutates
-            // the environment.
-            unsafe { std::env::set_var(SCHED_PERMIT_HELD_ENV, build) };
+        let mut permit = self.admit_unmarked(demand)?;
+        if self.export_permit_marker {
+            permit.held_for_build = self.build.as_ref().map(|(build, _)| build.clone());
         }
         Some(permit)
     }
@@ -2519,6 +2528,7 @@ impl Pool {
                     return Ok(Permit {
                         lock: Some(lock),
                         path,
+                        held_for_build: None,
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
