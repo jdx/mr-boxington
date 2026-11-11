@@ -5210,3 +5210,19 @@ fn a_released_publish_is_not_attributed_to_the_current_holder() {
     let mut probe = fslock::LockFile::open(&waiter.path).unwrap();
     assert!(!probe.try_lock().unwrap());
 }
+
+#[test]
+fn a_compiler_beneath_a_permit_holder_does_not_ask_for_a_second_permit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pool = pool_at(dir.path(), 1, 0);
+    pool.build = Some(("nested-build".into(), 1));
+    let outer = pool.admit(&Demand::new("outer", false)).unwrap();
+    // The enclosing process marks its environment; a wrapper that re-enters
+    // mbx-rustc would otherwise block forever on this one-slot pool, since
+    // the only slot is held by its own parent.
+    // SAFETY: only this test uses a build id of this name.
+    unsafe { std::env::set_var(SCHED_PERMIT_HELD_ENV, "nested-build") };
+    assert!(pool.admit(&Demand::new("inner", false)).is_none());
+    unsafe { std::env::remove_var(SCHED_PERMIT_HELD_ENV) };
+    drop(outer);
+}

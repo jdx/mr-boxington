@@ -115,6 +115,11 @@ const SCHED_PRESSURE_ENV: &str = "MBX_SCHED_PRESSURE";
 /// The session's resolved events gate, including workspace overrides.
 const SCHED_EVENTS_ENV: &str = "MBX_SCHED_EVENTS";
 const SCHED_BUILD_ID_ENV: &str = "MBX_SCHED_BUILD_ID";
+/// Names the build whose permit an ancestor compiler process already holds.
+/// A wrapper such as `cargo-llvm-cov` can run another `mbx-rustc` beneath the
+/// one that holds a permit; asking for a second permit there deadlocks once
+/// every slot is held by a parent waiting on its own child.
+const SCHED_PERMIT_HELD_ENV: &str = "MBX_SCHED_PERMIT_HELD";
 /// Most CPU cores one Cargo build may hold at once.
 const SCHED_BUILD_SLOTS_ENV: &str = "MBX_SCHED_BUILD_SLOTS";
 
@@ -1894,6 +1899,28 @@ impl Pool {
     /// `None` means the pool could not be used and the compilation should run
     /// unscheduled; it never means the compilation should not run.
     pub(crate) fn admit(&self, demand: &Demand) -> Option<Permit> {
+        let permit = self.admit_unmarked(demand)?;
+        if let Some((build, _)) = &self.build
+            && pool().is_some_and(|global| std::ptr::eq(global, self))
+        {
+            // SAFETY: called on the compile path before this process spawns
+            // the compiler that inherits it, and nothing else here mutates
+            // the environment.
+            unsafe { std::env::set_var(SCHED_PERMIT_HELD_ENV, build) };
+        }
+        Some(permit)
+    }
+
+    fn admit_unmarked(&self, demand: &Demand) -> Option<Permit> {
+        if let Some((build, _)) = &self.build
+            && std::env::var(SCHED_PERMIT_HELD_ENV).is_ok_and(|held| &held == build)
+        {
+            debug!(
+                "an enclosing compiler already holds this build's permit; not asking for another ({})",
+                demand.name
+            );
+            return None;
+        }
         let _phase = crate::phase_timing::phase("permit_wait");
         demand.observation.set(None);
         let started = Instant::now();
