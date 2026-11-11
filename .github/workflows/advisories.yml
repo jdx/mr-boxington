@@ -1,10 +1,11 @@
 name: advisories
 
-# CI checks advisories on every push and pull request, which leaves a repository
-# with no traffic unaudited: an advisory published against a dependency of a
-# released version would wait for the next PR to surface. This run is the
-# standing watch for that case, so it reports by email rather than only turning
-# a run red where nobody is looking.
+# CI runs `cargo deny check advisories` only on pushes to main and on pull
+# requests that change Cargo.lock, Cargo.toml, or deny.toml, so a newly
+# published RustSec advisory cannot turn unrelated PRs red. This run is the
+# standing watch for that case: it checks main daily, files or updates one
+# tracking issue, and emails, rather than only turning a run red where nobody
+# is looking.
 on:
   workflow_dispatch:
   schedule:
@@ -20,52 +21,100 @@ permissions: {}
 
 jobs:
   advisories:
+    if: ${{ github.repository == 'jdx/mr-boxington' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
+      issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: main
           persist-credentials: false
+
+      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
+        with:
+          tool: cargo-deny
 
       # Advisories only. Licenses, bans, and sources are policy over the
       # manifests, so they cannot change without a commit and CI already gates
-      # them; the advisory database changes on its own.
-      - id: deny
-        continue-on-error: true
-        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
-        with:
-          command: check advisories
+      # them; the advisory database changes on its own. --all-features matches
+      # cargo-deny-action's default, so CI and this run audit the same graph.
+      - name: Check advisories
+        id: deny
+        run: |
+          set +e
+          rm -rf ~/.cargo/advisory-dbs
+          cargo deny --all-features check advisories > "$RUNNER_TEMP/deny.txt" 2>&1
+          status=$?
+          cat "$RUNNER_TEMP/deny.txt"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
 
-      - name: Email the advisory report
-        if: steps.deny.outcome == 'failure'
+      - name: Open or update tracking issue
+        if: steps.deny.outputs.status != '0'
         env:
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          NOTIFY_FROM: ${{ secrets.NOTIFY_FROM }}
-          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
-          REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          set -euo pipefail
+          title="cargo-deny: new security advisories"
+          # Cap the output so the body stays under GitHub's size limit.
+          {
+            echo "\`cargo deny check advisories\` failed on \`main\` ([run]($RUN_URL))."
+            echo
+            echo "Fix by updating the affected crate, or ignore the advisory in \`deny.toml\` with a reason."
+            echo
+            echo '```'
+            head -c 50000 "$RUNNER_TEMP/deny.txt"
+            echo '```'
+          } > "$RUNNER_TEMP/body.md"
+          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "\"$title\" in:title" --json number,title \
+            --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$RUNNER_TEMP/body.md"
+          fi
+
+      - name: Send failure email via Resend
+        if: ${{ !cancelled() && steps.deny.outputs.status != '0' }}
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
           # A missing secret must not masquerade as a clean audit, but it must
           # not hide the advisory either: warn, and let the failing step below
           # still turn the run red.
-          if [[ -z "$RESEND_API_KEY" || -z "$NOTIFY_FROM" || -z "$NOTIFY_EMAIL" ]]; then
-            echo "::warning::a notification secret is unset; skipping the advisory email."
+          if [ -z "${RESEND_API_KEY:-}" ] || [ -z "${NOTIFY_EMAIL:-}" ]; then
+            echo "::warning::RESEND_API_KEY or NOTIFY_EMAIL is unset; skipping notification"
             exit 0
           fi
           # jq builds the payload so an advisory title can never break the JSON.
-          payload="$(jq -n \
-            --arg from "$NOTIFY_FROM" \
+          payload=$(jq -n \
             --arg to "$NOTIFY_EMAIL" \
-            --arg subject "cargo-deny found an advisory in ${REPOSITORY}" \
-            --arg html "<p><code>cargo deny check advisories</code> failed on <strong>${REPOSITORY}</strong>.</p><p><a href=\"${RUN_URL}\">View the workflow run</a> for the advisory list.</p>" \
-            '{from: $from, to: [$to], subject: $subject, html: $html}')"
-          curl --fail-with-body -sS -X POST 'https://api.resend.com/emails' \
+            --arg run_url "$RUN_URL" \
+            --arg repo "$GITHUB_REPOSITORY" \
+            '{
+              from: "mise CI <mise@en.dev>",
+              to: [$to],
+              subject: "❌ \($repo): cargo-deny found new security advisories",
+              html: (
+                "<p><strong>cargo deny check advisories</strong> failed on main in \($repo | @html).</p>"
+                + "<p><a href=\"\($run_url | @html)\">View workflow run</a> | <a href=\"https://github.com/\($repo)/issues\">Tracking issue</a></p>"
+              )
+            }')
+          curl --fail-with-body -sS \
+            --retry 3 --retry-all-errors --retry-delay 2 --retry-max-time 60 \
+            -X POST 'https://api.resend.com/emails' \
             -H "Authorization: Bearer ${RESEND_API_KEY}" \
             -H 'Content-Type: application/json' \
             -d "$payload"
 
-      - name: Report the advisory
-        if: steps.deny.outcome == 'failure'
+      - name: Fail run
+        if: ${{ !cancelled() && steps.deny.outputs.status != '0' }}
         run: exit 1
