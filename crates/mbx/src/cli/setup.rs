@@ -907,6 +907,19 @@ fn mise_wrapper_is_configured(scope: &MiseScope) -> Result<bool> {
     Ok(mise_wrapper_is_configured_in(&document))
 }
 
+/// Whether any of the given mise config files configures the mbx Cargo wrapper.
+/// Unreadable or unparsable files are skipped.
+pub(crate) fn mise_wrapper_is_configured_in_files<'a>(
+    files: impl IntoIterator<Item = &'a Path>,
+) -> bool {
+    files.into_iter().any(|file| {
+        std::fs::read_to_string(file)
+            .ok()
+            .and_then(|contents| contents.parse::<toml_edit::DocumentMut>().ok())
+            .is_some_and(|document| mise_wrapper_is_configured_in(&document))
+    })
+}
+
 pub(super) fn mise_wrapper_is_configured_in(document: &toml_edit::DocumentMut) -> bool {
     let Some(cargo) = document
         .get("wrappers")
