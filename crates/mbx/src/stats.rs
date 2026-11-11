@@ -98,6 +98,9 @@ pub(crate) struct Cache {
     bytes: u64,
     managed_targets: u64,
     managed_target_bytes: u64,
+    /// The part of `managed_targets` with no record, which `mbx gc` removes
+    /// only under an age or size limit.
+    untracked_targets: u64,
 }
 
 pub(crate) fn collect(store: &Path, target_root: &Path) -> Result<Report> {
@@ -124,6 +127,7 @@ pub(crate) fn collect(store: &Path, target_root: &Path) -> Result<Report> {
             bytes: stats.total_bytes(),
             managed_targets: targets.views,
             managed_target_bytes: targets.bytes,
+            untracked_targets: targets.untracked,
         },
         sharing: SharingEstimate::from_live_projects(&live_cache_bytes, stats.total_bytes()),
     })
@@ -286,8 +290,12 @@ impl Report {
             size(self.cache.bytes),
             self.cache.objects
         ));
+        let untracked = match self.cache.untracked_targets {
+            0 => String::new(),
+            count => format!(", {count} without a record"),
+        };
         lines.push(format!(
-            "managed targets          {} ({})",
+            "managed targets          {} ({}){untracked}",
             self.cache.managed_targets,
             size(self.cache.managed_target_bytes)
         ));
