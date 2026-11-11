@@ -1041,13 +1041,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(&project, "[tools]\nnode = \"22\"\n").unwrap();
-        let listing = format!(
-            r#"[{{"path":"{}"}},{{"path":"{}"}}]"#,
-            global.display(),
-            project.display()
-        );
+        let listing = serde_json::json!([{ "path": &global }, { "path": &project }]).to_string();
         let files = mise_config_paths(listing.as_bytes());
-        assert_eq!(files, vec![global, project.clone()]);
+        assert_eq!(files, vec![global.clone(), project.clone()]);
         assert!(crate::cli::mise_wrapper_is_configured_in_files(
             files.iter().map(PathBuf::as_path)
         ));
@@ -1055,6 +1051,17 @@ mod tests {
             project.as_path()
         ]));
         assert!(mise_config_paths(b"not json").is_empty());
+
+        let other = directory.path().join("other.toml");
+        std::fs::write(&other, "[wrappers]\ncargo = \"something-else\"\n").unwrap();
+        assert!(!crate::cli::mise_wrapper_is_configured_in_files([
+            global.as_path(),
+            other.as_path()
+        ]));
+        assert!(crate::cli::mise_wrapper_is_configured_in_files([
+            other.as_path(),
+            global.as_path()
+        ]));
     }
 
     #[cfg(unix)]
