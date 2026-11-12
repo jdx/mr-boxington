@@ -774,14 +774,46 @@ pub fn includes_depend_on_search_order<'a>(files: impl IntoIterator<Item = &'a P
             return true;
         };
         let parent = file.parent();
+        // The compiler joins backslash-continued lines before it reads a
+        // directive, so a directive split across lines is scanned whole.
+        let contents = join_continued_lines(&contents);
         contents
             .split(|byte| *byte == b'\n')
             .any(|line| line_depends_on_search_order(line, parent))
     })
 }
 
+fn join_continued_lines(contents: &[u8]) -> Vec<u8> {
+    let mut joined = Vec::with_capacity(contents.len());
+    let mut index = 0;
+    while index < contents.len() {
+        if contents[index] == b'\\' {
+            let rest = &contents[index + 1..];
+            let skip = if rest.starts_with(b"\r\n") {
+                2
+            } else {
+                usize::from(rest.starts_with(b"\n"))
+            };
+            if skip > 0 {
+                index += 1 + skip;
+                continue;
+            }
+        }
+        joined.push(contents[index]);
+        index += 1;
+    }
+    joined
+}
+
 fn line_depends_on_search_order(line: &[u8], parent: Option<&Path>) -> bool {
     let line = line.trim_ascii_start();
+    // `__has_include_next` asks about the directories after the current one.
+    if line
+        .windows(b"__has_include_next".len())
+        .any(|window| window == b"__has_include_next")
+    {
+        return true;
+    }
     let Some(directive) = line.strip_prefix(b"#") else {
         return false;
     };
@@ -792,8 +824,10 @@ fn line_depends_on_search_order(line: &[u8], parent: Option<&Path>) -> bool {
     if rest.starts_with(b"_next") {
         return true;
     }
+    // A computed include (`#include MACRO`) can expand to any operand,
+    // including a parent-directory one, so it keeps the order.
     let Some(open) = rest.iter().position(|byte| matches!(byte, b'"' | b'<')) else {
-        return false;
+        return true;
     };
     let close = if rest[open] == b'"' { b'"' } else { b'>' };
     let operand = &rest[open + 1..];

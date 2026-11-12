@@ -1344,19 +1344,34 @@ impl<'a> ActionBuilder<'a> {
             .into_iter()
             .map(|(path, digest)| CcInputDescriptor { path, digest })
             .collect();
+        let binding_arguments = if canonical_includes {
+            // Order by the normalized text, as the invocation does, so a
+            // mapped root cannot make two spellings sort differently.
+            let mut pairs = self
+                .invocation
+                .arguments
+                .iter()
+                .map(|argument| {
+                    self.normalize_argument(argument)
+                        .map(|text| (argument.clone(), text))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            sort_runs(
+                &mut pairs,
+                |(argument, _)| matches!(argument, Argument::Path { flag, .. } if flag == "-I"),
+                |(_, text)| text.clone(),
+            );
+            pairs
+                .into_iter()
+                .map(|(argument, _)| argument)
+                .collect::<Vec<_>>()
+        } else {
+            self.invocation.arguments.clone()
+        };
         let descriptor = CcActionDescriptor {
             path_binding: path_specific.then(|| CcPathBinding {
                 working_dir: self.context.working_dir.clone(),
-                arguments: if canonical_includes {
-                    sorted_include_runs(&self.invocation.arguments, |argument| match argument {
-                        Argument::Path { flag, path } if flag == "-I" => {
-                            Some(path.to_string_lossy().into_owned())
-                        }
-                        _ => None,
-                    })
-                } else {
-                    self.invocation.arguments.clone()
-                },
+                arguments: binding_arguments,
                 roots: self
                     .context
                     .path_mappings
@@ -1612,19 +1627,6 @@ fn sort_runs<T>(items: &mut [T], in_run: impl Fn(&T) -> bool, key: impl Fn(&T) -
         items[start..end].sort_by_cached_key(&key);
         start = end;
     }
-}
-
-fn sorted_include_runs(
-    arguments: &[Argument],
-    key: impl Fn(&Argument) -> Option<String>,
-) -> Vec<Argument> {
-    let mut sorted = arguments.to_vec();
-    sort_runs(
-        &mut sorted,
-        |argument| key(argument).is_some(),
-        |argument| key(argument).unwrap_or_default(),
-    );
-    sorted
 }
 
 fn absolute_path(path: &Path, working_dir: &Path) -> PathBuf {

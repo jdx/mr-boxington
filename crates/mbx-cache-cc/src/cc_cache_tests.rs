@@ -1566,6 +1566,9 @@ fn headers_that_read_the_search_order_keep_it() {
         "#include_next <two.h>\n",
         "#  include <../config.h>\n",
         "#include \"../missing.h\"\n",
+        "#include\\\n<../config.h>\n",
+        "#if __has_include_next(<two.h>)\n#endif\n",
+        "#define H \"../config.h\"\n#include H\n",
     ] {
         let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
         std::fs::write(root.path().join("src/a.c"), line).unwrap();
