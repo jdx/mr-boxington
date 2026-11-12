@@ -785,27 +785,58 @@ pub fn includes_depend_on_search_order<'a>(files: impl IntoIterator<Item = &'a P
         let parent = file.parent();
         // The compiler joins backslash-continued lines before it reads a
         // directive, so a directive split across lines is scanned whole.
-        let contents = strip_block_comments(&join_continued_lines(&contents));
-        contents
-            .split(|byte| *byte == b'\n')
-            .any(|line| line_depends_on_search_order(line, parent))
+        let joined = join_continued_lines(&contents);
+        // A newline inside a block comment is one space to the preprocessor,
+        // but reading it as a line break too costs nothing: either reading
+        // finding an order-sensitive directive keeps the order.
+        [true, false].into_iter().any(|keep_newlines| {
+            strip_comments(&joined, keep_newlines)
+                .split(|byte| *byte == b'\n')
+                .any(|line| line_depends_on_search_order(line, parent))
+        })
     })
 }
 
-/// Replace each block comment with a space, as translation phase 3 does, so
-/// a directive broken up by one (`#/**/include`) is still seen. A comment
-/// that never closes runs to the end of the file.
-fn strip_block_comments(contents: &[u8]) -> Vec<u8> {
+/// Replace each comment with a space, as translation phase 3 does, so a
+/// directive broken up by one (`#/**/include`) is still seen. String and
+/// character literals are skipped over, so a `/*` or `//` inside one starts
+/// nothing; a literal ends at its line, so an apostrophe in prose cannot run
+/// on. A block comment that never closes runs to the end of the file.
+fn strip_comments(contents: &[u8], keep_newlines: bool) -> Vec<u8> {
     let mut stripped = Vec::with_capacity(contents.len());
     let mut index = 0;
     while index < contents.len() {
-        if contents[index..].starts_with(b"/*") {
+        let rest = &contents[index..];
+        if rest.starts_with(b"/*") {
             index += 2;
             while index < contents.len() && !contents[index..].starts_with(b"*/") {
+                if keep_newlines && contents[index] == b'\n' {
+                    stripped.push(b'\n');
+                }
                 index += 1;
             }
             index = (index + 2).min(contents.len());
             stripped.push(b' ');
+        } else if rest.starts_with(b"//") {
+            while index < contents.len() && contents[index] != b'\n' {
+                index += 1;
+            }
+            stripped.push(b' ');
+        } else if matches!(contents[index], b'"' | b'\'') {
+            let quote = contents[index];
+            stripped.push(quote);
+            index += 1;
+            while index < contents.len() && contents[index] != b'\n' {
+                let byte = contents[index];
+                stripped.push(byte);
+                index += 1;
+                if byte == b'\\' && index < contents.len() && contents[index] != b'\n' {
+                    stripped.push(contents[index]);
+                    index += 1;
+                } else if byte == quote {
+                    break;
+                }
+            }
         } else {
             stripped.push(contents[index]);
             index += 1;

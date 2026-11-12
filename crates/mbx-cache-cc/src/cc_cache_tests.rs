@@ -1584,6 +1584,10 @@ fn headers_that_read_the_search_order_keep_it() {
         "#/**/include <../config.h>\n",
         "/* note */ #include /* x */ <../config.h>\n",
         "#include MACRO // \"x.h\"\n",
+        "const char *m = \"/*\";\n#include_next <two.h>\n",
+        "// see a/*.h\n#include_next <two.h>\n",
+        "int x; /*\n*/ int y;\n#include_next <two.h>\n",
+        "#include /*\n*/ <../config.h>\n",
         "#include /* \"x.h\" */ MACRO\n",
     ] {
         let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
