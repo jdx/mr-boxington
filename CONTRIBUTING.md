@@ -7,6 +7,11 @@ Start with [Discussions](https://github.com/jdx/mr-boxington/discussions) for
 questions and proposed changes. For a suspected vulnerability, use the private
 reporting process in [SECURITY.md](SECURITY.md).
 
+Bug reports, in Issues or Discussions, are only for problems you ran into while
+using mbx. Say what you were trying to do, what you ran, the relevant config,
+and what happened. Reports found by reading the source or by having an agent
+search the code will be closed.
+
 ## Set up the repository
 
 Install [mise](https://mise.jdx.dev) and a Rust toolchain through
