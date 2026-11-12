@@ -717,6 +717,9 @@ pub struct CcActionContext {
     pub environment: BTreeMap<String, Option<String>>,
     /// Complete set of direct and discovered file inputs.
     pub inputs: Vec<CcActionInput>,
+    /// Whether a header reads the include search order, when a prediction
+    /// already recorded it; `None` makes the key scan the headers itself.
+    pub search_order_dependent: Option<bool>,
 }
 
 /// Canonical action descriptor and its content digest.
@@ -811,6 +814,11 @@ pub struct CcInputPrediction {
     /// Source file name associated with the timing hint.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source_name: String,
+    /// Whether any input reads the include search order (`#include_next`,
+    /// `..` operands). Recorded when two or more `-I` directories exist, so
+    /// later key builds need not reread the headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_order_dependent: Option<bool>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -1087,6 +1095,7 @@ impl CcInvocation {
             environment: context.environment.keys().cloned().collect(),
             compiler_duration_ns,
             source_name: self.source_name(),
+            search_order_dependent: builder.search_order_dependent(),
         })
     }
 }
@@ -1119,7 +1128,9 @@ impl CcInputPrediction {
                 }
             }
         }
-        CcDiscoveredInputs::collect(working_dir, files, directories, digests)
+        let mut discovered = CcDiscoveredInputs::collect(working_dir, files, directories, digests)?;
+        discovered.search_order_dependent = self.search_order_dependent;
+        Ok(discovered)
     }
 }
 
@@ -1405,17 +1416,7 @@ impl<'a> ActionBuilder<'a> {
     /// describe a tree where it stops holding. Headers that read the order
     /// themselves (`#include_next`, `..` operands) keep it in the key.
     fn include_order_is_irrelevant(&self) -> bool {
-        let directories = self
-            .invocation
-            .arguments
-            .iter()
-            .filter_map(|argument| match argument {
-                Argument::Path { flag, path } if flag == "-I" => {
-                    Some(absolute_path(path, &self.context.working_dir))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let directories = self.include_directories();
         if directories.len() < 2 {
             return false;
         }
@@ -1444,17 +1445,43 @@ impl<'a> ActionBuilder<'a> {
         );
         normalized != sorted
             && depfile::include_search_order_is_irrelevant(&directories)
-            && !depfile::includes_depend_on_search_order(
-                self.context
-                    .inputs
-                    .iter()
-                    .map(|input| input.path.as_path())
-                    .filter(|path| {
-                        !path
-                            .to_str()
-                            .is_some_and(|path| path.starts_with(INCLUDE_MANIFEST_PREFIX))
-                    }),
-            )
+            && !self
+                .context
+                .search_order_dependent
+                .unwrap_or_else(|| self.scan_search_order_dependence())
+    }
+
+    fn include_directories(&self) -> Vec<PathBuf> {
+        self.invocation
+            .arguments
+            .iter()
+            .filter_map(|argument| match argument {
+                Argument::Path { flag, path } if flag == "-I" => {
+                    Some(absolute_path(path, &self.context.working_dir))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether any input reads the search order itself; `None` with fewer than
+    /// two `-I` directories, where there is no order to read.
+    fn search_order_dependent(&self) -> Option<bool> {
+        (self.include_directories().len() >= 2).then(|| self.scan_search_order_dependence())
+    }
+
+    fn scan_search_order_dependence(&self) -> bool {
+        depfile::includes_depend_on_search_order(
+            self.context
+                .inputs
+                .iter()
+                .map(|input| input.path.as_path())
+                .filter(|path| {
+                    !path
+                        .to_str()
+                        .is_some_and(|path| path.starts_with(INCLUDE_MANIFEST_PREFIX))
+                }),
+        )
     }
 
     fn invocation_descriptor(

@@ -264,6 +264,13 @@ pub struct CcDiscoveredInputs {
     /// established, index-aligned with `inputs`; `None` for manifests and
     /// where the filesystem gave nothing to compare against later.
     identities: Vec<Option<FileIdentity>>,
+    /// Whether a header reads the search order, as recorded when the inputs
+    /// were last published. `None` when nothing recorded it.
+    ///
+    /// A stale answer can only cost a miss: the content digests of every file
+    /// and directory listing are part of the key, so a changed header or tree
+    /// no longer matches the key this answer would have produced.
+    pub search_order_dependent: Option<bool>,
 }
 
 impl CcDiscoveredInputs {
@@ -411,6 +418,7 @@ impl CcDiscoveredInputs {
             working_dir,
             inputs,
             identities,
+            search_order_dependent: None,
         })
     }
 
@@ -536,6 +544,7 @@ impl CcDiscoveredInputs {
             return Err(CcBypassReason::DiscoveryWorkingDirectory);
         }
         context.inputs.extend(self.inputs);
+        context.search_order_dependent = self.search_order_dependent;
         Ok(())
     }
 }

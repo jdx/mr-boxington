@@ -87,6 +87,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         path_mappings: mappings,
         environment,
         inputs: Vec::new(),
+        search_order_dependent: None,
     };
 
     drop(setup);

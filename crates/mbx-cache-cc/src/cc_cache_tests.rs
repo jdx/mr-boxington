@@ -537,6 +537,7 @@ fn context(workspace: &Path, target: &Path) -> CcActionContext {
         ],
         environment: BTreeMap::new(),
         inputs: Vec::new(),
+        search_order_dependent: None,
     }
 }
 
@@ -954,6 +955,7 @@ fn a_prediction_from_a_future_schema_bypasses() {
         environment: Vec::new(),
         compiler_duration_ns: 0,
         source_name: String::new(),
+        search_order_dependent: None,
     };
     assert_eq!(
         prediction
@@ -1456,6 +1458,14 @@ fn include_checkout(headers: &[(&str, &str)]) -> tempfile::TempDir {
 }
 
 fn include_keys(root: &Path, order: &[&str]) -> (CacheDigest, CacheDigest) {
+    include_keys_with(root, order, None)
+}
+
+fn include_keys_with(
+    root: &Path,
+    order: &[&str],
+    recorded: Option<bool>,
+) -> (CacheDigest, CacheDigest) {
     let mut arguments = vec!["-O0", "-c", "-o", "out.o"];
     let flags = order
         .iter()
@@ -1466,6 +1476,7 @@ fn include_keys(root: &Path, order: &[&str]) -> (CacheDigest, CacheDigest) {
     let invocation = CcInvocation::parse(&argv(&arguments)).expect("admitted");
     let target = root.join("target");
     let mut context = context(root, &target);
+    context.search_order_dependent = recorded;
     context.inputs.push(CcActionInput {
         path: root.join("src/a.c"),
         digest: digest_of("source"),
@@ -1579,6 +1590,45 @@ fn headers_that_read_the_search_order_keep_it() {
     let root = include_checkout(&[("a", "one.h"), ("b", "two.h"), ("", "near.h")]);
     std::fs::write(root.path().join("src/a.c"), "#include \"../near.h\"\n").unwrap();
     assert!(order_is_shared(root.path()));
+}
+
+#[test]
+fn a_recorded_search_order_answer_replaces_the_header_scan() {
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
+    let shared = |recorded| {
+        include_keys_with(root.path(), &["a", "b"], recorded).0
+            == include_keys_with(root.path(), &["b", "a"], recorded).0
+    };
+    assert!(shared(None));
+    assert!(shared(Some(false)));
+    assert!(!shared(Some(true)));
+    // The scan is skipped when an answer is recorded.
+    std::fs::write(root.path().join("src/a.c"), "#include_next <two.h>\n").unwrap();
+    assert!(!shared(None));
+    assert!(shared(Some(false)));
+}
+
+#[test]
+fn a_prediction_records_whether_headers_read_the_search_order() {
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
+    let record = |text: &str| {
+        std::fs::write(root.path().join("src/a.c"), text).unwrap();
+        let invocation = CcInvocation::parse(&argv(&[
+            "-c", "-o", "out.o", "-I", "a", "-I", "b", "src/a.c",
+        ]))
+        .expect("admitted");
+        let mut context = context(root.path(), &root.path().join("target"));
+        context.inputs.push(CcActionInput {
+            path: root.path().join("src/a.c"),
+            digest: digest_of("source"),
+        });
+        invocation
+            .prediction(&context, 0)
+            .unwrap()
+            .search_order_dependent
+    };
+    assert_eq!(record("int x;\n"), Some(false));
+    assert_eq!(record("#include_next <two.h>\n"), Some(true));
 }
 
 #[test]
