@@ -944,11 +944,19 @@ fn classify_include_line(
             IncludeLine::Dependent
         };
     }
-    let Some(directive) = line.strip_prefix(b"#") else {
+    // `%:` and `??=` are other spellings of `#`.
+    let Some(directive) = [&b"#"[..], b"%:", b"??="]
+        .iter()
+        .find_map(|hash| line.strip_prefix(*hash))
+    else {
         return IncludeLine::Unrelated;
     };
     let directive = directive.trim_ascii_start();
-    let Some(rest) = directive.strip_prefix(b"include") else {
+    // `#import` is `#include` that reads each file once.
+    let Some(rest) = directive
+        .strip_prefix(b"include")
+        .or_else(|| directive.strip_prefix(b"import"))
+    else {
         return IncludeLine::Unrelated;
     };
     if rest.starts_with(b"_next") {
@@ -1001,14 +1009,18 @@ fn classify_include_line(
     if beside_includer {
         return IncludeLine::Unrelated;
     }
-    IncludeLine::Operand(
-        operand
-            .to_lowercase()
-            .split(['/', '\\'])
-            .filter(|component| !component.is_empty() && *component != ".")
-            .collect::<Vec<_>>()
-            .join("/"),
-    )
+    IncludeLine::Operand(normalize_include_operand(operand))
+}
+
+/// An include operand spelled as [`shadowable_include_names`] spells a name:
+/// lowercase, `/` separated, without `.` or empty components.
+pub fn normalize_include_operand(operand: &str) -> String {
+    operand
+        .to_lowercase()
+        .split(['/', '\\'])
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// The sorted names beneath a directory, relative to it.

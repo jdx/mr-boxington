@@ -1469,17 +1469,17 @@ impl<'a> ActionBuilder<'a> {
         let Some(shadowable) = depfile::shadowable_include_names(&directories) else {
             return false;
         };
-        // A recorded answer needs its operands too; one without them is read
-        // again rather than trusted.
-        let recorded = self
-            .context
-            .search_order_dependent
-            .zip(self.context.search_order_operands.as_ref());
-        match recorded {
-            Some((dependent, operands)) => {
-                !dependent && !operands.iter().any(|operand| shadowable.contains(operand))
+        // A recorded `true` already keeps the order. A recorded `false` needs
+        // its operands too; one without them is read again, not trusted.
+        match (
+            self.context.search_order_dependent,
+            self.context.search_order_operands.as_ref(),
+        ) {
+            (Some(true), _) => false,
+            (Some(false), Some(operands)) => {
+                !operands.iter().any(|operand| shadowable.contains(operand))
             }
-            None => {
+            _ => {
                 let scan = self.scan_search_order();
                 !scan.dependent
                     && !scan
@@ -1510,7 +1510,7 @@ impl<'a> ActionBuilder<'a> {
     }
 
     fn scan_search_order(&self) -> depfile::SearchOrderScan {
-        depfile::scan_search_order(
+        let mut scan = depfile::scan_search_order(
             self.context
                 .inputs
                 .iter()
@@ -1520,7 +1520,25 @@ impl<'a> ActionBuilder<'a> {
                         .to_str()
                         .is_some_and(|path| path.starts_with(INCLUDE_MANIFEST_PREFIX))
                 }),
-        )
+        );
+        // `-include` and `-imacros` name a header the driver looks up as if
+        // the source began with `#include "name"`, which no scanned file says.
+        for argument in &self.invocation.arguments {
+            let Argument::Path { flag, path } = argument else {
+                continue;
+            };
+            if !matches!(flag.as_str(), "-include" | "-imacros") {
+                continue;
+            }
+            match path.to_str() {
+                Some(name) => {
+                    scan.operands
+                        .insert(depfile::normalize_include_operand(name));
+                }
+                None => scan.dependent = true,
+            }
+        }
+        scan
     }
 
     fn invocation_descriptor(

@@ -1725,6 +1725,62 @@ fn a_name_in_two_directories_blocks_sharing_only_when_a_header_asks_for_it() {
         let root = shadowed_checkout(operand);
         assert!(!order_is_shared(root.path()), "{operand}");
     }
+    // Other spellings of the directive look the name up the same way.
+    for directive in [
+        "#import <shared.h>",
+        "%:include <shared.h>",
+        "# import \"shared.h\"",
+        "??=include <shared.h>",
+    ] {
+        let root = shadowed_checkout("<two.h>");
+        std::fs::write(root.path().join("src/a.c"), format!("{directive}\n")).unwrap();
+        assert!(!order_is_shared(root.path()), "{directive}");
+    }
+}
+
+#[test]
+fn a_forced_include_of_a_shadowed_name_keeps_the_order() {
+    let root = shadowed_checkout("<two.h>");
+    let key = |forced: &str, order: [&str; 2]| {
+        let invocation = CcInvocation::parse(&argv(&[
+            "-c", "-o", "out.o", "-I", order[0], "-I", order[1], forced, "shared.h", "src/a.c",
+        ]))
+        .expect("admitted");
+        let mut context = context(root.path(), &root.path().join("target"));
+        context.inputs.push(CcActionInput {
+            path: root.path().join("src/a.c"),
+            digest: digest_of("source"),
+        });
+        invocation.action(context).unwrap().digest
+    };
+    for forced in ["-include", "-imacros"] {
+        assert_ne!(key(forced, ["a", "b"]), key(forced, ["b", "a"]), "{forced}");
+    }
+}
+
+#[test]
+fn a_recorded_dependence_is_trusted_without_reading_headers() {
+    // A header that is gone cannot be scanned, and a scan would answer
+    // "dependent"; the recorded `false` with no operands shares the order, so
+    // the two answers differ only if the recorded one was used.
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
+    let key = |recorded: bool| {
+        let invocation = CcInvocation::parse(&argv(&[
+            "-c", "-o", "out.o", "-I", "a", "-I", "b", "src/a.c",
+        ]))
+        .expect("admitted");
+        let mut context = context(root.path(), &root.path().join("target"));
+        for (name, content) in [("src/a.c", "source"), ("gone.h", "gone")] {
+            context.inputs.push(CcActionInput {
+                path: root.path().join(name),
+                digest: digest_of(content),
+            });
+        }
+        context.search_order_dependent = Some(recorded);
+        context.search_order_operands = (!recorded).then(Vec::new);
+        invocation.action(context).unwrap().digest
+    };
+    assert_ne!(key(true), key(false));
 }
 
 #[test]
