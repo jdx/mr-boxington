@@ -4598,8 +4598,13 @@ fn main() {
         return;
     }
     println!("cargo::rerun-if-changed={own}/HEAD");
-    println!("cargo::rerun-if-changed={common}/packed-refs");
-    println!("cargo::rerun-if-changed={common}/{}", git(&["symbolic-ref", "-q", "HEAD"]));
+    // These cases exercise cacheable Git watches. Missing watches deliberately
+    // force execution and have separate regression coverage.
+    for path in [format!("{common}/packed-refs"), format!("{common}/{}", git(&["symbolic-ref", "-q", "HEAD"]))] {
+        if std::path::Path::new(&path).exists() {
+            println!("cargo::rerun-if-changed={path}");
+        }
+    }
 }
 "#,
     )
@@ -4662,8 +4667,36 @@ fn main() {
             std::env::consts::EXE_SUFFIX
         ))
     };
+    let remove_recorded_runs = |target: &Path| {
+        let build = target.join("debug/build");
+        if !build.is_dir() {
+            return false;
+        }
+        let records = find_files(&build, |path| {
+            path.ends_with("output") || path.ends_with("run/stdout")
+        });
+        let found = !records.is_empty();
+        for record in records {
+            let unit = if record.ends_with("run/stdout") {
+                record.parent().unwrap().parent().unwrap()
+            } else {
+                record.parent().unwrap()
+            };
+            if unit.exists() {
+                std::fs::remove_dir_all(unit).unwrap();
+            }
+        }
+        found
+    };
     let checkouts = [("main", &main), ("first", &first), ("second", &second)];
     for (name, checkout) in &checkouts[usize::from(bare)..] {
+        if shared_target {
+            // Ask Cargo to invoke the script for each checkout. A shared
+            // target can otherwise retain the previous checkout's recorded
+            // watches and consider that run fresh; this test checks mbx's
+            // replay isolation once execution is requested.
+            remove_recorded_runs(&shared);
+        }
         let (_, stderr) = build_with(
             checkout,
             store.path(),
@@ -4691,20 +4724,10 @@ fn main() {
     } else {
         second.join("target")
     };
-    let runs_recorded = find_files(&target.join("debug/build"), |path| {
-        path.ends_with("output") || path.ends_with("run/stdout")
-    });
-    assert!(!runs_recorded.is_empty(), "no recorded build-script run");
-    for record in runs_recorded {
-        let unit = if record.ends_with("run/stdout") {
-            record.parent().unwrap().parent().unwrap()
-        } else {
-            record.parent().unwrap()
-        };
-        if unit.exists() {
-            std::fs::remove_dir_all(unit).unwrap();
-        }
-    }
+    assert!(
+        remove_recorded_runs(&target),
+        "no recorded build-script run"
+    );
     let runs = std::fs::read_to_string(second.join("runs")).unwrap();
     let (warm, stderr) = build_with(
         &second,
@@ -4725,6 +4748,9 @@ fn main() {
 
     // A new commit in one worktree reaches its binary, not its sibling's.
     git(&first, &["commit", "-q", "--allow-empty", "-m", "moved"]);
+    if shared_target {
+        remove_recorded_runs(&shared);
+    }
     build_with(
         &first,
         store.path(),
@@ -5429,6 +5455,82 @@ fn changed_declared_input_executes_build_script_again() {
         std::fs::read_to_string(project.path().join("runs")).unwrap(),
         "2"
     );
+}
+
+/// Cargo runs a script on every build while an explicit watch is absent. The
+/// script may rely on that to read state it cannot otherwise declare, so both
+/// emitted environment and generated files must come from this execution.
+#[test]
+fn a_missing_build_script_watch_reruns_instead_of_replaying_outputs() {
+    for initially_present in [false, true] {
+        let store = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("src")).unwrap();
+        // Keep the missing watch's parent unchanged. Writing beside the
+        // missing path would independently prevent execution-cache publication.
+        std::fs::create_dir(project.path().join("watched")).unwrap();
+        let watch = project.path().join("watched/absent");
+        if initially_present {
+            std::fs::write(&watch, "present").unwrap();
+        }
+        std::fs::write(
+            project.path().join("Cargo.toml"),
+            "[package]\nname = \"missing-watch-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("build.rs"),
+            r#"fn main() {
+    println!("cargo:rerun-if-changed=watched/absent");
+    let value = std::fs::read_to_string("value").unwrap();
+    let runs = std::fs::read_to_string("runs").unwrap_or_default();
+    std::fs::write("runs", format!("{runs}run\n")).unwrap();
+    println!("cargo:rustc-env=WATCH_VALUE={value}");
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(out.join("generated.rs"), format!("const GENERATED: &str = {value:?};\n")).unwrap();
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("src/main.rs"),
+            "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\nfn main() { println!(\"{}|{}\", env!(\"WATCH_VALUE\"), GENERATED); }\n",
+        )
+        .unwrap();
+        generate_lockfile(project.path());
+
+        for (index, value) in ["first", "second", "third"].into_iter().enumerate() {
+            if index == 1 && initially_present {
+                // Reuse the prediction recorded while the watched path existed.
+                std::fs::remove_file(&watch).unwrap();
+            }
+            std::fs::write(project.path().join("value"), value).unwrap();
+            let (_, stderr) = build_with(
+                project.path(),
+                store.path(),
+                &reports.path().join(format!("{index}.json")),
+                &[],
+            );
+            let output = Command::new(project.path().join(format!(
+                "target/debug/missing-watch-fixture{}",
+                std::env::consts::EXE_SUFFIX
+            )))
+            .output()
+            .unwrap();
+            assert!(output.status.success(), "{stderr}");
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap().trim(),
+                format!("{value}|{value}"),
+                "a missing watch must refresh both env and generated output: {stderr}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(project.path().join("runs")).unwrap(),
+                "run\n".repeat(index + 1),
+                "the script body must execute despite an existing prediction"
+            );
+        }
+    }
 }
 
 #[test]
