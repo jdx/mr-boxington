@@ -720,6 +720,9 @@ pub struct CcActionContext {
     /// Whether a header reads the include search order, when a prediction
     /// already recorded it; `None` makes the key scan the headers itself.
     pub search_order_dependent: Option<bool>,
+    /// The include operands that answer was read with, sorted; `Some` exactly
+    /// when `search_order_dependent` is `Some(false)`.
+    pub search_order_operands: Option<Vec<String>>,
 }
 
 /// Canonical action descriptor and its content digest.
@@ -826,6 +829,11 @@ pub struct CcInputPrediction {
     /// used only while the files still hash to this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_order_scanned: Option<String>,
+    /// The sorted include operands looked up through the search path, recorded
+    /// when `search_order_dependent` is `false`. A name that exists in two
+    /// directories matters only if one of these asks for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_order_operands: Option<Vec<String>>,
 }
 
 /// One digest over the contents of every file input, in a stable order.
@@ -1111,6 +1119,7 @@ impl CcInvocation {
             .collect::<Result<Vec<_>, _>>()?;
         inputs.sort();
         inputs.dedup();
+        let scan = builder.search_order_scan();
         Ok(CcInputPrediction {
             path_specific: false,
             version: 1,
@@ -1118,10 +1127,11 @@ impl CcInvocation {
             environment: context.environment.keys().cloned().collect(),
             compiler_duration_ns,
             source_name: self.source_name(),
-            search_order_dependent: builder.search_order_dependent(),
-            search_order_scanned: builder
-                .search_order_dependent()
-                .map(|_| scanned_contents(&context.inputs)),
+            search_order_dependent: scan.as_ref().map(|scan| scan.dependent),
+            search_order_scanned: scan.as_ref().map(|_| scanned_contents(&context.inputs)),
+            search_order_operands: scan
+                .filter(|scan| !scan.dependent)
+                .map(|scan| scan.operands.into_iter().collect()),
         })
     }
 }
@@ -1157,10 +1167,13 @@ impl CcInputPrediction {
         let mut discovered = CcDiscoveredInputs::collect(working_dir, files, directories, digests)?;
         // The answer describes the contents it scanned: a header edited since
         // then may read the order now, so it is scanned again.
-        discovered.search_order_dependent = self.search_order_dependent.filter(|_| {
-            self.search_order_scanned.as_deref()
-                == Some(scanned_contents(&discovered.inputs).as_str())
-        });
+        let current = self.search_order_scanned.as_deref()
+            == Some(scanned_contents(&discovered.inputs).as_str());
+        discovered.search_order_dependent = self.search_order_dependent.filter(|_| current);
+        discovered.search_order_operands = self
+            .search_order_operands
+            .clone()
+            .filter(|_| current && self.search_order_dependent == Some(false));
         Ok(discovered)
     }
 }
@@ -1453,11 +1466,28 @@ impl<'a> ActionBuilder<'a> {
         if directories.len() < 2 {
             return false;
         }
-        depfile::include_search_order_is_irrelevant(&directories)
-            && !self
-                .context
-                .search_order_dependent
-                .unwrap_or_else(|| self.scan_search_order_dependence())
+        let Some(shadowable) = depfile::shadowable_include_names(&directories) else {
+            return false;
+        };
+        // A recorded `true` already keeps the order. A recorded `false` needs
+        // its operands too; one without them is read again, not trusted.
+        match (
+            self.context.search_order_dependent,
+            self.context.search_order_operands.as_ref(),
+        ) {
+            (Some(true), _) => false,
+            (Some(false), Some(operands)) => {
+                !operands.iter().any(|operand| shadowable.contains(operand))
+            }
+            _ => {
+                let scan = self.scan_search_order();
+                !scan.dependent
+                    && !scan
+                        .operands
+                        .iter()
+                        .any(|operand| shadowable.contains(operand))
+            }
+        }
     }
 
     fn include_directories(&self) -> Vec<PathBuf> {
@@ -1473,14 +1503,14 @@ impl<'a> ActionBuilder<'a> {
             .collect()
     }
 
-    /// Whether any input reads the search order itself; `None` with fewer than
-    /// two `-I` directories, where there is no order to read.
-    fn search_order_dependent(&self) -> Option<bool> {
-        (self.include_directories().len() >= 2).then(|| self.scan_search_order_dependence())
+    /// What the inputs say about the search order; `None` with fewer than two
+    /// `-I` directories, where there is no order to read.
+    fn search_order_scan(&self) -> Option<depfile::SearchOrderScan> {
+        (self.include_directories().len() >= 2).then(|| self.scan_search_order())
     }
 
-    fn scan_search_order_dependence(&self) -> bool {
-        depfile::includes_depend_on_search_order(
+    fn scan_search_order(&self) -> depfile::SearchOrderScan {
+        let mut scan = depfile::scan_search_order(
             self.context
                 .inputs
                 .iter()
@@ -1490,7 +1520,34 @@ impl<'a> ActionBuilder<'a> {
                         .to_str()
                         .is_some_and(|path| path.starts_with(INCLUDE_MANIFEST_PREFIX))
                 }),
-        )
+        );
+        // `-include` and `-imacros` name a header the driver looks up as if
+        // the source began with `#include "name"`, which no scanned file says.
+        for argument in &self.invocation.arguments {
+            let Argument::Path { flag, path } = argument else {
+                continue;
+            };
+            if !matches!(flag.as_str(), "-include" | "-imacros") {
+                continue;
+            }
+            match path.to_str() {
+                // A `..` operand can reach a file no listed directory shows,
+                // so only the order itself can say which one is found.
+                Some(_)
+                    if path
+                        .components()
+                        .any(|c| c == std::path::Component::ParentDir) =>
+                {
+                    scan.dependent = true;
+                }
+                Some(name) => {
+                    scan.operands
+                        .insert(depfile::normalize_include_operand(name));
+                }
+                None => scan.dependent = true,
+            }
+        }
+        scan
     }
 
     fn invocation_descriptor(

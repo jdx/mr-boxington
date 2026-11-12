@@ -271,6 +271,9 @@ pub struct CcDiscoveredInputs {
     /// and directory listing are part of the key, so a changed header or tree
     /// no longer matches the key this answer would have produced.
     pub search_order_dependent: Option<bool>,
+    /// The sorted include operands that are looked up through the search path,
+    /// recorded with `search_order_dependent` when it is `Some(false)`.
+    pub search_order_operands: Option<Vec<String>>,
 }
 
 impl CcDiscoveredInputs {
@@ -419,6 +422,7 @@ impl CcDiscoveredInputs {
             inputs,
             identities,
             search_order_dependent: None,
+            search_order_operands: None,
         })
     }
 
@@ -545,6 +549,7 @@ impl CcDiscoveredInputs {
         }
         context.inputs.extend(self.inputs);
         context.search_order_dependent = self.search_order_dependent;
+        context.search_order_operands = self.search_order_operands;
         Ok(())
     }
 }
@@ -729,27 +734,27 @@ fn include_manifest_with(
     Ok(digest)
 }
 
-/// Whether the order of these `-I` directories can change which header an
-/// `#include` resolves to.
+/// The file names that appear under more than one of these directories.
 ///
-/// It cannot when no file name, spelled relative to its directory, appears
-/// under more than one of them: every name then has exactly one place to be
-/// found, wherever it sits in the search. Every file counts, whatever its
-/// extension, and names that differ only in letter case are the same name,
+/// The order of the directories cannot change which file an include finds for
+/// any other name, wherever it sits in the search. Every file counts, whatever
+/// its extension, and names that differ only in letter case are the same name,
 /// because the filesystem may treat them so. A generator that collects its
 /// include directories in a hash set emits them in a different order on every
-/// run, and the answer here is what lets those runs share one key.
+/// run; knowing these names is what lets those runs share one key, provided no
+/// header looks one of them up (see [`SearchOrderScan`]).
 ///
-/// The answer is deliberately `false` whenever it cannot be established: a
-/// directory under a system root, one that cannot be listed, a symlinked
-/// directory beneath one (its contents are not walked), or a tree larger than
-/// the manifest budget. A `false` only keeps the order in the key.
-pub fn include_search_order_is_irrelevant(directories: &[PathBuf]) -> bool {
+/// `None` whenever the answer cannot be established: a directory under a
+/// system root, one that cannot be listed, a symlinked directory beneath one
+/// (its contents are not walked), or a tree larger than the manifest budget. A
+/// `None` only keeps the order in the key.
+pub fn shadowable_include_names(directories: &[PathBuf]) -> Option<BTreeSet<String>> {
     let mut budget = 0_usize;
     let mut seen = BTreeSet::new();
+    let mut shadowable = BTreeSet::new();
     for directory in directories {
         if crate::is_system_path(directory) {
-            return false;
+            return None;
         }
         let Ok(names) = include_names_with(
             directory,
@@ -757,32 +762,54 @@ pub fn include_search_order_is_irrelevant(directories: &[PathBuf]) -> bool {
             &|path| std::fs::read_dir(path),
             true,
         ) else {
-            return false;
+            return None;
         };
         for name in names {
-            if !seen.insert(name) {
-                return false;
+            if !seen.insert(name.clone()) {
+                shadowable.insert(name);
             }
         }
     }
-    true
+    Some(shadowable)
 }
 
-/// Whether any of these headers can make the search order matter beyond which
-/// directory holds which name.
+/// What a set of headers says about the include search order.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SearchOrderScan {
+    /// A header reads the order itself (`#include_next`, a computed include,
+    /// a `..` operand), or could not be read.
+    pub dependent: bool,
+    /// The operands looked up through the search path, normalized to the
+    /// spelling of [`shadowable_include_names`]. A quoted operand that resolves
+    /// beside its includer never reaches the search path and is left out.
+    pub operands: BTreeSet<String>,
+}
+
+/// Scan these headers for what they say about the search order.
 ///
 /// `#include_next` continues the search after the directory that found the
 /// current header, so the order is part of its meaning. An operand with a `..`
-/// component names a file relative to whichever search directory is tried, which
-/// the directory listings cannot see; a quoted one that resolves beside its
-/// includer never reaches the search path, and is left out.
-pub fn includes_depend_on_search_order<'a>(files: impl IntoIterator<Item = &'a Path>) -> bool {
-    files.into_iter().any(|file| {
+/// component names a file relative to whichever search directory is tried,
+/// which the directory listings cannot see; a quoted one that resolves beside
+/// its includer never reaches the search path, and is left out. Every other
+/// operand is returned, so a caller that knows which names exist in two
+/// directories can tell whether any include could find the wrong one.
+pub fn scan_search_order<'a>(files: impl IntoIterator<Item = &'a Path>) -> SearchOrderScan {
+    let mut operands = BTreeSet::new();
+    let dependent = SearchOrderScan {
+        dependent: true,
+        operands: BTreeSet::new(),
+    };
+    for file in files {
         // An unreadable file cannot be shown safe.
         let Ok(contents) = std::fs::read(file) else {
-            return true;
+            return dependent;
         };
         let parent = file.parent();
+        // A header under a system root is found after every `-I` directory,
+        // so `#include_next` in it continues past them and never through
+        // them.
+        let system = crate::is_system_path(file);
         // The compiler joins backslash-continued lines before it reads a
         // directive, so a directive split across lines is scanned whole.
         let joined = join_continued_lines(&contents);
@@ -793,19 +820,35 @@ pub fn includes_depend_on_search_order<'a>(files: impl IntoIterator<Item = &'a P
         // Comment markers inside an angle-bracket operand are part of the
         // name (`<sub//../x.h>`), which this reading cannot tell from a
         // comment, so the readings also include one that removes none.
-        [(true, true), (false, true), (true, false), (false, false)]
-            .into_iter()
-            .any(|(keep_newlines, strip)| {
-                let text = if strip {
-                    strip_comments(&joined, keep_newlines)
-                } else {
-                    joined.clone()
-                };
-                text.split(|byte| *byte == b'\n')
-                    .any(|line| line_depends_on_search_order(line, parent))
-            })
-    })
+        for (keep_newlines, strip) in [(true, true), (false, true), (true, false), (false, false)] {
+            let text = if strip {
+                strip_comments(&joined, keep_newlines)
+            } else {
+                joined.clone()
+            };
+            for line in text.split(|byte| *byte == b'\n') {
+                match classify_include_line(line, parent, system, strip) {
+                    IncludeLine::Unrelated => {}
+                    IncludeLine::Dependent => return dependent,
+                    IncludeLine::Operand(operand) => {
+                        operands.insert(operand);
+                    }
+                }
+            }
+        }
+        if operands.len() > MAX_SEARCH_OPERANDS {
+            return dependent;
+        }
+    }
+    SearchOrderScan {
+        dependent: false,
+        operands,
+    }
 }
+
+/// Most distinct include operands a scan keeps; a header set that names more
+/// keeps the order in the key rather than grow the prediction.
+const MAX_SEARCH_OPERANDS: usize = 16 * 1024;
 
 /// Replace each comment with a space, as translation phase 3 does, so a
 /// directive broken up by one (`#/**/include`) is still seen. String and
@@ -877,24 +920,51 @@ fn join_continued_lines(contents: &[u8]) -> Vec<u8> {
     joined
 }
 
-fn line_depends_on_search_order(line: &[u8], parent: Option<&Path>) -> bool {
+enum IncludeLine {
+    Unrelated,
+    Dependent,
+    Operand(String),
+}
+
+fn classify_include_line(
+    line: &[u8],
+    parent: Option<&Path>,
+    system: bool,
+    comments_stripped: bool,
+) -> IncludeLine {
     let line = line.trim_ascii_start();
     // `__has_include_next` asks about the directories after the current one.
     if line
         .windows(b"__has_include_next".len())
         .any(|window| window == b"__has_include_next")
     {
-        return true;
+        return if system {
+            IncludeLine::Unrelated
+        } else {
+            IncludeLine::Dependent
+        };
     }
-    let Some(directive) = line.strip_prefix(b"#") else {
-        return false;
+    // `%:` and `??=` are other spellings of `#`.
+    let Some(directive) = [&b"#"[..], b"%:", b"??="]
+        .iter()
+        .find_map(|hash| line.strip_prefix(*hash))
+    else {
+        return IncludeLine::Unrelated;
     };
     let directive = directive.trim_ascii_start();
-    let Some(rest) = directive.strip_prefix(b"include") else {
-        return false;
+    // `#import` is `#include` that reads each file once.
+    let Some(rest) = directive
+        .strip_prefix(b"include")
+        .or_else(|| directive.strip_prefix(b"import"))
+    else {
+        return IncludeLine::Unrelated;
     };
     if rest.starts_with(b"_next") {
-        return true;
+        return if system {
+            IncludeLine::Unrelated
+        } else {
+            IncludeLine::Dependent
+        };
     }
     // A computed include (`#include MACRO`) can expand to any operand,
     // including a parent-directory one, so it keeps the order. The operand
@@ -905,24 +975,55 @@ fn line_depends_on_search_order(line: &[u8], parent: Option<&Path>) -> bool {
         .position(|byte| !byte.is_ascii_whitespace())
         .filter(|open| matches!(rest[*open], b'"' | b'<'))
     else {
-        return true;
+        // Prose in a comment (`#include's protect themselves`) reads this way
+        // when comments are left in place; the readings that strip them
+        // decide whether it is a real directive.
+        return if comments_stripped {
+            IncludeLine::Dependent
+        } else {
+            IncludeLine::Unrelated
+        };
     };
-    let close = if rest[open] == b'"' { b'"' } else { b'>' };
+    let quoted = rest[open] == b'"';
+    let close = if quoted { b'"' } else { b'>' };
     let operand = &rest[open + 1..];
     let operand = &operand[..operand
         .iter()
         .position(|byte| *byte == close)
         .unwrap_or(operand.len())];
     let Ok(operand) = std::str::from_utf8(operand) else {
-        return true;
+        return IncludeLine::Dependent;
     };
-    if !operand
+    // A quoted operand is tried beside its includer first, whatever the order.
+    let beside_includer = quoted && parent.is_some_and(|parent| parent.join(operand).is_file());
+    if operand
         .split(['/', '\\'])
         .any(|component| component == "..")
     {
-        return false;
+        return if beside_includer {
+            IncludeLine::Unrelated
+        } else {
+            IncludeLine::Dependent
+        };
     }
-    !(rest[open] == b'"' && parent.is_some_and(|parent| parent.join(operand).is_file()))
+    if beside_includer {
+        return IncludeLine::Unrelated;
+    }
+    IncludeLine::Operand(normalize_include_operand(operand))
+}
+
+/// An include operand spelled as [`shadowable_include_names`] spells a name:
+/// lowercase, `/` separated, without `.` or empty components.
+pub fn normalize_include_operand(operand: &str) -> String {
+    // A backslash separates components only on Windows. Elsewhere it is part
+    // of a file name, which the directory listing keeps verbatim.
+    let separators: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+    operand
+        .to_lowercase()
+        .split(separators)
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// The sorted names beneath a directory, relative to it.
