@@ -1759,6 +1759,34 @@ fn a_forced_include_of_a_shadowed_name_keeps_the_order() {
 }
 
 #[test]
+fn a_forced_include_through_a_parent_directory_keeps_the_order() {
+    // No listed directory shows `src/../x.h`, so only the order can decide it.
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
+    let key = |order: [&str; 2]| {
+        let invocation = CcInvocation::parse(&argv(&[
+            "-c",
+            "-o",
+            "out.o",
+            "-I",
+            order[0],
+            "-I",
+            order[1],
+            "-include",
+            "src/../x.h",
+            "src/a.c",
+        ]))
+        .expect("admitted");
+        let mut context = context(root.path(), &root.path().join("target"));
+        context.inputs.push(CcActionInput {
+            path: root.path().join("src/a.c"),
+            digest: digest_of("source"),
+        });
+        invocation.action(context).unwrap().digest
+    };
+    assert_ne!(key(["a", "b"]), key(["b", "a"]));
+}
+
+#[test]
 fn a_recorded_dependence_is_trusted_without_reading_headers() {
     // A header that is gone cannot be scanned, and a scan would answer
     // "dependent"; the recorded `false` with no operands shares the order, so

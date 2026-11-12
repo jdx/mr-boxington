@@ -1015,9 +1015,12 @@ fn classify_include_line(
 /// An include operand spelled as [`shadowable_include_names`] spells a name:
 /// lowercase, `/` separated, without `.` or empty components.
 pub fn normalize_include_operand(operand: &str) -> String {
+    // A backslash separates components only on Windows. Elsewhere it is part
+    // of a file name, which the directory listing keeps verbatim.
+    let separators: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
     operand
         .to_lowercase()
-        .split(['/', '\\'])
+        .split(separators)
         .filter(|component| !component.is_empty() && *component != ".")
         .collect::<Vec<_>>()
         .join("/")

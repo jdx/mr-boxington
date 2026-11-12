@@ -1531,6 +1531,15 @@ impl<'a> ActionBuilder<'a> {
                 continue;
             }
             match path.to_str() {
+                // A `..` operand can reach a file no listed directory shows,
+                // so only the order itself can say which one is found.
+                Some(_)
+                    if path
+                        .components()
+                        .any(|c| c == std::path::Component::ParentDir) =>
+                {
+                    scan.dependent = true;
+                }
                 Some(name) => {
                     scan.operands
                         .insert(depfile::normalize_include_operand(name));
