@@ -956,6 +956,7 @@ fn a_prediction_from_a_future_schema_bypasses() {
         compiler_duration_ns: 0,
         source_name: String::new(),
         search_order_dependent: None,
+        search_order_scanned: None,
     };
     assert_eq!(
         prediction
@@ -1644,6 +1645,38 @@ fn a_prediction_records_whether_headers_read_the_search_order() {
     };
     assert_eq!(record("int x;\n"), Some(false));
     assert_eq!(record("#include_next <two.h>\n"), Some(true));
+}
+
+#[test]
+fn a_recorded_answer_is_dropped_when_the_scanned_files_change() {
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
+    let header = root.path().join("a/one.h");
+    let digest = |path: &Path| CacheDigest::blake3(&std::fs::read(path).unwrap());
+    let invocation = CcInvocation::parse(&argv(&[
+        "-c", "-o", "out.o", "-I", "a", "-I", "b", "src/a.c",
+    ]))
+    .expect("admitted");
+    let mut context = context(root.path(), &root.path().join("target"));
+    for path in [root.path().join("src/a.c"), header.clone()] {
+        context.inputs.push(CcActionInput {
+            digest: digest(&path),
+            path,
+        });
+    }
+    let prediction = invocation.prediction(&context, 0).unwrap();
+    let discover = |prediction: &CcInputPrediction| {
+        prediction
+            .discover(
+                root.path(),
+                &context.path_mappings,
+                &mbx_cache_core::NoFileDigestCache,
+            )
+            .unwrap()
+            .search_order_dependent
+    };
+    assert_eq!(discover(&prediction), Some(false));
+    std::fs::write(&header, "#include_next <two.h>\n").unwrap();
+    assert_eq!(discover(&prediction), None);
 }
 
 #[test]

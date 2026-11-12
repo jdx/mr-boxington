@@ -822,6 +822,26 @@ pub struct CcInputPrediction {
     /// later key builds need not reread the headers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_order_dependent: Option<bool>,
+    /// Digest of the file contents that answer was read from. The answer is
+    /// used only while the files still hash to this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_order_scanned: Option<String>,
+}
+
+/// One digest over the contents of every file input, in a stable order.
+fn scanned_contents(inputs: &[CcActionInput]) -> String {
+    let mut digests = inputs
+        .iter()
+        .filter(|input| {
+            !input
+                .path
+                .to_str()
+                .is_some_and(|path| path.starts_with(INCLUDE_MANIFEST_PREFIX))
+        })
+        .map(|input| input.digest.hash.clone())
+        .collect::<Vec<_>>();
+    digests.sort();
+    CacheDigest::blake3(digests.join("\n").as_bytes()).hash
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -1099,6 +1119,9 @@ impl CcInvocation {
             compiler_duration_ns,
             source_name: self.source_name(),
             search_order_dependent: builder.search_order_dependent(),
+            search_order_scanned: builder
+                .search_order_dependent()
+                .map(|_| scanned_contents(&context.inputs)),
         })
     }
 }
@@ -1132,7 +1155,12 @@ impl CcInputPrediction {
             }
         }
         let mut discovered = CcDiscoveredInputs::collect(working_dir, files, directories, digests)?;
-        discovered.search_order_dependent = self.search_order_dependent;
+        // The answer describes the contents it scanned: a header edited since
+        // then may read the order now, so it is scanned again.
+        discovered.search_order_dependent = self.search_order_dependent.filter(|_| {
+            self.search_order_scanned.as_deref()
+                == Some(scanned_contents(&discovered.inputs).as_str())
+        });
         Ok(discovered)
     }
 }
