@@ -789,11 +789,21 @@ pub fn includes_depend_on_search_order<'a>(files: impl IntoIterator<Item = &'a P
         // A newline inside a block comment is one space to the preprocessor,
         // but reading it as a line break too costs nothing: either reading
         // finding an order-sensitive directive keeps the order.
-        [true, false].into_iter().any(|keep_newlines| {
-            strip_comments(&joined, keep_newlines)
-                .split(|byte| *byte == b'\n')
-                .any(|line| line_depends_on_search_order(line, parent))
-        })
+        //
+        // Comment markers inside an angle-bracket operand are part of the
+        // name (`<sub//../x.h>`), which this reading cannot tell from a
+        // comment, so the readings also include one that removes none.
+        [(true, true), (false, true), (true, false), (false, false)]
+            .into_iter()
+            .any(|(keep_newlines, strip)| {
+                let text = if strip {
+                    strip_comments(&joined, keep_newlines)
+                } else {
+                    joined.clone()
+                };
+                text.split(|byte| *byte == b'\n')
+                    .any(|line| line_depends_on_search_order(line, parent))
+            })
     })
 }
 
