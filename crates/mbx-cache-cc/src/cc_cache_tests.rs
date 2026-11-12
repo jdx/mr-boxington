@@ -1445,6 +1445,8 @@ fn msvc_identity_distinguishes_target_architectures() {
 /// A checkout whose `-I` directories hold the given headers.
 fn include_checkout(headers: &[(&str, &str)]) -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("src")).unwrap();
+    std::fs::write(root.path().join("src/a.c"), "#include <one.h>\n").unwrap();
     for (directory, name) in headers {
         let path = root.path().join(directory).join(name);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1532,4 +1534,57 @@ fn only_a_run_of_consecutive_include_flags_is_reordered() {
         build(&arguments)
     };
     assert_ne!(split("a", "b"), split("b", "a"));
+}
+
+fn order_is_shared(root: &Path) -> bool {
+    include_keys(root, &["a", "b"]).0 == include_keys(root, &["b", "a"]).0
+}
+
+#[test]
+fn any_file_extension_counts_as_a_possible_include_target() {
+    let root = include_checkout(&[("a", "config.cuh"), ("b", "config.cuh")]);
+    assert!(!order_is_shared(root.path()));
+}
+
+#[test]
+fn names_differing_only_in_letter_case_keep_the_order() {
+    let root = include_checkout(&[("a", "Foo.h"), ("b", "foo.h")]);
+    assert!(!order_is_shared(root.path()));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_directory_keeps_the_order() {
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h"), ("real", "x.h")]);
+    std::os::unix::fs::symlink(root.path().join("real"), root.path().join("a/sub")).unwrap();
+    assert!(!order_is_shared(root.path()));
+}
+
+#[test]
+fn headers_that_read_the_search_order_keep_it() {
+    for line in [
+        "#include_next <two.h>\n",
+        "#  include <../config.h>\n",
+        "#include \"../missing.h\"\n",
+    ] {
+        let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
+        std::fs::write(root.path().join("src/a.c"), line).unwrap();
+        assert!(!order_is_shared(root.path()), "{line}");
+    }
+    // A quoted parent include that resolves beside its includer never reaches
+    // the search path.
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h"), ("", "near.h")]);
+    std::fs::write(root.path().join("src/a.c"), "#include \"../near.h\"\n").unwrap();
+    assert!(order_is_shared(root.path()));
+}
+
+#[test]
+fn orders_that_differ_across_mapped_roots_share_a_key() {
+    // `workspace` sorts after `target` once normalized, though `include` sorts
+    // before `target/generated` as spelled.
+    let root = include_checkout(&[("include", "one.h"), ("target/generated", "two.h")]);
+    assert_eq!(
+        include_keys(root.path(), &["include", "target/generated"]).0,
+        include_keys(root.path(), &["target/generated", "include"]).0
+    );
 }

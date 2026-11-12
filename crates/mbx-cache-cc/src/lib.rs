@@ -1384,10 +1384,11 @@ impl<'a> ActionBuilder<'a> {
     /// directories.
     ///
     /// Only when that order is not already the sorted one -- there is nothing
-    /// to decide otherwise -- and no header name can be found in two of the
+    /// to decide otherwise -- and no file name can be found in two of the
     /// directories, so every order resolves every include identically. The
     /// directory listings the key records pin that fact: the same key cannot
-    /// describe a tree where it stops holding.
+    /// describe a tree where it stops holding. Headers that read the order
+    /// themselves (`#include_next`, `..` operands) keep it in the key.
     fn include_order_is_irrelevant(&self) -> bool {
         let directories = self
             .invocation
@@ -1403,14 +1404,42 @@ impl<'a> ActionBuilder<'a> {
         if directories.len() < 2 {
             return false;
         }
-        let already_sorted = self.invocation.arguments
-            == sorted_include_runs(&self.invocation.arguments, |argument| match argument {
-                Argument::Path { flag, path } if flag == "-I" => {
-                    Some(path.to_string_lossy().into_owned())
-                }
-                _ => None,
-            });
-        !already_sorted && depfile::include_search_order_is_irrelevant(&directories)
+        // The same order the descriptor sorts by: normalized, not as spelled.
+        let Ok(normalized) = self
+            .invocation
+            .arguments
+            .iter()
+            .map(|argument| {
+                self.normalize_argument(argument).map(|text| {
+                    (
+                        matches!(argument, Argument::Path { flag, .. } if flag == "-I"),
+                        text,
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+        else {
+            return false;
+        };
+        let mut sorted = normalized.clone();
+        sort_runs(
+            &mut sorted,
+            |(include, _)| *include,
+            |(_, text)| text.clone(),
+        );
+        normalized != sorted
+            && depfile::include_search_order_is_irrelevant(&directories)
+            && !depfile::includes_depend_on_search_order(
+                self.context
+                    .inputs
+                    .iter()
+                    .map(|input| input.path.as_path())
+                    .filter(|path| {
+                        !path
+                            .to_str()
+                            .is_some_and(|path| path.starts_with(INCLUDE_MANIFEST_PREFIX))
+                    }),
+            )
     }
 
     fn invocation_descriptor(

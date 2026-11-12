@@ -715,7 +715,7 @@ fn include_manifest_with(
     budget: &mut usize,
     read_dir: &impl Fn(&Path) -> std::io::Result<std::fs::ReadDir>,
 ) -> Result<CacheDigest, CcBypassReason> {
-    let names = include_names_with(directory, budget, read_dir)?;
+    let names = include_names_with(directory, budget, read_dir, false)?;
     let digest = CacheDigest::blake3(names.join("\n").as_bytes());
     Ok(digest)
 }
@@ -723,15 +723,18 @@ fn include_manifest_with(
 /// Whether the order of these `-I` directories can change which header an
 /// `#include` resolves to.
 ///
-/// It cannot when no includable name, spelled relative to its directory,
-/// appears under more than one of them: every name then has exactly one place
-/// to be found, wherever it sits in the search. A generator that collects its
+/// It cannot when no file name, spelled relative to its directory, appears
+/// under more than one of them: every name then has exactly one place to be
+/// found, wherever it sits in the search. Every file counts, whatever its
+/// extension, and names that differ only in letter case are the same name,
+/// because the filesystem may treat them so. A generator that collects its
 /// include directories in a hash set emits them in a different order on every
 /// run, and the answer here is what lets those runs share one key.
 ///
 /// The answer is deliberately `false` whenever it cannot be established: a
-/// directory under a system root, one that cannot be listed, or a tree larger
-/// than the manifest budget. A `false` only keeps the order in the key.
+/// directory under a system root, one that cannot be listed, a symlinked
+/// directory beneath one (its contents are not walked), or a tree larger than
+/// the manifest budget. A `false` only keeps the order in the key.
 pub fn include_search_order_is_irrelevant(directories: &[PathBuf]) -> bool {
     let mut budget = 0_usize;
     let mut seen = BTreeSet::new();
@@ -739,8 +742,12 @@ pub fn include_search_order_is_irrelevant(directories: &[PathBuf]) -> bool {
         if crate::is_system_path(directory) {
             return false;
         }
-        let Ok(names) = include_names_with(directory, &mut budget, &|path| std::fs::read_dir(path))
-        else {
+        let Ok(names) = include_names_with(
+            directory,
+            &mut budget,
+            &|path| std::fs::read_dir(path),
+            true,
+        ) else {
             return false;
         };
         for name in names {
@@ -752,11 +759,70 @@ pub fn include_search_order_is_irrelevant(directories: &[PathBuf]) -> bool {
     true
 }
 
-/// The sorted includable names beneath a directory, relative to it.
+/// Whether any of these headers can make the search order matter beyond which
+/// directory holds which name.
+///
+/// `#include_next` continues the search after the directory that found the
+/// current header, so the order is part of its meaning. An operand with a `..`
+/// component names a file relative to whichever search directory is tried, which
+/// the directory listings cannot see; a quoted one that resolves beside its
+/// includer never reaches the search path, and is left out.
+pub fn includes_depend_on_search_order<'a>(files: impl IntoIterator<Item = &'a Path>) -> bool {
+    files.into_iter().any(|file| {
+        // An unreadable file cannot be shown safe.
+        let Ok(contents) = std::fs::read(file) else {
+            return true;
+        };
+        let parent = file.parent();
+        contents
+            .split(|byte| *byte == b'\n')
+            .any(|line| line_depends_on_search_order(line, parent))
+    })
+}
+
+fn line_depends_on_search_order(line: &[u8], parent: Option<&Path>) -> bool {
+    let line = line.trim_ascii_start();
+    let Some(directive) = line.strip_prefix(b"#") else {
+        return false;
+    };
+    let directive = directive.trim_ascii_start();
+    let Some(rest) = directive.strip_prefix(b"include") else {
+        return false;
+    };
+    if rest.starts_with(b"_next") {
+        return true;
+    }
+    let Some(open) = rest.iter().position(|byte| matches!(byte, b'"' | b'<')) else {
+        return false;
+    };
+    let close = if rest[open] == b'"' { b'"' } else { b'>' };
+    let operand = &rest[open + 1..];
+    let operand = &operand[..operand
+        .iter()
+        .position(|byte| *byte == close)
+        .unwrap_or(operand.len())];
+    let Ok(operand) = std::str::from_utf8(operand) else {
+        return true;
+    };
+    if !operand
+        .split(['/', '\\'])
+        .any(|component| component == "..")
+    {
+        return false;
+    }
+    !(rest[open] == b'"' && parent.is_some_and(|parent| parent.join(operand).is_file()))
+}
+
+/// The sorted names beneath a directory, relative to it.
+///
+/// A manifest lists only plausible include targets. The search-order check
+/// lists every file, folds letter case, and refuses a symlinked directory, whose
+/// contents this walk does not enter.
 fn include_names_with(
     directory: &Path,
     budget: &mut usize,
     read_dir: &impl Fn(&Path) -> std::io::Result<std::fs::ReadDir>,
+    strict: bool,
 ) -> Result<Vec<String>, CcBypassReason> {
     let mut names = Vec::new();
     let mut pending = vec![(directory.to_path_buf(), String::new())];
@@ -795,9 +861,20 @@ fn include_names_with(
                 pending.push((entry.path(), relative));
                 continue;
             }
-            if !is_includable(name) {
+            if strict && file_type.is_symlink() && entry.path().is_dir() {
+                return Err(CcBypassReason::InputRead {
+                    path: entry.path(),
+                    message: "symlinked directory".into(),
+                });
+            }
+            if !strict && !is_includable(name) {
                 continue;
             }
+            let relative = if strict {
+                relative.to_lowercase()
+            } else {
+                relative
+            };
             *budget += 1;
             if *budget > MAX_MANIFEST_ENTRIES {
                 return Err(CcBypassReason::TooManyInputs);
