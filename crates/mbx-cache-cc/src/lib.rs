@@ -756,6 +756,9 @@ struct CcActionDescriptor {
     assembly_input_model: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     preprocessing: Option<PreprocessingContext>,
+    /// The `-I` order was proven irrelevant and left out of `arguments`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    order_independent_includes: bool,
     compiler: CcCompilerDescriptor,
     arguments: Vec<String>,
     environment: BTreeMap<String, Option<String>>,
@@ -1395,6 +1398,7 @@ impl<'a> ActionBuilder<'a> {
             adapter_version: ADAPTER_VERSION,
             assembly_input_model: invocation.assembly_input_model,
             preprocessing: invocation.preprocessing,
+            order_independent_includes: canonical_includes,
             compiler: invocation.compiler,
             arguments: invocation.arguments,
             environment: self.context.environment.clone(),
@@ -1409,42 +1413,19 @@ impl<'a> ActionBuilder<'a> {
     /// Whether this action may be keyed without the order of its `-I`
     /// directories.
     ///
-    /// Only when that order is not already the sorted one -- there is nothing
-    /// to decide otherwise -- and no file name can be found in two of the
-    /// directories, so every order resolves every include identically. The
-    /// directory listings the key records pin that fact: the same key cannot
-    /// describe a tree where it stops holding. Headers that read the order
+    /// Only when no file name can be found in two of the directories, so every
+    /// order resolves every include identically. This is decided even when the
+    /// order is already the sorted one: the key then carries a marker, so it
+    /// is never confused with the same arguments kept because the proof failed
+    /// -- a prediction recorded under another order supplies the same inputs to
+    /// both, and only the proof says they are right for this tree. Headers that read the order
     /// themselves (`#include_next`, `..` operands) keep it in the key.
     fn include_order_is_irrelevant(&self) -> bool {
         let directories = self.include_directories();
         if directories.len() < 2 {
             return false;
         }
-        // The same order the descriptor sorts by: normalized, not as spelled.
-        let Ok(normalized) = self
-            .invocation
-            .arguments
-            .iter()
-            .map(|argument| {
-                self.normalize_argument(argument).map(|text| {
-                    (
-                        matches!(argument, Argument::Path { flag, .. } if flag == "-I"),
-                        text,
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()
-        else {
-            return false;
-        };
-        let mut sorted = normalized.clone();
-        sort_runs(
-            &mut sorted,
-            |(include, _)| *include,
-            |(_, text)| text.clone(),
-        );
-        normalized != sorted
-            && depfile::include_search_order_is_irrelevant(&directories)
+        depfile::include_search_order_is_irrelevant(&directories)
             && !self
                 .context
                 .search_order_dependent

@@ -1580,6 +1580,10 @@ fn headers_that_read_the_search_order_keep_it() {
         "#include\\\n<../config.h>\n",
         "#if __has_include_next(<two.h>)\n#endif\n",
         "#define H \"../config.h\"\n#include H\n",
+        "#/**/include <../config.h>\n",
+        "/* note */ #include /* x */ <../config.h>\n",
+        "#include MACRO // \"x.h\"\n",
+        "#include /* \"x.h\" */ MACRO\n",
     ] {
         let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
         std::fs::write(root.path().join("src/a.c"), line).unwrap();
@@ -1590,6 +1594,17 @@ fn headers_that_read_the_search_order_keep_it() {
     let root = include_checkout(&[("a", "one.h"), ("b", "two.h"), ("", "near.h")]);
     std::fs::write(root.path().join("src/a.c"), "#include \"../near.h\"\n").unwrap();
     assert!(order_is_shared(root.path()));
+}
+
+#[test]
+fn a_collision_that_appears_later_changes_the_key_even_for_the_sorted_order() {
+    // A prediction recorded under `-I b -I a` names `b/foo.data`; once
+    // `a/foo.data` exists the sorted order must not reuse that key.
+    let root = include_checkout(&[("a", "one.h"), ("b", "foo.data")]);
+    let before = include_keys(root.path(), &["a", "b"]).0;
+    assert_eq!(before, include_keys(root.path(), &["b", "a"]).0);
+    std::fs::write(root.path().join("a/foo.data"), "other").unwrap();
+    assert_ne!(before, include_keys(root.path(), &["a", "b"]).0);
 }
 
 #[test]

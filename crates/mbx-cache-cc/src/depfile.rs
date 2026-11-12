@@ -785,11 +785,33 @@ pub fn includes_depend_on_search_order<'a>(files: impl IntoIterator<Item = &'a P
         let parent = file.parent();
         // The compiler joins backslash-continued lines before it reads a
         // directive, so a directive split across lines is scanned whole.
-        let contents = join_continued_lines(&contents);
+        let contents = strip_block_comments(&join_continued_lines(&contents));
         contents
             .split(|byte| *byte == b'\n')
             .any(|line| line_depends_on_search_order(line, parent))
     })
+}
+
+/// Replace each block comment with a space, as translation phase 3 does, so
+/// a directive broken up by one (`#/**/include`) is still seen. A comment
+/// that never closes runs to the end of the file.
+fn strip_block_comments(contents: &[u8]) -> Vec<u8> {
+    let mut stripped = Vec::with_capacity(contents.len());
+    let mut index = 0;
+    while index < contents.len() {
+        if contents[index..].starts_with(b"/*") {
+            index += 2;
+            while index < contents.len() && !contents[index..].starts_with(b"*/") {
+                index += 1;
+            }
+            index = (index + 2).min(contents.len());
+            stripped.push(b' ');
+        } else {
+            stripped.push(contents[index]);
+            index += 1;
+        }
+    }
+    stripped
 }
 
 fn join_continued_lines(contents: &[u8]) -> Vec<u8> {
@@ -834,8 +856,14 @@ fn line_depends_on_search_order(line: &[u8], parent: Option<&Path>) -> bool {
         return true;
     }
     // A computed include (`#include MACRO`) can expand to any operand,
-    // including a parent-directory one, so it keeps the order.
-    let Some(open) = rest.iter().position(|byte| matches!(byte, b'"' | b'<')) else {
+    // including a parent-directory one, so it keeps the order. The operand
+    // must open the rest of the line: a delimiter further on belongs to a
+    // comment or a macro argument.
+    let Some(open) = rest
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .filter(|open| matches!(rest[*open], b'"' | b'<'))
+    else {
         return true;
     };
     let close = if rest[open] == b'"' { b'"' } else { b'>' };
