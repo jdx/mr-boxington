@@ -1040,7 +1040,10 @@ impl CcInvocation {
         context: &CcActionContext,
     ) -> Result<CacheDigest, CcBypassReason> {
         let builder = ActionBuilder::new(self, context.clone());
-        let descriptor = builder.invocation_descriptor()?;
+        // A prediction only names inputs to look at; the action key built from
+        // them is what decides a hit. So its identity can ignore the order of
+        // `-I` directories, which some generators emit differently every run.
+        let descriptor = builder.invocation_descriptor(true)?;
         let bytes = canonical_json(&descriptor)
             .map_err(|error| CcBypassReason::Serialization(error.to_string()))?;
         Ok(CacheDigest::blake3(&bytes))
@@ -1312,7 +1315,8 @@ impl<'a> ActionBuilder<'a> {
 
     fn build(self, path_specific: bool) -> Result<CcAction, CcBypassReason> {
         self.validate_mappings()?;
-        let invocation = self.invocation_descriptor()?;
+        let canonical_includes = self.include_order_is_irrelevant();
+        let invocation = self.invocation_descriptor(canonical_includes)?;
 
         let mut inputs = BTreeMap::<String, CacheDigest>::new();
         for input in &self.context.inputs {
@@ -1343,7 +1347,16 @@ impl<'a> ActionBuilder<'a> {
         let descriptor = CcActionDescriptor {
             path_binding: path_specific.then(|| CcPathBinding {
                 working_dir: self.context.working_dir.clone(),
-                arguments: self.invocation.arguments.clone(),
+                arguments: if canonical_includes {
+                    sorted_include_runs(&self.invocation.arguments, |argument| match argument {
+                        Argument::Path { flag, path } if flag == "-I" => {
+                            Some(path.to_string_lossy().into_owned())
+                        }
+                        _ => None,
+                    })
+                } else {
+                    self.invocation.arguments.clone()
+                },
                 roots: self
                     .context
                     .path_mappings
@@ -1367,14 +1380,66 @@ impl<'a> ActionBuilder<'a> {
         Ok(CcAction { digest, bytes })
     }
 
-    fn invocation_descriptor(&self) -> Result<CcInvocationDescriptor, CcBypassReason> {
-        self.validate_mappings()?;
-        let arguments = self
+    /// Whether this action may be keyed without the order of its `-I`
+    /// directories.
+    ///
+    /// Only when that order is not already the sorted one -- there is nothing
+    /// to decide otherwise -- and no header name can be found in two of the
+    /// directories, so every order resolves every include identically. The
+    /// directory listings the key records pin that fact: the same key cannot
+    /// describe a tree where it stops holding.
+    fn include_order_is_irrelevant(&self) -> bool {
+        let directories = self
             .invocation
             .arguments
             .iter()
-            .map(|argument| self.normalize_argument(argument))
+            .filter_map(|argument| match argument {
+                Argument::Path { flag, path } if flag == "-I" => {
+                    Some(absolute_path(path, &self.context.working_dir))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if directories.len() < 2 {
+            return false;
+        }
+        let already_sorted = self.invocation.arguments
+            == sorted_include_runs(&self.invocation.arguments, |argument| match argument {
+                Argument::Path { flag, path } if flag == "-I" => {
+                    Some(path.to_string_lossy().into_owned())
+                }
+                _ => None,
+            });
+        !already_sorted && depfile::include_search_order_is_irrelevant(&directories)
+    }
+
+    fn invocation_descriptor(
+        &self,
+        canonical_includes: bool,
+    ) -> Result<CcInvocationDescriptor, CcBypassReason> {
+        self.validate_mappings()?;
+        let mut arguments = self
+            .invocation
+            .arguments
+            .iter()
+            .map(|argument| {
+                self.normalize_argument(argument).map(|normalized| {
+                    let include = matches!(argument, Argument::Path { flag, .. } if flag == "-I");
+                    (include, normalized)
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
+        if canonical_includes {
+            sort_runs(
+                &mut arguments,
+                |(include, _)| *include,
+                |(_, text)| text.clone(),
+            );
+        }
+        let arguments = arguments
+            .into_iter()
+            .map(|(_, normalized)| normalized)
+            .collect::<Vec<_>>();
         let required_inputs = self
             .invocation
             .required_inputs
@@ -1496,6 +1561,41 @@ impl<'a> ActionBuilder<'a> {
             None => self.normalize_path(path),
         }
     }
+}
+
+/// Sort each maximal run of consecutive items that `key` selects, leaving
+/// everything else where it is.
+///
+/// Only a run of `-I` flags is a set: the search order *between* different
+/// kinds of directory (`-iquote`, `-isystem`, `-idirafter`) and relative to the
+/// other flags is not something to reorder.
+fn sort_runs<T>(items: &mut [T], in_run: impl Fn(&T) -> bool, key: impl Fn(&T) -> String) {
+    let mut start = 0;
+    while start < items.len() {
+        if !in_run(&items[start]) {
+            start += 1;
+            continue;
+        }
+        let mut end = start;
+        while end < items.len() && in_run(&items[end]) {
+            end += 1;
+        }
+        items[start..end].sort_by_cached_key(&key);
+        start = end;
+    }
+}
+
+fn sorted_include_runs(
+    arguments: &[Argument],
+    key: impl Fn(&Argument) -> Option<String>,
+) -> Vec<Argument> {
+    let mut sorted = arguments.to_vec();
+    sort_runs(
+        &mut sorted,
+        |argument| key(argument).is_some(),
+        |argument| key(argument).unwrap_or_default(),
+    );
+    sorted
 }
 
 fn absolute_path(path: &Path, working_dir: &Path) -> PathBuf {

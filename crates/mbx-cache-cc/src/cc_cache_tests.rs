@@ -1441,3 +1441,95 @@ fn msvc_identity_distinguishes_target_architectures() {
     };
     assert_ne!(for_arch("1", "_M_ARM64"), for_arch("_M_X64", "1"));
 }
+
+/// A checkout whose `-I` directories hold the given headers.
+fn include_checkout(headers: &[(&str, &str)]) -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    for (directory, name) in headers {
+        let path = root.path().join(directory).join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "").unwrap();
+    }
+    root
+}
+
+fn include_keys(root: &Path, order: &[&str]) -> (CacheDigest, CacheDigest) {
+    let mut arguments = vec!["-O0", "-c", "-o", "out.o"];
+    let flags = order
+        .iter()
+        .flat_map(|directory| ["-I", directory])
+        .collect::<Vec<_>>();
+    arguments.extend(flags);
+    arguments.push("src/a.c");
+    let invocation = CcInvocation::parse(&argv(&arguments)).expect("admitted");
+    let target = root.join("target");
+    let mut context = context(root, &target);
+    context.inputs.push(CcActionInput {
+        path: root.join("src/a.c"),
+        digest: digest_of("source"),
+    });
+    let invocation_digest = invocation.invocation_digest(&context).unwrap();
+    (
+        invocation.action(context).unwrap().digest,
+        invocation_digest,
+    )
+}
+
+#[test]
+fn include_directories_in_a_different_order_share_a_key_when_no_header_is_in_two() {
+    // A generator that gathers its include directories in a hash set emits
+    // them in a new order every run.
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h"), ("c", "sub/three.h")]);
+    let first = include_keys(root.path(), &["a", "b", "c"]);
+    assert_eq!(first, include_keys(root.path(), &["c", "a", "b"]));
+    assert_eq!(first, include_keys(root.path(), &["b", "c", "a"]));
+}
+
+#[test]
+fn include_directory_order_stays_in_the_key_when_a_header_is_in_two() {
+    let root = include_checkout(&[("a", "shared.h"), ("b", "shared.h")]);
+    let (forward, _) = include_keys(root.path(), &["a", "b"]);
+    let (reverse, _) = include_keys(root.path(), &["b", "a"]);
+    assert_ne!(forward, reverse);
+}
+
+#[test]
+fn a_header_appearing_in_a_second_directory_changes_the_key() {
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
+    let (before, _) = include_keys(root.path(), &["b", "a"]);
+    std::fs::write(root.path().join("b/one.h"), "").unwrap();
+    let (after, _) = include_keys(root.path(), &["b", "a"]);
+    assert_ne!(before, after);
+    assert_ne!(after, include_keys(root.path(), &["a", "b"]).0);
+}
+
+#[test]
+fn prediction_identity_ignores_include_order_even_when_headers_collide() {
+    // The prediction only names files to look at; the action key still
+    // separates the two orders.
+    let root = include_checkout(&[("a", "shared.h"), ("b", "shared.h")]);
+    let (_, forward) = include_keys(root.path(), &["a", "b"]);
+    let (_, reverse) = include_keys(root.path(), &["b", "a"]);
+    assert_eq!(forward, reverse);
+}
+
+#[test]
+fn only_a_run_of_consecutive_include_flags_is_reordered() {
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
+    let build = |arguments: &[&str]| {
+        let invocation = CcInvocation::parse(&argv(arguments)).unwrap();
+        let mut context = context(root.path(), &root.path().join("target"));
+        context.inputs.push(CcActionInput {
+            path: root.path().join("src/a.c"),
+            digest: digest_of("source"),
+        });
+        invocation.action(context).unwrap().digest
+    };
+    let base = ["-c", "-o", "out.o"];
+    let split = |first: &str, second: &str| {
+        let mut arguments = base.to_vec();
+        arguments.extend(["-I", first, "-DX=1", "-I", second, "src/a.c"]);
+        build(&arguments)
+    };
+    assert_ne!(split("a", "b"), split("b", "a"));
+}

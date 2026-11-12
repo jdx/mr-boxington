@@ -715,6 +715,49 @@ fn include_manifest_with(
     budget: &mut usize,
     read_dir: &impl Fn(&Path) -> std::io::Result<std::fs::ReadDir>,
 ) -> Result<CacheDigest, CcBypassReason> {
+    let names = include_names_with(directory, budget, read_dir)?;
+    let digest = CacheDigest::blake3(names.join("\n").as_bytes());
+    Ok(digest)
+}
+
+/// Whether the order of these `-I` directories can change which header an
+/// `#include` resolves to.
+///
+/// It cannot when no includable name, spelled relative to its directory,
+/// appears under more than one of them: every name then has exactly one place
+/// to be found, wherever it sits in the search. A generator that collects its
+/// include directories in a hash set emits them in a different order on every
+/// run, and the answer here is what lets those runs share one key.
+///
+/// The answer is deliberately `false` whenever it cannot be established: a
+/// directory under a system root, one that cannot be listed, or a tree larger
+/// than the manifest budget. A `false` only keeps the order in the key.
+pub fn include_search_order_is_irrelevant(directories: &[PathBuf]) -> bool {
+    let mut budget = 0_usize;
+    let mut seen = BTreeSet::new();
+    for directory in directories {
+        if crate::is_system_path(directory) {
+            return false;
+        }
+        let Ok(names) = include_names_with(directory, &mut budget, &|path| std::fs::read_dir(path))
+        else {
+            return false;
+        };
+        for name in names {
+            if !seen.insert(name) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// The sorted includable names beneath a directory, relative to it.
+fn include_names_with(
+    directory: &Path,
+    budget: &mut usize,
+    read_dir: &impl Fn(&Path) -> std::io::Result<std::fs::ReadDir>,
+) -> Result<Vec<String>, CcBypassReason> {
     let mut names = Vec::new();
     let mut pending = vec![(directory.to_path_buf(), String::new())];
     while let Some((current, prefix)) = pending.pop() {
@@ -763,8 +806,7 @@ fn include_manifest_with(
         }
     }
     names.sort();
-    let digest = CacheDigest::blake3(names.join("\n").as_bytes());
-    Ok(digest)
+    Ok(names)
 }
 
 /// Whether a preprocessor input can make the assembler read another file.
