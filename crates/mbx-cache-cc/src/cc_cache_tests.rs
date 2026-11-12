@@ -538,6 +538,7 @@ fn context(workspace: &Path, target: &Path) -> CcActionContext {
         environment: BTreeMap::new(),
         inputs: Vec::new(),
         search_order_dependent: None,
+        search_order_operands: None,
     }
 }
 
@@ -957,6 +958,7 @@ fn a_prediction_from_a_future_schema_bypasses() {
         source_name: String::new(),
         search_order_dependent: None,
         search_order_scanned: None,
+        search_order_operands: None,
     };
     assert_eq!(
         prediction
@@ -1478,6 +1480,7 @@ fn include_keys_with(
     let target = root.join("target");
     let mut context = context(root, &target);
     context.search_order_dependent = recorded;
+    context.search_order_operands = recorded.map(|_| Vec::new());
     context.inputs.push(CcActionInput {
         path: root.join("src/a.c"),
         digest: digest_of("source"),
@@ -1502,6 +1505,7 @@ fn include_directories_in_a_different_order_share_a_key_when_no_header_is_in_two
 #[test]
 fn include_directory_order_stays_in_the_key_when_a_header_is_in_two() {
     let root = include_checkout(&[("a", "shared.h"), ("b", "shared.h")]);
+    std::fs::write(root.path().join("src/a.c"), "#include <shared.h>\n").unwrap();
     let (forward, _) = include_keys(root.path(), &["a", "b"]);
     let (reverse, _) = include_keys(root.path(), &["b", "a"]);
     assert_ne!(forward, reverse);
@@ -1555,12 +1559,14 @@ fn order_is_shared(root: &Path) -> bool {
 #[test]
 fn any_file_extension_counts_as_a_possible_include_target() {
     let root = include_checkout(&[("a", "config.cuh"), ("b", "config.cuh")]);
+    std::fs::write(root.path().join("src/a.c"), "#include <config.cuh>\n").unwrap();
     assert!(!order_is_shared(root.path()));
 }
 
 #[test]
 fn names_differing_only_in_letter_case_keep_the_order() {
     let root = include_checkout(&[("a", "Foo.h"), ("b", "foo.h")]);
+    std::fs::write(root.path().join("src/a.c"), "#include <foo.h>\n").unwrap();
     assert!(!order_is_shared(root.path()));
 }
 
@@ -1607,6 +1613,7 @@ fn a_collision_that_appears_later_changes_the_key_even_for_the_sorted_order() {
     // A prediction recorded under `-I b -I a` names `b/foo.data`; once
     // `a/foo.data` exists the sorted order must not reuse that key.
     let root = include_checkout(&[("a", "one.h"), ("b", "foo.data")]);
+    std::fs::write(root.path().join("src/a.c"), "#include <foo.data>\n").unwrap();
     let before = include_keys(root.path(), &["a", "b"]).0;
     assert_eq!(before, include_keys(root.path(), &["b", "a"]).0);
     std::fs::write(root.path().join("a/foo.data"), "other").unwrap();
@@ -1693,4 +1700,89 @@ fn orders_that_differ_across_mapped_roots_share_a_key() {
         include_keys(root.path(), &["include", "target/generated"]).0,
         include_keys(root.path(), &["target/generated", "include"]).0
     );
+}
+
+/// A checkout whose `-I` directories both hold `shared.h`, included by the
+/// source as `operand`.
+fn shadowed_checkout(operand: &str) -> tempfile::TempDir {
+    let root = include_checkout(&[("a", "shared.h"), ("b", "shared.h"), ("b", "two.h")]);
+    std::fs::write(root.path().join("src/a.c"), format!("#include {operand}\n")).unwrap();
+    root
+}
+
+#[test]
+fn a_name_in_two_directories_blocks_sharing_only_when_a_header_asks_for_it() {
+    // Nothing includes `shared.h`, so no order can find the wrong copy.
+    let root = shadowed_checkout("<two.h>");
+    assert!(order_is_shared(root.path()));
+    // Something does, and the first directory searched decides which one.
+    for operand in [
+        "<shared.h>",
+        "<./SHARED.h>",
+        "\"shared.h\"",
+        "<sub/../shared.h>",
+    ] {
+        let root = shadowed_checkout(operand);
+        assert!(!order_is_shared(root.path()), "{operand}");
+    }
+}
+
+#[test]
+fn a_quoted_include_beside_its_includer_ignores_a_shadowed_name() {
+    // `src/shared.h` is found beside `src/a.c` before any `-I` directory.
+    let root = shadowed_checkout("\"shared.h\"");
+    std::fs::write(root.path().join("src/shared.h"), "").unwrap();
+    assert!(order_is_shared(root.path()));
+    // An angle-bracket include never looks there.
+    std::fs::write(root.path().join("src/a.c"), "#include <shared.h>\n").unwrap();
+    assert!(!order_is_shared(root.path()));
+}
+
+#[test]
+fn a_prediction_records_the_operands_it_scanned() {
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
+    std::fs::write(
+        root.path().join("src/a.c"),
+        "#include <One.h>\n#include \"./sub//x.h\"\n",
+    )
+    .unwrap();
+    let invocation = CcInvocation::parse(&argv(&[
+        "-c", "-o", "out.o", "-I", "a", "-I", "b", "src/a.c",
+    ]))
+    .expect("admitted");
+    let mut context = context(root.path(), &root.path().join("target"));
+    context.inputs.push(CcActionInput {
+        path: root.path().join("src/a.c"),
+        digest: digest_of("source"),
+    });
+    let prediction = invocation.prediction(&context, 0).unwrap();
+    assert_eq!(
+        prediction.search_order_operands,
+        Some(vec!["one.h".to_string(), "sub/x.h".to_string()])
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn include_next_in_a_system_header_does_not_keep_the_order() {
+    // `/usr/include` headers are found after every `-I` directory, so their
+    // `#include_next` never walks through the permuted ones.
+    let system = Path::new("/usr/include/limits.h");
+    if !system.is_file() {
+        return;
+    }
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
+    let invocation = CcInvocation::parse(&argv(&[
+        "-c", "-o", "out.o", "-I", "a", "-I", "b", "src/a.c",
+    ]))
+    .expect("admitted");
+    let mut context = context(root.path(), &root.path().join("target"));
+    for path in [root.path().join("src/a.c"), system.to_path_buf()] {
+        context.inputs.push(CcActionInput {
+            path,
+            digest: digest_of("input"),
+        });
+    }
+    let prediction = invocation.prediction(&context, 0).unwrap();
+    assert_eq!(prediction.search_order_dependent, Some(false));
 }

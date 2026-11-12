@@ -88,6 +88,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         environment,
         inputs: Vec::new(),
         search_order_dependent: None,
+        search_order_operands: None,
     };
 
     drop(setup);
