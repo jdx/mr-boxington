@@ -38,7 +38,7 @@ use std::time::{Instant, SystemTime};
 const ADAPTER: &str = "cc";
 // Keep the extended prediction payload out of older shims' manifests and
 // flights. They reject unknown fields before checking the payload version.
-const PREDICTION_ADAPTER: &str = "cc-path-binding-v1";
+const PREDICTION_ADAPTER: &str = "cc-path-binding-v2";
 
 /// Compile one C or C++ translation unit, consulting the cache around it.
 ///
@@ -87,6 +87,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         path_mappings: mappings,
         environment,
         inputs: Vec::new(),
+        search_order_dependent: None,
     };
 
     drop(setup);

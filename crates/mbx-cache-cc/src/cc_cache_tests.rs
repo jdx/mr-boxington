@@ -537,6 +537,7 @@ fn context(workspace: &Path, target: &Path) -> CcActionContext {
         ],
         environment: BTreeMap::new(),
         inputs: Vec::new(),
+        search_order_dependent: None,
     }
 }
 
@@ -954,6 +955,8 @@ fn a_prediction_from_a_future_schema_bypasses() {
         environment: Vec::new(),
         compiler_duration_ns: 0,
         source_name: String::new(),
+        search_order_dependent: None,
+        search_order_scanned: None,
     };
     assert_eq!(
         prediction
@@ -1440,4 +1443,254 @@ fn msvc_identity_distinguishes_target_architectures() {
         .unwrap()
     };
     assert_ne!(for_arch("1", "_M_ARM64"), for_arch("_M_X64", "1"));
+}
+
+/// A checkout whose `-I` directories hold the given headers.
+fn include_checkout(headers: &[(&str, &str)]) -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("src")).unwrap();
+    std::fs::write(root.path().join("src/a.c"), "#include <one.h>\n").unwrap();
+    for (directory, name) in headers {
+        let path = root.path().join(directory).join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "").unwrap();
+    }
+    root
+}
+
+fn include_keys(root: &Path, order: &[&str]) -> (CacheDigest, CacheDigest) {
+    include_keys_with(root, order, None)
+}
+
+fn include_keys_with(
+    root: &Path,
+    order: &[&str],
+    recorded: Option<bool>,
+) -> (CacheDigest, CacheDigest) {
+    let mut arguments = vec!["-O0", "-c", "-o", "out.o"];
+    let flags = order
+        .iter()
+        .flat_map(|directory| ["-I", directory])
+        .collect::<Vec<_>>();
+    arguments.extend(flags);
+    arguments.push("src/a.c");
+    let invocation = CcInvocation::parse(&argv(&arguments)).expect("admitted");
+    let target = root.join("target");
+    let mut context = context(root, &target);
+    context.search_order_dependent = recorded;
+    context.inputs.push(CcActionInput {
+        path: root.join("src/a.c"),
+        digest: digest_of("source"),
+    });
+    let invocation_digest = invocation.invocation_digest(&context).unwrap();
+    (
+        invocation.action(context).unwrap().digest,
+        invocation_digest,
+    )
+}
+
+#[test]
+fn include_directories_in_a_different_order_share_a_key_when_no_header_is_in_two() {
+    // A generator that gathers its include directories in a hash set emits
+    // them in a new order every run.
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h"), ("c", "sub/three.h")]);
+    let first = include_keys(root.path(), &["a", "b", "c"]);
+    assert_eq!(first, include_keys(root.path(), &["c", "a", "b"]));
+    assert_eq!(first, include_keys(root.path(), &["b", "c", "a"]));
+}
+
+#[test]
+fn include_directory_order_stays_in_the_key_when_a_header_is_in_two() {
+    let root = include_checkout(&[("a", "shared.h"), ("b", "shared.h")]);
+    let (forward, _) = include_keys(root.path(), &["a", "b"]);
+    let (reverse, _) = include_keys(root.path(), &["b", "a"]);
+    assert_ne!(forward, reverse);
+}
+
+#[test]
+fn a_header_appearing_in_a_second_directory_changes_the_key() {
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
+    let (before, _) = include_keys(root.path(), &["b", "a"]);
+    std::fs::write(root.path().join("b/one.h"), "").unwrap();
+    let (after, _) = include_keys(root.path(), &["b", "a"]);
+    assert_ne!(before, after);
+    assert_ne!(after, include_keys(root.path(), &["a", "b"]).0);
+}
+
+#[test]
+fn prediction_identity_ignores_include_order_even_when_headers_collide() {
+    // The prediction only names files to look at; the action key still
+    // separates the two orders.
+    let root = include_checkout(&[("a", "shared.h"), ("b", "shared.h")]);
+    let (_, forward) = include_keys(root.path(), &["a", "b"]);
+    let (_, reverse) = include_keys(root.path(), &["b", "a"]);
+    assert_eq!(forward, reverse);
+}
+
+#[test]
+fn only_a_run_of_consecutive_include_flags_is_reordered() {
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
+    let build = |arguments: &[&str]| {
+        let invocation = CcInvocation::parse(&argv(arguments)).unwrap();
+        let mut context = context(root.path(), &root.path().join("target"));
+        context.inputs.push(CcActionInput {
+            path: root.path().join("src/a.c"),
+            digest: digest_of("source"),
+        });
+        invocation.action(context).unwrap().digest
+    };
+    let base = ["-c", "-o", "out.o"];
+    let split = |first: &str, second: &str| {
+        let mut arguments = base.to_vec();
+        arguments.extend(["-I", first, "-DX=1", "-I", second, "src/a.c"]);
+        build(&arguments)
+    };
+    assert_ne!(split("a", "b"), split("b", "a"));
+}
+
+fn order_is_shared(root: &Path) -> bool {
+    include_keys(root, &["a", "b"]).0 == include_keys(root, &["b", "a"]).0
+}
+
+#[test]
+fn any_file_extension_counts_as_a_possible_include_target() {
+    let root = include_checkout(&[("a", "config.cuh"), ("b", "config.cuh")]);
+    assert!(!order_is_shared(root.path()));
+}
+
+#[test]
+fn names_differing_only_in_letter_case_keep_the_order() {
+    let root = include_checkout(&[("a", "Foo.h"), ("b", "foo.h")]);
+    assert!(!order_is_shared(root.path()));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_directory_keeps_the_order() {
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h"), ("real", "x.h")]);
+    std::os::unix::fs::symlink(root.path().join("real"), root.path().join("a/sub")).unwrap();
+    assert!(!order_is_shared(root.path()));
+}
+
+#[test]
+fn headers_that_read_the_search_order_keep_it() {
+    for line in [
+        "#include_next <two.h>\n",
+        "#  include <../config.h>\n",
+        "#include \"../missing.h\"\n",
+        "#include\\\n<../config.h>\n",
+        "#if __has_include_next(<two.h>)\n#endif\n",
+        "#define H \"../config.h\"\n#include H\n",
+        "#/**/include <../config.h>\n",
+        "/* note */ #include /* x */ <../config.h>\n",
+        "#include MACRO // \"x.h\"\n",
+        "const char *m = \"/*\";\n#include_next <two.h>\n",
+        "// see a/*.h\n#include_next <two.h>\n",
+        "int x; /*\n*/ int y;\n#include_next <two.h>\n",
+        "#include /*\n*/ <../config.h>\n",
+        "#include <sub//../../config.h>\n",
+        "#include /* \"x.h\" */ MACRO\n",
+    ] {
+        let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
+        std::fs::write(root.path().join("src/a.c"), line).unwrap();
+        assert!(!order_is_shared(root.path()), "{line}");
+    }
+    // A quoted parent include that resolves beside its includer never reaches
+    // the search path.
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h"), ("", "near.h")]);
+    std::fs::write(root.path().join("src/a.c"), "#include \"../near.h\"\n").unwrap();
+    assert!(order_is_shared(root.path()));
+}
+
+#[test]
+fn a_collision_that_appears_later_changes_the_key_even_for_the_sorted_order() {
+    // A prediction recorded under `-I b -I a` names `b/foo.data`; once
+    // `a/foo.data` exists the sorted order must not reuse that key.
+    let root = include_checkout(&[("a", "one.h"), ("b", "foo.data")]);
+    let before = include_keys(root.path(), &["a", "b"]).0;
+    assert_eq!(before, include_keys(root.path(), &["b", "a"]).0);
+    std::fs::write(root.path().join("a/foo.data"), "other").unwrap();
+    assert_ne!(before, include_keys(root.path(), &["a", "b"]).0);
+}
+
+#[test]
+fn a_recorded_search_order_answer_replaces_the_header_scan() {
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
+    let shared = |recorded| {
+        include_keys_with(root.path(), &["a", "b"], recorded).0
+            == include_keys_with(root.path(), &["b", "a"], recorded).0
+    };
+    assert!(shared(None));
+    assert!(shared(Some(false)));
+    assert!(!shared(Some(true)));
+    // The scan is skipped when an answer is recorded.
+    std::fs::write(root.path().join("src/a.c"), "#include_next <two.h>\n").unwrap();
+    assert!(!shared(None));
+    assert!(shared(Some(false)));
+}
+
+#[test]
+fn a_prediction_records_whether_headers_read_the_search_order() {
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
+    let record = |text: &str| {
+        std::fs::write(root.path().join("src/a.c"), text).unwrap();
+        let invocation = CcInvocation::parse(&argv(&[
+            "-c", "-o", "out.o", "-I", "a", "-I", "b", "src/a.c",
+        ]))
+        .expect("admitted");
+        let mut context = context(root.path(), &root.path().join("target"));
+        context.inputs.push(CcActionInput {
+            path: root.path().join("src/a.c"),
+            digest: digest_of("source"),
+        });
+        invocation
+            .prediction(&context, 0)
+            .unwrap()
+            .search_order_dependent
+    };
+    assert_eq!(record("int x;\n"), Some(false));
+    assert_eq!(record("#include_next <two.h>\n"), Some(true));
+}
+
+#[test]
+fn a_recorded_answer_is_dropped_when_the_scanned_files_change() {
+    let root = include_checkout(&[("a", "one.h"), ("b", "two.h")]);
+    let header = root.path().join("a/one.h");
+    let digest = |path: &Path| CacheDigest::blake3(&std::fs::read(path).unwrap());
+    let invocation = CcInvocation::parse(&argv(&[
+        "-c", "-o", "out.o", "-I", "a", "-I", "b", "src/a.c",
+    ]))
+    .expect("admitted");
+    let mut context = context(root.path(), &root.path().join("target"));
+    for path in [root.path().join("src/a.c"), header.clone()] {
+        context.inputs.push(CcActionInput {
+            digest: digest(&path),
+            path,
+        });
+    }
+    let prediction = invocation.prediction(&context, 0).unwrap();
+    let discover = |prediction: &CcInputPrediction| {
+        prediction
+            .discover(
+                root.path(),
+                &context.path_mappings,
+                &mbx_cache_core::NoFileDigestCache,
+            )
+            .unwrap()
+            .search_order_dependent
+    };
+    assert_eq!(discover(&prediction), Some(false));
+    std::fs::write(&header, "#include_next <two.h>\n").unwrap();
+    assert_eq!(discover(&prediction), None);
+}
+
+#[test]
+fn orders_that_differ_across_mapped_roots_share_a_key() {
+    // `workspace` sorts after `target` once normalized, though `include` sorts
+    // before `target/generated` as spelled.
+    let root = include_checkout(&[("include", "one.h"), ("target/generated", "two.h")]);
+    assert_eq!(
+        include_keys(root.path(), &["include", "target/generated"]).0,
+        include_keys(root.path(), &["target/generated", "include"]).0
+    );
 }
