@@ -611,10 +611,6 @@ fn state(source: &str, reason: Option<&str>) -> mbx_cache_core::IncrementalState
     mbx_cache_core::IncrementalState {
         source: source.into(),
         reason: reason.map(Into::into),
-        donor: None,
-        files: None,
-        bytes: None,
-        copy_ns: None,
     }
 }
 
@@ -636,7 +632,7 @@ fn private_compilations_are_charged_to_the_crate_whose_edit_made_them_private() 
                 3,
                 "private-dependency",
                 &["store"],
-                state("cold", Some("no-donor")),
+                state("cold", Some("empty-directory")),
             ),
         ],
     );
@@ -649,62 +645,6 @@ fn private_compilations_are_charged_to_the_crate_whose_edit_made_them_private() 
 }
 
 #[test]
-fn a_private_dependency_not_built_this_time_still_names_the_change() {
-    let analysis = analyze(
-        Vec::new(),
-        vec![private_compilation(
-            "store",
-            5,
-            "private-dependency",
-            &["core"],
-            state("seeded", None),
-        )],
-    );
-
-    let changed = group(&analysis, &Cause::Changed("core".into()));
-    assert_eq!(changed.dependent_count, 1);
-}
-
-#[test]
-fn the_report_says_where_private_incremental_state_came_from() {
-    let mut seeded = state("seeded", None);
-    seeded.bytes = Some(3 * 1024 * 1024);
-    seeded.copy_ns = Some(SECOND / 2);
-    let text = analyze(
-        Vec::new(),
-        vec![
-            private_compilation("core", 2, "hot-reuse", &[], state("existing", None)),
-            private_compilation("store", 5, "private-dependency", &["core"], seeded),
-            private_compilation(
-                "analysis",
-                3,
-                "private-dependency",
-                &["core"],
-                state("cold", Some("no-donor")),
-            ),
-        ],
-    )
-    .text();
-
-    assert!(
-        text.contains("private incremental state for 3 compilations"),
-        "{text}"
-    );
-    assert!(
-        text.contains("seeded from another checkout, copying 3.0 MiB in"),
-        "{text}"
-    );
-    assert!(
-        text.contains("started empty: no other checkout had it (1)"),
-        "{text}"
-    );
-    assert!(
-        text.contains("started from this checkout's earlier state (1)"),
-        "{text}"
-    );
-}
-
-#[test]
 fn recordings_without_private_state_details_leave_the_section_out() {
     let text = analyze(
         Vec::new(),
@@ -713,4 +653,28 @@ fn recordings_without_private_state_details_leave_the_section_out() {
     .text();
 
     assert!(!text.contains("private incremental state"), "{text}");
+}
+
+#[test]
+fn private_state_reports_existing_and_empty_starts() {
+    let text = analyze(
+        Vec::new(),
+        vec![
+            private_compilation("core", 2, "hot-reuse", &[], state("existing", None)),
+            private_compilation(
+                "store",
+                5,
+                "private-dependency",
+                &["core"],
+                state("cold", Some("empty-directory")),
+            ),
+        ],
+    )
+    .text();
+    assert!(
+        text.contains("started from this checkout's earlier state"),
+        "{text}"
+    );
+    assert!(text.contains("started empty:"), "{text}");
+    assert!(!text.contains("seeded"), "{text}");
 }

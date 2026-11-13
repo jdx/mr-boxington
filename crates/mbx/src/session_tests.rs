@@ -2328,33 +2328,6 @@ fn transparent_wrapped_compiles_do_not_count_samples_and_clippy_has_its_own_mode
 }
 
 #[test]
-fn seed_incremental_session_policy_uses_config_boolean_spellings() {
-    let requested = |value: Option<&str>| {
-        seed_incremental_from_env(|name| {
-            assert_eq!(name, "MBX_SESSION_SEED_INCREMENTAL");
-            value.map(OsString::from)
-        })
-    };
-    assert!(requested(None));
-    for spelling in [
-        "", "0", "false", "no", "off", "n", " FALSE ", "NO", " Off ", "  ",
-    ] {
-        assert!(!requested(Some(spelling)), "{spelling:?}");
-    }
-    for spelling in ["1", "true", "yes", "on", "y", " TRUE ", " YES ", " On "] {
-        assert!(requested(Some(spelling)), "{spelling:?}");
-    }
-    assert!(!requested(Some("invalid")));
-}
-
-#[test]
-fn seed_incremental_shim_does_not_read_the_user_override() {
-    assert!(seed_incremental_from_env(|name| {
-        (name == "MBX_SEED_INCREMENTAL").then(|| OsString::from("0"))
-    }));
-}
-
-#[test]
 fn rustc_shim_entry_reserves_stderr_before_reporting_diagnostics() {
     const CHILD: &str = "MBX_TEST_RUSTC_WARNING_CHILD";
     if std::env::var_os(CHILD).is_some() {

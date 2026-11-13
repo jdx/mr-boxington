@@ -611,8 +611,7 @@ To remove existing managed targets now, use the commands in
 
 Collection reports **logical bytes**, based on file lengths. Learned
 incremental state counts each distinct file inode once across all checkouts,
-including hard-linked sessions seeded by older mbx versions. New seeds use
-independent copies or filesystem clones. Removing a unit only counts shared
+including hard-linked sessions seeded by older mbx versions. Removing a unit only counts shared
 bytes as removed when their last reference in the incremental cache is gone,
 and removing a rustc session from a checkout a build is using counts only the
 files whose last link it removed. `mbx gc --json` reports those sessions as

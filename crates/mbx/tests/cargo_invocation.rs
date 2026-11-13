@@ -2,6 +2,8 @@
 //! without changing Cargo's configuration loading, listing, or execution.
 #![cfg(unix)]
 
+mod support;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -75,6 +77,7 @@ touch "$EXTERNAL_MARKER"
 
     fn command(&self, shim: bool) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_mbx"));
+        support::isolate_host(&mut command);
         let real = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let real = which::which(real).unwrap();
         let path = std::env::join_paths(

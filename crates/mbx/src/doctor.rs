@@ -165,7 +165,7 @@ async fn check(config: &Config, toolchain: Option<&str>) -> Vec<Check> {
     if config.target.views {
         checks.push(atime_check(
             &crate::target::views_root(&config.target.root),
-            "unused-unit collection is skipped and seeding cannot filter by recent use",
+            "unused-unit collection is skipped",
         ));
     }
     #[cfg(unix)]
