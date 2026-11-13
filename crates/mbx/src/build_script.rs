@@ -863,7 +863,11 @@ fn build_action(
     let checkout = checkout_local
         .then(|| std::env::var("CARGO_MANIFEST_DIR"))
         .transpose()?;
-    let profile = execution_profile(Path::new(&std::env::var("OUT_DIR")?), &mappings);
+    // Cargo always sets OUT_DIR for a script; without one there is no
+    // profile to name.
+    let profile = std::env::var_os("OUT_DIR")
+        .map(|out_dir| execution_profile(Path::new(&out_dir), &mappings))
+        .unwrap_or_default();
     let archive_timestamps = archive_timestamp_key();
     let bytes = canonical_json(&Action {
         archive_timestamps: archive_timestamps.as_deref(),
