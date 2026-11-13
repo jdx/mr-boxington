@@ -2326,9 +2326,12 @@ impl CacheAgent {
         {
             paths.extend(self.fetch_remote_blobs(remote, missing, None).await);
         }
-        if digests.iter().any(|digest| !paths.contains_key(digest))
-            && let Some(refusal) = self.budget_refusal(&digests)
-        {
+        let unfound = digests
+            .iter()
+            .filter(|digest| !paths.contains_key(*digest))
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(refusal) = self.budget_refusal(&unfound) {
             return Ok(refusal);
         }
 

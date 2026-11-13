@@ -954,7 +954,14 @@ impl CacheAgent {
         let _permit = self.remote_transfers.acquire().await?;
         let reservation = match self.reserve_remote_download(digest.size, prefetch_limit.is_some())
         {
-            Ok(reservation) => reservation,
+            Ok(reservation) => {
+                // A refusal recorded earlier is stale once the budget allows
+                // this fetch, whatever else may now go wrong with it.
+                if prefetch_limit.is_none() {
+                    self.budget_refused_blobs.lock().unwrap().remove(digest);
+                }
+                reservation
+            }
             Err(error) => {
                 if prefetch_limit.is_none() {
                     self.budget_refused_blobs

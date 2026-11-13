@@ -5947,6 +5947,35 @@ async fn bounds_cumulative_remote_downloads_for_a_session() {
 }
 
 #[tokio::test]
+async fn a_recovered_budget_refusal_is_not_blamed_for_a_later_miss() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let blob = CacheDigest::blake3(b"refused once");
+    let _gone = server
+        .mock("GET", blob_path(&blob).as_str())
+        .with_status(404)
+        .create_async()
+        .await;
+    let agent = remote_agent_url_with_limit(
+        server.url().parse().unwrap(),
+        directory.path().join("reader"),
+        RemoteCacheMode::ReadOnly,
+        100,
+    );
+    // An earlier lookup was refused while another download held the budget.
+    agent
+        .budget_refused_blobs
+        .lock()
+        .unwrap()
+        .insert(blob.clone());
+
+    assert!(matches!(
+        agent.respond(AgentRequest::FindBlob { digest: blob }).await,
+        AgentResponse::Blob { path: None }
+    ));
+}
+
+#[tokio::test]
 async fn prefetch_leaves_part_of_the_download_budget_for_restores() {
     let directory = tempfile::tempdir().unwrap();
     let agent = remote_agent_url_with_limit(
