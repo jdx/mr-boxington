@@ -192,9 +192,11 @@ they enter the key as text:
 
 macOS needs one adjustment of its own. A debug-info link records absolute
 object paths and their timestamps in the binary's debug map, so mbx passes
-ld64 `-oso_prefix` for the build's target directory, which lets those links
-cache. The same prefix covers `-Csplit-debuginfo=unpacked`, which keeps debug
-information in the objects rather than beside the binary.
+ld64 `-oso_prefix` for the build's profile directory (such as `target/debug`),
+which lets those links cache and leaves the debug map naming `deps/...` in
+every profile that shares the link. The same prefix covers
+`-Csplit-debuginfo=unpacked`, which keeps debug information in the objects
+rather than beside the binary.
 
 ## Native libraries are inputs where nothing links
 

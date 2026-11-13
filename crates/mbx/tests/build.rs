@@ -1166,6 +1166,45 @@ fn a_failed_mergeable_render_is_not_run_again_transparently() {
     assert_eq!(std::fs::read(&count).unwrap(), b"x");
 }
 
+/// A profile that inherits `dev` unchanged compiles every unit as `dev` does,
+/// so its build restores what the `dev` build stored instead of compiling again.
+#[test]
+fn a_profile_inheriting_dev_restores_the_dev_compilations() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let manifest = project.path().join("Cargo.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text.push_str("\n[profile.alt]\ninherits = \"dev\"\n");
+    std::fs::write(&manifest, text).unwrap();
+
+    let dev = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("dev.json"),
+    );
+    assert!(
+        count(&dev, "stored_bytes") > 0,
+        "the dev build stores: {dev}"
+    );
+
+    let (alt, _) = cargo_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("alt.json"),
+        &["build", "--offline", "--profile", "alt"],
+        &[],
+    );
+    assert!(
+        count(&alt, "hits") > 0,
+        "alt should restore from dev: {alt}"
+    );
+    assert_eq!(count(&alt, "misses"), 0, "alt compiled again: {alt}");
+    assert_eq!(count(&alt, "unconsulted"), 0, "alt compiled again: {alt}");
+    assert!(fixture_rlib_exists(&project.path().join("target/alt")));
+}
+
 /// Remove the outputs behind a target link so the next build must restore.
 fn wipe_target(project: &Path) {
     let target = project.join("target");
