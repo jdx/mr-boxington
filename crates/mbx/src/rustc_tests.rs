@@ -2619,10 +2619,8 @@ fn mbx_incremental_safety_tracks_optimization_lto_and_codegen_units() {
     let safe = |arguments: &[&str]| {
         mbx_incremental_is_safe(&arguments.iter().map(OsString::from).collect::<Vec<_>>())
     };
-    for level in ["0", "1"] {
-        assert!(safe(&["-C", &format!("opt-level={level}")]));
-    }
-    for level in ["2", "3", "s", "z"] {
+    assert!(safe(&["-C", "opt-level=0"]));
+    for level in ["1", "2", "3", "s", "z"] {
         assert!(!safe(&["-C", &format!("opt-level={level}")]));
     }
     assert!(!safe(&["-O"]));
@@ -2686,7 +2684,11 @@ fn mbx_incremental_safety_tracks_optimization_lto_and_codegen_units() {
     assert!(!safe(&["-Copt-level=3", "-Clto=off", "-Clto=thin"]));
     assert!(safe(&["-Copt-level=3", "-Clto=false"]));
     assert!(!safe(&["-Copt-level=0", "-Clto=false", "-Clto=thin"]));
-    assert!(safe(&["-O", "-Copt-level=1"]));
+    assert!(!safe(&["-O", "-Copt-level=1"]));
+    assert!(safe(&["-O", "-Copt-level=0"]));
+    assert!(!safe(&["-Copt-level=0", "-O"]));
+    assert!(safe(&["-Copt-level=1", "-Clto=off"]));
+    assert!(safe(&["-Copt-level=1", "-Ccodegen-units=1"]));
     assert!(!safe(&["-Copt-level=1", "-O"]));
 }
 
@@ -2717,10 +2719,12 @@ fn mbx_incremental_safety_expands_response_files() {
     assert!(!safe("-Copt-level=0\n-Clto=thin\n", &[]));
     assert!(safe("-Copt-level=3\n-Ccodegen-units=1\n", &[]));
     assert!(safe("-Copt-level=3\n", &["-Clto=off"]));
-    assert!(safe("-Copt-level=3\n", &["-Copt-level=1"]));
+    assert!(!safe("-Copt-level=3\n", &["-Copt-level=1"]));
     assert!(!safe("-Copt-level=3\n-Ccodegen-units=1\n", &["-Clto=fat"]));
     assert!(safe("-Copt-level=0\n", &[]));
-    assert!(safe("-Copt-level=1\n", &[]));
+    assert!(!safe("-Copt-level=1\n", &[]));
+    assert!(safe("-Copt-level=1\n", &["-Clto=off"]));
+    assert!(safe("-Copt-level=1\n", &["-Ccodegen-units=1"]));
 }
 
 #[test]

@@ -1865,111 +1865,51 @@ fn learned_incremental_state_seeds_another_checkout_by_default() {
 }
 
 #[test]
-fn incremental_seed_keeps_the_donors_thin_lto_state_linkable() {
-    // Before 1.98 mbx seeds nothing, so there is no donor to protect.
-    if !rustc_relocates_incremental_state() {
-        return;
-    }
-    const MARKER: &str = "seeded-from-first";
-    let store = tempfile::tempdir().unwrap();
-    let first = tempfile::tempdir().unwrap();
-    let second = tempfile::tempdir().unwrap();
-    let reports = tempfile::tempdir().unwrap();
-    let stable = (0..8)
-        .map(|index| {
-            format!(
-                "#[inline(never)] fn f{index}(x: u64) -> u64 {{ super::secret(x.rotate_left({index})) ^ {index} }}\n"
-            )
-        })
-        .collect::<String>()
-        + "pub fn run(x: u64) -> u64 {"
-        + &(0..8)
-            .map(|index| format!("f{index}(x)"))
-            .collect::<Vec<_>>()
-            .join(" ^ ")
-        + "}\n";
-    let edit = |project: &Path, revision: u64| {
-        let table = (0..32)
-            .map(|value| (value + revision).to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        // ThinLTO imports secret into stable's codegen unit and promotes the
-        // private table with a .llvm suffix. Corrupting the donor's bitcode
-        // leaves its reused object referencing a table the new object lacks.
-        std::fs::write(
-            project.join("base/src/lib.rs"),
-            format!(
-                "pub mod stable; static TABLE: [u64; 32] = [{table}];\n\
-                 fn secret(x: u64) -> u64 {{ TABLE[(x % 32) as usize] }}\n\
-                 pub fn value(x: u64) -> u64 {{ stable::run(x) + {revision} }}\n"
-            ),
-        )
-        .unwrap();
-    };
-    for project in [first.path(), second.path()] {
-        write_dependent_project(project);
-        let manifest = project.join("Cargo.toml");
+fn local_thin_lto_links_without_mbx_incremental() {
+    // ThinLTO's in-place session rewrites previously corrupted seeded donors.
+    // Such profiles must now avoid private state entirely, and still link.
+    for mode in ["MBX_LEARNED_INCREMENTAL", "MBX_EAGER_INCREMENTAL"] {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_dependent_project(project.path());
+        let manifest = project.path().join("Cargo.toml");
         let mut contents = std::fs::read_to_string(&manifest).unwrap();
         contents.push_str("\n[profile.dev]\nopt-level = 1\n");
         std::fs::write(manifest, contents).unwrap();
-        std::fs::remove_file(project.join("above/src/lib.rs")).unwrap();
+        std::fs::remove_file(project.path().join("above/src/lib.rs")).unwrap();
         std::fs::write(
-            project.join("above/src/main.rs"),
-            "fn main() { println!(\"{}\", base::value(std::env::args().count() as u64)); }\n",
+            project.path().join("above/src/main.rs"),
+            "fn main() { println!(\"{}\", base::value()); }\n",
         )
         .unwrap();
-        std::fs::write(project.join("base/src/stable.rs"), &stable).unwrap();
-        edit(project, 0);
-    }
-    // Enabled explicitly so a configuration that turns seeding off cannot
-    // skip what this test checks.
-    let environment = [("MBX_SEED_INCREMENTAL", "1")];
-    let build = |project: &Path, label: &str| {
-        build_with(
-            project,
-            store.path(),
-            &reports.path().join(format!("{label}.json")),
-            &environment,
-        )
-    };
-    build(first.path(), "first-initial");
-    edit(first.path(), 1);
-    let (learned, _) = build(first.path(), "first-edit");
-    assert!(compiled_incrementally(&learned) >= 1, "{learned}");
-    // A seed copies the whole unit, so the marker shows the second checkout
-    // really started from the donor's state rather than from scratch.
-    let units = find_files(&incremental_checkout(store.path(), first.path()), |path| {
-        file_name_is(path, |name| name == "query-cache.bin")
-    });
-    assert!(!units.is_empty(), "the edit should leave rustc state");
-    for unit in &units {
-        // <unit>/<crate>-<hash>/<session>/query-cache.bin
-        std::fs::write(unit.ancestors().nth(3).unwrap().join(MARKER), b"").unwrap();
-    }
-    build(second.path(), "second-initial");
-    edit(second.path(), 2);
-    build(second.path(), "second-edit");
-    assert!(
-        !find_files(&incremental_checkout(store.path(), second.path()), |path| {
-            file_name_is(path, |name| name == MARKER)
-        })
-        .is_empty(),
-        "the second checkout should be seeded from the first"
-    );
-    // Check out the receiver's revision in place in the donor. A hard-linked
-    // seed makes this build fail to link with an undefined *.llvm.* symbol.
-    edit(first.path(), 2);
-    build(first.path(), "first-final");
-    for project in [first.path(), second.path()] {
-        let output = Command::new(
-            project
-                .join("target/debug")
-                .join(format!("above{}", std::env::consts::EXE_SUFFIX)),
-        )
-        .output()
-        .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "29");
+        for revision in 0..3 {
+            std::fs::write(
+                project.path().join("base/src/lib.rs"),
+                format!("pub fn value() -> u32 {{ {revision} }}\n"),
+            )
+            .unwrap();
+            let (stats, stderr) = build_with(
+                project.path(),
+                store.path(),
+                &reports.path().join(format!("{revision}.json")),
+                &[(mode, "1"), ("MBX_SEED_INCREMENTAL", "1")],
+            );
+            assert_eq!(compiled_incrementally(&stats), 0, "{stats}\n{stderr}");
+            let output = Command::new(
+                project
+                    .path()
+                    .join("target/debug")
+                    .join(format!("above{}", std::env::consts::EXE_SUFFIX)),
+            )
+            .output()
+            .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap().trim(),
+                revision.to_string()
+            );
+        }
     }
 }
 
@@ -2052,6 +1992,7 @@ fn check_incremental_seeding(remapped: &[(&str, &str)]) {
     let reports = tempfile::tempdir().unwrap();
     // Apply the GC branch's seeding backstop checks to both remap modes.
     let mut environment = remapped.to_vec();
+    environment.push(("MBX_LEARNED_INCREMENTAL", "1"));
     environment.extend([("MBX_GC_INCREMENTAL_MAX_SIZE", "0B"), ("MBX_GC_AUTO", "0")]);
     let remapped = environment.as_slice();
     // A module the edit never touches compiles to its own codegen units, which
@@ -2069,11 +2010,10 @@ fn check_incremental_seeding(remapped: &[(&str, &str)]) {
     let edit = |project: &Path| std::fs::write(project.join("base/src/lib.rs"), lib(21)).unwrap();
     for project in [first.path(), second.path(), unremapped.path()] {
         write_dependent_project(project);
-        // ThinLTO retains bitcode that rustc can rewrite in place when loading
-        // a seeded session. A hard-linked seed would corrupt the donor.
+        // Keep optimized seeding eligible and verify independent donor copies.
         let manifest = project.join("Cargo.toml");
         let mut contents = std::fs::read_to_string(&manifest).unwrap();
-        contents.push_str("\n[profile.dev]\nopt-level = 1\n");
+        contents.push_str("\n[profile.dev]\nopt-level = 1\nlto = \"off\"\n");
         std::fs::write(manifest, contents).unwrap();
         std::fs::write(project.join("base/src/stable.rs"), &stable).unwrap();
         std::fs::write(project.join("base/src/lib.rs"), lib(0)).unwrap();
@@ -2853,17 +2793,22 @@ fn a_changed_build_script_environment_value_counts_as_an_edit() {
 }
 
 #[test]
-fn learned_incremental_skips_optimized_compiles_and_keeps_dev_levels() {
+fn learned_incremental_skips_local_thin_lto_and_keeps_safe_profiles() {
     let store = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();
 
-    for (label, level, expected) in [("dev0", "0", true), ("dev1", "1", true)] {
+    for (label, level, extra, expected) in [
+        ("dev0", "0", "", true),
+        ("dev1", "1", "", false),
+        ("dev1off", "1", "lto = \"off\"\n", true),
+        ("dev1cgu", "1", "codegen-units = 1\n", true),
+    ] {
         let project = tempfile::tempdir().unwrap();
         write_named_project(project.path(), label);
         std::fs::write(
             project.path().join("Cargo.toml"),
             format!(
-                "[package]\nname = \"{label}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[profile.dev]\nopt-level = {level}\n"
+                "[package]\nname = \"{label}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[profile.dev]\nopt-level = {level}\n{extra}"
             ),
         )
         .unwrap();
@@ -2949,8 +2894,10 @@ fn eager_incremental_skips_optimized_compiles() {
 fn response_file_profiles_follow_incremental_safety_gates() {
     for (mode, level, expected) in [
         ("MBX_LEARNED_INCREMENTAL", "0", true),
+        ("MBX_LEARNED_INCREMENTAL", "1", false),
         ("MBX_LEARNED_INCREMENTAL", "3", false),
         ("MBX_EAGER_INCREMENTAL", "0", true),
+        ("MBX_EAGER_INCREMENTAL", "1", false),
         ("MBX_EAGER_INCREMENTAL", "3", false),
     ] {
         let store = tempfile::tempdir().unwrap();

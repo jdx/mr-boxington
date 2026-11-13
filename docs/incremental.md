@@ -24,11 +24,12 @@ cache; [the build summary](#incremental-counts-in-the-build-summary) counts the
 compilation as `incremental`.
 
 mbx does not add incremental state to compiles that use LTO, or to compiles
-optimized at opt-level 2 or higher (including `s` and `z`). Above opt-level 0,
-rustc runs local ThinLTO across a crate's codegen units, and incremental ThinLTO
-can leave an rlib whose units do not link. Opt-level 1 stays eligible because
-Cargo itself compiles opt-level 1 dev profiles incrementally. In a Cargo
-profile, `lto = "off"` or `codegen-units = 1` turns local ThinLTO off, so those
+optimized at any opt-level above 0 (1, 2, 3, `s`, or `z`). Above opt-level 0,
+rustc runs local ThinLTO across a crate's codegen units, and it rewrites files
+of the previous, finished incremental session in place. A copy taken while that
+happens, or a build interrupted partway, can leave state whose rlibs do not
+link. Cargo compiles opt-level 1 dev profiles incrementally itself; mbx does
+not add to that. In a Cargo profile, `lto = "off"` or `codegen-units = 1` turns local ThinLTO off, so those
 compiles stay eligible at any opt-level. `lto = false`, Cargo's default, does
 not turn it off.
 
