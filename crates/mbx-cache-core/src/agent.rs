@@ -1794,7 +1794,7 @@ impl CacheAgent {
     fn lock_task_manifest(&self, task: &str) -> Result<fslock::LockFile> {
         let path = self.task_manifest_lock_path(task);
         fs::create_dir_all(path.parent().expect("task manifest lock has a parent"))?;
-        let mut lock = fslock::LockFile::open(&path)?;
+        let mut lock = crate::open_shared_lock(&path)?;
         lock.lock()?;
         Ok(lock)
     }
@@ -1828,7 +1828,8 @@ impl CacheAgent {
     fn persist_task_manifest(&self, manifest: &TaskActionManifest) -> Result<()> {
         let bytes = canonical_json(manifest)?;
         fs::create_dir_all(self.manifest_dir.as_path())?;
-        let mut temporary = tempfile::NamedTempFile::new_in(self.manifest_dir.as_path())?;
+        let mut temporary =
+            crate::shared_tempfile_builder().tempfile_in(self.manifest_dir.as_path())?;
         std::io::Write::write_all(temporary.as_file_mut(), &bytes)?;
         temporary.as_file_mut().sync_all()?;
         temporary
@@ -3245,7 +3246,8 @@ impl CacheAgent {
         let path = self.persisted_identity_path(key)?;
         fs::create_dir_all(self.identity_dir.as_path())?;
         // Not synced: a torn record reads as no record, and costs one probe.
-        let mut temporary = tempfile::NamedTempFile::new_in(self.identity_dir.as_path())?;
+        let mut temporary =
+            crate::shared_tempfile_builder().tempfile_in(self.identity_dir.as_path())?;
         std::io::Write::write_all(temporary.as_file_mut(), &serde_json::to_vec(&persisted)?)?;
         temporary.persist(path).map_err(|error| error.error)?;
         Ok(())

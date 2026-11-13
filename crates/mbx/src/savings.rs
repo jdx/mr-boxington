@@ -184,7 +184,7 @@ pub(crate) fn record(store: &Path, delta: &Delta) -> Result<Tally> {
             .expect("the tally lock path has a parent"),
     )
     .wrap_err_with(|| format!("failed to create {}", lock_path.display()))?;
-    let mut lock = fslock::LockFile::open(&lock_path)?;
+    let mut lock = mbx_cache_core::open_shared_lock(&lock_path)?;
     lock.lock()?;
 
     let path = tally_path(store);

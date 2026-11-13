@@ -903,7 +903,7 @@ impl HttpRemoteCache {
                 .await?;
             let mut response = error_for_status_with_body(response).await?;
             fs::create_dir_all(staging_dir)?;
-            let temporary = tempfile::NamedTempFile::new_in(staging_dir)?;
+            let temporary = crate::shared_tempfile_builder().tempfile_in(staging_dir)?;
             let mut output = tokio::fs::File::from_std(temporary.reopen()?);
             // Bound the download by the digest's own size so an oversized
             // response cannot fill the disk before verification rejects it.

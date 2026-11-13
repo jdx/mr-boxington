@@ -253,7 +253,7 @@ pub(crate) fn stabilize(real: &Path, root: &Path) -> Result<Option<PathBuf>> {
     // the same lock, so a second process either finds the finished,
     // protected tree or waits for it.
     let published = (|| -> Result<()> {
-        let mut publishing = fslock::LockFile::open(&publish_lock_path(root, &digest))?;
+        let mut publishing = mbx_cache_core::open_shared_lock(&publish_lock_path(root, &digest))?;
         publishing.lock()?;
         if !stable.is_dir() {
             materialize(real, root, &stable, &manifest, &files, &directories)?;
@@ -290,7 +290,7 @@ fn leases_dir(root: &Path, digest: &str) -> PathBuf {
 
 fn registrar(root: &Path) -> Result<fslock::LockFile> {
     std::fs::create_dir_all(root)?;
-    let mut lock = fslock::LockFile::open(&root.join(REGISTRAR))?;
+    let mut lock = mbx_cache_core::open_shared_lock(&root.join(REGISTRAR))?;
     lock.lock()?;
     Ok(lock)
 }
@@ -319,7 +319,7 @@ fn lease(root: &Path, digest: &str) -> Result<()> {
         .write(true)
         .create_new(true)
         .open(&path)?;
-    let mut lock = fslock::LockFile::open(&path)?;
+    let mut lock = mbx_cache_core::open_shared_lock(&path)?;
     if !lock.try_lock()? {
         eyre::bail!("the OUT_DIR lease {} is already held", path.display());
     }
@@ -339,7 +339,7 @@ fn leased(root: &Path, digest: &str, prune: bool) -> std::io::Result<bool> {
     };
     for entry in entries {
         let entry = entry?;
-        let mut lock = fslock::LockFile::open(&entry.path())?;
+        let mut lock = mbx_cache_core::open_shared_lock(&entry.path())?;
         if !lock.try_lock()? {
             return Ok(true);
         }

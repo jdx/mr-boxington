@@ -1036,7 +1036,7 @@ pub(super) fn was_explained(store: &Path) -> bool {
 /// Written immediately after the notice prints, so a build that fails later
 /// does not explain itself again.
 pub(super) fn mark_explained(store: &Path) {
-    if let Err(error) = crate::util::write_atomic(&store.join(NOTICE_STAMP), b"") {
+    if let Err(error) = crate::util::write_atomic_shared(&store.join(NOTICE_STAMP), b"") {
         // Worth one line at debug: the cost is a repeated notice, and a store
         // this cannot write to has larger problems than that.
         log::debug!("the first-run notice was not recorded: {error}");
