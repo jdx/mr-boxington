@@ -697,9 +697,10 @@ impl CacheAgent {
         let requested_bytes = requested
             .iter()
             .fold(0_u64, |total, digest| total.saturating_add(digest.size));
-        let reservation = match self
-            .reserve_remote_download_up_to(requested_bytes.min(MAX_STAGED_BLOB_PACK_BYTES))
-        {
+        let reservation = match self.reserve_remote_download_up_to(
+            requested_bytes.min(MAX_STAGED_BLOB_PACK_BYTES),
+            prefetch_limit.is_some(),
+        ) {
             Ok(reservation) if reservation.bytes() > 0 => reservation,
             Ok(_) => return Vec::new(),
             Err(error) => {
@@ -951,7 +952,26 @@ impl CacheAgent {
             None => None,
         };
         let _permit = self.remote_transfers.acquire().await?;
-        let reservation = self.reserve_remote_download(digest.size)?;
+        let reservation = match self.reserve_remote_download(digest.size, prefetch_limit.is_some())
+        {
+            Ok(reservation) => {
+                // A refusal recorded earlier is stale once the budget allows
+                // this fetch, whatever else may now go wrong with it.
+                if prefetch_limit.is_none() {
+                    self.budget_refused_blobs.lock().unwrap().remove(digest);
+                }
+                reservation
+            }
+            Err(error) => {
+                if prefetch_limit.is_none() {
+                    self.budget_refused_blobs
+                        .lock()
+                        .unwrap()
+                        .insert(digest.clone());
+                }
+                return Err(error);
+            }
+        };
         self.stats
             .remote_blob_requests
             .fetch_add(1, Ordering::Relaxed);
