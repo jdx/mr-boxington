@@ -3473,6 +3473,42 @@ fn returning_to_cached_content_restores_instead_of_compiling_incrementally() {
         "and should come from the cache: {reverted}"
     );
 }
+
+#[test]
+fn returning_to_cached_content_restores_dependents_too() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_dependent_project(project.path());
+    let run = |revision: u32| {
+        std::fs::write(
+            project.path().join("base/src/lib.rs"),
+            format!("pub fn value() -> u32 {{ {revision} }}\n"),
+        )
+        .unwrap();
+        build(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("{revision}.json")),
+        )
+    };
+
+    run(0);
+    for revision in 1..=3 {
+        run(revision);
+    }
+    let reverted = run(0);
+    assert_eq!(
+        compiled_incrementally(&reverted),
+        0,
+        "neither the edited crate nor the crate linking it should compile incrementally: {reverted}"
+    );
+    assert!(
+        reverted["hits"].as_u64().unwrap_or(0) >= 2,
+        "both crates should come from the cache: {reverted}"
+    );
+}
+
 /// A compilation that failed left nothing behind to compare against, so the
 /// retry that follows -- with nothing edited in between -- must not read as a
 /// crate that had settled and drop it back to compiling from scratch.

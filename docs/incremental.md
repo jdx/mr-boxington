@@ -39,7 +39,7 @@ still compiles and publishes normally when it misses the cache. Later source
 edits to a known active workspace crate look up the cache first and fall back
 to its private state on a miss. Returning to content the cache already holds,
 as after a revert, a rebase onto a cached branch, or a branch switch, restores
-the crate and its dependents instead of recompiling them. A changed environment
+the crate and its dependents instead of recompiling them. The exception is a revert that removes a module the edits added: the cache remembers the crate's most recent input list, which names a file the reverted checkout lacks, so the crate still compiles. A changed environment
 value is looked up the same way, so a value the cache already holds, such as a
 commit hash another checkout published, restores instead of compiling.
 

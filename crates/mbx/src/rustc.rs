@@ -426,7 +426,7 @@ pub(crate) fn compile(
             }
             Ok(None) => {
                 // The fast plan already measured this unit for this compile.
-                if !learned.backstop_rejected {
+                if !learned.backstop_rejected && hot_after_lookup.is_none() {
                     learned = plan_learned_reuse(&compilation, &discovered, &[], learned_enabled);
                 }
             }
@@ -435,12 +435,14 @@ pub(crate) fn compile(
             }
         }
     }
-    if let Some(hot) = hot_after_lookup {
-        learned = hot;
-    }
     // A compilation that cannot be keyed for the cache still has sources worth
     // watching: private incremental state needs no shareable key.
-    if unshareable && learned_enabled && !learned.engaged() && learned.record.is_none() {
+    if unshareable
+        && hot_after_lookup.is_none()
+        && learned_enabled
+        && !learned.engaged()
+        && learned.record.is_none()
+    {
         learned = plan_learned_without_action_key(&compilation, &outputs);
     }
     let mut prediction_missing = private_inputs;
@@ -478,6 +480,10 @@ pub(crate) fn compile(
                 session::report_shim_warning(&format!("prediction was not restored: {error:#}"));
             }
         }
+    }
+    // Neither lookup restored the crate: take back the private plan set aside.
+    if let Some(hot) = hot_after_lookup {
+        learned = hot;
     }
 
     // Everything past this point would run the real compiler, so this is
