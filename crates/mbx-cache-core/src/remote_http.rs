@@ -303,6 +303,16 @@ impl HttpRemoteCache {
         self.read_stall.charge(elapsed, "reads");
     }
 
+    /// Negotiated capabilities, asked for on behalf of an upload.
+    ///
+    /// A server that never answers fails this lookup, and a failed lookup
+    /// leaves the cell empty, so each waiting upload would otherwise start its
+    /// own request and pay its own timeout. Going through the write budget
+    /// charges those failures and stops asking once it is spent.
+    async fn upload_capabilities(&self) -> Result<NegotiatedCapabilities> {
+        self.write_attempt(self.negotiated_capabilities()).await
+    }
+
     /// Run one upload attempt against the write budget.
     ///
     /// Only transient failures (timeouts, refused connections, 5xx) are
@@ -320,6 +330,11 @@ impl HttpRemoteCache {
             && is_transient(error)
         {
             self.write_stall.charge(started_at.elapsed(), "uploads");
+            // The charge that spends the budget ends the retries too, rather
+            // than leaving `retry_async` to back off and find out next attempt.
+            if self.writes_abandoned() {
+                bail!("remote cache uploads were abandoned for this session");
+            }
         }
         result
     }
@@ -1006,7 +1021,7 @@ impl HttpRemoteCache {
         if self.blob_pack_uploads_disabled.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        Ok(self.negotiated_capabilities().await?.blob_pack_uploads)
+        Ok(self.upload_capabilities().await?.blob_pack_uploads)
     }
 
     pub(crate) async fn put_blob_pack(
@@ -1046,7 +1061,7 @@ impl HttpRemoteCache {
             + payload_bytes
             + BLOB_PACK_HEADER_BYTES * uploads.len() as u64;
         let compress = self
-            .negotiated_capabilities()
+            .upload_capabilities()
             .await
             .map(|capabilities| capabilities.zstd_uploads)
             .unwrap_or(false);
@@ -1107,7 +1122,7 @@ impl HttpRemoteCache {
         // A failed negotiation downgrades to identity rather than failing the
         // upload: compression is an economy, not a requirement.
         let compress = self
-            .negotiated_capabilities()
+            .upload_capabilities()
             .await
             .map(|capabilities| capabilities.zstd_uploads)
             .unwrap_or(false);

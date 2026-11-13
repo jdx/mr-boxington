@@ -605,6 +605,10 @@ impl Inner {
                 UploadOutcome::Uploaded
             }
             Err(error) => {
+                if self.remote.writes_abandoned() {
+                    self.sink.record_upload_failure();
+                    return UploadOutcome::Failed;
+                }
                 if missing_source(&error) {
                     warn!(
                         "remote cache blob upload skipped for {}: the local object is gone",
@@ -630,6 +634,12 @@ impl Inner {
     ) -> UploadOutcome {
         for prerequisite in prerequisites {
             if !prerequisite.await.published() {
+                // The budget running out is what failed the blob, and that was
+                // reported once already.
+                if self.remote.writes_abandoned() {
+                    self.sink.record_upload_failure();
+                    return UploadOutcome::Failed;
+                }
                 // The server validates an action result against the blobs it
                 // references, so publishing this one now would be rejected. The
                 // blob failure has already been reported.
@@ -658,6 +668,10 @@ impl Inner {
                 UploadOutcome::Uploaded
             }
             Err(error) => {
+                if self.remote.writes_abandoned() {
+                    self.sink.record_upload_failure();
+                    return UploadOutcome::Failed;
+                }
                 warn!(
                     "remote cache action upload failed for {}: {error}",
                     result.action.hash
