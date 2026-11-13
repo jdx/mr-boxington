@@ -74,6 +74,15 @@ mbx maps known workspace, target, Cargo registry, toolchain, and sysroot paths
 to stable placeholders before they enter a key. That is what lets equivalent
 worktrees share an action even though their absolute paths differ.
 
+The Cargo profile directory, such as `target/debug` or
+`target/<triple>/release`, gets a placeholder of its own. A profile that
+compiles a unit exactly as another does, like `[profile.alt] inherits = "dev"`
+with nothing changed, therefore restores that unit from the other profile's
+entries even though Cargo writes it to `target/alt`. A unit the profile
+compiles differently keeps its own key. Build-script runs stay per profile,
+because a script can read the profile's name from its `OUT_DIR` and emit
+something that depends on it.
+
 The key also covers compiler inputs and relevant environment. If mbx cannot
 model something exactly, it bypasses the action.
 

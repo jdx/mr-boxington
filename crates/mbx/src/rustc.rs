@@ -3557,10 +3557,16 @@ fn with_oso_prefix(arguments: &[OsString], cache_links: bool) -> Cow<'_, [OsStri
     // Examples link rlibs from the sibling deps directory, and build scripts
     // can live further below build/. Strip the shared target root rather than
     // only the directory receiving this particular executable.
-    let prefix = std::env::var_os(session::TARGET_DIR_ENV)
-        .map(PathBuf::from)
-        .filter(|root| root.is_absolute() && out_dir.starts_with(root))
-        .unwrap_or_else(|| standalone_target_root(&out_dir, None));
+    // The profile directory, not the target root: the debug map then names
+    // `deps/x.o` in every profile that shares the link.
+    let prefix = crate::cargo_layout::profile_dir(&out_dir)
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            std::env::var_os(session::TARGET_DIR_ENV)
+                .map(PathBuf::from)
+                .filter(|root| root.is_absolute() && out_dir.starts_with(root))
+        })
+        .unwrap_or_else(|| out_dir.clone());
     // ld64 resolves archive paths through Cargo's target symlink before
     // recording them, so the prefix must use the same physical spelling.
     let prefix = std::fs::canonicalize(&prefix).unwrap_or(prefix);
@@ -4700,6 +4706,23 @@ fn path_mappings_with_env(
             .filter(|root| root.is_absolute())
             .map(|output| standalone_target_root(output, target))
     }) {
+        // Deeper than the target root: a profile that compiles a unit exactly
+        // as another does differs from it only by this directory's name, so it
+        // gets a placeholder of its own and the two share one key.
+        if let Some(profile) = target_output
+            .and_then(crate::cargo_layout::profile_dir)
+            .filter(|profile| profile.starts_with(&root) && *profile != root)
+        {
+            add_mapping(&mut mappings, &mut roots, profile.to_path_buf(), "profile");
+            // With `--target`, host artifacts (proc macros, build scripts)
+            // sit in the plain profile directory beside the triple's.
+            if let Some(name) = profile
+                .file_name()
+                .filter(|_| profile.parent() != Some(&root))
+            {
+                add_mapping(&mut mappings, &mut roots, root.join(name), "host_profile");
+            }
+        }
         add_mapping(&mut mappings, &mut roots, root, "target");
     }
     if let Some(root) = environment(session::WORKSPACE_ROOT_ENV)
@@ -4789,21 +4812,7 @@ fn path_mappings_with_env(
 /// than only the output directory, also covers the other units' outputs and
 /// generated inputs below `build/`.
 fn standalone_target_root(output: &Path, target: Option<&str>) -> PathBuf {
-    let profile = if matches!(
-        output.file_name().and_then(OsStr::to_str),
-        Some("deps" | "examples")
-    ) {
-        output.parent()
-    } else if output.parent().and_then(Path::file_name) == Some(OsStr::new("build")) {
-        output.parent().and_then(Path::parent)
-    } else if output.file_name() == Some(OsStr::new("out"))
-        && output.ancestors().nth(3).and_then(Path::file_name) == Some(OsStr::new("build"))
-    {
-        output.ancestors().nth(4)
-    } else {
-        None
-    };
-    if let Some(profile_root) = profile.and_then(Path::parent) {
+    if let Some(profile_root) = crate::cargo_layout::profile_dir(output).and_then(Path::parent) {
         let target_component = target.and_then(|target| Path::new(target).file_stem());
         if target_component.is_some_and(|target| profile_root.file_name() == Some(target))
             && let Some(root) = profile_root.parent()

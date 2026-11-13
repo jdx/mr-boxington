@@ -49,6 +49,11 @@ struct Action<'a> {
     inputs: &'a BTreeMap<String, InputState>,
     kind: &'static str,
     out_dir: Option<&'a str>,
+    /// The profile directory the script runs for, such as `${target}/debug`.
+    /// `OUT_DIR`'s placeholder hides it and the binary's own key is the same
+    /// in every profile that compiles it identically, yet a script can read
+    /// the profile out of `OUT_DIR` and emit something that names it.
+    profile: &'a str,
     version: u8,
 }
 
@@ -858,6 +863,7 @@ fn build_action(
     let checkout = checkout_local
         .then(|| std::env::var("CARGO_MANIFEST_DIR"))
         .transpose()?;
+    let profile = execution_profile(Path::new(&std::env::var("OUT_DIR")?), &mappings);
     let archive_timestamps = archive_timestamp_key();
     let bytes = canonical_json(&Action {
         archive_timestamps: archive_timestamps.as_deref(),
@@ -868,9 +874,12 @@ fn build_action(
         inputs: &inputs,
         kind: ADAPTER,
         out_dir: out_dir.as_deref(),
+        profile: &profile,
         // Results stored before resolved stream roots were normalized may
         // still contain the publishing checkout's canonical target paths.
-        version: 5,
+        // Keys before 6 named no profile, so profiles that compile a script
+        // identically shared its runs.
+        version: 6,
     })?;
     let digest = CacheDigest::blake3(&bytes);
     Ok((bytes, digest))
@@ -1841,7 +1850,28 @@ fn build_script_mappings() -> Vec<PathMapping> {
     build_script_mappings_with_env(|name| std::env::var_os(name).map(PathBuf::from))
 }
 
+/// The profile directory of a script's `OUT_DIR`, as the key names it.
+///
+/// An `OUT_DIR` outside Cargo's layout names no profile directory, so the key
+/// takes the whole directory instead, under every root but `OUT_DIR`'s own
+/// placeholder, which would hide it again.
+fn execution_profile(out_dir: &Path, mappings: &[PathMapping]) -> String {
+    match crate::cargo_layout::out_dir_profile(out_dir) {
+        Some(profile) => normalize_environment_value(&profile.to_string_lossy(), mappings),
+        None => {
+            let mappings = mappings
+                .iter()
+                .filter(|mapping| mapping.placeholder != "build_script_out_dir")
+                .cloned()
+                .collect::<Vec<_>>();
+            normalize_environment_value(&out_dir.to_string_lossy(), &mappings)
+        }
+    }
+}
+
 /// Construct build-script mappings from an injectable environment lookup.
+///
+/// There is deliberately no profile root: only the path keeps profiles apart.
 fn build_script_mappings_with_env(
     environment: impl Fn(&str) -> Option<PathBuf>,
 ) -> Vec<PathMapping> {
@@ -2669,6 +2699,34 @@ mod tests {
         assert_eq!(
             normalize_environment_value(&cargo_bin.to_string_lossy(), &mappings),
             PathBuf::from("${cargo_home}").join("bin").to_string_lossy()
+        );
+    }
+
+    /// A script can read the profile's name out of its `OUT_DIR` and emit it,
+    /// so profiles that compile the script identically run it under different
+    /// keys.
+    #[test]
+    fn build_script_runs_stay_apart_between_profiles() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target");
+        let profile_of = |out_dir: &Path| {
+            let mappings = build_script_mappings_with_env(|name| match name {
+                "OUT_DIR" => Some(out_dir.to_path_buf()),
+                session::TARGET_DIR_ENV => Some(target.clone()),
+                _ => None,
+            });
+            execution_profile(out_dir, &mappings)
+        };
+        let sep = std::path::MAIN_SEPARATOR;
+        for unit in ["build/app-0def/out", "build/app/0123456789abcdef/out"] {
+            let debug = profile_of(&target.join("debug").join(unit));
+            assert_eq!(debug, format!("${{target}}{sep}debug"));
+            assert_ne!(debug, profile_of(&target.join("alt").join(unit)));
+        }
+        // Outside Cargo's layout the whole directory tells the runs apart.
+        assert_ne!(
+            profile_of(&target.join("debug/generated")),
+            profile_of(&target.join("alt/generated"))
         );
     }
 

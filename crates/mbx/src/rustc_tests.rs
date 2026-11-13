@@ -854,6 +854,63 @@ fn standalone_target_mapping_covers_the_profile_tree() {
 }
 
 #[test]
+fn a_units_profile_directory_is_its_own_placeholder() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target");
+    let key = |output: &Path, target_name: Option<&str>| {
+        let mappings = PathMapping::ordered(&path_mappings_with_env(
+            directory.path(),
+            Some(output),
+            target_name,
+            |name| match name {
+                crate::session::TARGET_DIR_ENV => Some(target.as_os_str().to_owned()),
+                _ => None,
+            },
+        ));
+        normalize_mapped_path(&output.join("libwidget.rlib"), directory.path(), &mappings).unwrap()
+    };
+
+    assert_eq!(
+        key(&target.join("debug/deps"), None),
+        key(&target.join("alt/deps"), None)
+    );
+    assert_eq!(
+        key(&target.join("alt/deps"), None),
+        "${profile}/deps/libwidget.rlib"
+    );
+    // The `--target` layout nests the profile beneath the triple.
+    let triple = "x86_64-unknown-linux-gnu";
+    assert_eq!(
+        key(&target.join(triple).join("debug/deps"), Some(triple)),
+        key(&target.join(triple).join("alt/deps"), Some(triple))
+    );
+    // Host artifacts beside the triple directory are keyed the same way.
+    let mappings = PathMapping::ordered(&path_mappings_with_env(
+        directory.path(),
+        Some(&target.join(triple).join("alt/deps")),
+        Some(triple),
+        |name| match name {
+            crate::session::TARGET_DIR_ENV => Some(target.as_os_str().to_owned()),
+            _ => None,
+        },
+    ));
+    assert_eq!(
+        normalize_mapped_path(
+            &target.join("alt/deps/libmacro.so"),
+            directory.path(),
+            &mappings
+        )
+        .unwrap(),
+        "${host_profile}/deps/libmacro.so"
+    );
+    // A directory outside Cargo's layout keeps naming itself under the target.
+    assert_eq!(
+        key(&target.join("doc"), None),
+        "${target}/doc/libwidget.rlib"
+    );
+}
+
+#[test]
 fn validates_exact_rustc_output_set() {
     let root = tempfile::tempdir().unwrap();
     let outputs = test_outputs(root.path());
