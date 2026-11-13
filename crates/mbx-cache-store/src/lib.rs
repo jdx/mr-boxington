@@ -3351,7 +3351,7 @@ fn write_advisory(path: &Path, contents: &[u8]) -> Result<()> {
         .ok_or_else(|| eyre::eyre!("path has no parent: {}", path.display()))?;
     std::fs::create_dir_all(parent)
         .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
-    let mut temporary = tempfile::Builder::new()
+    let mut temporary = mbx_cache_core::shared_tempfile_builder()
         .prefix(".mbx-")
         .tempfile_in(parent)?;
     use std::io::Write as _;
@@ -3370,7 +3370,7 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
         .ok_or_else(|| eyre::eyre!("path has no parent: {}", path.display()))?;
     std::fs::create_dir_all(parent)
         .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
-    let mut temporary = tempfile::Builder::new()
+    let mut temporary = mbx_cache_core::shared_tempfile_builder()
         .prefix(".mbx-")
         .tempfile_in(parent)?;
     use std::io::Write as _;
