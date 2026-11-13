@@ -842,8 +842,10 @@ fn last_used(directory: &Path) -> Option<u64> {
     if !metadata.is_dir() {
         return None;
     }
-    let stamp = std::fs::metadata(use_stamp_path(directory))
-        .ok()
+    // A leftover staging directory's stamp path is its destination unit's.
+    let stamp = (!is_leftover_staging(directory))
+        .then(|| std::fs::metadata(use_stamp_path(directory)).ok())
+        .flatten()
         .and_then(|stamp| stamp.modified().ok());
     let used = std::fs::read_dir(directory)
         .ok()?
@@ -912,12 +914,9 @@ fn finished_sessions(unit: &Path) -> Vec<(PathBuf, PathBuf)> {
 
 fn measure_unit(directory: PathBuf, inodes: &mut Inodes) -> Option<Unit> {
     let last_used = last_used(&directory)?;
-    // Leftover staging directories from older versions have a dotted suffix.
-    // Their adjacent records belong to the destination unit, so do not collect them.
-    let records = if directory
-        .file_name()
-        .is_some_and(|name| name.to_string_lossy().contains(".seeding-"))
-    {
+    // A leftover staging directory's adjacent records are its destination
+    // unit's, so do not collect them.
+    let records = if is_leftover_staging(&directory) {
         Vec::new()
     } else {
         vec![directory.with_extension("json"), use_stamp_path(&directory)]
@@ -994,6 +993,15 @@ fn listed_bytes(root: &Path) -> u64 {
 
 fn use_stamp_path(unit: &Path) -> PathBuf {
     unit.with_extension(USE_STAMP_EXTENSION)
+}
+
+/// A `<unit>.seeding-<pid>` directory that an mbx version which seeded state
+/// from other checkouts left behind. `with_extension` maps its name to the
+/// destination unit's records and stamp.
+fn is_leftover_staging(directory: &Path) -> bool {
+    directory
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().contains(".seeding-"))
 }
 
 fn rejection(budget: u64) -> Vec<u8> {
@@ -2279,6 +2287,42 @@ mod tests {
         std::fs::write(use_stamp_path(&fallback), b"").unwrap();
         set_mtime(&use_stamp_path(&fallback), 400);
         assert_eq!(last_used(&fallback), Some(400));
+    }
+
+    #[test]
+    fn leftover_staging_ages_on_its_own_and_leaves_its_destinations_records() {
+        let cache = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let state = touch(cache.path(), workspace.path()).unwrap();
+        let destination = unit(&state.directory, "unit", now_secs());
+        let staging = state.directory.join("blake3/unit.seeding-123");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("partial"), b"partial").unwrap();
+        set_mtime(&staging, 0);
+        let stamp = use_stamp_path(&staging);
+        assert_eq!(stamp, use_stamp_path(&destination));
+        std::fs::write(&stamp, b"").unwrap();
+        let churn = destination.with_extension("json");
+        std::fs::write(&churn, b"destination churn").unwrap();
+        assert_eq!(
+            last_used(&staging),
+            Some(0),
+            "the destination's fresh stamp does not keep the staging directory"
+        );
+        drop(state.lease);
+        let outcome = collect(
+            cache.path(),
+            None,
+            Some(Duration::from_secs(60)),
+            false,
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(outcome.removed_units, 1);
+        assert_eq!(outcome.removed_bytes, 7);
+        assert!(!staging.exists());
+        assert!(destination.exists() && stamp.exists() && churn.exists());
     }
 
     #[test]
