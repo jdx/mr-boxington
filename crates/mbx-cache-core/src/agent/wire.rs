@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Wire protocol version used between an in-process cache agent and its shims.
-pub const AGENT_PROTOCOL_VERSION: u8 = 12;
+pub const AGENT_PROTOCOL_VERSION: u8 = 13;
 
 /// Facts the compiler wrapper determined about one action, recorded on its
 /// session event row. Every field is optional, and absent means unknown.
@@ -34,30 +34,11 @@ pub struct CompileMetadata {
 /// Where a compilation's private incremental state came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncrementalState {
-    /// `existing` (the unit's state directory already held a finished rustc
-    /// session; rustc decides how much of it to reuse), `seeded` (copied from
-    /// another checkout), `cold` (started empty), or `failed` (seeding
-    /// errored).
+    /// `existing` when a finished session is present, or `cold` when starting empty.
     pub source: String,
-    /// Why state started cold: `no-donor` (no other checkout had it),
-    /// `not-ready` (a one-time state discard is still pending),
-    /// `seeding-off` (this compilation's state cannot be shared), or
-    /// `empty-directory` (its state directory held no finished session, so
-    /// seeding passed it over).
+    /// Why state started cold: `empty-directory` (no finished session).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// The workspace root of the checkout seeded state was copied from.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub donor: Option<PathBuf>,
-    /// Files copied while seeding.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub files: Option<u64>,
-    /// Bytes copied while seeding.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bytes: Option<u64>,
-    /// Time spent copying while seeding, in nanoseconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub copy_ns: Option<u64>,
 }
 
 /// Largest single protocol request the agent will read.

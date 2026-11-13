@@ -89,20 +89,13 @@ When the build kept private incremental state, a section after the causes says
 where that state came from, with compiler time and count for each source:
 
 ```text
-private incremental state for 42 compilations
+private incremental state for 34 compilations
  6m 12s  started from this checkout's earlier state (30)
- 1m 40s  seeded from another checkout, copying 1.2 GiB in 3.1s (8)
-    52s  started empty: no other checkout had it (4)
+    52s  started empty: this checkout's state directory held no finished session (4)
 ```
 
-Seeded state is copied from the checkout that used it most recently, so a new
-checkout does not start from nothing. State starts empty when no other
-checkout has state for the same compilation, while a one-time discard of older
-state is pending, when the compilation's state cannot be shared between
-checkouts, or when this checkout's state directory exists but holds no
-finished session, as after a compilation that failed early; seeding passes
-such a directory over. `started from this checkout's earlier state` means the
-directory held a finished session; rustc decides how much of it to reuse.
+State starts empty when this checkout has no finished session. Existing state
+means the directory held a finished session; rustc decides how much to reuse.
 
 ## What it compares against
 

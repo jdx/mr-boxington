@@ -277,7 +277,7 @@ checked-in `.mbx.toml`, which rejects them; see
 cache_dir = "/var/cache/mbx"
 incremental = false
 eager_incremental = false  # opt-in state from the first compilation
-seed_incremental = true  # reuse private state across checkouts
+seed_incremental = true  # accepted for compatibility; has no effect
 share_out_dir = true
 share_workspace_root = false
 build_script_execution = true
