@@ -36,10 +36,12 @@ The trigger is a source change, or a changed value of an environment variable
 the crate reads with `env!` or `option_env!`, such as one its build script sets
 with `cargo:rustc-env`. An unchanged crate in a fresh target or a new checkout
 still compiles and publishes normally when it misses the cache. Later source
-edits to a known active workspace crate go directly to its private state,
-without a cache lookup. A changed environment value is looked up first, so a
-value the cache already holds, such as a commit hash another checkout
-published, restores instead of compiling.
+edits to a known active workspace crate look up the cache first and fall back
+to its private state on a miss. Returning to content the cache already holds,
+as after a revert, a rebase onto a cached branch, or a branch switch, restores
+the crate and its dependents instead of recompiling them. The exception is a revert that removes a module the edits added: the cache remembers the crate's most recent input list, which names a file the reverted checkout lacks, so the crate still compiles. A changed environment
+value is looked up the same way, so a value the cache already holds, such as a
+commit hash another checkout published, restores instead of compiling.
 
 Dependents of a crate using private incremental state also keep private state,
 because their inputs contain an artifact other checkouts cannot share. They can

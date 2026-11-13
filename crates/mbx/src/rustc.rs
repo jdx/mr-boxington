@@ -337,6 +337,22 @@ pub(crate) fn compile(
             ChangedEnvironment::LookUp,
         )
     };
+    // A workspace crate whose sources changed again is planned for private
+    // incremental state without a lookup. Returning to content the cache holds,
+    // as after a branch switch or a revert, would then recompile the crate and
+    // all its dependents. Set the plan aside, look up first, and take it back
+    // on a miss.
+    let hot_after_lookup = if !verify
+        && !private_inputs
+        && !eager_requested
+        && learned.engaged()
+        && learned.record.is_some()
+        && outputs.dep_info.is_file()
+    {
+        Some(std::mem::take(&mut learned))
+    } else {
+        None
+    };
     let mut unshareable = false;
     if !private_inputs
         && !learned.engaged()
@@ -398,7 +414,7 @@ pub(crate) fn compile(
             }
             Ok(None) => {
                 // The fast plan already measured this unit for this compile.
-                if !learned.backstop_rejected {
+                if !learned.backstop_rejected && hot_after_lookup.is_none() {
                     learned = plan_learned_reuse(&compilation, &discovered, &[], learned_enabled);
                 }
             }
@@ -409,7 +425,12 @@ pub(crate) fn compile(
     }
     // A compilation that cannot be keyed for the cache still has sources worth
     // watching: private incremental state needs no shareable key.
-    if unshareable && learned_enabled && !learned.engaged() && learned.record.is_none() {
+    if unshareable
+        && hot_after_lookup.is_none()
+        && learned_enabled
+        && !learned.engaged()
+        && learned.record.is_none()
+    {
         learned = plan_learned_without_action_key(&compilation, &outputs);
     }
     let mut prediction_missing = private_inputs;
@@ -447,6 +468,10 @@ pub(crate) fn compile(
                 session::report_shim_warning(&format!("prediction was not restored: {error:#}"));
             }
         }
+    }
+    // Neither lookup restored the crate: take back the private plan set aside.
+    if let Some(hot) = hot_after_lookup {
+        learned = hot;
     }
 
     // Everything past this point would run the real compiler, so this is
