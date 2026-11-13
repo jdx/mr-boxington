@@ -349,6 +349,22 @@ pub(crate) fn compile(
             ChangedEnvironment::LookUp,
         )
     };
+    // A workspace crate whose sources changed again is planned for private
+    // incremental state without a lookup. Returning to content the cache holds,
+    // as after a branch switch or a revert, would then recompile the crate and
+    // all its dependents. Set the plan aside, look up first, and take it back
+    // on a miss.
+    let hot_after_lookup = if !verify
+        && !private_inputs
+        && !eager_requested
+        && learned.engaged()
+        && learned.record.is_some()
+        && outputs.dep_info.is_file()
+    {
+        Some(std::mem::take(&mut learned))
+    } else {
+        None
+    };
     let mut unshareable = false;
     if !private_inputs
         && !learned.engaged()
@@ -418,6 +434,9 @@ pub(crate) fn compile(
                 session::report_shim_warning(&format!("result was not restored: {error:#}"));
             }
         }
+    }
+    if let Some(hot) = hot_after_lookup {
+        learned = hot;
     }
     // A compilation that cannot be keyed for the cache still has sources worth
     // watching: private incremental state needs no shareable key.

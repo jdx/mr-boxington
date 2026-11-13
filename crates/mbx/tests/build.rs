@@ -3435,6 +3435,44 @@ fn a_settled_crate_publishes_again() {
     );
 }
 
+#[test]
+fn returning_to_cached_content_restores_instead_of_compiling_incrementally() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let run = |revision: u32| {
+        edit_project(project.path(), revision);
+        build(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("{revision}.json")),
+        )
+    };
+
+    run(0);
+    for revision in [1, 2] {
+        run(revision);
+    }
+    let edited = run(3);
+    assert!(
+        compiled_incrementally(&edited) > 0,
+        "new content still compiles incrementally: {edited}"
+    );
+
+    // Revision 0 is in the shared cache; a revert or branch switch back to it
+    // should restore it rather than recompile with private state.
+    let reverted = run(0);
+    assert_eq!(
+        compiled_incrementally(&reverted),
+        0,
+        "cached content should not compile incrementally: {reverted}"
+    );
+    assert!(
+        reverted["hits"].as_u64().unwrap_or(0) > 0,
+        "and should come from the cache: {reverted}"
+    );
+}
 /// A compilation that failed left nothing behind to compare against, so the
 /// retry that follows -- with nothing edited in between -- must not read as a
 /// crate that had settled and drop it back to compiling from scratch.
@@ -3563,8 +3601,8 @@ fn editing_one_crate_takes_its_dependents_private_too() {
     );
     assert_eq!(
         stats["lookups"].as_u64(),
-        Some(0),
-        "neither crate can hit a shared action, so neither should look one up: {stats}"
+        Some(1),
+        "the edited crate looks up once, in case the cache holds its content, and the crate linking its private artifact cannot hit a shared action, so it looks up nothing: {stats}"
     );
 
     // Unchanged sources after a wiped target are not churn, above or below:
