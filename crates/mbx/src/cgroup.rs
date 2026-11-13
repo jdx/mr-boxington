@@ -608,7 +608,10 @@ mod tests {
         }
         // A cached walk the clocks cannot place after a lease it was not
         // made for does not answer for that lease.
-        let stepped = Some(stamp(now.wall_ms.saturating_sub(60_000), now.boot_ms + 60_000));
+        let stepped = Some(stamp(
+            now.wall_ms.saturating_sub(60_000),
+            now.boot_ms + 60_000,
+        ));
         std::thread::sleep(std::time::Duration::from_millis(2));
         assert!(!contains(pool.path(), scope, &["0:3".into()], stepped));
         assert_ne!(read().began, first, "walked for the new lease");
