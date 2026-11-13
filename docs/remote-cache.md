@@ -405,3 +405,12 @@ count against the budget, even when slow. Set it to `0` to disable this
 session-wide limit while retaining the per-download deadline. The budget
 applies to cache servers. An `s3://` remote keeps the per-download deadline but
 has no session-wide limit.
+
+Uploads have a matching limit, `MBX_HTTP_WRITE_STALL_BUDGET` (30 seconds by
+default). Each failed transient attempt (a timeout, a refused connection, or a
+5xx response) counts against it, including the attempts of uploads already in
+flight. Once it is spent, mbx stops uploading and finishes the build without the
+remote, so a server that is down costs about one timeout instead of one per
+uploaded object. Rejections such as a 4xx response do not count. Set it to `0`
+to keep uploading however long failures take. It applies to cache servers, not
+`s3://` remotes.

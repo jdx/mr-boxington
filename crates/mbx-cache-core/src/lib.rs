@@ -302,6 +302,32 @@ impl RemoteCacheClient {
         self
     }
 
+    /// Bound the wall clock this session may lose to uploads that fail.
+    ///
+    /// Every failed transient attempt (a timeout, a refused connection, a 5xx)
+    /// is charged against the budget. Once it is spent, uploads stop for the
+    /// rest of the session and builds finish locally, instead of each queued
+    /// object waiting out its own timeouts against a server that is down.
+    /// Uploads are best effort, so abandoning them never fails the build.
+    ///
+    /// `Duration::ZERO` keeps uploading however long the remote takes to fail.
+    /// Has no effect on an S3 backend.
+    pub fn with_write_stall_budget(mut self, budget: Duration) -> Self {
+        if let Backend::Http(client) = &mut self.backend {
+            client.set_write_stall_budget(budget);
+        }
+        self
+    }
+
+    /// Whether this session has stopped uploading because the remote kept
+    /// failing. See [`Self::with_write_stall_budget`].
+    pub fn writes_abandoned(&self) -> bool {
+        match &self.backend {
+            Backend::Http(client) => client.writes_abandoned(),
+            Backend::S3(_) => false,
+        }
+    }
+
     /// Construct a client backed directly by an S3-compatible object store.
     ///
     /// The store answers the same lookups a cache server does, without the
@@ -650,7 +676,7 @@ impl std::fmt::Display for TransientRequest {
 
 impl std::error::Error for TransientRequest {}
 
-fn is_transient(error: &eyre::Report) -> bool {
+pub(crate) fn is_transient(error: &eyre::Report) -> bool {
     // An unavailable hostname is a deterministic configuration error. reqwest
     // categorizes it as a connect error, but retrying only delays the diagnosis.
     if is_dns_error(error.as_ref()) {

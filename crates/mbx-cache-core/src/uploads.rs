@@ -489,7 +489,7 @@ impl Inner {
                 let _ = member.done.send(UploadOutcome::Skipped);
             }
         }
-        if present.len() < 2 {
+        if present.len() < 2 || self.remote.writes_abandoned() {
             self.upload_members(present).await;
             return;
         }
@@ -509,6 +509,11 @@ impl Inner {
             };
             self.remote.put_blob_pack(&uploads).await
         };
+        // An attempt that tripped the budget is already reported; its members
+        // fail fast below without a second warning.
+        if self.remote.writes_abandoned() && receipt.is_err() {
+            return self.upload_members(present).await;
+        }
         match receipt {
             Ok(Some(_)) => {
                 self.sink.record_blob_pack_uploaded(present.len() as u64);
@@ -572,6 +577,12 @@ impl Inner {
             self.sink.record_upload_failure();
             return UploadOutcome::Skipped;
         }
+        // Reported once when the budget ran out; repeating it per object would
+        // bury that line.
+        if self.remote.writes_abandoned() {
+            self.sink.record_upload_failure();
+            return UploadOutcome::Failed;
+        }
         let _permit = match self.transfers.acquire().await {
             Ok(permit) => permit,
             Err(_) => return UploadOutcome::Failed,
@@ -580,6 +591,10 @@ impl Inner {
             Ok(permit) => permit,
             Err(_) => return UploadOutcome::Failed,
         };
+        if self.remote.writes_abandoned() {
+            self.sink.record_upload_failure();
+            return UploadOutcome::Failed;
+        }
         let upload = BlobUpload {
             digest: digest.clone(),
             source: BlobSource::Path(path.clone()),
@@ -633,6 +648,10 @@ impl Inner {
             Ok(permit) => permit,
             Err(_) => return UploadOutcome::Failed,
         };
+        if self.remote.writes_abandoned() {
+            self.sink.record_upload_failure();
+            return UploadOutcome::Failed;
+        }
         match self.remote.put_action_result(result).await {
             Ok(()) => {
                 self.sink.record_action_uploaded();
