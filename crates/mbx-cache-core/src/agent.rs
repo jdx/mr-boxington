@@ -1723,7 +1723,7 @@ impl CacheAgent {
     fn lock_task_manifest(&self, task: &str) -> Result<fslock::LockFile> {
         let path = self.task_manifest_lock_path(task);
         fs::create_dir_all(path.parent().expect("task manifest lock has a parent"))?;
-        let mut lock = fslock::LockFile::open(&path)?;
+        let mut lock = crate::open_shared_lock(&path)?;
         lock.lock()?;
         Ok(lock)
     }

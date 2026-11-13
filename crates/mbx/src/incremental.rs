@@ -80,7 +80,7 @@ fn discard_pre_copy_state(root: &Path) -> Result<()> {
             };
             // Save the original set before renaming anything. After a crash,
             // newly created checkouts must not become migration candidates.
-            crate::util::write_atomic(&root.join(EPOCH_FILE), &serde_json::to_vec(&state)?)?;
+            crate::util::write_atomic_shared(&root.join(EPOCH_FILE), &serde_json::to_vec(&state)?)?;
             state
         }
     };
@@ -131,7 +131,7 @@ fn discard_pre_copy_state(root: &Path) -> Result<()> {
             }
         }
     }
-    crate::util::write_atomic(
+    crate::util::write_atomic_shared(
         &root.join(EPOCH_FILE),
         &serde_json::to_vec(&StateEpoch { pending, ..state })?,
     )?;

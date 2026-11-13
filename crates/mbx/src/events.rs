@@ -325,7 +325,7 @@ impl EventWriter {
             .expect("a session event path has a parent");
         std::fs::create_dir_all(dir)
             .wrap_err_with(|| format!("failed to create {}", dir.display()))?;
-        let mut lock = fslock::LockFile::open(&self.paths.lock)?;
+        let mut lock = mbx_cache_core::open_shared_lock(&self.paths.lock)?;
         // try_lock, not lock: the id contains this process's pid, so a taken
         // lock is somebody else's bug, not something to wait behind.
         if !lock.try_lock()? {
@@ -578,7 +578,7 @@ impl SessionTail {
 /// gone, whether it finished or was killed, because the OS releases the lock
 /// either way. Nothing waits on this lock, so a probe never blocks a build.
 fn locked(lock: &Path) -> bool {
-    match fslock::LockFile::open(lock) {
+    match mbx_cache_core::open_shared_lock(lock) {
         Ok(mut lock) => match lock.try_lock() {
             // Taking it means nobody else had it. Released again at once: this
             // is a probe, not a claim.

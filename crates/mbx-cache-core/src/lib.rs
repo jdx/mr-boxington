@@ -87,7 +87,7 @@ pub use remote_http::fuzz_decode_blob_pack;
 pub(crate) use remote_http::{BlobPackLimits, blob_pack_chunk};
 use remote_s3::S3RemoteCache;
 pub use remote_s3::{S3ConditionalWrites, S3RemoteCacheConfig};
-pub use shared_file::shared_tempfile_builder;
+pub use shared_file::{open_shared_lock, shared_tempfile_builder};
 pub use sigv4::S3Credentials;
 /// Cap the JSON bodies a remote cache can hand back. Blob downloads are bounded
 /// by the size their digest promises, but action results and manifests carry no

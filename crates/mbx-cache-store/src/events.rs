@@ -16,7 +16,7 @@ pub(crate) fn session_paths(store: &Path, id: &str) -> SessionPaths {
 }
 
 fn locked(path: &Path) -> bool {
-    match fslock::LockFile::open(path) {
+    match mbx_cache_core::open_shared_lock(path) {
         Ok(mut lock) => match lock.try_lock() {
             Ok(true) => {
                 let _ = lock.unlock();
@@ -95,7 +95,7 @@ impl EventWriter {
 
     pub(crate) fn started(&self, _workspace_root: &Path, _command: &[String]) {
         std::fs::create_dir_all(self.paths.events.parent().unwrap()).unwrap();
-        let mut lock = fslock::LockFile::open(&self.paths.lock).unwrap();
+        let mut lock = mbx_cache_core::open_shared_lock(&self.paths.lock).unwrap();
         lock.lock().unwrap();
         std::fs::write(&self.paths.events, b"session\n").unwrap();
         *self.lock.lock().unwrap() = Some(lock);

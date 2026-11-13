@@ -1,4 +1,6 @@
-//! Temporary files for cache entries that several users may share.
+//! Files and locks for cache entries that several users may share.
+
+use std::path::Path;
 
 /// A [`tempfile::Builder`] whose files follow the process umask.
 ///
@@ -10,33 +12,65 @@
 /// `002` gives `0664`, the same result a plain `File::create` would give.
 #[must_use]
 pub fn shared_tempfile_builder() -> tempfile::Builder<'static, 'static> {
-    let mut builder = tempfile::Builder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
+        let mut builder = tempfile::Builder::new();
         builder.permissions(std::fs::Permissions::from_mode(0o666));
+        builder
     }
-    builder
+    #[cfg(not(unix))]
+    {
+        tempfile::Builder::new()
+    }
+}
+
+/// Open a lock file that every user of a shared cache can reopen.
+///
+/// `fslock` creates a missing lock file with mode `0644`, so with two users in
+/// one group the second cannot open the first's lock for writing. Creating the
+/// file first with `0666` lets the umask decide, as for cache entries.
+pub fn open_shared_lock(path: &Path) -> std::io::Result<fslock::LockFile> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o666);
+    }
+    drop(options.open(path)?);
+    fslock::LockFile::open(path)
 }
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::shared_tempfile_builder;
+    use super::{open_shared_lock, shared_tempfile_builder};
     use std::os::unix::fs::PermissionsExt as _;
 
+    fn mode(path: &std::path::Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
     #[test]
-    fn files_are_not_private_to_the_creator() {
+    fn tempfiles_get_the_mode_a_plain_create_would() {
         let directory = tempfile::tempdir().unwrap();
+        let plain = directory.path().join("plain");
+        drop(std::fs::File::create(&plain).unwrap());
         let file = shared_tempfile_builder()
             .tempfile_in(directory.path())
             .unwrap();
-        let mode = file.as_file().metadata().unwrap().permissions().mode() & 0o777;
-        // Whatever the umask is, the helper must not force owner-only access
-        // beyond it: the mode is exactly 0666 with the umask removed.
-        assert_eq!(mode & !0o666, 0);
-        assert_ne!(
-            mode, 0o600,
-            "umask of 077 would hide this check; run under 022"
-        );
+        // Both calls see the same process umask, so this holds under 022,
+        // 002 and 077 alike.
+        assert_eq!(mode(file.path()), mode(&plain));
+    }
+
+    #[test]
+    fn locks_get_the_mode_a_plain_create_would() {
+        let directory = tempfile::tempdir().unwrap();
+        let plain = directory.path().join("plain");
+        drop(std::fs::File::create(&plain).unwrap());
+        let lock = directory.path().join("a.lock");
+        drop(open_shared_lock(&lock).unwrap());
+        assert_eq!(mode(&lock), mode(&plain));
     }
 }
