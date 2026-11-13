@@ -2271,3 +2271,17 @@ fn unconsulted_reasons_follow_wrapper_precedence() {
         Some("other")
     );
 }
+
+#[test]
+fn private_incremental_state_is_named_under_a_new_generation() {
+    // State from versions that seeded between checkouts is never reused,
+    // even for an invocation whose digest did not change.
+    let invocation = CacheDigest::blake3(b"invocation");
+    let unit = current_incremental_generation(&invocation);
+    assert_ne!(unit, invocation);
+    assert_eq!(unit, current_incremental_generation(&invocation));
+    assert_ne!(
+        unit,
+        current_incremental_generation(&CacheDigest::blake3(b"another invocation"))
+    );
+}

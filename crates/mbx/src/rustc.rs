@@ -1570,7 +1570,20 @@ fn incremental_unit_identity(compilation: &Compilation<'_>) -> Result<CacheDiges
         compilation.working_dir,
         compilation.portable,
     )?;
-    Ok(compilation.invocation.invocation_digest(&context)?)
+    Ok(current_incremental_generation(
+        &compilation.invocation.invocation_digest(&context)?,
+    ))
+}
+
+/// The generation private incremental state is named under.
+///
+/// State an older mbx left may hold a session seeded from another checkout
+/// while that checkout's rustc was rewriting it, which links rlibs with
+/// undefined symbols. A build that passed `-Zremap-cwd-prefix` itself kept the
+/// same invocation digest, so naming state under a new generation is what
+/// keeps every checkout from reusing it. Collection removes the old units.
+fn current_incremental_generation(invocation: &CacheDigest) -> CacheDigest {
+    CacheDigest::blake3(format!("{}\0mbx-incremental-state-v2", invocation.key()).as_bytes())
 }
 
 /// Why a compilation that ran without a lookup had none, for its event row.
