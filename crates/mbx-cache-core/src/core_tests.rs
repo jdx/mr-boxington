@@ -1792,3 +1792,30 @@ async fn failed_capability_lookups_spend_the_upload_stall_budget() {
     capabilities.assert_async().await;
     put.assert_async().await;
 }
+
+#[tokio::test]
+async fn uploads_queued_behind_a_failing_capability_lookup_do_not_repeat_it() {
+    let mut server = mockito::Server::new_async().await;
+    let digest = CacheDigest::blake3(b"concurrent capability upload");
+    // Every upload is already waiting on the lookup when it fails. Each waiter
+    // is handed the cell in turn, so without a check in the initializer each
+    // would send its own request and pay its own timeout.
+    let capabilities = server
+        .mock("GET", "/v1/capabilities")
+        .with_status(503)
+        .expect(1)
+        .create_async()
+        .await;
+    let mut client = test_client(&server);
+    client.set_write_stall_budget(Duration::from_nanos(1));
+    let upload = BlobUpload {
+        digest: digest.clone(),
+        source: BlobSource::Bytes(b"concurrent capability upload".to_vec()),
+    };
+
+    let results = futures_util::future::join_all((0..4).map(|_| client.put_blob(&upload))).await;
+
+    assert!(results.iter().all(Result::is_err));
+    assert!(client.writes_abandoned());
+    capabilities.assert_async().await;
+}

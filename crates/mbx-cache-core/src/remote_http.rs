@@ -310,7 +310,14 @@ impl HttpRemoteCache {
     /// own request and pay its own timeout. Going through the write budget
     /// charges those failures and stops asking once it is spent.
     async fn upload_capabilities(&self) -> Result<NegotiatedCapabilities> {
-        self.write_attempt(self.negotiated_capabilities()).await
+        // The budget check and charge live inside the initializer, which runs
+        // when this waiter is handed the cell. Checking before waiting on the
+        // cell would miss an upload already queued behind a lookup that fails.
+        // Read-side callers keep their own initializer, so reads are unaffected.
+        self.capabilities
+            .get_or_try_init(|| self.write_attempt(self.fetch_capabilities(true)))
+            .await
+            .copied()
     }
 
     /// Run one upload attempt against the write budget.
