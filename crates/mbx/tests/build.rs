@@ -6492,7 +6492,7 @@ mod target_views {
     /// Start `arguments` under mbx in `project`, whose program prints
     /// `ready` and then waits on standard input, and check that `mbx gc`
     /// keeps the managed target directory while the program runs and
-    /// removes it once the command has exited.
+    /// refreshes its record once the command has exited.
     ///
     /// Once Cargo has finished compiling, the target directory is still in
     /// use: `cargo run` executes the program from it, and `cargo test`
@@ -6611,6 +6611,21 @@ mod target_views {
             child_stderr()
         );
 
+        let refreshed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        assert!(
+            refreshed["updated_secs"].as_u64().unwrap() > 1,
+            "the command must refresh the record when it ends: {refreshed}"
+        );
+        let (gc_stdout, gc_stderr) = gc_expired_targets(store);
+        assert!(
+            view.is_dir(),
+            "gc should keep the target directory the command just finished using:\ngc stdout: {gc_stdout}\ngc stderr: {gc_stderr}"
+        );
+
+        // Once that final use expires, the lease must no longer prevent collection.
+        std::fs::write(&record, serde_json::to_vec(&fields).unwrap()).unwrap();
+        backdate_runs(&view);
         let (gc_stdout, gc_stderr) = gc_expired_targets(store);
         assert!(
             !view.exists(),
