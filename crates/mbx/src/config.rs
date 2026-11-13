@@ -216,13 +216,7 @@ pub(crate) struct RawConfig {
         default = true
     )]
     _learned_incremental: bool,
-    /// Seed private incremental state from another checkout on rustc 1.98 or later.
-    ///
-    /// Uses `.` as the working directory in debug info and backtrace frames.
-    /// On stable and beta, enables compiler bootstrap only for private-state
-    /// compilations, while still rejecting `#![feature]`. An existing
-    /// `RUSTC_BOOTSTRAP` disables automatic flag injection. A user-supplied
-    /// `-Zremap-cwd-prefix` still enables seeding when this setting is off.
+    /// Has no effect; seeding from other checkouts was removed.
     #[usage(env = "MBX_SEED_INCREMENTAL", default = true)]
     seed_incremental: bool,
     /// Cap on the per-compilation history one build records, or `"none"`.
@@ -670,6 +664,20 @@ struct RawGc {
     /// Collect learned incremental units unused this long, or `"none"`.
     #[usage(env = "MBX_GC_INCREMENTAL_MAX_AGE", default = "30d", ty = "duration")]
     incremental_max_age: String,
+    /// Keep finished session event files this long, or `"none"` for no age limit.
+    ///
+    /// Both event limits apply: whichever removes a session first wins. A
+    /// session a build is still writing is never removed. Each file can grow
+    /// to `events_max_size` (16 MiB by default).
+    #[usage(env = "MBX_GC_EVENTS_MAX_AGE", default = "7d", ty = "duration")]
+    events_max_age: String,
+    /// Keep at most this many newest session event files, or `"none"` for no count limit.
+    ///
+    /// Both event limits apply: whichever removes a session first wins. A
+    /// session a build is still writing is never removed. Each file can grow
+    /// to `events_max_size` (16 MiB by default).
+    #[usage(env = "MBX_GC_EVENTS_MAX_SESSIONS", default = "256")]
+    events_max_sessions: String,
     /// Collect cached Rust compilations for compiler versions unused this
     /// long, or `"none"`.
     ///
@@ -1019,6 +1027,8 @@ pub(crate) struct RetentionSettings {
     pub target_max_age: Option<Duration>,
     pub incremental_max_bytes: Option<u64>,
     pub incremental_max_age: Option<Duration>,
+    pub events_max_age: Option<Duration>,
+    pub events_max_sessions: Option<usize>,
     /// Age past which a compiler version's cached results are collected;
     /// `None` never does.
     pub rustc_max_age: Option<Duration>,
@@ -1073,7 +1083,8 @@ pub(crate) struct CliSettings {
     pub plain_output: bool,
     /// Whether a churning crate may compile with its own incremental state.
     pub learned_incremental: bool,
-    pub seed_incremental: bool,
+    pub _seed_incremental: bool,
+    pub retired_seed_setting: bool,
     /// A retired global setting was present; only the CLI reports this notice.
     pub removed_incremental_cap: bool,
     /// Whether natively linked programs may be cached.
@@ -1096,7 +1107,8 @@ impl Default for CliSettings {
             pretty_inspect: false,
             plain_output: false,
             learned_incremental: true,
-            seed_incremental: true,
+            _seed_incremental: true,
+            retired_seed_setting: false,
             removed_incremental_cap: false,
             cache_links: true,
             blaze: false,
@@ -1179,6 +1191,16 @@ impl std::str::FromStr for SavingsStyle {
 /// `Default` cannot probe a disk it has not been told about. Collection still
 /// happens, which is the property that matters: a default that pruned nothing
 /// would make every unconfigured path a leak.
+impl RetentionSettings {
+    /// The session event limits, as the store's collection takes them.
+    pub(crate) fn sessions(&self) -> crate::store::SessionRetention {
+        crate::store::SessionRetention {
+            max_age: self.events_max_age,
+            max_sessions: self.events_max_sessions,
+        }
+    }
+}
+
 impl Default for RetentionSettings {
     fn default() -> Self {
         Self {
@@ -1186,6 +1208,8 @@ impl Default for RetentionSettings {
             target_max_age: Some(DEFAULT_TARGET_MAX_AGE),
             incremental_max_bytes: Some(INCREMENTAL_BUDGET.fallback),
             incremental_max_age: Some(DEFAULT_TARGET_MAX_AGE),
+            events_max_age: crate::store::SessionRetention::default().max_age,
+            events_max_sessions: crate::store::SessionRetention::default().max_sessions,
             rustc_max_age: None,
             max_total_bytes: None,
             target_precedence: crate::target::Precedence::default(),
@@ -1226,6 +1250,9 @@ impl Config {
     pub(crate) fn load_for_cli() -> Result<(Self, CliSettings)> {
         let (config, settings) = Self::load_from_environment()?;
         // Compiler shims use load(), so only the outer CLI reports this notice.
+        if settings.retired_seed_setting {
+            log::warn!("seed_incremental has no effect; seeding from other checkouts was removed");
+        }
         if settings.removed_incremental_cap {
             log::warn!(
                 "learned_incremental_max_size was removed and is ignored; use gc.incremental_max_size to bound aggregate state"
@@ -1290,6 +1317,15 @@ impl Config {
         let raw = RawConfig::read(&resolved)?;
         let (config, mut settings) = Self::from_raw_measuring(raw, measure_disk, measure_memory)?;
         settings.removed_incremental_cap = removed_incremental_cap;
+        settings.retired_seed_setting =
+            resolved
+                .origin_key("seed_incremental")
+                .is_some_and(|origin| {
+                    matches!(
+                        origin.kind,
+                        usage_config::SourceKind::FILE | usage_config::SourceKind::ENV
+                    )
+                });
         Ok((config, settings))
     }
 
@@ -1395,6 +1431,18 @@ impl Config {
             }),
             incremental_max_age: parse_optional_duration(&raw.gc.incremental_max_age)
                 .wrap_err(Invalid("gc.incremental_max_age"))?,
+            events_max_age: parse_optional_duration(&raw.gc.events_max_age)
+                .wrap_err(Invalid("gc.events_max_age"))?,
+            events_max_sessions: if is_no_limit(&raw.gc.events_max_sessions) {
+                None
+            } else {
+                Some(
+                    raw.gc
+                        .events_max_sessions
+                        .parse::<usize>()
+                        .wrap_err(Invalid("gc.events_max_sessions"))?,
+                )
+            },
             rustc_max_age: parse_optional_duration(&raw.gc.rustc_max_age)
                 .wrap_err(Invalid("gc.rustc_max_age"))?,
             max_total_bytes: total_budget,
@@ -1532,7 +1580,8 @@ impl Config {
                 pretty_inspect: raw.pretty_inspect,
                 plain_output: raw.display == "plain",
                 learned_incremental: raw._learned_incremental,
-                seed_incremental: raw.seed_incremental,
+                _seed_incremental: raw.seed_incremental,
+                retired_seed_setting: false,
                 removed_incremental_cap: false,
                 cache_links: raw.cache_links,
                 blaze: raw.blaze,
@@ -2993,22 +3042,39 @@ incremental_max_size = "none"
         assert!(!config.eager_incremental);
     }
 
-    /// On by default: a crate nobody is editing never reaches the threshold, so
-    /// the setting only matters to the one the developer is working in.
+    /// Retired values still parse so existing configuration remains valid.
     #[test]
-    fn seed_incremental_defaults_on_and_respects_config_and_environment() {
-        assert!(configured_for_cli(None, &[]).unwrap().1.seed_incremental);
+    fn retired_seed_incremental_accepts_config_and_environment() {
+        assert!(configured_for_cli(None, &[]).unwrap().1._seed_incremental);
+        assert!(
+            !configured_for_cli(None, &[])
+                .unwrap()
+                .1
+                .retired_seed_setting
+        );
+        assert!(
+            configured_for_cli(Some("seed_incremental = false"), &[])
+                .unwrap()
+                .1
+                .retired_seed_setting
+        );
+        assert!(
+            configured_for_cli(None, &[("MBX_SEED_INCREMENTAL", "0")])
+                .unwrap()
+                .1
+                .retired_seed_setting
+        );
         assert!(
             !configured_for_cli(Some("seed_incremental = false"), &[])
                 .unwrap()
                 .1
-                .seed_incremental
+                ._seed_incremental
         );
         assert!(
             !configured_for_cli(None, &[("MBX_SEED_INCREMENTAL", "0")])
                 .unwrap()
                 .1
-                .seed_incremental
+                ._seed_incremental
         );
         assert!(
             configured_for_cli(
@@ -3017,7 +3083,7 @@ incremental_max_size = "none"
             )
             .unwrap()
             .1
-            .seed_incremental
+            ._seed_incremental
         );
     }
 
@@ -3032,7 +3098,7 @@ incremental_max_size = "none"
                 configured_for_cli(file, &[("MBX_SESSION_SEED_INCREMENTAL", inherited)])
                     .unwrap()
                     .1
-                    .seed_incremental,
+                    ._seed_incremental,
                 expected
             );
         }
@@ -3601,5 +3667,36 @@ default = "rust-lld"
         assert!(spec.contains(r#"default="quips""#));
         // The declared log default is the filter the logger actually installs.
         assert!(spec.contains(&format!(r#"default="{}""#, crate::logging::DEFAULT_FILTER)));
+    }
+    #[test]
+    fn session_retention_settings_parse_defaults_files_and_environment() {
+        let (_, retention) = configured_retention(None, &[]).unwrap();
+        assert_eq!(
+            retention.events_max_age,
+            Some(Duration::from_secs(7 * 86_400))
+        );
+        assert_eq!(retention.events_max_sessions, Some(256));
+        let (_, retention) = configured_retention(
+            Some("[gc]\nevents_max_age = \"2d\"\nevents_max_sessions = 512"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            retention.events_max_age,
+            Some(Duration::from_secs(2 * 86_400))
+        );
+        assert_eq!(retention.events_max_sessions, Some(512));
+        let (_, retention) = configured_retention(
+            Some("[gc]\nevents_max_age = \"2d\"\nevents_max_sessions = 512"),
+            &[
+                ("MBX_GC_EVENTS_MAX_AGE", "none"),
+                ("MBX_GC_EVENTS_MAX_SESSIONS", "none"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(retention.events_max_age, None);
+        assert_eq!(retention.events_max_sessions, None);
+        assert!(configured_retention(None, &[("MBX_GC_EVENTS_MAX_AGE", "bad")]).is_err());
+        assert!(configured_retention(None, &[("MBX_GC_EVENTS_MAX_SESSIONS", "bad")]).is_err());
     }
 }

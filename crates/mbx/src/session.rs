@@ -34,6 +34,7 @@ mod shims;
 mod stats;
 pub(crate) use stats::{cache_misses, unexpected_bypasses};
 pub(crate) mod verification;
+pub(crate) mod workspace;
 
 #[cfg(test)]
 use client::validate_handshake_response;
@@ -106,7 +107,6 @@ pub(crate) const GC_MIN_FREE_ENV: &str = "MBX_SESSION_GC_MIN_FREE";
 pub(crate) const GC_CACHE_DIR_ENV: &str = "MBX_SESSION_GC_CACHE_DIR";
 pub(crate) const GC_TARGET_ROOT_ENV: &str = "MBX_SESSION_GC_TARGET_ROOT";
 pub(crate) const GC_EXECUTABLE_ENV: &str = "MBX_SESSION_GC_EXECUTABLE";
-pub(crate) const SESSION_SEED_INCREMENTAL_ENV: &str = "MBX_SESSION_SEED_INCREMENTAL";
 pub(crate) const LEARNED_INCREMENTAL_ENV: &str = "MBX_LEARNED_INCREMENTAL";
 pub(crate) const INCREMENTAL_BUDGET_ENV: &str = "MBX_SESSION_INCREMENTAL_BUDGET";
 pub(crate) const INCREMENTAL_ROOT_ENV: &str = "MBX_INCREMENTAL_ROOT";
@@ -960,9 +960,10 @@ impl AgentEventObserver for EventStream {
             AgentEvent::ActionHit {
                 crate_name,
                 restore,
+                metadata,
             } => {
                 let diagnostic = self.take_diagnostic("hit", crate_name.as_deref());
-                self.writer.action_with_diagnostic(
+                self.writer.action_with_metadata(
                     ActionOutcome::Hit,
                     crate_name,
                     restore.duration_ns,
@@ -975,6 +976,8 @@ impl AgentEventObserver for EventStream {
                         copied_output_bytes: restore.copied_output_bytes,
                     },
                     diagnostic,
+                    metadata,
+                    None,
                 );
             }
             AgentEvent::Bypass { kind } => self.writer.action(
@@ -987,11 +990,16 @@ impl AgentEventObserver for EventStream {
                 kind,
                 crate_name,
                 duration_ns,
-            } => self.writer.action(
+                incremental,
+                metadata,
+            } => self.writer.action_with_metadata(
                 ActionOutcome::Bypass { reason: kind },
                 crate_name,
                 duration_ns,
                 ActionDetail::default(),
+                None,
+                metadata,
+                Some(incremental),
             ),
             // Nothing is emitted for the counter itself: the compiler
             // invocation that follows carries the same fact with a crate name
@@ -1001,6 +1009,8 @@ impl AgentEventObserver for EventStream {
                 outcome,
                 crate_name,
                 duration_ns,
+                incremental,
+                metadata,
             } => {
                 let recorded_outcome = match outcome.as_str() {
                     // An incremental compilation reaches the ledger under what
@@ -1015,19 +1025,28 @@ impl AgentEventObserver for EventStream {
                     _ => return,
                 };
                 let diagnostic = self.take_diagnostic(&outcome, crate_name.as_deref());
-                self.writer.action_with_diagnostic(
+                self.writer.action_with_metadata(
                     recorded_outcome,
                     crate_name,
                     duration_ns,
                     ActionDetail::default(),
                     diagnostic,
+                    metadata,
+                    Some(incremental),
                 );
             }
-            AgentEvent::Verification { matched, restore } => self.writer.action(
+            AgentEvent::Verification {
+                matched,
+                restore,
+                metadata,
+            } => self.writer.action_with_metadata(
                 ActionOutcome::Verification { matched },
                 None,
                 restore.duration_ns,
                 ActionDetail::default(),
+                None,
+                metadata,
+                Some(false),
             ),
             AgentEvent::ActionDiagnostic {
                 outcome,
@@ -2040,9 +2059,10 @@ fn run_transparent_rustc(
     // Most probes carry no --crate-name; the target-info queries carry the
     // placeholder name `___` alongside `--print`, and compile nothing.
     let is_query = is_compiler_query(described);
-    let incremental_flag = bypassed
-        .then(|| crate::rustc::bypassed_library_incremental_flag(described))
-        .flatten();
+    let (incremental_flag, incremental_state) = bypassed
+        .then(|| crate::rustc::bypassed_library_incremental(described))
+        .flatten()
+        .map_or((None, None), |(flag, state)| (Some(flag), state));
     let demand = crate_name.as_deref().filter(|_| !is_query).map(|name| {
         transparent_compiler_demand(
             name,
@@ -2068,11 +2088,14 @@ fn run_transparent_rustc(
         Command::new(&rustc)
     };
     command.args(&arguments);
-    if let Some(flag) = incremental_flag {
+    if let Some(ref flag) = incremental_flag {
         command.arg(flag);
     }
     command.env_remove(PREVIOUS_RUSTC_WRAPPER_ENV);
     command.env_remove(PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV);
+    if let Some(permit) = &permit {
+        permit.mark_held(&mut command);
+    }
     #[cfg(unix)]
     let eligible = permit.is_some()
         && std::env::var_os(PREVIOUS_RUSTC_WRAPPER_ENV).is_none()
@@ -2121,9 +2144,11 @@ fn run_transparent_rustc(
                 if let Some(objects) = objects {
                     objects.remove_superseded(&status);
                 }
-                record_compiler_invocation(
-                    "bypass",
+                record_transparent_compilation(
+                    incremental_flag.is_some(),
+                    incremental_state,
                     crate_name.as_deref(),
+                    described,
                     duration_ns(started.elapsed()),
                 );
                 crate::materialize::exit_code(status)
@@ -2162,9 +2187,11 @@ fn run_transparent_rustc(
                 if let Some(objects) = objects {
                     objects.remove_superseded(&status);
                 }
-                record_compiler_invocation(
-                    "bypass",
+                record_transparent_compilation(
+                    incremental_flag.is_some(),
+                    incremental_state,
                     crate_name.as_deref(),
+                    described,
                     duration_ns(started.elapsed()),
                 );
                 // ExitProcess skips Rust destructors, including the timer.
@@ -2180,6 +2207,34 @@ fn run_transparent_rustc(
             }
         }
     }
+}
+
+/// Record a compilation the transparent wrapper ran without the cache, and
+/// whether mbx gave it private incremental state and where that came from.
+/// Both platforms report it the same way, so their session rows match.
+fn record_transparent_compilation(
+    incremental: bool,
+    incremental_state: Option<mbx_cache_core::IncrementalState>,
+    crate_name: Option<&str>,
+    arguments: &[OsString],
+    duration_ns: u64,
+) {
+    record_compiler_invocation_with_metadata(
+        if incremental {
+            "incremental-bypass"
+        } else {
+            "bypass"
+        },
+        crate_name,
+        duration_ns,
+        None,
+        Some(mbx_cache_core::CompileMetadata {
+            unit_kind: crate_name
+                .and_then(|name| crate::rustc::compiler_unit_kind(arguments, name)),
+            incremental_state,
+            ..Default::default()
+        }),
+    );
 }
 
 /// Avoid object cleanup when a wrapper can report success without compiling.
@@ -2469,23 +2524,6 @@ pub(crate) fn learned_incremental_requested() -> bool {
     std::env::var_os(LEARNED_INCREMENTAL_ENV).is_some_and(|value| !value.is_empty() && value != "0")
 }
 
-/// Whether private state may be made portable automatically.
-pub(crate) fn seed_incremental_requested() -> bool {
-    seed_incremental_from_env(|name| std::env::var_os(name))
-}
-
-fn seed_incremental_from_env(environment: impl FnOnce(&str) -> Option<OsString>) -> bool {
-    let value = environment(SESSION_SEED_INCREMENTAL_ENV);
-    value.as_deref().is_none_or(|value| {
-        value.to_str().is_some_and(|value| {
-            matches!(
-                usage_config::Ty::Bool.coerce(usage_config::Value::String(value.trim().to_owned())),
-                Ok(usage_config::Value::Bool(true))
-            )
-        })
-    })
-}
-
 /// Whether the session opted into private workspace state from the first compilation.
 pub(crate) fn eager_incremental_requested() -> bool {
     std::env::var_os(EAGER_INCREMENTAL_ENV).is_some_and(|value| value == "1")
@@ -2681,6 +2719,16 @@ pub(crate) fn record_compiler_invocation_with_diagnostic(
     duration_ns: u64,
     diagnostic: Option<mbx_cache_core::ActionDiagnostic>,
 ) {
+    record_compiler_invocation_with_metadata(outcome, crate_name, duration_ns, diagnostic, None);
+}
+
+pub(crate) fn record_compiler_invocation_with_metadata(
+    outcome: &str,
+    crate_name: Option<&str>,
+    duration_ns: u64,
+    diagnostic: Option<mbx_cache_core::ActionDiagnostic>,
+    metadata: Option<mbx_cache_core::CompileMetadata>,
+) {
     let mut requests = Vec::new();
     if let Some(diagnostic) = diagnostic
         && let Some(request) = action_diagnostic_request(outcome, crate_name, diagnostic)
@@ -2692,6 +2740,7 @@ pub(crate) fn record_compiler_invocation_with_diagnostic(
         outcome: outcome.into(),
         crate_name: crate_name.map(str::to_string),
         duration_ns,
+        metadata,
     });
     let _ = request_agent(&requests);
 }

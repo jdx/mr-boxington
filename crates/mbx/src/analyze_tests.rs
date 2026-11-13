@@ -40,6 +40,8 @@ fn action(
     diagnostic: Option<ActionDiagnostic>,
 ) -> SessionEvent {
     SessionEvent::Action {
+        metadata: Default::default(),
+        incremental: None,
         v: 1,
         ts_ms: 0,
         outcome,
@@ -578,4 +580,101 @@ fn a_divergent_verification_is_reported() {
         "{text}"
     );
     assert!(text.contains("MBX_VERIFY=1"), "{text}");
+}
+
+fn private_compilation(
+    name: &str,
+    seconds: u64,
+    skip_reason: &str,
+    private_dependencies: &[&str],
+    state: mbx_cache_core::IncrementalState,
+) -> SessionEvent {
+    let mut event = action(ActionOutcome::Unconsulted, name, seconds, None);
+    if let SessionEvent::Action {
+        metadata,
+        incremental,
+        ..
+    } = &mut event
+    {
+        *incremental = Some(true);
+        metadata.skip_reason = Some(skip_reason.into());
+        metadata.private_dependencies = private_dependencies
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+        metadata.incremental_state = Some(state);
+    }
+    event
+}
+
+fn state(source: &str, reason: Option<&str>) -> mbx_cache_core::IncrementalState {
+    mbx_cache_core::IncrementalState {
+        source: source.into(),
+        reason: reason.map(Into::into),
+    }
+}
+
+#[test]
+fn private_compilations_are_charged_to_the_crate_whose_edit_made_them_private() {
+    let analysis = analyze(
+        Vec::new(),
+        vec![
+            private_compilation("core", 2, "hot-reuse", &[], state("existing", None)),
+            private_compilation(
+                "store",
+                5,
+                "private-dependency",
+                &["core"],
+                state("existing", None),
+            ),
+            private_compilation(
+                "analysis",
+                3,
+                "private-dependency",
+                &["store"],
+                state("cold", Some("empty-directory")),
+            ),
+        ],
+    );
+
+    let changed = group(&analysis, &Cause::Changed("core".into()));
+    assert_eq!(changed.duration_ns, 10 * SECOND);
+    assert_eq!(changed.direct_count, 1);
+    assert_eq!(changed.dependent_count, 2);
+    assert!(!analysis.groups.contains_key(&Cause::FirstBuild));
+}
+
+#[test]
+fn recordings_without_private_state_details_leave_the_section_out() {
+    let text = analyze(
+        Vec::new(),
+        vec![action(ActionOutcome::Unconsulted, "core", 2, None)],
+    )
+    .text();
+
+    assert!(!text.contains("private incremental state"), "{text}");
+}
+
+#[test]
+fn private_state_reports_existing_and_empty_starts() {
+    let text = analyze(
+        Vec::new(),
+        vec![
+            private_compilation("core", 2, "hot-reuse", &[], state("existing", None)),
+            private_compilation(
+                "store",
+                5,
+                "private-dependency",
+                &["core"],
+                state("cold", Some("empty-directory")),
+            ),
+        ],
+    )
+    .text();
+    assert!(
+        text.contains("started from this checkout's earlier state"),
+        "{text}"
+    );
+    assert!(text.contains("started empty:"), "{text}");
+    assert!(!text.contains("seeded"), "{text}");
 }

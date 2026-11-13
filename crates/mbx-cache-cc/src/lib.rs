@@ -717,6 +717,12 @@ pub struct CcActionContext {
     pub environment: BTreeMap<String, Option<String>>,
     /// Complete set of direct and discovered file inputs.
     pub inputs: Vec<CcActionInput>,
+    /// Whether a header reads the include search order, when a prediction
+    /// already recorded it; `None` makes the key scan the headers itself.
+    pub search_order_dependent: Option<bool>,
+    /// The include operands that answer was read with, sorted; `Some` exactly
+    /// when `search_order_dependent` is `Some(false)`.
+    pub search_order_operands: Option<Vec<String>>,
 }
 
 /// Canonical action descriptor and its content digest.
@@ -753,6 +759,9 @@ struct CcActionDescriptor {
     assembly_input_model: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     preprocessing: Option<PreprocessingContext>,
+    /// The `-I` order was proven irrelevant and left out of `arguments`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    order_independent_includes: bool,
     compiler: CcCompilerDescriptor,
     arguments: Vec<String>,
     environment: BTreeMap<String, Option<String>>,
@@ -811,6 +820,36 @@ pub struct CcInputPrediction {
     /// Source file name associated with the timing hint.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source_name: String,
+    /// Whether any input reads the include search order (`#include_next`,
+    /// `..` operands). Recorded when two or more `-I` directories exist, so
+    /// later key builds need not reread the headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_order_dependent: Option<bool>,
+    /// Digest of the file contents that answer was read from. The answer is
+    /// used only while the files still hash to this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_order_scanned: Option<String>,
+    /// The sorted include operands looked up through the search path, recorded
+    /// when `search_order_dependent` is `false`. A name that exists in two
+    /// directories matters only if one of these asks for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_order_operands: Option<Vec<String>>,
+}
+
+/// One digest over the contents of every file input, in a stable order.
+fn scanned_contents(inputs: &[CcActionInput]) -> String {
+    let mut digests = inputs
+        .iter()
+        .filter(|input| {
+            !input
+                .path
+                .to_str()
+                .is_some_and(|path| path.starts_with(INCLUDE_MANIFEST_PREFIX))
+        })
+        .map(|input| input.digest.hash.clone())
+        .collect::<Vec<_>>();
+    digests.sort();
+    CacheDigest::blake3(digests.join("\n").as_bytes()).hash
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -1040,7 +1079,10 @@ impl CcInvocation {
         context: &CcActionContext,
     ) -> Result<CacheDigest, CcBypassReason> {
         let builder = ActionBuilder::new(self, context.clone());
-        let descriptor = builder.invocation_descriptor()?;
+        // A prediction only names inputs to look at; the action key built from
+        // them is what decides a hit. So its identity can ignore the order of
+        // `-I` directories, which some generators emit differently every run.
+        let descriptor = builder.invocation_descriptor(true)?;
         let bytes = canonical_json(&descriptor)
             .map_err(|error| CcBypassReason::Serialization(error.to_string()))?;
         Ok(CacheDigest::blake3(&bytes))
@@ -1077,6 +1119,7 @@ impl CcInvocation {
             .collect::<Result<Vec<_>, _>>()?;
         inputs.sort();
         inputs.dedup();
+        let scan = builder.search_order_scan();
         Ok(CcInputPrediction {
             path_specific: false,
             version: 1,
@@ -1084,6 +1127,11 @@ impl CcInvocation {
             environment: context.environment.keys().cloned().collect(),
             compiler_duration_ns,
             source_name: self.source_name(),
+            search_order_dependent: scan.as_ref().map(|scan| scan.dependent),
+            search_order_scanned: scan.as_ref().map(|_| scanned_contents(&context.inputs)),
+            search_order_operands: scan
+                .filter(|scan| !scan.dependent)
+                .map(|scan| scan.operands.into_iter().collect()),
         })
     }
 }
@@ -1116,7 +1164,17 @@ impl CcInputPrediction {
                 }
             }
         }
-        CcDiscoveredInputs::collect(working_dir, files, directories, digests)
+        let mut discovered = CcDiscoveredInputs::collect(working_dir, files, directories, digests)?;
+        // The answer describes the contents it scanned: a header edited since
+        // then may read the order now, so it is scanned again.
+        let current = self.search_order_scanned.as_deref()
+            == Some(scanned_contents(&discovered.inputs).as_str());
+        discovered.search_order_dependent = self.search_order_dependent.filter(|_| current);
+        discovered.search_order_operands = self
+            .search_order_operands
+            .clone()
+            .filter(|_| current && self.search_order_dependent == Some(false));
+        Ok(discovered)
     }
 }
 
@@ -1312,7 +1370,8 @@ impl<'a> ActionBuilder<'a> {
 
     fn build(self, path_specific: bool) -> Result<CcAction, CcBypassReason> {
         self.validate_mappings()?;
-        let invocation = self.invocation_descriptor()?;
+        let canonical_includes = self.include_order_is_irrelevant();
+        let invocation = self.invocation_descriptor(canonical_includes)?;
 
         let mut inputs = BTreeMap::<String, CacheDigest>::new();
         for input in &self.context.inputs {
@@ -1340,10 +1399,34 @@ impl<'a> ActionBuilder<'a> {
             .into_iter()
             .map(|(path, digest)| CcInputDescriptor { path, digest })
             .collect();
+        let binding_arguments = if canonical_includes {
+            // Order by the normalized text, as the invocation does, so a
+            // mapped root cannot make two spellings sort differently.
+            let mut pairs = self
+                .invocation
+                .arguments
+                .iter()
+                .map(|argument| {
+                    self.normalize_argument(argument)
+                        .map(|text| (argument.clone(), text))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            sort_runs(
+                &mut pairs,
+                |(argument, _)| matches!(argument, Argument::Path { flag, .. } if flag == "-I"),
+                |(_, text)| text.clone(),
+            );
+            pairs
+                .into_iter()
+                .map(|(argument, _)| argument)
+                .collect::<Vec<_>>()
+        } else {
+            self.invocation.arguments.clone()
+        };
         let descriptor = CcActionDescriptor {
             path_binding: path_specific.then(|| CcPathBinding {
                 working_dir: self.context.working_dir.clone(),
-                arguments: self.invocation.arguments.clone(),
+                arguments: binding_arguments,
                 roots: self
                     .context
                     .path_mappings
@@ -1356,6 +1439,7 @@ impl<'a> ActionBuilder<'a> {
             adapter_version: ADAPTER_VERSION,
             assembly_input_model: invocation.assembly_input_model,
             preprocessing: invocation.preprocessing,
+            order_independent_includes: canonical_includes,
             compiler: invocation.compiler,
             arguments: invocation.arguments,
             environment: self.context.environment.clone(),
@@ -1367,14 +1451,132 @@ impl<'a> ActionBuilder<'a> {
         Ok(CcAction { digest, bytes })
     }
 
-    fn invocation_descriptor(&self) -> Result<CcInvocationDescriptor, CcBypassReason> {
+    /// Whether this action may be keyed without the order of its `-I`
+    /// directories.
+    ///
+    /// Only when no file name can be found in two of the directories, so every
+    /// order resolves every include identically. This is decided even when the
+    /// order is already the sorted one: the key then carries a marker, so it
+    /// is never confused with the same arguments kept because the proof failed
+    /// -- a prediction recorded under another order supplies the same inputs to
+    /// both, and only the proof says they are right for this tree. Headers that read the order
+    /// themselves (`#include_next`, `..` operands) keep it in the key.
+    fn include_order_is_irrelevant(&self) -> bool {
+        let directories = self.include_directories();
+        if directories.len() < 2 {
+            return false;
+        }
+        let Some(shadowable) = depfile::shadowable_include_names(&directories) else {
+            return false;
+        };
+        // A recorded `true` already keeps the order. A recorded `false` needs
+        // its operands too; one without them is read again, not trusted.
+        match (
+            self.context.search_order_dependent,
+            self.context.search_order_operands.as_ref(),
+        ) {
+            (Some(true), _) => false,
+            (Some(false), Some(operands)) => {
+                !operands.iter().any(|operand| shadowable.contains(operand))
+            }
+            _ => {
+                let scan = self.scan_search_order();
+                !scan.dependent
+                    && !scan
+                        .operands
+                        .iter()
+                        .any(|operand| shadowable.contains(operand))
+            }
+        }
+    }
+
+    fn include_directories(&self) -> Vec<PathBuf> {
+        self.invocation
+            .arguments
+            .iter()
+            .filter_map(|argument| match argument {
+                Argument::Path { flag, path } if flag == "-I" => {
+                    Some(absolute_path(path, &self.context.working_dir))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What the inputs say about the search order; `None` with fewer than two
+    /// `-I` directories, where there is no order to read.
+    fn search_order_scan(&self) -> Option<depfile::SearchOrderScan> {
+        (self.include_directories().len() >= 2).then(|| self.scan_search_order())
+    }
+
+    fn scan_search_order(&self) -> depfile::SearchOrderScan {
+        let mut scan = depfile::scan_search_order(
+            self.context
+                .inputs
+                .iter()
+                .map(|input| input.path.as_path())
+                .filter(|path| {
+                    !path
+                        .to_str()
+                        .is_some_and(|path| path.starts_with(INCLUDE_MANIFEST_PREFIX))
+                }),
+        );
+        // `-include` and `-imacros` name a header the driver looks up as if
+        // the source began with `#include "name"`, which no scanned file says.
+        for argument in &self.invocation.arguments {
+            let Argument::Path { flag, path } = argument else {
+                continue;
+            };
+            if !matches!(flag.as_str(), "-include" | "-imacros") {
+                continue;
+            }
+            match path.to_str() {
+                // A `..` operand can reach a file no listed directory shows,
+                // so only the order itself can say which one is found.
+                Some(_)
+                    if path
+                        .components()
+                        .any(|c| c == std::path::Component::ParentDir) =>
+                {
+                    scan.dependent = true;
+                }
+                Some(name) => {
+                    scan.operands
+                        .insert(depfile::normalize_include_operand(name));
+                }
+                None => scan.dependent = true,
+            }
+        }
+        scan
+    }
+
+    fn invocation_descriptor(
+        &self,
+        canonical_includes: bool,
+    ) -> Result<CcInvocationDescriptor, CcBypassReason> {
         self.validate_mappings()?;
-        let arguments = self
+        let mut arguments = self
             .invocation
             .arguments
             .iter()
-            .map(|argument| self.normalize_argument(argument))
+            .map(|argument| {
+                self.normalize_argument(argument).map(|normalized| {
+                    let include = matches!(argument, Argument::Path { flag, .. } if flag == "-I");
+                    (include, normalized)
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
+        if canonical_includes {
+            sort_runs(
+                &mut arguments,
+                |(include, _)| *include,
+                |(_, text)| text.clone(),
+            );
+        }
+        let arguments = arguments
+            .into_iter()
+            .map(|(_, normalized)| normalized)
+            .collect::<Vec<_>>();
         let required_inputs = self
             .invocation
             .required_inputs
@@ -1495,6 +1697,28 @@ impl<'a> ActionBuilder<'a> {
             )),
             None => self.normalize_path(path),
         }
+    }
+}
+
+/// Sort each maximal run of consecutive items that `key` selects, leaving
+/// everything else where it is.
+///
+/// Only a run of `-I` flags is a set: the search order *between* different
+/// kinds of directory (`-iquote`, `-isystem`, `-idirafter`) and relative to the
+/// other flags is not something to reorder.
+fn sort_runs<T>(items: &mut [T], in_run: impl Fn(&T) -> bool, key: impl Fn(&T) -> String) {
+    let mut start = 0;
+    while start < items.len() {
+        if !in_run(&items[start]) {
+            start += 1;
+            continue;
+        }
+        let mut end = start;
+        while end < items.len() && in_run(&items[end]) {
+            end += 1;
+        }
+        items[start..end].sort_by_cached_key(&key);
+        start = end;
     }
 }
 

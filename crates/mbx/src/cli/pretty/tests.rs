@@ -862,3 +862,15 @@ fn incomplete_cursor_query_at_end_of_output_is_returned() {
     assert_eq!(query.take(), b"\x1b[6");
     assert!(input.is_empty());
 }
+
+#[test]
+fn block_height_stays_within_half_the_terminal() {
+    assert_eq!(block_height(0), 1);
+    assert_eq!(block_height(3), 1);
+    // Short terminals keep the old size so the progress rows are not cropped.
+    assert_eq!(block_height(16), 14);
+    assert_eq!(block_height(24), 14);
+    assert_eq!(block_height(30), 15);
+    assert_eq!(block_height(42), 21);
+    assert_eq!(block_height(200), 27);
+}

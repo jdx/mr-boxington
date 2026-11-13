@@ -45,6 +45,8 @@ fn manifest_directories_skip_system_roots_and_include_header_parents() {
         path_mappings: Vec::new(),
         environment: BTreeMap::new(),
         inputs: Vec::new(),
+        search_order_dependent: None,
+        search_order_operands: None,
     };
     let files = BTreeSet::from([
         PathBuf::from("/work/pkg/a.c"),

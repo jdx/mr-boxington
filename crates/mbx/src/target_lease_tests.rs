@@ -1352,3 +1352,294 @@ fn a_view_with_a_file_a_program_has_open_is_kept() {
     assert_eq!(outcome.removed_live_views, 1, "{outcome:?}");
     assert!(!view.exists());
 }
+
+/// A view that lost its record, whose contents last changed `days_ago` days
+/// ago: what a collector that predates leases leaves behind.
+fn unrecorded_view(root: &Path, config: &Config, name: &str, days_ago: u64) -> (PathBuf, PathBuf) {
+    let (workspace, view) = expired_view(root, config, name);
+    std::fs::remove_file(view_record_path(&config.target.root, &workspace)).unwrap();
+    let then = FileTime::from_system_time(
+        std::time::SystemTime::now() - Duration::from_secs(days_ago * 24 * 60 * 60),
+    );
+    let mut pending = vec![view.clone()];
+    let mut all = Vec::new();
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            pending.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+        }
+        all.push(path);
+    }
+    for path in all {
+        filetime::set_file_mtime(&path, then).unwrap();
+    }
+    (workspace, view)
+}
+
+fn collect_aged(root: &Path, dry_run: bool) -> CollectionOutcome {
+    collect(root, None, Some(Duration::from_secs(24 * 60 * 60)), dry_run).unwrap()
+}
+
+#[test]
+fn a_view_without_a_record_is_counted() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let (_kept, _) = expired_view(directory.path(), &config, "recorded");
+    let (_lost, view) = unrecorded_view(directory.path(), &config, "lost", 3);
+
+    let stats = stats(&config.target.root).unwrap();
+
+    assert_eq!(stats.views, 2);
+    assert_eq!(stats.untracked, 1);
+    assert!(stats.bytes >= 2 * 4_096, "both directories are sized");
+    assert!(view.exists());
+}
+
+#[test]
+fn names_that_are_not_views_are_not_counted_or_collected() {
+    if !in_own_process(
+        module_path!(),
+        "names_that_are_not_views_are_not_counted_or_collected",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let views = views_root(&config.target.root);
+    std::fs::create_dir_all(views.join("scratch")).unwrap();
+    std::fs::create_dir_all(views.join(format!("{}.extra", view_key(Path::new("/x"))))).unwrap();
+    std::fs::write(views.join(view_key(Path::new("/y"))), b"a file").unwrap();
+
+    assert_eq!(stats(&config.target.root).unwrap().untracked, 0);
+    let outcome = collect(&config.target.root, Some(0), None, false).unwrap();
+
+    assert_eq!(outcome.removed_views, 0);
+    assert!(views.join("scratch").is_dir());
+}
+
+#[test]
+fn an_old_view_without_a_record_is_collected_by_an_age_limit() {
+    if !in_own_process(
+        module_path!(),
+        "an_old_view_without_a_record_is_collected_by_an_age_limit",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let (_workspace, view) = unrecorded_view(directory.path(), &config, "lost", 3);
+
+    // No limit, no collection: the same as for a checkout that is still there.
+    let outcome = collect(&config.target.root, None, None, false).unwrap();
+    assert_eq!(outcome.removed_views, 0);
+    assert!(view.exists());
+
+    // A preview reports it and changes nothing.
+    let outcome = collect_aged(&config.target.root, true);
+    assert_eq!(outcome.removed_untracked_views, 1);
+    assert!(view.join("artifact").exists());
+
+    let outcome = collect_aged(&config.target.root, false);
+    assert_eq!(outcome.removed_views, 1);
+    assert_eq!(outcome.removed_untracked_views, 1);
+    assert_eq!(outcome.removed_live_views, 0);
+    assert!(!view.exists());
+    assert_eq!(stats(&config.target.root).unwrap().untracked, 0);
+}
+
+#[test]
+fn a_view_without_a_record_is_collected_by_a_budget() {
+    if !in_own_process(
+        module_path!(),
+        "a_view_without_a_record_is_collected_by_a_budget",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let (_workspace, view) = unrecorded_view(directory.path(), &config, "lost", 0);
+
+    let outcome = collect(&config.target.root, Some(0), None, false).unwrap();
+
+    assert_eq!(outcome.removed_untracked_views, 1);
+    assert!(!view.exists());
+}
+
+#[test]
+fn a_view_without_a_record_that_changed_recently_is_kept() {
+    if !in_own_process(
+        module_path!(),
+        "a_view_without_a_record_that_changed_recently_is_kept",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let (_workspace, view) = unrecorded_view(directory.path(), &config, "lost", 3);
+    // One file written an hour ago is all the evidence a build needs to leave.
+    std::fs::write(view.join("fresh"), b"new").unwrap();
+
+    let outcome = collect_aged(&config.target.root, false);
+
+    assert_eq!(outcome.removed_views, 0);
+    assert!(view.join("fresh").exists());
+}
+
+#[test]
+fn a_view_without_a_record_under_a_lease_is_kept() {
+    if !in_own_process(
+        module_path!(),
+        "a_view_without_a_record_under_a_lease_is_kept",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let (workspace, view) = unrecorded_view(directory.path(), &config, "lost", 3);
+    let held = ViewLease::acquire(&config.target.root, &workspace).unwrap();
+
+    let outcome = collect_aged(&config.target.root, false);
+
+    assert_eq!(outcome.kept_active_views, 1);
+    assert_eq!(outcome.removed_views, 0);
+    assert!(view.join("artifact").exists());
+
+    drop(held);
+    let outcome = collect_aged(&config.target.root, false);
+    assert_eq!(outcome.removed_untracked_views, 1);
+    assert!(!view.exists());
+}
+
+/// A build placing the checkout while collection holds the reservation can
+/// only be one that took no lease. Its record must survive with its directory.
+#[test]
+fn a_record_written_during_the_removal_keeps_the_directory() {
+    if !in_own_process(
+        module_path!(),
+        "a_record_written_during_the_removal_keeps_the_directory",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let (workspace, view) = unrecorded_view(directory.path(), &config, "lost", 3);
+
+    let outcome = collect_with(
+        &config.target.root,
+        None,
+        Some(Duration::from_secs(24 * 60 * 60)),
+        &Precedence::default(),
+        RunningPrograms::Spare,
+        false,
+        now_secs(),
+        || {},
+        |_| record_view(&config.target.root, &workspace).unwrap(),
+        || {},
+    )
+    .unwrap();
+
+    assert_eq!(outcome.removed_views, 0);
+    assert_eq!(outcome.kept_active_views, 1);
+    assert!(view.join("artifact").exists());
+    assert!(view_record_path(&config.target.root, &workspace).exists());
+}
+
+/// A build that took no lease can write to the directory after its age was
+/// read and finish before the reservation. Its outputs must not go on the
+/// strength of the old age.
+#[test]
+fn a_view_without_a_record_written_after_selection_is_kept() {
+    if !in_own_process(
+        module_path!(),
+        "a_view_without_a_record_written_after_selection_is_kept",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let (_workspace, view) = unrecorded_view(directory.path(), &config, "lost", 3);
+
+    let outcome = collect_with(
+        &config.target.root,
+        None,
+        Some(Duration::from_secs(24 * 60 * 60)),
+        &Precedence::default(),
+        RunningPrograms::Spare,
+        false,
+        now_secs(),
+        || {},
+        |directory: &Path| std::fs::write(directory.join("late"), b"built").unwrap(),
+        || {},
+    )
+    .unwrap();
+
+    assert_eq!(outcome.removed_views, 0);
+    assert_eq!(outcome.kept_active_views, 1);
+    assert!(view.join("late").exists());
+}
+
+/// Taking and releasing Cargo's lock rewrites its file, which must not be
+/// read as a build's change when deciding whether the directory is old.
+#[test]
+fn an_old_view_without_a_record_holding_a_cargo_lock_file_is_collected() {
+    if !in_own_process(
+        module_path!(),
+        "an_old_view_without_a_record_holding_a_cargo_lock_file_is_collected",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let (_workspace, view) = unrecorded_view(directory.path(), &config, "lost", 3);
+    let lock = view.join("debug/.cargo-lock");
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    std::fs::write(&lock, b"").unwrap();
+    let then = FileTime::from_system_time(
+        std::time::SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60),
+    );
+    for path in [lock.parent().unwrap(), lock.as_path(), view.as_path()] {
+        filetime::set_file_mtime(path, then).unwrap();
+    }
+
+    let outcome = collect_aged(&config.target.root, false);
+
+    assert_eq!(outcome.removed_untracked_views, 1, "{outcome:?}");
+    assert!(!view.exists());
+}
+
+/// The sweep's clock is read before the walk, so a write that lands after it
+/// has a time past `now`. It must still count as a change.
+#[test]
+fn a_write_past_the_sweeps_clock_keeps_a_view_without_a_record() {
+    if !in_own_process(
+        module_path!(),
+        "a_write_past_the_sweeps_clock_keeps_a_view_without_a_record",
+    ) {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let config = lease_test_config(directory.path(), true);
+    let (_workspace, view) = unrecorded_view(directory.path(), &config, "lost", 0);
+
+    let outcome = collect_with(
+        &config.target.root,
+        Some(0),
+        None,
+        &Precedence::default(),
+        RunningPrograms::Spare,
+        false,
+        now_secs().saturating_sub(100),
+        || {},
+        |directory: &Path| {
+            let late = directory.join("late");
+            std::fs::write(&late, b"built").unwrap();
+            let after =
+                FileTime::from_system_time(std::time::SystemTime::now() + Duration::from_secs(50));
+            filetime::set_file_mtime(&late, after).unwrap();
+        },
+        || {},
+    )
+    .unwrap();
+
+    assert_eq!(outcome.removed_views, 0);
+    assert!(view.join("late").exists());
+}

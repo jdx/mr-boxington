@@ -198,12 +198,21 @@ pub(super) fn run(
     // sweep that fails afterwards must still get credit for what it freed.
     let compilers_selected = selection.max_age.is_some() || selection.release.is_some();
     let mut named_failure = None;
+    let sessions = retention.sessions();
     let (outcome, stale_bytes) = match (dry_run, compilers_selected) {
         (true, true) => (
-            store::gc_dry_run_after_compilers(&store, store_budget, &selection),
+            store::gc_dry_run_after_compilers_with_sessions(
+                &store,
+                store_budget,
+                &selection,
+                sessions,
+            ),
             0,
         ),
-        (true, false) => (store::gc_dry_run(&store, store_budget), 0),
+        (true, false) => (
+            store::gc_dry_run_with_sessions(&store, store_budget, sessions),
+            0,
+        ),
         (false, _) => {
             // A failed age-based pass is housekeeping the budget sweep covers.
             // A version the user named is the point of the run: sweep the
@@ -218,7 +227,8 @@ pub(super) fn run(
                 });
             let stale_bytes = stale.removed_bytes;
             (
-                store::gc(&store, store_budget).map(|outcome| with_stale_compilers(stale, outcome)),
+                store::gc_with_sessions(&store, store_budget, sessions)
+                    .map(|outcome| with_stale_compilers(stale, outcome)),
                 stale_bytes,
             )
         }
@@ -613,14 +623,19 @@ pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool
     let verb = if dry_run { "would remove" } else { "removed" };
     let mut lines = Vec::new();
     let mut kept_alone = None;
-    let kept = if outcome.kept_active_views > 0 {
-        format!(
+    let mut kept = String::new();
+    if outcome.removed_untracked_views > 0 {
+        kept.push_str(&format!(
+            ", {} without a record",
+            outcome.removed_untracked_views
+        ));
+    }
+    if outcome.kept_active_views > 0 {
+        kept.push_str(&format!(
             ", {} kept for running commands or builds that started meanwhile",
             outcome.kept_active_views
-        )
-    } else {
-        String::new()
-    };
+        ));
+    }
     if outcome.removed_views > 0 {
         lines.push(format!(
             "{verb} {} target directories ({} logical, {} abandoned and {} live{kept}); {} logical remain",
@@ -801,23 +816,24 @@ fn run_sweep_body(config: &Config, retention: &RetentionSettings) -> Sweep {
         release: None,
     };
     let stale = stale_compilers(&config.store_dir(), &selection, false);
-    let outcome = match store::gc(&config.store_dir(), store_budget) {
-        Ok(outcome) => with_stale_compilers(stale, outcome),
-        Err(error) => {
-            log::warn!("the store was not swept: {error}");
-            // The budget sweep did not measure the store, so measure it here
-            // rather than report the empty default as what remains.
-            let remaining =
-                store::stats(&config.store_dir()).map_or(0, |stats| stats.total_bytes());
-            with_stale_compilers(
-                stale,
-                store::GcOutcome {
-                    remaining_bytes: remaining,
-                    ..store::GcOutcome::default()
-                },
-            )
-        }
-    };
+    let outcome =
+        match store::gc_with_sessions(&config.store_dir(), store_budget, retention.sessions()) {
+            Ok(outcome) => with_stale_compilers(stale, outcome),
+            Err(error) => {
+                log::warn!("the store was not swept: {error}");
+                // The budget sweep did not measure the store, so measure it here
+                // rather than report the empty default as what remains.
+                let remaining =
+                    store::stats(&config.store_dir()).map_or(0, |stats| stats.total_bytes());
+                with_stale_compilers(
+                    stale,
+                    store::GcOutcome {
+                        remaining_bytes: remaining,
+                        ..store::GcOutcome::default()
+                    },
+                )
+            }
+        };
     sweep.delta.freed_store_bytes = outcome.removed_bytes;
     if outcome.removed_bytes > 0 {
         sweep.lines.push(evictions(&outcome));
@@ -1298,7 +1314,7 @@ fn collect_low_disk_tier(
             LowDiskTier::Targets => {
                 collect_low_disk_targets(config, retention, shortfall, collection)
             }
-            LowDiskTier::Store => collect_low_disk_store(config, shortfall, collection),
+            LowDiskTier::Store => collect_low_disk_store(config, retention, shortfall, collection),
         };
         if !progressed {
             return;
@@ -1442,6 +1458,7 @@ pub(super) fn collect_low_disk_targets(
 
 fn collect_low_disk_store(
     config: &Config,
+    retention: &RetentionSettings,
     shortfall: u64,
     collection: &mut LowDiskCollection,
 ) -> bool {
@@ -1451,7 +1468,7 @@ fn collect_low_disk_store(
         return false;
     };
     let limit = usage.saturating_sub(shortfall);
-    let outcome = match store::gc(&store, limit) {
+    let outcome = match store::gc_with_sessions(&store, limit, retention.sessions()) {
         Ok(outcome) => outcome,
         Err(error) => {
             log::warn!("the store was not swept: {error}");
@@ -1545,6 +1562,9 @@ impl LowDiskCollection {
         total.removed_live_views = total
             .removed_live_views
             .saturating_add(outcome.removed_live_views);
+        total.removed_untracked_views = total
+            .removed_untracked_views
+            .saturating_add(outcome.removed_untracked_views);
         total.kept_active_views = outcome.kept_active_views;
         total.removed_units = total.removed_units.saturating_add(outcome.removed_units);
         total.removed_unit_bytes = total

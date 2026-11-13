@@ -907,6 +907,30 @@ fn mise_wrapper_is_configured(scope: &MiseScope) -> Result<bool> {
     Ok(mise_wrapper_is_configured_in(&document))
 }
 
+/// Whether the mbx Cargo wrapper is the effective one across the given mise
+/// config files, listed from lowest to highest precedence. The highest-precedence
+/// file that defines `wrappers.cargo` decides, so a project can override a global
+/// mbx wrapper. Unreadable or unparsable files are skipped.
+pub(crate) fn mise_wrapper_is_configured_in_files<'a>(
+    files: impl IntoIterator<Item = &'a Path>,
+) -> bool {
+    let documents = files.into_iter().filter_map(|file| {
+        std::fs::read_to_string(file)
+            .ok()?
+            .parse::<toml_edit::DocumentMut>()
+            .ok()
+    });
+    documents
+        .filter(|document| {
+            document
+                .get("wrappers")
+                .and_then(toml_edit::Item::as_table_like)
+                .is_some_and(|wrappers| wrappers.get("cargo").is_some())
+        })
+        .last()
+        .is_some_and(|document| mise_wrapper_is_configured_in(&document))
+}
+
 pub(super) fn mise_wrapper_is_configured_in(document: &toml_edit::DocumentMut) -> bool {
     let Some(cargo) = document
         .get("wrappers")

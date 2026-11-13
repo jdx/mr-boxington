@@ -64,6 +64,32 @@ pub(crate) struct Lifetime {
     automatically_pruned_bytes: u64,
     automatically_pruned_since_unix_secs: Option<u64>,
     requested_removal_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compilations: Option<Compilations>,
+}
+
+/// Compilations by what the cache did with them, from when mbx started
+/// counting them. Raw totals: which of them belong in a hit rate's denominator
+/// is the reader's choice.
+#[derive(Serialize)]
+pub(crate) struct Compilations {
+    since_unix_secs: u64,
+    hits: u64,
+    misses: u64,
+    unconsulted: u64,
+    bypasses: u64,
+    verifications: u64,
+    /// Also counted under their outcome.
+    incremental: u64,
+    compiler_ns: CompilerTime,
+}
+
+#[derive(Serialize)]
+struct CompilerTime {
+    miss: u64,
+    unconsulted: u64,
+    bypass: u64,
+    verification: u64,
 }
 
 #[derive(Serialize)]
@@ -72,6 +98,9 @@ pub(crate) struct Cache {
     bytes: u64,
     managed_targets: u64,
     managed_target_bytes: u64,
+    /// The part of `managed_targets` with no record, which `mbx gc` removes
+    /// only under an age or size limit.
+    untracked_targets: u64,
 }
 
 pub(crate) fn collect(store: &Path, target_root: &Path) -> Result<Report> {
@@ -98,6 +127,7 @@ pub(crate) fn collect(store: &Path, target_root: &Path) -> Result<Report> {
             bytes: stats.total_bytes(),
             managed_targets: targets.views,
             managed_target_bytes: targets.bytes,
+            untracked_targets: targets.untracked,
         },
         sharing: SharingEstimate::from_live_projects(&live_cache_bytes, stats.total_bytes()),
     })
@@ -121,6 +151,24 @@ impl From<&savings::Tally> for Lifetime {
             automatically_pruned_since_unix_secs: (tally.auto_pruned_since_secs > 0)
                 .then_some(tally.auto_pruned_since_secs),
             requested_removal_bytes: tally.freed_requested_bytes,
+            compilations: (tally.outcomes.since_secs > 0).then(|| {
+                let outcomes = &tally.outcomes;
+                Compilations {
+                    since_unix_secs: outcomes.since_secs,
+                    hits: outcomes.hits,
+                    misses: outcomes.misses,
+                    unconsulted: outcomes.unconsulted,
+                    bypasses: outcomes.bypasses,
+                    verifications: outcomes.verifications,
+                    incremental: outcomes.incremental,
+                    compiler_ns: CompilerTime {
+                        miss: outcomes.miss_compiler_ns,
+                        unconsulted: outcomes.unconsulted_compiler_ns,
+                        bypass: outcomes.bypass_compiler_ns,
+                        verification: outcomes.verification_compiler_ns,
+                    },
+                }
+            }),
         }
     }
 }
@@ -150,6 +198,28 @@ impl Lifetime {
             ),
             ("builds", self.builds.to_string()),
             ("cache hits", self.cached_compilations.to_string()),
+            (
+                "compilations",
+                self.compilations.as_ref().map_or_else(
+                    || "not tracked yet".into(),
+                    |counted| {
+                        // Verifications only appear where sampling is on.
+                        let verified = if counted.verifications > 0 {
+                            format!(", {} rebuilt to verify", counted.verifications)
+                        } else {
+                            String::new()
+                        };
+                        format!(
+                            "{} hits, {} misses, {} not looked up, {} bypassed{verified} {}",
+                            counted.hits,
+                            counted.misses,
+                            counted.unconsulted,
+                            counted.bypasses,
+                            savings::since(counted.since_unix_secs)
+                        )
+                    },
+                ),
+            ),
             ("pruned by mbx", logical_size(self.pruned_bytes)),
             (
                 "  targets / cache",
@@ -220,8 +290,12 @@ impl Report {
             size(self.cache.bytes),
             self.cache.objects
         ));
+        let untracked = match self.cache.untracked_targets {
+            0 => String::new(),
+            count => format!(", {count} without a record"),
+        };
         lines.push(format!(
-            "managed targets          {} ({})",
+            "managed targets          {} ({}){untracked}",
             self.cache.managed_targets,
             size(self.cache.managed_target_bytes)
         ));
@@ -299,6 +373,57 @@ mod tests {
             "not tracked yet"
         );
         assert_eq!(report.since(), "since 2023-11-14");
+    }
+
+    #[test]
+    fn compilations_by_outcome_appear_once_counting_starts() {
+        let old = serde_json::from_value::<savings::Tally>(
+            serde_json::json!({"version": 1, "since_secs": 1_700_000_000, "cached_compilations": 9}),
+        )
+        .unwrap();
+        let report = Lifetime::from(&old);
+        assert!(
+            serde_json::to_value(&report)
+                .unwrap()
+                .get("compilations")
+                .is_none()
+        );
+        let row = |report: &Lifetime| {
+            report
+                .rows()
+                .into_iter()
+                .find(|(label, _)| *label == "compilations")
+                .unwrap()
+                .1
+        };
+        assert_eq!(row(&report), "not tracked yet");
+
+        let counted = serde_json::from_value::<savings::Tally>(serde_json::json!({
+            "version": 1,
+            "since_secs": 1_700_000_000,
+            "outcomes": {
+                "since_secs": 1_800_000_000,
+                "hits": 7,
+                "misses": 2,
+                "unconsulted": 3,
+                "bypasses": 1,
+                "verifications": 4,
+                "incremental": 2,
+                "unconsulted_compiler_ns": 5,
+            },
+        }))
+        .unwrap();
+        let report = Lifetime::from(&counted);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["compilations"]["since_unix_secs"], 1_800_000_000);
+        assert_eq!(json["compilations"]["hits"], 7);
+        assert_eq!(json["compilations"]["unconsulted"], 3);
+        assert_eq!(json["compilations"]["incremental"], 2);
+        assert_eq!(json["compilations"]["compiler_ns"]["unconsulted"], 5);
+        assert_eq!(
+            row(&report),
+            "7 hits, 2 misses, 3 not looked up, 1 bypassed, 4 rebuilt to verify since 2027-01-15"
+        );
     }
 
     #[test]

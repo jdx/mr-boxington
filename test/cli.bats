@@ -318,6 +318,30 @@ global_config_file() {
   assert_output --partial "src/lib.rs"
 }
 
+@test "explain --last and analyze read a checkout nested inside another project" {
+  # The enclosing project has its own lockfile, as a repository does when
+  # agent checkouts live in a directory inside it.
+  cargo init --lib --vcs none outer-project
+  cargo init --lib --vcs none outer-project/lanes/inner
+  cd outer-project/lanes/inner
+  run "$MBX_BIN" check
+  assert_success
+
+  # The enclosing project builds last.
+  cd ../..
+  run "$MBX_BIN" check
+  assert_success
+
+  cd lanes/inner
+  run "$MBX_BIN" explain --last
+  assert_success
+  assert_output --regexp $'workspace: [^\n]*inner\n'
+
+  run "$MBX_BIN" analyze
+  assert_success
+  assert_output --regexp $'workspace: [^\n]*inner\n'
+}
+
 @test "analyze charges a dependent's rebuild to the crate that changed" {
   export MBX_LEARNED_INCREMENTAL=0
   mkdir analyzed-project

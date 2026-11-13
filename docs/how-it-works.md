@@ -213,10 +213,19 @@ targets can otherwise repeat the same dependency compilations. With mbx, a
 compilation identical to one already running against the same cache directory
 waits for that one to finish and tries to restore its result from the cache.
 
+For Rust builds orchestrated by mbx, this deduplication applies only to packages
+that are not workspace members. Vendored dependencies remain eligible.
+Workspace crates still reuse completed cache results, but a cache miss goes
+directly to the permit pool. Different worktrees editing the same workspace
+crate therefore do not wait behind each other's compiler invocations.
+Standalone compiler wrappers skip deduplication for Cargo's explicitly selected
+packages; identifying all workspace members requires a build session.
+
 Compilations with the same arguments can still read different source files,
-for example in two checkouts with different edits. When the finished result
-does not match a waiting build's files, that build compiles at once through
-the permit pool, and the builds waiting behind it do not wait for its compile.
+for example in two external path dependencies with different edits. When the
+finished result does not match a waiting build's files, that build compiles at
+once through the permit pool, and the builds waiting behind it do not wait for
+its compile.
 When the first compilation fails or stores nothing, the next waiting build
 compiles while the others keep waiting, so they can reuse its result.
 

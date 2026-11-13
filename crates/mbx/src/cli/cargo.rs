@@ -520,6 +520,13 @@ fn cargo_with_settings_bypass_log_and_roots(
             Err(error) => return Err(error),
         };
         let mut environment = wrapper_environment.clone();
+        if config.scheduler.enabled {
+            session::workspace::record_members(
+                roots.workspace_members.as_deref(),
+                session_dir.path(),
+                &mut environment,
+            );
+        }
         if let Some(rustc) = &rustc {
             environment.insert("RUSTC".into(), rustc.to_string_lossy().into_owned());
         }
@@ -574,10 +581,6 @@ fn cargo_with_settings_bypass_log_and_roots(
         environment.insert(
             session::LEARNED_INCREMENTAL_ENV.into(),
             if learned_incremental { "1" } else { "0" }.into(),
-        );
-        environment.insert(
-            session::SESSION_SEED_INCREMENTAL_ENV.into(),
-            if settings.seed_incremental { "1" } else { "0" }.into(),
         );
         environment.insert(
             session::INCREMENTAL_BUDGET_ENV.into(),
@@ -992,6 +995,21 @@ pub(super) fn account_session(
         }
         delta.cached_compilations = stats.hits;
         delta.avoided_compiler_ns = stats.avoided_compiler_duration_ns;
+        let compiler = |outcome: &str| {
+            stats.compiler.get(outcome).map_or((0, 0), |compiler| {
+                (compiler.invocations, compiler.duration_ns)
+            })
+        };
+        // Every count comes from the compiler outcomes the action rows use, so
+        // they add up to the same compilations; `stats.unconsulted` and
+        // `stats.bypasses` count other things and would not.
+        let outcomes = &mut delta.outcomes;
+        outcomes.hits = stats.hits;
+        (outcomes.misses, outcomes.miss_compiler_ns) = compiler("miss");
+        (outcomes.unconsulted, outcomes.unconsulted_compiler_ns) = compiler("unconsulted");
+        (outcomes.bypasses, outcomes.bypass_compiler_ns) = compiler("bypass");
+        (outcomes.verifications, outcomes.verification_compiler_ns) = compiler("verification");
+        outcomes.incremental = stats.incremental_compilations;
         // Both mechanisms save the same thing: a second copy of bytes the
         // store already holds. The ledger counts them together under the name
         // it has always persisted under.
@@ -1179,6 +1197,7 @@ pub(super) fn cargo_help_requested(arguments: &[String]) -> bool {
     arguments.first().is_some_and(|argument| argument == "help")
         || arguments
             .iter()
+            .take_while(|argument| *argument != "--")
             .any(|argument| argument == "--help" || argument == "-h")
 }
 
@@ -1404,6 +1423,7 @@ pub(super) fn exit_code(status: std::process::ExitStatus) -> ExitCode {
 /// Settings the shim maps out of its cache keys.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Roots {
+    pub(super) workspace_members: Option<Vec<PathBuf>>,
     pub(super) workspace_root: PathBuf,
     pub(super) target_dir: PathBuf,
     pub(super) build_dir: Option<PathBuf>,
@@ -1482,6 +1502,7 @@ pub(super) fn resolve_roots_with(
 ) -> Roots {
     let resolved = mbx_cache_cargo::resolve(cargo, arguments, working_dir, target_dir_env);
     Roots {
+        workspace_members: None,
         workspace_root: resolved.workspace_root,
         target_dir: resolved.target_dir,
         build_dir: resolved.build_dir,
@@ -1553,13 +1574,14 @@ pub(super) fn cargo_roots_reported(
         return remote_install_roots(arguments, &working_dir, target_dir_env)
             .ok_or_else(|| eyre::eyre!("could not resolve remote install storage"));
     }
-    let resolved = mbx_cache_cargo::try_resolve_reported(
+    let (resolved, workspace_members) = mbx_cache_cargo::try_resolve_reported_with_members(
         cargo,
         arguments,
         &working_dir,
         target_dir_env.map(std::ffi::OsStr::to_os_string),
     )?;
     Ok(Roots {
+        workspace_members,
         workspace_root: resolved.workspace_root,
         target_dir: resolved.target_dir,
         build_dir: resolved.build_dir,
@@ -1589,6 +1611,7 @@ fn remote_install_roots(
         mbx_cache_cargo::remote_install_target_dir(arguments, working_dir, target_dir_env)
             .unwrap_or_else(|| workspace_root.join("target"));
     Some(Roots {
+        workspace_members: None,
         workspace_root,
         target_dir,
         build_dir: None,
@@ -1632,6 +1655,7 @@ fn remote_install_scratch(
 pub(super) fn parse_cargo_roots(metadata: &[u8]) -> Option<Roots> {
     let metadata: serde_json::Value = serde_json::from_slice(metadata).ok()?;
     Some(Roots {
+        workspace_members: None,
         workspace_root: PathBuf::from(metadata.get("workspace_root")?.as_str()?),
         target_dir: PathBuf::from(metadata.get("target_directory")?.as_str()?),
         build_dir: metadata

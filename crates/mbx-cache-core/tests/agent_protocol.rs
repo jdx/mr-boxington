@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v11.jsonl");
+const AGENT_FIXTURE: &str = include_str!("fixtures/agent-protocol-v13.jsonl");
 
 fn digest() -> CacheDigest {
     CacheDigest {
@@ -169,6 +169,7 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
                 action: digest(),
                 restore: restore(),
                 crate_name: Some("serde".into()),
+                metadata: None,
             },
         ),
         (
@@ -206,11 +207,13 @@ fn requests() -> Vec<(&'static str, AgentRequest)> {
                 outcome: "miss".into(),
                 crate_name: Some("fixture".into()),
                 duration_ns: 19,
+                metadata: None,
             },
         ),
         (
             "request.record_action_verification",
             AgentRequest::RecordActionVerification {
+                metadata: None,
                 matched: true,
                 restore: restore(),
             },
@@ -474,7 +477,7 @@ fn assert_fixture<T: Serialize>(expected: &mut BTreeMap<&str, &str>, name: &str,
 }
 
 #[test]
-fn agent_protocol_v11_shapes_match_the_conformance_fixture() {
+fn agent_protocol_v13_shapes_match_the_conformance_fixture() {
     let mut expected = fixture();
     for line in AGENT_FIXTURE.lines() {
         let (name, json) = line
@@ -552,7 +555,7 @@ fn agent_protocol_v11_shapes_match_the_conformance_fixture() {
 
 #[test]
 fn protocol_constants_match_the_contract() {
-    assert_eq!(AGENT_PROTOCOL_VERSION, 11);
+    assert_eq!(AGENT_PROTOCOL_VERSION, 13);
     assert_eq!(PROTOCOL_VERSION, 1);
     assert_eq!(
         ACTION_RESULT_MEDIA_TYPE,

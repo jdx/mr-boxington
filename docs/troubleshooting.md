@@ -65,8 +65,8 @@ the past. In the action store, mbx records object use itself, so the check
 confirms that it can set that file's access time; if it cannot, object
 eviction loses its recent-use ordering. Managed target views still depend on
 the filesystem: there the check reads the file, and both `relatime` and
-`strictatime` pass. With `noatime`, unused-unit collection is skipped and
-seeding cannot filter units by recent use. On Linux, enable access times with
+`strictatime` pass. With `noatime`, unused-unit collection is skipped.
+On Linux, enable access times with
 `relatime` or `strictatime`; on ZFS, both `atime=on` and `relatime=on` are needed
 for relative access-time updates. On other platforms, check the filesystem's
 access-time settings. The checks warn rather than fail because caching still

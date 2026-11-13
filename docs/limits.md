@@ -32,9 +32,12 @@ directives become the [input prediction](/how-it-works#prediction-and-dep-info)
 for later runs. The action key combines the build-script binary, Cargo's
 implicit unit environment (target, profile, features, configuration, and
 package metadata), the recursively hashed declared paths, and the declared
-environment values. Directories and missing paths are inputs too, matching
-Cargo's directive model. A hit restores the complete `OUT_DIR` tree and replays
-the script's stdout directives and stderr without starting the script.
+environment values. Directory inputs are hashed recursively. A declared path
+that is missing, has a dangling symlink, or runs through a regular file forces
+execution on every build, matching Cargo's freshness rules. Such a path prevents
+replay even when an earlier mbx version cached a result for it. A hit restores
+the complete `OUT_DIR` tree and replays the script's stdout directives and stderr
+without starting the script.
 
 Set `build_script_execution = false` or `MBX_BUILD_SCRIPT_EXECUTION=0` to turn
 off build-script caching while keeping Rust and C/C++ compilation caching.

@@ -433,8 +433,9 @@ pub(crate) fn run() -> Result<ExitCode> {
     // Whether the run below follows a lookup. The agent counted that lookup,
     // so the run is its miss; without one the run was never consulted.
     let mut looked_up = false;
-    if let Some(prediction) = find_prediction(&invocation)? {
-        let (action_bytes, action) = build_action(&binary_action, &prediction)?;
+    if let Some(prediction) = find_prediction(&invocation)?
+        && let Some((action_bytes, action)) = build_action(&binary_action, &prediction)?
+    {
         looked_up = true;
         // A result that fails to restore is a miss like any other: running the
         // script republishes it, where bypassing would leave it broken.
@@ -488,14 +489,10 @@ pub(crate) fn run() -> Result<ExitCode> {
             record_bypass("build-script-always-rerun");
             return Ok(());
         };
-        if declares_a_path_through_a_file(&prediction)? {
-            // Cargo cannot stat such a path, `.git/HEAD` in a linked worktree
-            // for one, so it reruns the script on every build. What the script
-            // reads behind it, the worktree's real `HEAD`, is in no key, so a
-            // stored result would come back after the commit moved.
+        let Some((action_bytes, action)) = build_action(&binary_action, &prediction)? else {
             record_bypass("build-script-always-rerun");
             return Ok(());
-        }
+        };
         if declared_inputs_changed_since(&prediction, started_at)? {
             // The result is keyed to the inputs as the run left them, but the
             // script read them as they were before. Cargo runs it again, and
@@ -503,7 +500,6 @@ pub(crate) fn run() -> Result<ExitCode> {
             record_bypass("build-script-wrote-its-inputs");
             return Ok(());
         }
-        let (action_bytes, action) = build_action(&binary_action, &prediction)?;
         publish(&action, &action_bytes, &output.stdout, &output.stderr)?;
         record_prediction(invocation, action, &prediction)
     })();
@@ -811,7 +807,7 @@ fn parse_prediction_with_mappings(
 fn build_action(
     binary_action: &CacheDigest,
     prediction: &Prediction,
-) -> Result<(Vec<u8>, CacheDigest)> {
+) -> Result<Option<(Vec<u8>, CacheDigest)>> {
     let working_dir = std::env::current_dir()?;
     let mappings = build_script_mappings();
     let mut inputs = BTreeMap::new();
@@ -832,6 +828,14 @@ fn build_action(
             Vec::new()
         };
         let tree = InputTree::read(&resolved, &mappings, &excluded, &[], 0)?;
+        // Cargo reruns a script on every build when it cannot stat an explicit
+        // watch. Continued absence is not a stable execution input: the script
+        // can rely on this contract to read state it cannot otherwise declare.
+        // Check the tree used for the key itself, on lookups as well as stores,
+        // so predictions cached before this guard cannot replay stale output.
+        if tree.missing_root() || tree.blocked_by_file() {
+            return Ok(None);
+        }
         checkout_local = checkout_local || is_git_metadata(&resolved) || tree.holds_git_metadata();
         let state = tree.state(&mut |path| CacheDigest::blake3_file(path))?;
         inputs.insert(declared.clone(), state);
@@ -873,7 +877,7 @@ fn build_action(
         version: 5,
     })?;
     let digest = CacheDigest::blake3(&bytes);
-    Ok((bytes, digest))
+    Ok(Some((bytes, digest)))
 }
 
 /// Cargo's build-script declarations also invalidate the package's rustc
@@ -1216,6 +1220,16 @@ impl InputTree {
         )
     }
 
+    /// Whether the watched root is absent, including a dangling symlink.
+    /// Missing descendants of an existing directory are not explicit watches.
+    fn missing_root(&self) -> bool {
+        match self {
+            Self::Missing => true,
+            Self::Symlink { referent, .. } => referent.missing_root(),
+            Self::BlockedByFile | Self::File(_) | Self::Directory(_) => false,
+        }
+    }
+
     /// Whether some path in the tree runs through a regular file.
     fn blocked_by_file(&self) -> bool {
         match self {
@@ -1449,28 +1463,6 @@ fn run_start_stamp() -> SystemTime {
         modified
     });
     stamp.map_or(now, |stamp| stamp.min(now))
-}
-
-/// Whether a declared input, or anything a link in it leads to, runs through a
-/// regular file, so it can never exist.
-fn declares_a_path_through_a_file(prediction: &Prediction) -> Result<bool> {
-    let mappings = build_script_mappings();
-    let working_dir = std::env::current_dir()?;
-    for declared in &prediction.inputs {
-        let resolved_name =
-            String::from_utf8(denormalize_output_text(declared.as_bytes(), &mappings))
-                .expect("denormalizing UTF-8 paths preserves UTF-8");
-        let path = working_dir.join(resolved_name);
-        let excluded = if prediction.default_package {
-            default_package_exclusions(&path)?
-        } else {
-            Vec::new()
-        };
-        if InputTree::read(&path, &mappings, &excluded, &[], 0)?.blocked_by_file() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// Whether anything a prediction declares as an input was modified at or after
@@ -2324,29 +2316,35 @@ mod tests {
         assert!(!runs_through_a_file(&directory.path().join("absent/child")));
     }
 
-    /// A declared link whose target runs through a file, as `head -> .git/HEAD`
-    /// in a linked worktree, leaves the execution uncached like the path itself.
+    /// Unavailable watches cannot form keys, including predictions recorded by
+    /// versions which cached an ordinary missing path as a stable input.
     #[cfg(unix)]
     #[test]
-    fn a_declared_link_through_a_file_is_a_path_through_a_file() {
+    fn an_unavailable_watch_cannot_form_an_execution_key() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join(".git"), "gitdir: elsewhere\n").unwrap();
         std::fs::write(directory.path().join("plain"), "").unwrap();
         std::os::unix::fs::symlink(".git/HEAD", directory.path().join("head")).unwrap();
-        let declares = |name: &str| {
-            declares_a_path_through_a_file(&Prediction {
-                default_package: false,
-                environment: Vec::new(),
-                inputs: vec![directory.path().join(name).to_string_lossy().into_owned()],
-                portable_out_dir: true,
-                version: 3,
-            })
+        std::os::unix::fs::symlink("absent", directory.path().join("dangling")).unwrap();
+        let cacheable = |name: &str| {
+            build_action(
+                &CacheDigest::blake3(b"script"),
+                &Prediction {
+                    default_package: false,
+                    environment: Vec::new(),
+                    inputs: vec![directory.path().join(name).to_string_lossy().into_owned()],
+                    portable_out_dir: true,
+                    version: 3,
+                },
+            )
             .unwrap()
+            .is_some()
         };
-        assert!(declares("head"));
-        assert!(declares(".git/HEAD"));
-        assert!(!declares("plain"));
-        assert!(!declares("absent"));
+        assert!(!cacheable("head"));
+        assert!(!cacheable(".git/HEAD"));
+        assert!(cacheable("plain"));
+        assert!(!cacheable("absent"));
+        assert!(!cacheable("dangling"));
     }
 
     #[test]

@@ -466,8 +466,21 @@ fn private_artifacts_are_recognized_only_while_marked() {
     ];
     assert!(!links_private_artifact_in(root.path(), &links));
 
-    record_private_artifacts(root.path(), &outputs).unwrap();
+    record_private_artifacts(root.path(), &outputs, "base").unwrap();
     assert!(links_private_artifact_in(root.path(), &links));
+    assert_eq!(
+        private_artifact_inputs_in(root.path(), &links).1,
+        vec!["base"]
+    );
+    let marker_path = private_artifact_path(root.path(), &deps.join("libbase-1.rmeta")).unwrap();
+    let mut old: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
+    old.as_object_mut().unwrap().remove("producer");
+    std::fs::write(&marker_path, serde_json::to_vec(&old).unwrap()).unwrap();
+    assert_eq!(
+        private_artifact_inputs_in(root.path(), &links),
+        (true, vec![], None)
+    );
     assert!(
         !links_private_artifact_in(root.path(), &[deps.join("libother-1.rlib")]),
         "a marker must not vouch for an artifact it was not written for"
@@ -1853,699 +1866,6 @@ fn cached_clippy_compiles_count_samples_under_their_own_mode() {
     assert_ne!(clippy.compile_mode_key(), check.compile_mode_key());
 }
 
-#[test]
-fn paths_under_the_working_directory_become_relative() {
-    let working_dir = Path::new("/work/checkout");
-    let rewrite = |arguments: &[&str]| -> Vec<String> {
-        let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
-        paths_relative_to(&arguments, working_dir)
-            .into_iter()
-            .map(|argument| argument.into_string().unwrap())
-            .collect()
-    };
-
-    assert_eq!(
-        rewrite(&[
-            "--crate-name",
-            "render",
-            "crates/render/src/lib.rs",
-            "-L",
-            "dependency=/work/checkout/target/debug/deps",
-            "-Lnative=/work/checkout/target/debug/build/blake3-0abc/out",
-            "--extern",
-            "bevy=/work/checkout/target/debug/deps/libbevy-0abc.rmeta",
-            "--extern=log=/work/checkout/target/debug/deps/liblog-0abc.rmeta",
-            "--out-dir",
-            "/work/checkout/target/debug/deps",
-            "--remap-path-prefix=/work/checkout/target/debug/build/render-0abc/out=${target}/out",
-            "--remap-path-prefix=/work/checkout=${workspace}",
-            "--remap-path-prefix",
-            "/work/checkout/vendor=/vendor",
-            "--emit=dep-info=/work/checkout/target/debug/deps/render.d",
-        ]),
-        [
-            "--crate-name",
-            "render",
-            "crates/render/src/lib.rs",
-            "-L",
-            "dependency=./target/debug/deps",
-            "-Lnative=./target/debug/build/blake3-0abc/out",
-            "--extern",
-            "bevy=./target/debug/deps/libbevy-0abc.rmeta",
-            "--extern=log=./target/debug/deps/liblog-0abc.rmeta",
-            "--out-dir",
-            "./target/debug/deps",
-            "--remap-path-prefix=./target/debug/build/render-0abc/out=${target}/out",
-            "--remap-path-prefix=.=${workspace}",
-            "--remap-path-prefix",
-            "./vendor=/vendor",
-            // `./` rather than nothing, so a path never turns into a name.
-            "--emit=dep-info=./target/debug/deps/render.d",
-        ]
-    );
-    // Elsewhere, including a path that merely contains the working directory,
-    // one that only shares its name's prefix, a remap destination (the text
-    // recorded in the source's place), the virtual working directory itself,
-    // and what only the linker reads -- which can embed a path, such as an
-    // rpath, that must stay absolute -- stays as it was.
-    let unrelated = [
-        "-Lnative=/opt/homebrew/lib",
-        "--extern=std=/mnt/work/checkout/libstd.rlib",
-        "-L",
-        "/work/checkout-two/target",
-        "--remap-path-prefix=/vendor=/work/checkout/vendor",
-        "--remap-path-prefix",
-        "/vendor=/work/checkout/vendor",
-        "-Zremap-cwd-prefix=/work/checkout",
-        "-Z",
-        "remap-cwd-prefix=/work/checkout",
-        "-Clinker=/work/checkout/tools/clang",
-        "-Clink-arg=-Wl,-rpath,/work/checkout/target/debug/lib",
-        "-C",
-        "link-args=-Wl,-rpath=/work/checkout/lib -L/work/checkout/lib",
-        "-C",
-        "linker=/work/checkout/tools/clang",
-        "-Zpre-link-arg=/work/checkout/crt0.o",
-    ];
-    assert_eq!(rewrite(&unrelated), unrelated);
-}
-
-#[cfg(windows)]
-#[test]
-fn windows_paths_under_the_working_directory_become_relative_with_either_separator() {
-    let working_dir = Path::new(r"E:\work\checkout");
-    let arguments: Vec<OsString> = [
-        r"dependency=E:\work\checkout\target\debug\deps",
-        "--extern=log=E:\\work\\checkout/target/debug/deps/liblog.rmeta",
-        r"E:\work\checkout-two\target",
-    ]
-    .iter()
-    .map(OsString::from)
-    .collect();
-    assert_eq!(
-        paths_relative_to(&arguments, working_dir),
-        [
-            OsString::from(r"dependency=.\target\debug\deps"),
-            OsString::from("--extern=log=./target/debug/deps/liblog.rmeta"),
-            OsString::from(r"E:\work\checkout-two\target"),
-        ]
-    );
-}
-
-#[test]
-fn relocatable_incremental_state_needs_rustc_1_98() {
-    // As `query_compiler_identity` keeps it: the version lines of `rustc -vV`.
-    let identity = |release: &str| {
-        format!(
-            "rustc {release} (88d9e12ae 2026-08-18); commit-hash: 88d9e12ae; LLVM version: 21.1.0"
-        )
-    };
-    assert!(!release_at_least(&identity("1.94.0"), (1, 98)));
-    assert!(!release_at_least(&identity("1.97.1"), (1, 98)));
-    assert!(release_at_least(&identity("1.98.0"), (1, 98)));
-    assert!(release_at_least(&identity("1.101.0-nightly"), (1, 98)));
-    assert!(release_at_least(&identity("2.0.0"), (1, 98)));
-    assert!(
-        !release_at_least("commit-hash: 88d9e12ae", (1, 98)),
-        "no version line"
-    );
-}
-
-#[test]
-fn incremental_seed_injection_respects_compiler_and_user_policy() {
-    use IncrementalSeedMode::{Disabled, Inject, UserRemap};
-    let cases = [
-        (
-            "1.98.0",
-            true,
-            true,
-            false,
-            false,
-            Inject { bootstrap: true },
-        ),
-        (
-            "1.99.0-beta.1",
-            true,
-            true,
-            false,
-            false,
-            Inject { bootstrap: true },
-        ),
-        (
-            "1.99.0-nightly",
-            true,
-            true,
-            false,
-            false,
-            Inject { bootstrap: false },
-        ),
-        (
-            "1.99.0-dev",
-            true,
-            true,
-            false,
-            false,
-            Inject { bootstrap: false },
-        ),
-        ("1.97.0", true, true, false, false, Disabled),
-        ("1.99.0", false, true, false, false, Disabled),
-        ("1.99.0", true, true, true, false, UserRemap),
-        ("1.99.0", false, true, true, true, UserRemap),
-        ("1.99.0", true, true, false, true, Disabled),
-        ("1.99.0-nightly", true, true, false, true, Disabled),
-        ("1.99.0", true, false, false, false, Disabled),
-        ("1.99.0", true, false, true, false, Disabled),
-    ];
-    for (release, enabled, private, user_remap, bootstrap_set, expected) in cases {
-        let mode = seed_mode_for(
-            &format!("rustc {release} (hash date)"),
-            enabled,
-            private,
-            user_remap,
-            bootstrap_set,
-        );
-        assert_eq!(
-            mode, expected,
-            "{release}, enabled={enabled}, private={private}, remap={user_remap}, bootstrap={bootstrap_set}"
-        );
-        let mut command = Command::new("rustc");
-        command.arg("src/lib.rs");
-        if user_remap {
-            command.arg("-Zremap-cwd-prefix=/chosen");
-        }
-        let original = command.get_args().map(OsStr::to_owned).collect::<Vec<_>>();
-        mode.apply(&mut command);
-        let args = command.get_args().map(OsStr::to_owned).collect::<Vec<_>>();
-        let env = command.get_envs().collect::<Vec<_>>();
-        match mode {
-            Inject { bootstrap } => {
-                assert_eq!(args[original.len()], "-Zremap-cwd-prefix=.");
-                assert_eq!(args.len(), original.len() + if bootstrap { 2 } else { 1 });
-                if bootstrap {
-                    assert_eq!(args.last().unwrap(), "-Zallow-features=");
-                    assert_eq!(
-                        env,
-                        [(OsStr::new("RUSTC_BOOTSTRAP"), Some(OsStr::new("1")))]
-                    );
-                } else {
-                    assert!(env.is_empty());
-                }
-            }
-            _ => {
-                assert_eq!(args, original);
-                assert!(env.is_empty());
-            }
-        }
-        // Directory selection and command construction consume the same mode.
-        assert_eq!(
-            mode.shares_state(),
-            matches!(mode, Inject { .. } | UserRemap)
-        );
-    }
-}
-
-#[test]
-fn incremental_seed_identity_separates_automatic_remapping() {
-    let unit = CacheDigest::blake3(b"cargo invocation");
-    let injected =
-        incremental_state_identity(&unit, IncrementalSeedMode::Inject { bootstrap: true });
-    assert_ne!(injected, unit);
-    assert_eq!(
-        injected,
-        incremental_state_identity(&unit, IncrementalSeedMode::Inject { bootstrap: false })
-    );
-    assert_eq!(
-        unit,
-        incremental_state_identity(&unit, IncrementalSeedMode::Disabled)
-    );
-    assert_eq!(
-        unit,
-        incremental_state_identity(&unit, IncrementalSeedMode::UserRemap)
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn incremental_seed_probe_checks_flags_and_fails_closed() {
-    let directory = tempfile::tempdir().unwrap();
-    let compiler = directory.path().join("rustc");
-    // A child shell writes the script. If this process wrote it, another
-    // test's spawn could inherit the open descriptor for a moment, and the
-    // probe's exec would fail with ETXTBSY.
-    let write = |body: &str| {
-        let status = Command::new("sh")
-            .arg("-c")
-            .arg("printf '%s\\n' \"#!/bin/sh\" \"$1\" > \"$2\" && chmod 755 \"$2\"")
-            .arg("sh")
-            .arg(body)
-            .arg(&compiler)
-            .status()
-            .unwrap();
-        assert!(status.success());
-    };
-    write(
-        "test \"$*\" = '--print=cfg -Zremap-cwd-prefix=. -Zallow-features=' && test \"$RUSTC_BOOTSTRAP\" = 1",
-    );
-    assert!(probe_remap_cwd(&compiler, "1.98.0"));
-    assert!(probe_remap_cwd(&compiler, "1.99.0-beta.1"));
-    write("test \"$*\" = '--print=cfg -Zremap-cwd-prefix=.' && test -z \"${RUSTC_BOOTSTRAP+x}\"");
-    assert!(probe_remap_cwd(&compiler, "1.99.0-nightly"));
-    assert!(probe_remap_cwd(&compiler, "1.99.0-dev"));
-    write("exit 0");
-    assert!(!probe_remap_cwd(&compiler, "1.97.0"));
-    write("exit 1");
-    assert!(!probe_remap_cwd(&compiler, "1.100.0"));
-    assert!(!probe_remap_cwd(
-        &directory.path().join("missing"),
-        "1.100.0"
-    ));
-}
-
-#[test]
-fn incremental_seed_respects_unstable_flags_on_stable_and_beta() {
-    for release in ["1.99.0", "1.99.0-beta.1", "1.99.0-nightly", "1.99.0-dev"] {
-        for flags in [
-            vec!["-Zallow-features=some_feature"],
-            vec!["-Z", "allow-features=some_feature"],
-            vec!["-Zshare-generics=y"],
-        ] {
-            let args = flags.into_iter().map(OsString::from).collect::<Vec<_>>();
-            let original = seed_mode_for(&format!("rustc {release}"), true, true, false, false);
-            let mode = injection_for_invocation(original, &args, false);
-            if release.contains("nightly") || release.contains("dev") {
-                assert_eq!(mode, IncrementalSeedMode::Inject { bootstrap: false });
-            } else {
-                assert_eq!(mode, IncrementalSeedMode::Disabled);
-            }
-            let mut command = Command::new("rustc");
-            command.args(&args);
-            mode.apply(&mut command);
-            assert_eq!(
-                &command.get_args().map(OsStr::to_owned).collect::<Vec<_>>()[..args.len()],
-                args
-            );
-            assert!(command.get_envs().next().is_none());
-        }
-    }
-}
-
-#[test]
-fn incremental_seed_keeps_private_build_script_arguments_and_environment() {
-    let args = [
-        "--crate-name=build_script_main",
-        "--crate-type=bin",
-        "/checkout/build/main.rs",
-    ]
-    .map(OsString::from);
-    assert!(session::compiles_only_a_binary(&args));
-    for bootstrap in [false, true] {
-        let mode = injection_for_invocation(IncrementalSeedMode::Inject { bootstrap }, &args, true);
-        assert_eq!(mode, IncrementalSeedMode::Disabled);
-        let (command, _response_file) = private_compiler_command(
-            OsStr::new("rustc"),
-            None,
-            &args,
-            Path::new("/checkout"),
-            Some(OsStr::new("-Cincremental=/state")),
-            mode,
-        )
-        .unwrap();
-        assert_eq!(
-            command.get_args().collect::<Vec<_>>(),
-            args.iter()
-                .map(OsString::as_os_str)
-                .chain([OsStr::new("-Cincremental=/state")])
-                .collect::<Vec<_>>()
-        );
-        assert!(command.get_envs().next().is_none());
-    }
-    // Explicit remapping retains its original behavior, including on build scripts.
-    assert_eq!(
-        injection_for_invocation(IncrementalSeedMode::UserRemap, &args, true),
-        IncrementalSeedMode::UserRemap
-    );
-}
-
-#[test]
-fn incremental_seed_bootstrap_dep_info_disables_later_injection() {
-    let state = tempfile::tempdir().unwrap();
-    let dep_info = state.path().join("crate.d");
-    let bootstrap = IncrementalSeedMode::Inject { bootstrap: true };
-    for record in ["# env-dep:RUSTC_BOOTSTRAP=1", "# env-dep:RUSTC_BOOTSTRAP"] {
-        std::fs::write(&dep_info, format!("out: src/lib.rs\n{record}\n")).unwrap();
-        assert!(bootstrap_dep_info_requires_retry(bootstrap, &dep_info));
-        assert!(!bootstrap_dep_info_requires_retry(
-            IncrementalSeedMode::Inject { bootstrap: false },
-            &dep_info
-        ));
-    }
-    std::fs::write(&dep_info, "out: src/lib.rs\n# env-dep:OTHER=1\n").unwrap();
-    assert!(!bootstrap_dep_info_requires_retry(bootstrap, &dep_info));
-    assert_eq!(
-        mode_in_state_directory(bootstrap, Some(state.path())),
-        bootstrap
-    );
-    std::fs::write(state.path().join(BOOTSTRAP_ENV_DEP_MARKER), b"").unwrap();
-    assert_eq!(
-        mode_in_state_directory(bootstrap, Some(state.path())),
-        IncrementalSeedMode::Disabled
-    );
-    assert_eq!(
-        mode_in_state_directory(IncrementalSeedMode::UserRemap, Some(state.path())),
-        IncrementalSeedMode::UserRemap
-    );
-    let args = [OsString::from("/checkout/src/lib.rs")];
-    let (command, _response_file) = private_compiler_command(
-        OsStr::new("rustc"),
-        None,
-        &args,
-        Path::new("/checkout"),
-        Some(OsStr::new("-Cincremental=/state")),
-        IncrementalSeedMode::Disabled,
-    )
-    .unwrap();
-    assert_eq!(command.get_args().next().unwrap(), args[0]);
-    assert!(command.get_envs().next().is_none());
-}
-
-#[test]
-fn incremental_seed_excludes_build_script_compiles_in_argfiles() {
-    let project = tempfile::tempdir().unwrap();
-    std::fs::write(project.path().join("build.rs"), "fn main() {}\n").unwrap();
-    let argfile = project.path().join("build.args");
-    std::fs::write(
-        &argfile,
-        "--crate-name\nbuild_script_build\n--crate-type\nbin\n--emit=dep-info,link\nbuild.rs\n",
-    )
-    .unwrap();
-    let args = [OsString::from(format!("@{}", argfile.display()))];
-    let parsed =
-        RustcInvocation::parse_with(&args, ParseOptions::caching_native_links(true)).unwrap();
-    assert!(mbx_cache_rustc::is_build_script_crate_name(
-        parsed.crate_name()
-    ));
-    assert!(
-        !session::compiles_only_a_binary(&args),
-        "the original argv hides the crate type"
-    );
-    for bootstrap in [false, true] {
-        let mode = injection_for_invocation(IncrementalSeedMode::Inject { bootstrap }, &args, true);
-        assert_eq!(mode, IncrementalSeedMode::Disabled);
-        let state = project.path().join("state");
-        let flag = private_incremental_flag(&state);
-        let (mut command, _response_file) = private_compiler_command(
-            OsStr::new("rustc"),
-            None,
-            &args,
-            project.path(),
-            Some(&flag),
-            mode,
-        )
-        .unwrap();
-        assert_eq!(
-            command.get_args().collect::<Vec<_>>(),
-            vec![args[0].as_os_str(), flag.as_os_str()]
-        );
-        assert!(command.get_envs().next().is_none());
-        let output = command.output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    // Both crate-type detection and unstable-option policy use expanded argv.
-    std::fs::write(
-        &argfile,
-        "--crate-type\nlib\n-Z\nallow-features=some_feature\n",
-    )
-    .unwrap();
-    assert_eq!(
-        injection_for_invocation(
-            IncrementalSeedMode::Inject { bootstrap: true },
-            &args,
-            false
-        ),
-        IncrementalSeedMode::Disabled
-    );
-    assert_eq!(
-        injection_for_invocation(
-            IncrementalSeedMode::Inject { bootstrap: false },
-            &args,
-            false
-        ),
-        IncrementalSeedMode::Inject { bootstrap: false }
-    );
-}
-
-#[test]
-fn incremental_seed_retry_uses_only_current_dep_info() {
-    let project = tempfile::tempdir().unwrap();
-    let path = project.path().join("crate.d");
-    let mode = IncrementalSeedMode::Inject { bootstrap: true };
-    std::fs::write(&path, "out: src/lib.rs\n# env-dep:RUSTC_BOOTSTRAP=1\n").unwrap();
-    assert!(bootstrap_dep_info_requires_retry(mode, &path));
-    clear_bootstrap_dep_info(mode, &path).unwrap();
-    assert!(!path.exists());
-    assert!(!bootstrap_dep_info_requires_retry(mode, &path));
-    std::fs::write(&path, "out: src/lib.rs\n").unwrap();
-    assert!(!bootstrap_dep_info_requires_retry(mode, &path));
-    std::fs::write(&path, "out: src/lib.rs\n# env-dep:RUSTC_BOOTSTRAP=1\n").unwrap();
-    assert!(bootstrap_dep_info_requires_retry(mode, &path));
-}
-
-#[test]
-fn incremental_seed_response_file_rewrites_paths_without_shell_escaping() {
-    let project = tempfile::tempdir().unwrap();
-    let root = project.path();
-    let input = root.join("cargo.args");
-    // Native separators throughout, as Cargo passes them; the rewrite keeps
-    // whatever follows the checkout root as written.
-    let deps = root.join("target").join("debug").join("deps");
-    let arguments = [
-        root.join("src").join("lib.rs").display().to_string(),
-        format!("--out-dir={}", deps.display()),
-        format!("-Ldependency={}", deps.display()),
-        format!("--extern=dep={}", deps.join("libdep.rlib").display()),
-        "--cfg=message=\"spaces and quotes\"".to_owned(),
-        "literal\\backslash".to_owned(),
-        "日本語".to_owned(),
-        String::new(),
-    ]
-    .map(OsString::from);
-    std::fs::write(&input, response_file_contents(&arguments).unwrap()).unwrap();
-    let outer = [OsString::from(format!("@{}", input.display()))];
-    let prepare = || {
-        private_compiler_command(
-            OsStr::new("clippy-driver"),
-            Some(OsStr::new("rustc")),
-            &outer,
-            root,
-            Some(OsStr::new("-Cincremental=/state")),
-            IncrementalSeedMode::Inject { bootstrap: true },
-        )
-        .unwrap()
-    };
-    let (command, file) = prepare();
-    let file = file.unwrap();
-    let (other_command, other_file) = prepare();
-    let other_file = other_file.unwrap();
-    assert_ne!(
-        file.path(),
-        other_file.path(),
-        "concurrent commands need different files"
-    );
-    let expected = paths_relative_to(&arguments, root);
-    let contents = std::fs::read(file.path()).unwrap();
-    assert_eq!(contents, response_file_contents(&expected).unwrap());
-    let text = String::from_utf8(contents).unwrap();
-    let sep = std::path::MAIN_SEPARATOR;
-    assert!(text.contains(&format!("--out-dir=.{sep}target{sep}debug{sep}deps\n")));
-    assert!(text.contains(&format!("-Ldependency=.{sep}target{sep}debug{sep}deps\n")));
-    assert!(text.contains(&format!(
-        "--extern=dep=.{sep}target{sep}debug{sep}deps{sep}libdep.rlib\n"
-    )));
-    assert!(text.contains("--cfg=message=\"spaces and quotes\"\nliteral\\backslash\n日本語\n\n"));
-    let args = command.get_args().collect::<Vec<_>>();
-    assert_eq!(args[0], "rustc");
-    assert_eq!(
-        args[1],
-        OsString::from(format!("@{}", file.path().display()))
-    );
-    assert_eq!(
-        &args[2..],
-        [
-            "-Cincremental=/state",
-            "-Zremap-cwd-prefix=.",
-            "-Zallow-features="
-        ]
-    );
-    assert_eq!(
-        RustcInvocation::expand_arguments(&[args[1].to_owned()]).unwrap(),
-        expected
-    );
-    let path = file.path().to_owned();
-    drop(file);
-    assert!(!path.exists());
-    assert!(other_file.path().exists());
-    drop(other_command);
-}
-
-#[test]
-fn incremental_seed_response_file_requires_lossless_arguments() {
-    let project = tempfile::tempdir().unwrap();
-    let input = project.path().join("cargo.args");
-    std::fs::write(&input, "src/lib.rs\n").unwrap();
-    for value in ["message=\"first\nsecond\"", "trailing\r"] {
-        let arguments = [
-            OsString::from(format!("@{}", input.display())),
-            OsString::from(value),
-        ];
-        for bootstrap in [true, false] {
-            let mode = injection_for_invocation(
-                IncrementalSeedMode::Inject { bootstrap },
-                &arguments,
-                false,
-            );
-            assert_eq!(mode, IncrementalSeedMode::Disabled);
-            assert!(!mode.shares_state(), "must not seed from a donor");
-            let (command, file) = private_compiler_command(
-                OsStr::new("rustc"),
-                None,
-                &arguments,
-                project.path(),
-                Some(OsStr::new("-Cincremental=/state")),
-                mode,
-            )
-            .unwrap();
-            assert!(file.is_none());
-            assert_eq!(
-                command.get_args().collect::<Vec<_>>(),
-                [
-                    arguments[0].as_os_str(),
-                    arguments[1].as_os_str(),
-                    OsStr::new("-Cincremental=/state")
-                ]
-            );
-            assert_eq!(command.get_envs().count(), 0);
-        }
-        assert_eq!(
-            injection_for_invocation(IncrementalSeedMode::UserRemap, &arguments, false),
-            IncrementalSeedMode::UserRemap,
-            "explicit remapping must keep its existing behavior"
-        );
-    }
-}
-
-#[test]
-fn incremental_seed_response_file_keeps_newline_arguments_original() {
-    let project = tempfile::tempdir().unwrap();
-    let input = project.path().join("cargo.args");
-    std::fs::write(&input, "src/lib.rs\n").unwrap();
-    for value in ["message=\"first\nsecond\"", "trailing\r"] {
-        let arguments = [
-            OsString::from(format!("@{}", input.display())),
-            OsString::from(value),
-            OsString::from(format!(
-                "--out-dir={}",
-                project.path().join("target").display()
-            )),
-        ];
-        let (command, file) = private_compiler_command(
-            OsStr::new("rustc"),
-            None,
-            &arguments,
-            project.path(),
-            None,
-            IncrementalSeedMode::UserRemap,
-        )
-        .unwrap();
-        assert!(file.is_none());
-        assert_eq!(
-            command.get_args().collect::<Vec<_>>(),
-            arguments
-                .iter()
-                .map(OsString::as_os_str)
-                .collect::<Vec<_>>()
-        );
-    }
-    let newline_root = Path::new("/checkout\nroot");
-    let arguments = [
-        OsString::from(format!("@{}", input.display())),
-        OsString::from(format!(
-            "--out-dir={}",
-            newline_root.join("target").display()
-        )),
-    ];
-    let (command, file) = private_compiler_command(
-        OsStr::new("rustc"),
-        None,
-        &arguments,
-        newline_root,
-        None,
-        IncrementalSeedMode::UserRemap,
-    )
-    .unwrap();
-    assert!(
-        file.is_none(),
-        "a newline in the checkout path must also preserve the original arguments"
-    );
-    assert_eq!(
-        command.get_args().collect::<Vec<_>>(),
-        arguments
-            .iter()
-            .map(OsString::as_os_str)
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        response_file_contents(&[OsString::from("middle\rcarriage")]).unwrap(),
-        b"middle\rcarriage\n"
-    );
-}
-
-#[test]
-fn incremental_seed_response_file_is_removed_after_compiler_failure() {
-    let project = tempfile::tempdir().unwrap();
-    std::fs::write(
-        project.path().join("failed.rs"),
-        "compile_error!(\"expected compiler failure\");\n",
-    )
-    .unwrap();
-    let input = project.path().join("cargo.args");
-    std::fs::write(
-        &input,
-        "--crate-type=lib\n--emit=dep-info,link\nfailed.rs\n",
-    )
-    .unwrap();
-    let args = [OsString::from(format!("@{}", input.display()))];
-    let (mut command, file) = private_compiler_command(
-        OsStr::new("rustc"),
-        None,
-        &args,
-        project.path(),
-        None,
-        IncrementalSeedMode::Inject { bootstrap: true },
-    )
-    .unwrap();
-    let path = file.as_ref().unwrap().path().to_owned();
-    assert!(!command.output().unwrap().status.success());
-    drop(file);
-    assert!(!path.exists());
-    let (mut command, file) = private_compiler_command(
-        project.path().join("missing-compiler").as_os_str(),
-        None,
-        &args,
-        project.path(),
-        None,
-        IncrementalSeedMode::UserRemap,
-    )
-    .unwrap();
-    let path = file.as_ref().unwrap().path().to_owned();
-    assert!(command.output().is_err());
-    drop(file);
-    assert!(!path.exists());
-}
-
 /// Cargo moves a long command line into a response file. The unit whose
 /// objects are cleaned up is read from the expanded line.
 #[cfg(unix)]
@@ -2877,5 +2197,91 @@ fn bypassed_library_identity_ignores_a_single_diagnostic_width() {
     assert_ne!(
         base,
         identity(&["--crate-name=widget", "--diagnostic-width=x", "src/lib.rs"])
+    );
+}
+
+#[test]
+fn compiler_kind_comes_from_rustc_flags() {
+    let args = |xs: &[&str]| xs.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+    assert_eq!(
+        compiler_unit_kind(&args(&["--crate-type=rlib"]), "serde").as_deref(),
+        Some("lib")
+    );
+    assert_eq!(
+        compiler_unit_kind(&args(&["--crate-type", "proc-macro"]), "derive").as_deref(),
+        Some("proc-macro")
+    );
+    assert_eq!(
+        compiler_unit_kind(&args(&["--crate-type=bin"]), "app").as_deref(),
+        Some("bin")
+    );
+    assert_eq!(
+        compiler_unit_kind(&args(&["--crate-type=lib", "--test"]), "app").as_deref(),
+        Some("test")
+    );
+    assert_eq!(
+        compiler_unit_kind(&args(&["--crate-type=bin"]), "build_script_build").as_deref(),
+        Some("build-script")
+    );
+    assert_eq!(
+        compiler_unit_kind(&args(&["--crate-type=lib"]), "build_script_helper").as_deref(),
+        Some("lib")
+    );
+    assert_eq!(compiler_unit_kind(&args(&[]), "unknown"), None);
+}
+
+#[test]
+fn unconsulted_reasons_follow_wrapper_precedence() {
+    assert_eq!(
+        classify_skip_reason(false, true, true, true, true, true, false),
+        None
+    );
+    assert_eq!(
+        classify_skip_reason(true, true, true, true, true, true, false),
+        Some("private-dependency")
+    );
+    assert_eq!(
+        classify_skip_reason(true, false, true, true, true, true, false),
+        Some("eager")
+    );
+    // A key that cannot be shared is found before learned state is planned
+    // for it, so it names why that state was taken.
+    assert_eq!(
+        classify_skip_reason(true, false, true, false, true, true, false),
+        Some("unshareable-key")
+    );
+    assert_eq!(
+        classify_skip_reason(true, false, true, false, false, true, false),
+        Some("hot-reuse")
+    );
+    assert_eq!(
+        classify_skip_reason(true, false, false, false, true, true, false),
+        Some("unshareable-key")
+    );
+    assert_eq!(
+        classify_skip_reason(true, false, false, false, false, true, false),
+        Some("no-prediction")
+    );
+    assert_eq!(
+        classify_skip_reason(true, false, false, false, false, false, true),
+        Some("prediction-error")
+    );
+    assert_eq!(
+        classify_skip_reason(true, false, false, false, false, false, false),
+        Some("other")
+    );
+}
+
+#[test]
+fn private_incremental_state_is_named_under_a_new_generation() {
+    // State from versions that seeded between checkouts is never reused,
+    // even for an invocation whose digest did not change.
+    let invocation = CacheDigest::blake3(b"invocation");
+    let unit = current_incremental_generation(&invocation);
+    assert_ne!(unit, invocation);
+    assert_eq!(unit, current_incremental_generation(&invocation));
+    assert_ne!(
+        unit,
+        current_incremental_generation(&CacheDigest::blake3(b"another invocation"))
     );
 }

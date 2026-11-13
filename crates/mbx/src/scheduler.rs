@@ -117,6 +117,11 @@ const SCHED_EVENTS_ENV: &str = "MBX_SCHED_EVENTS";
 const SCHED_BUILD_ID_ENV: &str = "MBX_SCHED_BUILD_ID";
 /// Whether compiler supervision may move compilers into their own cgroups.
 const SCHED_SUSPEND_ENV: &str = "MBX_SCHED_SUSPEND";
+/// Names the build whose permit an ancestor compiler process already holds.
+/// A wrapper such as `cargo-llvm-cov` can run another `mbx-rustc` beneath the
+/// one that holds a permit; asking for a second permit there deadlocks once
+/// every slot is held by a parent waiting on its own child.
+const SCHED_PERMIT_HELD_ENV: &str = "MBX_SCHED_PERMIT_HELD";
 /// Most CPU cores one Cargo build may hold at once.
 const SCHED_BUILD_SLOTS_ENV: &str = "MBX_SCHED_BUILD_SLOTS";
 
@@ -407,6 +412,20 @@ pub(crate) struct Permit {
     /// it -- is what lets the lease go away rather than accumulate.
     lock: Option<fslock::LockFile>,
     path: PathBuf,
+    /// The build whose permit this is, when children should be told so.
+    held_for_build: Option<String>,
+}
+
+impl Permit {
+    /// Tell a compiler this permit pays for that it need not ask for another.
+    /// A wrapper such as `cargo-llvm-cov` can run a second `mbx-rustc` beneath
+    /// it; that process does the same work, so it must not wait for a slot
+    /// its own parent holds.
+    pub(crate) fn mark_held(&self, command: &mut std::process::Command) {
+        if let Some(build) = &self.held_for_build {
+            command.env(SCHED_PERMIT_HELD_ENV, build);
+        }
+    }
 }
 
 impl Drop for Permit {
@@ -1611,6 +1630,9 @@ pub(crate) struct Pool {
     domain_memory_capacity: u64,
     /// A per-Cargo-build ceiling, separate from the machine-wide capacity.
     build: Option<(String, u64)>,
+    /// Whether a permit from this pool lets its compiler's children skip
+    /// admission (`MBX_SCHED_PERMIT_HELD`). Only the process-wide pool does.
+    export_permit_marker: bool,
     /// Original memory share, retained for fallback guesses and old readers.
     /// Zero disables memory predictions and the available-memory gate.
     bytes_per_permit: u64,
@@ -1695,6 +1717,7 @@ fn resolve_pool() -> Option<Pool> {
                     .unwrap_or_else(|| capacity.saturating_mul(pool.bytes_per_permit)),
             );
             pool.pressure = env_number(SCHED_PRESSURE_ENV) == Some(1);
+            pool.export_permit_marker = true;
             pool.build = std::env::var(SCHED_BUILD_ID_ENV)
                 .ok()
                 .filter(|id| !id.is_empty())
@@ -1947,6 +1970,7 @@ impl Pool {
                 local_memory,
             ),
             build: None,
+            export_permit_marker: false,
             bytes_per_permit,
             events: true,
             priority,
@@ -2030,6 +2054,25 @@ impl Pool {
     /// `None` means the pool could not be used and the compilation should run
     /// unscheduled; it never means the compilation should not run.
     pub(crate) fn admit(&self, demand: &Demand) -> Option<Permit> {
+        let held = std::env::var(SCHED_PERMIT_HELD_ENV).ok();
+        let mut permit = self.admit_unless_held(demand, held.as_deref())?;
+        if self.export_permit_marker {
+            permit.held_for_build = self.build.as_ref().map(|(build, _)| build.clone());
+        }
+        Some(permit)
+    }
+
+    /// `held` is the build an enclosing compiler says it holds a permit for.
+    fn admit_unless_held(&self, demand: &Demand, held: Option<&str>) -> Option<Permit> {
+        if let Some((build, _)) = &self.build
+            && held == Some(build.as_str())
+        {
+            debug!(
+                "an enclosing compiler already holds this build's permit; not asking for another ({})",
+                demand.name
+            );
+            return None;
+        }
         let _phase = crate::phase_timing::phase("permit_wait");
         demand.observation.set(None);
         let started = Instant::now();
@@ -2640,6 +2683,7 @@ impl Pool {
                     return Ok(Permit {
                         lock: Some(lock),
                         path,
+                        held_for_build: None,
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {

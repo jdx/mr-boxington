@@ -277,7 +277,7 @@ checked-in `.mbx.toml`, which rejects them; see
 cache_dir = "/var/cache/mbx"
 incremental = false
 eager_incremental = false  # opt-in state from the first compilation
-seed_incremental = true  # reuse private state across checkouts
+seed_incremental = true  # accepted for compatibility; has no effect
 share_out_dir = true
 share_workspace_root = false
 build_script_execution = true
@@ -301,6 +301,8 @@ auto = true
 max_size = "20GiB"       # default: 5% of the cache disk
 incremental_max_size = "20GiB" # default: 5% of the cache disk
 incremental_max_age = "30d"    # default
+events_max_age = "7d"          # default; "none" keeps sessions of any age
+events_max_sessions = 256      # default; "none" keeps any number of sessions
 rustc_max_age = "90d"    # optional, off by default
 max_total_size = "50GiB" # optional combined budget
 min_free_size = "20GiB"  # default: 10% of each disk

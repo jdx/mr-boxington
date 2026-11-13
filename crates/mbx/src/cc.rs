@@ -38,7 +38,7 @@ use std::time::{Instant, SystemTime};
 const ADAPTER: &str = "cc";
 // Keep the extended prediction payload out of older shims' manifests and
 // flights. They reject unknown fields before checking the payload version.
-const PREDICTION_ADAPTER: &str = "cc-path-binding-v1";
+const PREDICTION_ADAPTER: &str = "cc-path-binding-v3";
 
 /// Compile one C or C++ translation unit, consulting the cache around it.
 ///
@@ -87,6 +87,8 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
         path_mappings: mappings,
         environment,
         inputs: Vec::new(),
+        search_order_dependent: None,
+        search_order_operands: None,
     };
 
     drop(setup);
@@ -344,7 +346,7 @@ pub fn compile(compiler: &OsStr, arguments: &[OsString], language: CcLanguage) -
     let verified = verification.is_some();
     if let Some(cached) = verification {
         let divergence = verification_divergence(&cached, &output);
-        record_verification(divergence.is_none(), cached.restore);
+        record_verification(divergence.is_none(), cached.restore, None);
         if let Some(divergence) = divergence {
             session::report_shim_warning(&crate::materialize::verification_warning(
                 "cc",

@@ -264,6 +264,16 @@ pub struct CcDiscoveredInputs {
     /// established, index-aligned with `inputs`; `None` for manifests and
     /// where the filesystem gave nothing to compare against later.
     identities: Vec<Option<FileIdentity>>,
+    /// Whether a header reads the search order, as recorded when the inputs
+    /// were last published. `None` when nothing recorded it.
+    ///
+    /// A stale answer can only cost a miss: the content digests of every file
+    /// and directory listing are part of the key, so a changed header or tree
+    /// no longer matches the key this answer would have produced.
+    pub search_order_dependent: Option<bool>,
+    /// The sorted include operands that are looked up through the search path,
+    /// recorded with `search_order_dependent` when it is `Some(false)`.
+    pub search_order_operands: Option<Vec<String>>,
 }
 
 impl CcDiscoveredInputs {
@@ -411,6 +421,8 @@ impl CcDiscoveredInputs {
             working_dir,
             inputs,
             identities,
+            search_order_dependent: None,
+            search_order_operands: None,
         })
     }
 
@@ -536,6 +548,8 @@ impl CcDiscoveredInputs {
             return Err(CcBypassReason::DiscoveryWorkingDirectory);
         }
         context.inputs.extend(self.inputs);
+        context.search_order_dependent = self.search_order_dependent;
+        context.search_order_operands = self.search_order_operands;
         Ok(())
     }
 }
@@ -715,6 +729,314 @@ fn include_manifest_with(
     budget: &mut usize,
     read_dir: &impl Fn(&Path) -> std::io::Result<std::fs::ReadDir>,
 ) -> Result<CacheDigest, CcBypassReason> {
+    let names = include_names_with(directory, budget, read_dir, false)?;
+    let digest = CacheDigest::blake3(names.join("\n").as_bytes());
+    Ok(digest)
+}
+
+/// The file names that appear under more than one of these directories.
+///
+/// The order of the directories cannot change which file an include finds for
+/// any other name, wherever it sits in the search. Every file counts, whatever
+/// its extension, and names that differ only in letter case are the same name,
+/// because the filesystem may treat them so. A generator that collects its
+/// include directories in a hash set emits them in a different order on every
+/// run; knowing these names is what lets those runs share one key, provided no
+/// header looks one of them up (see [`SearchOrderScan`]).
+///
+/// `None` whenever the answer cannot be established: a directory under a
+/// system root, one that cannot be listed, a symlinked directory beneath one
+/// (its contents are not walked), or a tree larger than the manifest budget. A
+/// `None` only keeps the order in the key.
+pub fn shadowable_include_names(directories: &[PathBuf]) -> Option<BTreeSet<String>> {
+    let mut budget = 0_usize;
+    let mut seen = BTreeSet::new();
+    let mut shadowable = BTreeSet::new();
+    for directory in directories {
+        if crate::is_system_path(directory) {
+            return None;
+        }
+        let Ok(names) = include_names_with(
+            directory,
+            &mut budget,
+            &|path| std::fs::read_dir(path),
+            true,
+        ) else {
+            return None;
+        };
+        for name in names {
+            if !seen.insert(name.clone()) {
+                shadowable.insert(name);
+            }
+        }
+    }
+    Some(shadowable)
+}
+
+/// What a set of headers says about the include search order.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SearchOrderScan {
+    /// A header reads the order itself (`#include_next`, a computed include,
+    /// a `..` operand), or could not be read.
+    pub dependent: bool,
+    /// The operands looked up through the search path, normalized to the
+    /// spelling of [`shadowable_include_names`]. A quoted operand that resolves
+    /// beside its includer never reaches the search path and is left out.
+    pub operands: BTreeSet<String>,
+}
+
+/// Scan these headers for what they say about the search order.
+///
+/// `#include_next` continues the search after the directory that found the
+/// current header, so the order is part of its meaning. An operand with a `..`
+/// component names a file relative to whichever search directory is tried,
+/// which the directory listings cannot see; a quoted one that resolves beside
+/// its includer never reaches the search path, and is left out. Every other
+/// operand is returned, so a caller that knows which names exist in two
+/// directories can tell whether any include could find the wrong one.
+pub fn scan_search_order<'a>(files: impl IntoIterator<Item = &'a Path>) -> SearchOrderScan {
+    let mut operands = BTreeSet::new();
+    let dependent = SearchOrderScan {
+        dependent: true,
+        operands: BTreeSet::new(),
+    };
+    for file in files {
+        // An unreadable file cannot be shown safe.
+        let Ok(contents) = std::fs::read(file) else {
+            return dependent;
+        };
+        let parent = file.parent();
+        // A header under a system root is found after every `-I` directory,
+        // so `#include_next` in it continues past them and never through
+        // them.
+        let system = crate::is_system_path(file);
+        // The compiler joins backslash-continued lines before it reads a
+        // directive, so a directive split across lines is scanned whole.
+        let joined = join_continued_lines(&contents);
+        // A newline inside a block comment is one space to the preprocessor,
+        // but reading it as a line break too costs nothing: either reading
+        // finding an order-sensitive directive keeps the order.
+        //
+        // Comment markers inside an angle-bracket operand are part of the
+        // name (`<sub//../x.h>`), which this reading cannot tell from a
+        // comment, so the readings also include one that removes none.
+        for (keep_newlines, strip) in [(true, true), (false, true), (true, false), (false, false)] {
+            let text = if strip {
+                strip_comments(&joined, keep_newlines)
+            } else {
+                joined.clone()
+            };
+            for line in text.split(|byte| *byte == b'\n') {
+                match classify_include_line(line, parent, system, strip) {
+                    IncludeLine::Unrelated => {}
+                    IncludeLine::Dependent => return dependent,
+                    IncludeLine::Operand(operand) => {
+                        operands.insert(operand);
+                    }
+                }
+            }
+        }
+        if operands.len() > MAX_SEARCH_OPERANDS {
+            return dependent;
+        }
+    }
+    SearchOrderScan {
+        dependent: false,
+        operands,
+    }
+}
+
+/// Most distinct include operands a scan keeps; a header set that names more
+/// keeps the order in the key rather than grow the prediction.
+const MAX_SEARCH_OPERANDS: usize = 16 * 1024;
+
+/// Replace each comment with a space, as translation phase 3 does, so a
+/// directive broken up by one (`#/**/include`) is still seen. String and
+/// character literals are skipped over, so a `/*` or `//` inside one starts
+/// nothing; a literal ends at its line, so an apostrophe in prose cannot run
+/// on. A block comment that never closes runs to the end of the file.
+fn strip_comments(contents: &[u8], keep_newlines: bool) -> Vec<u8> {
+    let mut stripped = Vec::with_capacity(contents.len());
+    let mut index = 0;
+    while index < contents.len() {
+        let rest = &contents[index..];
+        if rest.starts_with(b"/*") {
+            index += 2;
+            while index < contents.len() && !contents[index..].starts_with(b"*/") {
+                if keep_newlines && contents[index] == b'\n' {
+                    stripped.push(b'\n');
+                }
+                index += 1;
+            }
+            index = (index + 2).min(contents.len());
+            stripped.push(b' ');
+        } else if rest.starts_with(b"//") {
+            while index < contents.len() && contents[index] != b'\n' {
+                index += 1;
+            }
+            stripped.push(b' ');
+        } else if matches!(contents[index], b'"' | b'\'') {
+            let quote = contents[index];
+            stripped.push(quote);
+            index += 1;
+            while index < contents.len() && contents[index] != b'\n' {
+                let byte = contents[index];
+                stripped.push(byte);
+                index += 1;
+                if byte == b'\\' && index < contents.len() && contents[index] != b'\n' {
+                    stripped.push(contents[index]);
+                    index += 1;
+                } else if byte == quote {
+                    break;
+                }
+            }
+        } else {
+            stripped.push(contents[index]);
+            index += 1;
+        }
+    }
+    stripped
+}
+
+fn join_continued_lines(contents: &[u8]) -> Vec<u8> {
+    let mut joined = Vec::with_capacity(contents.len());
+    let mut index = 0;
+    while index < contents.len() {
+        if contents[index] == b'\\' {
+            let rest = &contents[index + 1..];
+            let skip = if rest.starts_with(b"\r\n") {
+                2
+            } else {
+                usize::from(rest.starts_with(b"\n"))
+            };
+            if skip > 0 {
+                index += 1 + skip;
+                continue;
+            }
+        }
+        joined.push(contents[index]);
+        index += 1;
+    }
+    joined
+}
+
+enum IncludeLine {
+    Unrelated,
+    Dependent,
+    Operand(String),
+}
+
+fn classify_include_line(
+    line: &[u8],
+    parent: Option<&Path>,
+    system: bool,
+    comments_stripped: bool,
+) -> IncludeLine {
+    let line = line.trim_ascii_start();
+    // `__has_include_next` asks about the directories after the current one.
+    if line
+        .windows(b"__has_include_next".len())
+        .any(|window| window == b"__has_include_next")
+    {
+        return if system {
+            IncludeLine::Unrelated
+        } else {
+            IncludeLine::Dependent
+        };
+    }
+    // `%:` and `??=` are other spellings of `#`.
+    let Some(directive) = [&b"#"[..], b"%:", b"??="]
+        .iter()
+        .find_map(|hash| line.strip_prefix(*hash))
+    else {
+        return IncludeLine::Unrelated;
+    };
+    let directive = directive.trim_ascii_start();
+    // `#import` is `#include` that reads each file once.
+    let Some(rest) = directive
+        .strip_prefix(b"include")
+        .or_else(|| directive.strip_prefix(b"import"))
+    else {
+        return IncludeLine::Unrelated;
+    };
+    if rest.starts_with(b"_next") {
+        return if system {
+            IncludeLine::Unrelated
+        } else {
+            IncludeLine::Dependent
+        };
+    }
+    // A computed include (`#include MACRO`) can expand to any operand,
+    // including a parent-directory one, so it keeps the order. The operand
+    // must open the rest of the line: a delimiter further on belongs to a
+    // comment or a macro argument.
+    let Some(open) = rest
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .filter(|open| matches!(rest[*open], b'"' | b'<'))
+    else {
+        // Prose in a comment (`#include's protect themselves`) reads this way
+        // when comments are left in place; the readings that strip them
+        // decide whether it is a real directive.
+        return if comments_stripped {
+            IncludeLine::Dependent
+        } else {
+            IncludeLine::Unrelated
+        };
+    };
+    let quoted = rest[open] == b'"';
+    let close = if quoted { b'"' } else { b'>' };
+    let operand = &rest[open + 1..];
+    let operand = &operand[..operand
+        .iter()
+        .position(|byte| *byte == close)
+        .unwrap_or(operand.len())];
+    let Ok(operand) = std::str::from_utf8(operand) else {
+        return IncludeLine::Dependent;
+    };
+    // A quoted operand is tried beside its includer first, whatever the order.
+    let beside_includer = quoted && parent.is_some_and(|parent| parent.join(operand).is_file());
+    if operand
+        .split(['/', '\\'])
+        .any(|component| component == "..")
+    {
+        return if beside_includer {
+            IncludeLine::Unrelated
+        } else {
+            IncludeLine::Dependent
+        };
+    }
+    if beside_includer {
+        return IncludeLine::Unrelated;
+    }
+    IncludeLine::Operand(normalize_include_operand(operand))
+}
+
+/// An include operand spelled as [`shadowable_include_names`] spells a name:
+/// lowercase, `/` separated, without `.` or empty components.
+pub fn normalize_include_operand(operand: &str) -> String {
+    // A backslash separates components only on Windows. Elsewhere it is part
+    // of a file name, which the directory listing keeps verbatim.
+    let separators: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+    operand
+        .to_lowercase()
+        .split(separators)
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// The sorted names beneath a directory, relative to it.
+///
+/// A manifest lists only plausible include targets. The search-order check
+/// lists every file, folds letter case, and refuses a symlinked directory, whose
+/// contents this walk does not enter.
+fn include_names_with(
+    directory: &Path,
+    budget: &mut usize,
+    read_dir: &impl Fn(&Path) -> std::io::Result<std::fs::ReadDir>,
+    strict: bool,
+) -> Result<Vec<String>, CcBypassReason> {
     let mut names = Vec::new();
     let mut pending = vec![(directory.to_path_buf(), String::new())];
     while let Some((current, prefix)) = pending.pop() {
@@ -752,9 +1074,20 @@ fn include_manifest_with(
                 pending.push((entry.path(), relative));
                 continue;
             }
-            if !is_includable(name) {
+            if strict && file_type.is_symlink() && entry.path().is_dir() {
+                return Err(CcBypassReason::InputRead {
+                    path: entry.path(),
+                    message: "symlinked directory".into(),
+                });
+            }
+            if !strict && !is_includable(name) {
                 continue;
             }
+            let relative = if strict {
+                relative.to_lowercase()
+            } else {
+                relative
+            };
             *budget += 1;
             if *budget > MAX_MANIFEST_ENTRIES {
                 return Err(CcBypassReason::TooManyInputs);
@@ -763,8 +1096,7 @@ fn include_manifest_with(
         }
     }
     names.sort();
-    let digest = CacheDigest::blake3(names.join("\n").as_bytes());
-    Ok(digest)
+    Ok(names)
 }
 
 /// Whether a preprocessor input can make the assembler read another file.

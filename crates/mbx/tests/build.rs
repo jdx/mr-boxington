@@ -1837,552 +1837,6 @@ fn incremental_checkouts(cache: &Path) -> Vec<(PathBuf, PathBuf)> {
         .collect()
 }
 
-/// Whether the `rustc` these tests build with accepts incremental state
-/// recorded in another checkout under `-Zremap-cwd-prefix` (1.98 and later).
-fn rustc_relocates_incremental_state() -> bool {
-    let output = Command::new("rustc").arg("-vV").output().unwrap();
-    let verbose = String::from_utf8(output.stdout).unwrap();
-    let release = verbose
-        .lines()
-        .find_map(|line| line.strip_prefix("release: "))
-        .expect("rustc -vV names its release");
-    let mut parts = release.split(|c: char| !c.is_ascii_digit());
-    let mut next = || parts.next().unwrap().parse::<u32>().unwrap();
-    (next(), next()) >= (1, 98)
-}
-
-#[test]
-fn learned_state_seeds_another_checkout_when_rustc_remaps_the_working_directory() {
-    check_incremental_seeding(&[
-        ("RUSTC_BOOTSTRAP", "1"),
-        ("RUSTFLAGS", "-Zremap-cwd-prefix=/src"),
-    ]);
-}
-
-#[test]
-fn learned_incremental_state_seeds_another_checkout_by_default() {
-    check_incremental_seeding(&[]);
-}
-
-#[test]
-fn incremental_seed_keeps_the_donors_thin_lto_state_linkable() {
-    // Before 1.98 mbx seeds nothing, so there is no donor to protect.
-    if !rustc_relocates_incremental_state() {
-        return;
-    }
-    const MARKER: &str = "seeded-from-first";
-    let store = tempfile::tempdir().unwrap();
-    let first = tempfile::tempdir().unwrap();
-    let second = tempfile::tempdir().unwrap();
-    let reports = tempfile::tempdir().unwrap();
-    let stable = (0..8)
-        .map(|index| {
-            format!(
-                "#[inline(never)] fn f{index}(x: u64) -> u64 {{ super::secret(x.rotate_left({index})) ^ {index} }}\n"
-            )
-        })
-        .collect::<String>()
-        + "pub fn run(x: u64) -> u64 {"
-        + &(0..8)
-            .map(|index| format!("f{index}(x)"))
-            .collect::<Vec<_>>()
-            .join(" ^ ")
-        + "}\n";
-    let edit = |project: &Path, revision: u64| {
-        let table = (0..32)
-            .map(|value| (value + revision).to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        // ThinLTO imports secret into stable's codegen unit and promotes the
-        // private table with a .llvm suffix. Corrupting the donor's bitcode
-        // leaves its reused object referencing a table the new object lacks.
-        std::fs::write(
-            project.join("base/src/lib.rs"),
-            format!(
-                "pub mod stable; static TABLE: [u64; 32] = [{table}];\n\
-                 fn secret(x: u64) -> u64 {{ TABLE[(x % 32) as usize] }}\n\
-                 pub fn value(x: u64) -> u64 {{ stable::run(x) + {revision} }}\n"
-            ),
-        )
-        .unwrap();
-    };
-    for project in [first.path(), second.path()] {
-        write_dependent_project(project);
-        let manifest = project.join("Cargo.toml");
-        let mut contents = std::fs::read_to_string(&manifest).unwrap();
-        contents.push_str("\n[profile.dev]\nopt-level = 1\n");
-        std::fs::write(manifest, contents).unwrap();
-        std::fs::remove_file(project.join("above/src/lib.rs")).unwrap();
-        std::fs::write(
-            project.join("above/src/main.rs"),
-            "fn main() { println!(\"{}\", base::value(std::env::args().count() as u64)); }\n",
-        )
-        .unwrap();
-        std::fs::write(project.join("base/src/stable.rs"), &stable).unwrap();
-        edit(project, 0);
-    }
-    // Enabled explicitly so a configuration that turns seeding off cannot
-    // skip what this test checks.
-    let environment = [("MBX_SEED_INCREMENTAL", "1")];
-    let build = |project: &Path, label: &str| {
-        build_with(
-            project,
-            store.path(),
-            &reports.path().join(format!("{label}.json")),
-            &environment,
-        )
-    };
-    build(first.path(), "first-initial");
-    edit(first.path(), 1);
-    let (learned, _) = build(first.path(), "first-edit");
-    assert!(compiled_incrementally(&learned) >= 1, "{learned}");
-    // A seed copies the whole unit, so the marker shows the second checkout
-    // really started from the donor's state rather than from scratch.
-    let units = find_files(&incremental_checkout(store.path(), first.path()), |path| {
-        file_name_is(path, |name| name == "query-cache.bin")
-    });
-    assert!(!units.is_empty(), "the edit should leave rustc state");
-    for unit in &units {
-        // <unit>/<crate>-<hash>/<session>/query-cache.bin
-        std::fs::write(unit.ancestors().nth(3).unwrap().join(MARKER), b"").unwrap();
-    }
-    build(second.path(), "second-initial");
-    edit(second.path(), 2);
-    build(second.path(), "second-edit");
-    assert!(
-        !find_files(&incremental_checkout(store.path(), second.path()), |path| {
-            file_name_is(path, |name| name == MARKER)
-        })
-        .is_empty(),
-        "the second checkout should be seeded from the first"
-    );
-    // Check out the receiver's revision in place in the donor. A hard-linked
-    // seed makes this build fail to link with an undefined *.llvm.* symbol.
-    edit(first.path(), 2);
-    build(first.path(), "first-final");
-    for project in [first.path(), second.path()] {
-        let output = Command::new(
-            project
-                .join("target/debug")
-                .join(format!("above{}", std::env::consts::EXE_SUFFIX)),
-        )
-        .output()
-        .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "29");
-    }
-}
-
-#[test]
-fn incremental_seed_preserves_bootstrap_env_dependencies_across_edits() {
-    let version = Command::new("rustc").arg("-vV").output().unwrap();
-    let version = String::from_utf8(version.stdout).unwrap();
-    if !rustc_relocates_incremental_state()
-        || version.lines().any(|line| {
-            line.starts_with("release:") && (line.contains("nightly") || line.contains("dev"))
-        })
-    {
-        return;
-    }
-    let store = tempfile::tempdir().unwrap();
-    let project = tempfile::tempdir().unwrap();
-    let reports = tempfile::tempdir().unwrap();
-    write_project(project.path());
-    std::fs::write(
-        project.path().join("src/main.rs"),
-        "fn main() { println!(\"{:?}\", fixture::bootstrap()); }\n",
-    )
-    .unwrap();
-    let mut remembered = Vec::new();
-    for revision in 0..2 {
-        std::fs::write(project.path().join("src/lib.rs"), format!("pub fn bootstrap() -> Option<&'static str> {{ option_env!(\"RUSTC_BOOTSTRAP\") }}\npub fn revision() -> u32 {{ {revision} }}\n")).unwrap();
-        let mut command = mbx_command();
-        command.env_remove("RUSTC_BOOTSTRAP");
-        cargo_with_command(
-            command,
-            project.path(),
-            store.path(),
-            &reports.path().join(format!("{revision}.json")),
-            &["build", "--locked"],
-            &[("MBX_EAGER_INCREMENTAL", "1")],
-        );
-        let output = Command::new(project.path().join(format!(
-            "target/debug/fixture{}",
-            std::env::consts::EXE_SUFFIX
-        )))
-        .output()
-        .unwrap();
-        assert!(output.status.success());
-        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "None");
-        if revision == 0 {
-            remembered = find_files(
-                &incremental_checkout(store.path(), project.path()),
-                |path| file_name_is(path, |name| name == "bootstrap-env-dependency"),
-            );
-            assert!(
-                !remembered.is_empty(),
-                "the unit should remember its bootstrap dependency"
-            );
-            for path in &remembered {
-                std::fs::write(path, "remembered").unwrap();
-            }
-        } else {
-            for path in &remembered {
-                assert_eq!(
-                    std::fs::read_to_string(path).unwrap(),
-                    "remembered",
-                    "the next edit should not inject again"
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn learned_incremental_state_reuses_donors_with_cargo_response_files() {
-    check_incremental_seeding(&[("__CARGO_TEST_FORCE_ARGFILE", "1")]);
-}
-
-fn check_incremental_seeding(remapped: &[(&str, &str)]) {
-    const MARKER: &str = "seeded-from-first";
-    let store = tempfile::tempdir().unwrap();
-    let first = tempfile::tempdir().unwrap();
-    let second = tempfile::tempdir().unwrap();
-    let unremapped = tempfile::tempdir().unwrap();
-    let reports = tempfile::tempdir().unwrap();
-    // Apply the GC branch's seeding backstop checks to both remap modes.
-    let mut environment = remapped.to_vec();
-    environment.extend([("MBX_GC_INCREMENTAL_MAX_SIZE", "0B"), ("MBX_GC_AUTO", "0")]);
-    let remapped = environment.as_slice();
-    // A module the edit never touches compiles to its own codegen units, which
-    // rustc reuses rather than recompiles when it accepts the state.
-    let stable = (0..64)
-        .map(|index| {
-            format!("pub fn f{index}(x: u64) -> u64 {{ x.rotate_left({index}) ^ {index} }}\n")
-        })
-        .collect::<String>();
-    let lib = |value: u32| {
-        format!(
-            "#![doc = include_str!(\"../../README.md\")]\npub mod stable;\npub fn value() -> u32 {{ {value} }}\n"
-        )
-    };
-    let edit = |project: &Path| std::fs::write(project.join("base/src/lib.rs"), lib(21)).unwrap();
-    for project in [first.path(), second.path(), unremapped.path()] {
-        write_dependent_project(project);
-        // ThinLTO retains bitcode that rustc can rewrite in place when loading
-        // a seeded session. A hard-linked seed would corrupt the donor.
-        let manifest = project.join("Cargo.toml");
-        let mut contents = std::fs::read_to_string(&manifest).unwrap();
-        contents.push_str("\n[profile.dev]\nopt-level = 1\n");
-        std::fs::write(manifest, contents).unwrap();
-        std::fs::write(project.join("base/src/stable.rs"), &stable).unwrap();
-        std::fs::write(project.join("base/src/lib.rs"), lib(0)).unwrap();
-    }
-
-    build_with(
-        first.path(),
-        store.path(),
-        &reports.path().join("first.json"),
-        remapped,
-    );
-    edit(first.path());
-    let edited = build_with(
-        first.path(),
-        store.path(),
-        &reports.path().join("first-edit.json"),
-        remapped,
-    )
-    .0;
-    assert!(compiled_incrementally(&edited) >= 1, "{edited}");
-    // rustc leaves files it does not know about in the state directory alone,
-    // and the seed copies all of it: the marker is how the second checkout's
-    // state can tell where it came from.
-    let first_state = incremental_checkout(store.path(), first.path());
-    let units = find_files(&first_state, |path| {
-        file_name_is(path, |name| name == "query-cache.bin")
-    });
-    assert!(!units.is_empty(), "the edit should leave rustc state");
-    for unit in &units {
-        // <unit>/<crate>-<hash>/<session>/query-cache.bin
-        let unit = unit.ancestors().nth(3).unwrap();
-        assert!(
-            unit.with_extension("json").is_file(),
-            "state and history must share a unit identity: {}",
-            unit.display()
-        );
-        std::fs::write(unit.join(MARKER), b"").unwrap();
-    }
-
-    let donor_files = find_files(&first_state, |_| true)
-        .into_iter()
-        .map(|path| {
-            let bytes = std::fs::read(&path).unwrap();
-            (path, bytes)
-        })
-        .collect::<Vec<_>>();
-
-    build_with(
-        second.path(),
-        store.path(),
-        &reports.path().join("second.json"),
-        remapped,
-    );
-    std::fs::write(second.path().join("base/src/lib.rs"), lib(22)).unwrap();
-    let seeded = build_with(
-        second.path(),
-        store.path(),
-        &reports.path().join("second-edit.json"),
-        remapped,
-    )
-    .0;
-    assert!(compiled_incrementally(&seeded) >= 1, "{seeded}");
-    for (path, bytes) in &donor_files {
-        assert_eq!(
-            &std::fs::read(path).unwrap(),
-            bytes,
-            "a seeded compile must not change donor file {}",
-            path.display()
-        );
-    }
-    let second_state = incremental_checkout(store.path(), second.path());
-    let seeded_units = find_files(&second_state, |path| {
-        file_name_is(path, |name| name == MARKER)
-    })
-    .into_iter()
-    .map(|path| path.parent().unwrap().to_path_buf())
-    .collect::<Vec<_>>();
-    for unit in &seeded_units {
-        assert!(
-            unit.with_extension("json").is_file(),
-            "seeded state must have its own churn record"
-        );
-    }
-    let seeded_from_first = !find_files(&second_state, |path| {
-        file_name_is(path, |name| name == MARKER)
-    })
-    .is_empty();
-    let saved_sessions = find_files(&second_state, |path| {
-        file_name_is(path, |name| name == "query-cache.bin")
-    });
-    assert!(!saved_sessions.is_empty());
-    std::fs::write(second.path().join("base/src/lib.rs"), lib(23)).unwrap();
-    let oversized = build_with(
-        second.path(),
-        store.path(),
-        &reports.path().join("oversized-edit.json"),
-        remapped,
-    )
-    .0;
-    assert_eq!(
-        compiled_incrementally(&oversized),
-        0,
-        "existing oversized state takes the shared path: {oversized}"
-    );
-    assert!(
-        saved_sessions.iter().all(|session| session.exists()),
-        "the backstop leaves existing sessions for collection"
-    );
-
-    // Before 1.98, rustc checks incremental state against the real working
-    // directory and ignores another checkout's whatever the flag says, so mbx
-    // copies nothing.
-    if !rustc_relocates_incremental_state() {
-        assert!(
-            !seeded_from_first,
-            "state rustc would ignore should not be copied"
-        );
-        return;
-    }
-    assert!(
-        seeded_from_first,
-        "the second checkout's first edit should start from the first checkout's state"
-    );
-    // Check both isolation and reuse: every inode must be private to its
-    // checkout, but reused codegen units retain their contents and mtimes.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        let objects = |directory: &Path| {
-            find_files(directory, |path| {
-                path.extension().is_some_and(|extension| extension == "o")
-            })
-        };
-        let inode = |path: &Path| {
-            let metadata = std::fs::metadata(path).unwrap();
-            (metadata.dev(), metadata.ino())
-        };
-        let donor_inodes = donor_files
-            .iter()
-            .map(|(path, _)| inode(path))
-            .collect::<std::collections::HashSet<_>>();
-        for path in find_files(&second_state, |_| true) {
-            assert!(
-                !donor_inodes.contains(&inode(&path)),
-                "seeded file must have its own inode: {}",
-                path.display()
-            );
-        }
-        let object_identity = |path: &Path| {
-            (
-                std::fs::read(path).unwrap(),
-                std::fs::metadata(path).unwrap().modified().unwrap(),
-            )
-        };
-        let donor = objects(&first_state)
-            .iter()
-            .map(|path| object_identity(path))
-            .collect::<std::collections::HashSet<_>>();
-        let newest = find_files(&second_state, |path| {
-            file_name_is(path, |name| name == "dep-graph.bin")
-        })
-        .into_iter()
-        .filter(|graph| {
-            graph.ancestors().nth(2).is_some_and(|krate| {
-                krate
-                    .file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with("base-"))
-            })
-        })
-        .max_by_key(|graph| std::fs::metadata(graph).unwrap().modified().unwrap())
-        .expect("the second checkout keeps state for base")
-        .parent()
-        .unwrap()
-        .to_path_buf();
-        let reused = objects(&newest)
-            .iter()
-            .filter(|path| donor.contains(&object_identity(path)))
-            .count();
-        assert!(
-            reused > 0,
-            "rustc should reuse the seeded codegen units in {}",
-            newest.display()
-        );
-    }
-
-    // Turning automatic seeding off keeps unremapped state separate from donors.
-    build_with(
-        unremapped.path(),
-        store.path(),
-        &reports.path().join("unremapped.json"),
-        &[("MBX_SEED_INCREMENTAL", "0")],
-    );
-    edit(unremapped.path());
-    build_with(
-        unremapped.path(),
-        store.path(),
-        &reports.path().join("unremapped-edit.json"),
-        &[("MBX_SEED_INCREMENTAL", "0")],
-    );
-    let unremapped_state = incremental_checkout(store.path(), unremapped.path());
-    assert!(
-        find_files(&unremapped_state, |path| file_name_is(path, |name| name
-            == MARKER))
-        .is_empty()
-    );
-
-    // Age this fixture's rustc sessions past the collector's start grace.
-    let mut pending = vec![store.path().join("incremental")];
-    while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(directory).unwrap() {
-            let entry = entry.unwrap();
-            if entry.file_type().unwrap().is_dir() {
-                pending.push(entry.path());
-            }
-            filetime::set_file_mtime(entry.path(), filetime::FileTime::from_unix_time(1, 0))
-                .unwrap();
-        }
-    }
-    let collected = mbx_command()
-        .args(["gc", "--max-size", "20GiB"])
-        .env("MBX_CACHE_DIR", store.path())
-        .env("MBX_GC_INCREMENTAL_MAX_SIZE", "0B")
-        .env("MBX_GC_MIN_FREE_SIZE", "0B")
-        .output()
-        .unwrap();
-    assert!(collected.status.success(), "{collected:?}");
-    for unit in seeded_units {
-        assert!(!unit.exists(), "gc must collect the seeded unit");
-        assert!(
-            !unit.with_extension("json").exists(),
-            "gc must collect its marked churn record too"
-        );
-    }
-    for state in [first_state, second_state, unremapped_state] {
-        assert!(
-            find_files(&state.join("blake3"), |path| path
-                .extension()
-                .is_some_and(|extension| extension == "json"))
-            .is_empty(),
-            "no churn record should be orphaned after collecting this fixture's units"
-        );
-    }
-}
-
-#[test]
-fn learned_incremental_marked_history_survives_edits_and_seed_policy_changes() {
-    if !rustc_relocates_incremental_state() {
-        return;
-    }
-    let store = tempfile::tempdir().unwrap();
-    let project = tempfile::tempdir().unwrap();
-    let reports = tempfile::tempdir().unwrap();
-    write_project(project.path());
-    let records = || {
-        find_files(
-            &incremental_checkout(store.path(), project.path()).join("blake3"),
-            |path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "json")
-            },
-        )
-    };
-    let build_revision = |revision, seed| {
-        edit_project(project.path(), revision);
-        build_with(
-            project.path(),
-            store.path(),
-            &reports.path().join(format!("{revision}.json")),
-            &[("MBX_SEED_INCREMENTAL", seed)],
-        )
-        .0
-    };
-    assert_eq!(compiled_incrementally(&build_revision(0, "1")), 0);
-    let marked = records();
-    assert_eq!(marked.len(), 1);
-    for revision in [1, 2] {
-        assert_eq!(compiled_incrementally(&build_revision(revision, "1")), 1);
-        assert_eq!(records(), marked, "edits keep the marked history");
-        let record: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&marked[0]).unwrap()).unwrap();
-        assert_eq!(record["streak"], 1);
-    }
-    assert_eq!(
-        compiled_incrementally(&build_revision(3, "0")),
-        0,
-        "turning seeding off starts separate history"
-    );
-    let both = records();
-    assert_eq!(both.len(), 2);
-    let unmarked = both.iter().find(|path| !marked.contains(path)).unwrap();
-    let record: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(unmarked).unwrap()).unwrap();
-    assert_eq!(record["streak"], 0);
-    assert_eq!(compiled_incrementally(&build_revision(4, "0")), 1);
-    assert_eq!(
-        compiled_incrementally(&build_revision(5, "1")),
-        1,
-        "the marked streak survives while seeding is off"
-    );
-    let mut after = records();
-    let mut before = both;
-    after.sort();
-    before.sort();
-    assert_eq!(
-        after, before,
-        "neither policy creates another identity on later edits"
-    );
-}
-
 #[test]
 fn learned_private_dependents_reuse_state_after_the_target_is_removed() {
     let store = tempfile::tempdir().unwrap();
@@ -2590,78 +2044,6 @@ fn main() {
 }
 
 #[test]
-fn nested_workspaces_keep_their_seed_incremental_policy_and_user_override() {
-    for (inherited_seed, user_override) in [
-        (false, None),
-        (true, None),
-        (false, Some("1")),
-        (true, Some("0")),
-    ] {
-        let store = tempfile::tempdir().unwrap();
-        let outer = tempfile::tempdir().unwrap();
-        let inner = tempfile::tempdir().unwrap();
-        let reports = tempfile::tempdir().unwrap();
-        write_named_project(outer.path(), "outer");
-        write_named_project(inner.path(), "inner");
-        let check_policy = r#"
-fn check_policy() {
-    let expected = std::env::var("TEST_EXPECTED_OVERRIDE").unwrap();
-    assert_eq!(std::env::var("MBX_SEED_INCREMENTAL").ok(), if expected.is_empty() { None } else { Some(expected) });
-    assert_eq!(std::env::var("MBX_SESSION_SEED_INCREMENTAL").unwrap(), std::env::var("TEST_EXPECTED_SESSION").unwrap());
-}
-"#;
-        std::fs::write(
-            inner.path().join("build.rs"),
-            format!("{check_policy}\nfn main() {{ check_policy(); }}\n"),
-        )
-        .unwrap();
-        std::fs::write(
-            outer.path().join("build.rs"),
-            format!(
-                "{check_policy}{}",
-                r#"
-fn main() {
-    check_policy();
-    let output = std::process::Command::new(std::env::var_os("TEST_MBX").unwrap())
-        .current_dir(std::env::var_os("TEST_INNER").unwrap())
-        .args(["build", "--offline"])
-        .env("TEST_EXPECTED_SESSION", std::env::var_os("TEST_INNER_SESSION").unwrap())
-        .env("MBX_STATS_REPORT", std::env::var_os("TEST_INNER_REPORT").unwrap())
-        .output().unwrap();
-    assert!(output.status.success(), "{output:?}");
-}
-"#
-            ),
-        )
-        .unwrap();
-        let inner_report = reports.path().join("inner.json");
-        let policy = user_override.unwrap_or("1");
-        let mut settings = vec![
-            ("TEST_MBX", env!("CARGO_BIN_EXE_mbx")),
-            ("TEST_INNER", inner.path().to_str().unwrap()),
-            ("TEST_INNER_REPORT", inner_report.to_str().unwrap()),
-            ("TEST_EXPECTED_OVERRIDE", user_override.unwrap_or("")),
-            ("TEST_EXPECTED_SESSION", policy),
-            ("TEST_INNER_SESSION", policy),
-            (
-                "MBX_SESSION_SEED_INCREMENTAL",
-                if inherited_seed { "1" } else { "0" },
-            ),
-        ];
-        if let Some(value) = user_override {
-            settings.push(("MBX_SEED_INCREMENTAL", value));
-        }
-        build_with(
-            outer.path(),
-            store.path(),
-            &reports.path().join("outer.json"),
-            &settings,
-        );
-        assert!(inner_report.exists(), "the nested build must run");
-    }
-}
-
-#[test]
 fn eager_incremental_is_opt_in_and_yields_to_verification() {
     for settings in [
         vec![("CI", "1")],
@@ -2753,14 +2135,13 @@ fn a_changed_environment_value_keeps_private_state_without_a_prediction() {
         );
     }
 
-    // The churn records stay; the predictions go, including those finished
-    // flights leave behind.
+    // The churn records stay; the predictions go, including any that finished
+    // dependency flights left behind.
     std::fs::remove_dir_all(store.path().join("actions/task-manifests/v1")).unwrap();
     let flights = find_files(store.path(), |path| {
         path.extension()
             .is_some_and(|extension| extension == "prediction")
     });
-    assert!(!flights.is_empty());
     for flight in flights {
         std::fs::remove_file(flight).unwrap();
     }
@@ -3652,6 +3033,38 @@ fn a_staticlib_above_the_incremental_backstop_leaves_existing_sessions_alone() {
     );
 }
 
+/// The incremental state source of every bypassed compilation that kept
+/// private state, across the store's session streams in the order recorded.
+fn bypassed_incremental_states(store: &Path) -> Vec<(String, Option<String>)> {
+    let mut streams: Vec<_> = std::fs::read_dir(store.join("actions/sessions/v1"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .collect();
+    streams.sort();
+    let mut states = Vec::new();
+    for stream in streams {
+        for line in std::fs::read_to_string(stream).unwrap().lines() {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            if event["type"] == "action"
+                && event["outcome"]["kind"] == "bypass"
+                && event["incremental"] == true
+            {
+                let state = &event["incremental_state"];
+                states.push((
+                    state["source"].as_str().unwrap_or("missing").to_string(),
+                    state["reason"].as_str().map(str::to_string),
+                ));
+            }
+        }
+    }
+    states
+}
+
 #[test]
 fn a_staticlib_the_cache_bypasses_still_compiles_incrementally() {
     let store = tempfile::tempdir().unwrap();
@@ -3692,6 +3105,15 @@ fn a_staticlib_the_cache_bypasses_still_compiles_incrementally() {
         learned_sessions(store.path()),
         1,
         "an edit should reuse the library's state rather than start another"
+    );
+    // Each build's row says where that state came from. This path never
+    // seeds, so the first build starts it empty and the edit reuses it.
+    assert_eq!(
+        bypassed_incremental_states(store.path()),
+        [
+            ("cold".to_string(), Some("empty-directory".to_string())),
+            ("existing".to_string(), None),
+        ]
     );
 
     // The opt-out is checked against a store of its own, where any state at
@@ -4558,8 +3980,13 @@ fn main() {
         return;
     }
     println!("cargo::rerun-if-changed={own}/HEAD");
-    println!("cargo::rerun-if-changed={common}/packed-refs");
-    println!("cargo::rerun-if-changed={common}/{}", git(&["symbolic-ref", "-q", "HEAD"]));
+    // These cases exercise cacheable Git watches. Missing watches deliberately
+    // force execution and have separate regression coverage.
+    for path in [format!("{common}/packed-refs"), format!("{common}/{}", git(&["symbolic-ref", "-q", "HEAD"]))] {
+        if std::path::Path::new(&path).exists() {
+            println!("cargo::rerun-if-changed={path}");
+        }
+    }
 }
 "#,
     )
@@ -4622,8 +4049,36 @@ fn main() {
             std::env::consts::EXE_SUFFIX
         ))
     };
+    let remove_recorded_runs = |target: &Path| {
+        let build = target.join("debug/build");
+        if !build.is_dir() {
+            return false;
+        }
+        let records = find_files(&build, |path| {
+            path.ends_with("output") || path.ends_with("run/stdout")
+        });
+        let found = !records.is_empty();
+        for record in records {
+            let unit = if record.ends_with("run/stdout") {
+                record.parent().unwrap().parent().unwrap()
+            } else {
+                record.parent().unwrap()
+            };
+            if unit.exists() {
+                std::fs::remove_dir_all(unit).unwrap();
+            }
+        }
+        found
+    };
     let checkouts = [("main", &main), ("first", &first), ("second", &second)];
     for (name, checkout) in &checkouts[usize::from(bare)..] {
+        if shared_target {
+            // Ask Cargo to invoke the script for each checkout. A shared
+            // target can otherwise retain the previous checkout's recorded
+            // watches and consider that run fresh; this test checks mbx's
+            // replay isolation once execution is requested.
+            remove_recorded_runs(&shared);
+        }
         let (_, stderr) = build_with(
             checkout,
             store.path(),
@@ -4651,20 +4106,10 @@ fn main() {
     } else {
         second.join("target")
     };
-    let runs_recorded = find_files(&target.join("debug/build"), |path| {
-        path.ends_with("output") || path.ends_with("run/stdout")
-    });
-    assert!(!runs_recorded.is_empty(), "no recorded build-script run");
-    for record in runs_recorded {
-        let unit = if record.ends_with("run/stdout") {
-            record.parent().unwrap().parent().unwrap()
-        } else {
-            record.parent().unwrap()
-        };
-        if unit.exists() {
-            std::fs::remove_dir_all(unit).unwrap();
-        }
-    }
+    assert!(
+        remove_recorded_runs(&target),
+        "no recorded build-script run"
+    );
     let runs = std::fs::read_to_string(second.join("runs")).unwrap();
     let (warm, stderr) = build_with(
         &second,
@@ -4685,6 +4130,9 @@ fn main() {
 
     // A new commit in one worktree reaches its binary, not its sibling's.
     git(&first, &["commit", "-q", "--allow-empty", "-m", "moved"]);
+    if shared_target {
+        remove_recorded_runs(&shared);
+    }
     build_with(
         &first,
         store.path(),
@@ -5389,6 +4837,82 @@ fn changed_declared_input_executes_build_script_again() {
         std::fs::read_to_string(project.path().join("runs")).unwrap(),
         "2"
     );
+}
+
+/// Cargo runs a script on every build while an explicit watch is absent. The
+/// script may rely on that to read state it cannot otherwise declare, so both
+/// emitted environment and generated files must come from this execution.
+#[test]
+fn a_missing_build_script_watch_reruns_instead_of_replaying_outputs() {
+    for initially_present in [false, true] {
+        let store = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("src")).unwrap();
+        // Keep the missing watch's parent unchanged. Writing beside the
+        // missing path would independently prevent execution-cache publication.
+        std::fs::create_dir(project.path().join("watched")).unwrap();
+        let watch = project.path().join("watched/absent");
+        if initially_present {
+            std::fs::write(&watch, "present").unwrap();
+        }
+        std::fs::write(
+            project.path().join("Cargo.toml"),
+            "[package]\nname = \"missing-watch-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("build.rs"),
+            r#"fn main() {
+    println!("cargo:rerun-if-changed=watched/absent");
+    let value = std::fs::read_to_string("value").unwrap();
+    let runs = std::fs::read_to_string("runs").unwrap_or_default();
+    std::fs::write("runs", format!("{runs}run\n")).unwrap();
+    println!("cargo:rustc-env=WATCH_VALUE={value}");
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(out.join("generated.rs"), format!("const GENERATED: &str = {value:?};\n")).unwrap();
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("src/main.rs"),
+            "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\nfn main() { println!(\"{}|{}\", env!(\"WATCH_VALUE\"), GENERATED); }\n",
+        )
+        .unwrap();
+        generate_lockfile(project.path());
+
+        for (index, value) in ["first", "second", "third"].into_iter().enumerate() {
+            if index == 1 && initially_present {
+                // Reuse the prediction recorded while the watched path existed.
+                std::fs::remove_file(&watch).unwrap();
+            }
+            std::fs::write(project.path().join("value"), value).unwrap();
+            let (_, stderr) = build_with(
+                project.path(),
+                store.path(),
+                &reports.path().join(format!("{index}.json")),
+                &[],
+            );
+            let output = Command::new(project.path().join(format!(
+                "target/debug/missing-watch-fixture{}",
+                std::env::consts::EXE_SUFFIX
+            )))
+            .output()
+            .unwrap();
+            assert!(output.status.success(), "{stderr}");
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap().trim(),
+                format!("{value}|{value}"),
+                "a missing watch must refresh both env and generated output: {stderr}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(project.path().join("runs")).unwrap(),
+                "run\n".repeat(index + 1),
+                "the script body must execute despite an existing prediction"
+            );
+        }
+    }
 }
 
 #[test]
@@ -9016,99 +8540,6 @@ fn main() {
 }
 
 #[cfg(unix)]
-#[test]
-fn incremental_seed_retries_failed_bootstrap_const_but_not_genuine_rustc_errors() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let version = Command::new("rustc").arg("-vV").output().unwrap();
-    let version = String::from_utf8(version.stdout).unwrap();
-    if !rustc_relocates_incremental_state()
-        || version.lines().any(|line| {
-            line.starts_with("release:") && (line.contains("nightly") || line.contains("dev"))
-        })
-    {
-        return;
-    }
-    let real_rustc = which::which("rustc").unwrap();
-    for (name, source, succeeds, attempts) in [
-        (
-            "bootstrap-const",
-            "const _: () = assert!(option_env!(\"RUSTC_BOOTSTRAP\").is_none());\npub fn value() {}\n",
-            true,
-            vec!["1", "unset"],
-        ),
-        (
-            "genuine-error",
-            "compile_error!(\"genuine-compile-error\");\n",
-            false,
-            vec!["1"],
-        ),
-        ("no-dep-info", "pub fn broken( {\n", false, vec!["1"]),
-    ] {
-        let store = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        let reports = tempfile::tempdir().unwrap();
-        write_project(project.path());
-        std::fs::write(project.path().join("src/lib.rs"), source).unwrap();
-        let wrapper = project.path().join("counting-rustc");
-        let log = project.path().join("attempts.log");
-        std::fs::write(
-            &wrapper,
-            r#"#!/bin/sh
-case " $* " in
-  *" --crate-name fixture "*)
-    printf '%s\n' "${RUSTC_BOOTSTRAP-unset}" >> "$TEST_COMPILER_ATTEMPTS"
-    ;;
-esac
-exec "$TEST_REAL_RUSTC" "$@"
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut command = mbx_command();
-        command.env_remove("RUSTC_BOOTSTRAP");
-        let output = isolated_cargo_command(
-            command,
-            project.path(),
-            store.path(),
-            &reports.path().join("build.json"),
-            &["build", "--locked"],
-            &[
-                ("MBX_EAGER_INCREMENTAL", "1"),
-                ("RUSTC", wrapper.to_str().unwrap()),
-                ("TEST_REAL_RUSTC", real_rustc.to_str().unwrap()),
-                ("TEST_COMPILER_ATTEMPTS", log.to_str().unwrap()),
-            ],
-        )
-        .output()
-        .unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(output.status.success(), succeeds, "{name}: {stderr}");
-        let actual = std::fs::read_to_string(&log).unwrap();
-        assert_eq!(
-            actual.lines().collect::<Vec<_>>(),
-            attempts,
-            "{name}: {stderr}"
-        );
-        let markers = find_files(&store.path().join("incremental"), |path| {
-            file_name_is(path, |name| name == "bootstrap-env-dependency")
-        });
-        assert_eq!(
-            !markers.is_empty(),
-            succeeds,
-            "{name}: retry marker should match bootstrap dependency"
-        );
-        if succeeds {
-            assert!(
-                !stderr.contains("E0080"),
-                "discarded diagnostics reached Cargo: {stderr}"
-            );
-        } else if name == "genuine-error" {
-            assert!(stderr.contains("genuine-compile-error"), "{stderr}");
-        }
-    }
-}
-
 /// Write a binary-only fixture called `objects` whose `main` depends on
 /// `revision`, so each revision compiles to new code.
 #[cfg(unix)]
@@ -9418,7 +8849,144 @@ fn late_workspace_wrappers_keep_objects_when_they_skip_rustc() {
     }
 }
 
-/// A waiter with different inputs must not serialize the builds behind it.
+/// A workspace edit must compile even while another build holds an old
+/// invocation lock. Cache lookup and scheduler admission still apply.
+#[cfg(unix)]
+#[test]
+fn workspace_compilations_skip_flights_but_keep_scheduler_admission() {
+    workspace_compilation_skips_flight(false);
+}
+
+/// A dependency member has no CARGO_PRIMARY_PACKAGE marker. Its exemption
+/// therefore has to reach the compiler through the session membership file.
+#[cfg(unix)]
+#[test]
+fn unselected_workspace_members_skip_flights_but_keep_scheduler_admission() {
+    workspace_compilation_skips_flight(true);
+}
+
+/// Exercise a selected crate or an unselected member under its invocation lock.
+#[cfg(unix)]
+fn workspace_compilation_skips_flight(as_dependency: bool) {
+    use std::time::{Duration, Instant};
+
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    let store = directory.path().join("store");
+    write_project(&project);
+    if as_dependency {
+        let manifest = std::fs::read_to_string(project.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            project.join("Cargo.toml"),
+            format!("{manifest}\n[workspace]\nmembers = [\"consumer\"]\nresolver = \"2\"\n"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.join("consumer/src")).unwrap();
+        std::fs::write(
+            project.join("consumer/Cargo.toml"),
+            "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nfixture = { path = \"..\" }\n",
+        )
+        .unwrap();
+        std::fs::write(project.join("consumer/src/lib.rs"), "pub use fixture::*;\n").unwrap();
+        generate_lockfile(&project);
+    }
+    let arguments: &[&str] = if as_dependency {
+        &["build", "--offline", "-p", "consumer"]
+    } else {
+        &["build", "--offline"]
+    };
+    let settings = [
+        ("MBX_TARGET_VIEWS", "0"),
+        ("MBX_LEARNED_INCREMENTAL", "0"),
+        ("CARGO_INCREMENTAL", "0"),
+    ];
+    cargo_with(
+        &project,
+        &store,
+        &directory.path().join("seed.json"),
+        arguments,
+        &settings,
+    );
+    let prediction = find_files(&store.join("actions/task-manifests/v1"), |path| {
+        path.extension().is_some_and(|ext| ext == "json")
+    })
+    .into_iter()
+    .flat_map(|path| {
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        manifest["predictions"].as_array().unwrap().clone()
+    })
+    .find(|prediction| {
+        prediction["adapter"] == "rustc"
+            && serde_json::from_str::<serde_json::Value>(prediction["payload"].as_str().unwrap())
+                .unwrap()["crate_name"]
+                == "fixture"
+    })
+    .expect("the workspace compilation published a cache prediction");
+    let flights = store.join("scheduler/inflight");
+    std::fs::create_dir_all(&flights).unwrap();
+    let lock_path = flights.join(format!(
+        "rustc-{}",
+        prediction["invocation"]["hash"].as_str().unwrap()
+    ));
+    let mut holder = fslock::LockFile::open(&lock_path).unwrap();
+    assert!(holder.try_lock().unwrap());
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn changed() -> u32 { 42 }\n",
+    )
+    .unwrap();
+
+    let report = directory.path().join("edited.json");
+    let log = directory.path().join("edited.stderr");
+    let mut command = isolated_cargo_command(
+        mbx_command(),
+        &project,
+        &store,
+        &report,
+        arguments,
+        &settings,
+    );
+    command
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap());
+    let mut child = BuildChildGuard::spawn_group(&mut command).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while child.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "workspace compilation waited for a dependency flight: {}",
+            std::fs::read_to_string(&log).unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    let stderr = std::fs::read_to_string(&log).unwrap();
+    assert!(output.status.success(), "{stderr}");
+    let stats: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    assert!(stats["misses"].as_u64().unwrap() > 0, "{stats}");
+    assert!(
+        stats["wrapper_phases_ns"]["permit_wait"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0,
+        "workspace compilation must still request scheduler admission: {stats}"
+    );
+
+    // A completed workspace result remains shareable even though its compile
+    // does not participate in invocation deduplication.
+    std::fs::remove_dir_all(project.join("target")).unwrap();
+    let (warm, stderr) = cargo_with(
+        &project,
+        &store,
+        &directory.path().join("warm.json"),
+        arguments,
+        &settings,
+    );
+    assert!(warm["hits"].as_u64().unwrap() > 0, "{warm}\n{stderr}");
+}
+
+/// A dependency waiter with different inputs must not serialize the builds behind it.
 /// With no new publication it must retain occupancy, so the next build can
 /// reuse its own result. Compiler and flight barriers make both cases exact.
 #[cfg(unix)]
@@ -9433,11 +9001,29 @@ fn a_flight_waiter_releases_only_after_a_fresh_prediction_misses() {
         }
     }
 
-    for publishes in [true, false] {
+    for (publishes, vendored) in [(true, false), (false, false), (true, true)] {
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("project");
+        let dependency = if vendored {
+            project.join("vendor/fixture")
+        } else {
+            directory.path().join("dependency")
+        };
         let store = directory.path().join("store");
-        write_project(&project);
+        write_named_project(&project, "consumer");
+        write_project(&dependency);
+        let manifest = std::fs::read_to_string(project.join("Cargo.toml")).unwrap();
+        let dependency_path = if vendored {
+            "vendor/fixture"
+        } else {
+            "../dependency"
+        };
+        std::fs::write(
+            project.join("Cargo.toml"),
+            format!("{manifest}\n[workspace]\nexclude = [\"vendor/fixture\"]\n\n[dependencies]\nfixture = {{ path = \"{dependency_path}\" }}\n"),
+        )
+        .unwrap();
+        generate_lockfile(&project);
         let wrapper = directory.path().join("gated-rustc");
         let entered = directory.path().join("compiler-entered");
         let release = directory.path().join("release-compiler");
@@ -9492,7 +9078,7 @@ exec "$TEST_REAL_RUSTC" "$@"
             std::fs::write(record_path, serde_json::to_vec(&record).unwrap()).unwrap();
         }
         std::fs::write(
-            project.join("src/lib.rs"),
+            dependency.join("src/lib.rs"),
             "pub fn changed() -> u32 { 42 }\n",
         )
         .unwrap();
@@ -9598,4 +9184,41 @@ fn build_child_guard_kills_the_compiler_process_group_on_unwind() {
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("a compiler descendant still holds the output pipe open")
         .unwrap();
+}
+
+#[test]
+fn retired_seed_setting_keeps_the_same_private_history() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    for (revision, seed) in [(0, "1"), (1, "0"), (2, "1")] {
+        edit_project(project.path(), revision);
+        let (stats, _) = build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("{revision}.json")),
+            &[
+                ("MBX_SEED_INCREMENTAL", seed),
+                ("MBX_LEARNED_INCREMENTAL", "1"),
+            ],
+        );
+        assert_eq!(
+            compiled_incrementally(&stats),
+            u64::from(revision > 0),
+            "{stats}"
+        );
+    }
+    let records = find_files(
+        &incremental_checkout(store.path(), project.path()).join("blake3"),
+        |path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        },
+    );
+    assert_eq!(
+        records.len(),
+        1,
+        "the retired setting must not change unit identity"
+    );
 }

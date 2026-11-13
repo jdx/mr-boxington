@@ -5,7 +5,10 @@ description: Rank where a build's uncached compiler time went, and see what woul
 
 `mbx analyze` reads the most recent recorded build of the current workspace,
 groups its uncached compiler time by cause, largest first, and shows the chain
-of units the build waited on. It runs nothing.
+of units the build waited on. It runs nothing. The workspace is the deepest
+recorded one that contains the current directory, so a checkout nested inside
+another project's directory reports its own builds; the report names the
+workspace it read.
 
 ```sh
 cargo check
@@ -19,6 +22,7 @@ report after editing `engine` begins like this:
 
 ```text
 last recorded build: cargo check
+workspace: /home/me/demo
 compiler time: 47.7ms in 3 uncached compilations
 
 uncached compiler time by cause
@@ -67,8 +71,31 @@ listed on one final `expected, nothing to cache:` line. They count as uncached
 work only when they took compiler time.
 
 A crate you are editing keeps private [incremental state](/incremental)
-instead of publishing its result, so a later build does not restore it from
-the cache even when the report names it as a first build.
+instead of publishing its result, and so does every crate that links it. None
+of them looks anything up in the cache. Recordings from this mbx version say
+why. The report charges each crate that links the edited crate to the same
+cause as the edited crate. An edited crate that skipped the lookup is charged
+to `inputs of <crate> changed`. One that looked up and missed first is
+classified like any other miss; when its recording lacks key details, as for
+an incremental miss, that is `misses with no earlier recording`. A crate that links an edited
+crate's private output is charged to that crate even when it was edited as
+well, because mbx does not check its own sources on that path. Older
+recordings lack this, and the report names these compilations as a first
+build.
+
+## Private incremental state
+
+When the build kept private incremental state, a section after the causes says
+where that state came from, with compiler time and count for each source:
+
+```text
+private incremental state for 34 compilations
+ 6m 12s  started from this checkout's earlier state (30)
+    52s  started empty: this checkout's state directory held no finished session (4)
+```
+
+State starts empty when this checkout has no finished session. Existing state
+means the directory held a finished session; rustc decides how much to reuse.
 
 ## What it compares against
 
@@ -76,8 +103,10 @@ mbx compares each compilation with this workspace's most recent earlier
 recording of the same compilation unit. When this workspace has none, mbx uses
 the most recent one from another checkout of the same project.
 `mbx explain --last` uses the same baseline. Recordings come from
-[session history](/tui#recording), which keeps a week of builds, at most 256
-of them.
+[session history](/tui#recording), which by default keeps a week of builds, at
+most 256 of them; [`gc.events_max_age`](/configuration#gc-events-max-age) and
+[`gc.events_max_sessions`](/configuration#gc-events-max-sessions) change those
+limits.
 
 ## Critical path
 

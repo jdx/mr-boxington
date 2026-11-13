@@ -5,7 +5,42 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Wire protocol version used between an in-process cache agent and its shims.
-pub const AGENT_PROTOCOL_VERSION: u8 = 11;
+pub const AGENT_PROTOCOL_VERSION: u8 = 13;
+
+/// Facts the compiler wrapper determined about one action, recorded on its
+/// session event row. Every field is optional, and absent means unknown.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompileMetadata {
+    /// The Cargo unit compiled: `lib`, `bin`, `test`, `proc-macro`, or
+    /// `build-script`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_kind: Option<String>,
+    /// Why a compilation ran without a cache lookup: `private-dependency`,
+    /// `eager`, `unshareable-key`, `hot-reuse`, `prediction-error`,
+    /// `no-prediction`, or `other`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
+    /// Crates whose private artifacts this unit links, sorted, at most four.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub private_dependencies: Vec<String>,
+    /// How many more such crates there were beyond those named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_dependencies_more: Option<u64>,
+    /// Where a compilation's private incremental state came from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incremental_state: Option<IncrementalState>,
+}
+
+/// Where a compilation's private incremental state came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncrementalState {
+    /// `existing` when a finished session is present, or `cold` when starting empty.
+    pub source: String,
+    /// Why state started cold: `empty-directory` (no finished session).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// Largest single protocol request the agent will read.
 ///
 /// Requests are small JSON objects; the largest legitimate ones carry an output
@@ -175,6 +210,9 @@ pub enum AgentRequest {
         restore: RestoreStats,
         /// Compiler crate name, when the invocation supplied one.
         crate_name: Option<String>,
+        /// Facts the wrapper determined about this action.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<CompileMetadata>,
     },
     /// A compilation the adapter declined to cache, grouped by reason.
     RecordBypass {
@@ -200,9 +238,15 @@ pub enum AgentRequest {
         crate_name: Option<String>,
         /// Wall time spent running the compiler.
         duration_ns: u64,
+        /// Facts the wrapper determined about this action.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<CompileMetadata>,
     },
     /// Account for a cache hit that was rebuilt for correctness verification.
     RecordActionVerification {
+        /// Facts the wrapper determined about this action.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<CompileMetadata>,
         /// Whether rebuilt and cached outputs matched.
         matched: bool,
         /// Restoration work performed before rebuilding.
@@ -415,6 +459,8 @@ pub enum AgentEvent {
         crate_name: Option<String>,
         /// Restoration work performed by the adapter.
         restore: RestoreStats,
+        /// Facts the wrapper determined about this action.
+        metadata: Option<CompileMetadata>,
     },
     /// A compilation the adapter declined to cache.
     Bypass {
@@ -430,12 +476,16 @@ pub enum AgentEvent {
     /// [`Self::CompilerInvocation`] when a shim reports both over one
     /// connection, so the reason arrives with the crate and time it cost.
     BypassedCompilation {
+        /// Whether private incremental state was used.
+        incremental: bool,
         /// Stable, low-cardinality bypass-reason name.
         kind: String,
         /// Compiler crate name, when the invocation supplied one.
         crate_name: Option<String>,
         /// Wall time spent running the compiler.
         duration_ns: u64,
+        /// Facts the wrapper determined about this action.
+        metadata: Option<CompileMetadata>,
     },
     /// A real compiler invocation ran.
     CompilerInvocation {
@@ -445,9 +495,15 @@ pub enum AgentEvent {
         crate_name: Option<String>,
         /// Wall time spent running the compiler.
         duration_ns: u64,
+        /// Whether private incremental state was used.
+        incremental: bool,
+        /// Facts the wrapper determined about this action.
+        metadata: Option<CompileMetadata>,
     },
     /// A hit was rebuilt to verify it.
     Verification {
+        /// Facts the wrapper determined about this action.
+        metadata: Option<CompileMetadata>,
         /// Whether rebuilt and cached outputs matched.
         matched: bool,
         /// Restoration work performed before rebuilding.

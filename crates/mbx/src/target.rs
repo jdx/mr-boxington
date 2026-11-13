@@ -161,7 +161,11 @@ fn deepest_match(entries: &[PathBuf], workspace_root: &Path) -> Option<(usize, u
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ViewStats {
+    /// Every managed target directory, those without a record included.
     pub views: u64,
+    /// The part of `views` with no record beside it, so no checkout to
+    /// collect them for: only an age or size limit removes these.
+    pub untracked: u64,
     pub bytes: u64,
 }
 
@@ -177,6 +181,9 @@ pub(crate) struct CollectionOutcome {
     pub removed_bytes: u64,
     pub removed_stale_views: u64,
     pub removed_live_views: u64,
+    /// Directories with no record, removed by an age or size limit. Counted
+    /// in `removed_views` and in neither of the two above.
+    pub removed_untracked_views: u64,
     /// Selected for removal, then found in use by a running command, or
     /// claimed by a build that started after the selection was made.
     pub kept_active_views: u64,
@@ -200,6 +207,17 @@ pub(crate) struct CollectionOutcome {
 }
 
 impl CollectionOutcome {
+    /// Count one removed directory by why it was a candidate.
+    fn count_removed(&mut self, live: bool, untracked: bool) {
+        if untracked {
+            self.removed_untracked_views += 1;
+        } else if live {
+            self.removed_live_views += 1;
+        } else {
+            self.removed_stale_views += 1;
+        }
+    }
+
     /// Logical bytes removed, whole directories and units together.
     pub(crate) fn freed_bytes(&self) -> u64 {
         self.removed_bytes.saturating_add(self.removed_unit_bytes)
@@ -1379,12 +1397,15 @@ pub fn touch_managed(config: &Config, workspace_root: &Path, target_dir: &Path) 
 
 /// Summarize the managed target directories under `root`.
 pub fn stats(root: &Path) -> Result<ViewStats> {
-    let directories = views(root)?
+    let mut directories = views(root)?
         .into_iter()
         .map(|(_, directory)| directory)
         .collect::<Vec<_>>();
+    let untracked = untracked_views(root)?;
+    directories.extend(untracked.iter().map(|(_, directory)| directory.clone()));
     Ok(ViewStats {
         views: directories.len() as u64,
+        untracked: untracked.len() as u64,
         bytes: trees_bytes(directories),
     })
 }
@@ -1560,6 +1581,41 @@ fn collect_with(
             // When a build last claimed it, which tells a build arriving
             // during the removal apart.
             record.updated_secs,
+            false,
+        ));
+    }
+    // A directory whose record is gone names no checkout, so none can be
+    // gone, and nothing ranks it but when it last changed. It is weighed like
+    // a live target: left alone without an age or size limit, and removed by
+    // either once it is old enough or the budget needs the room. Its lease,
+    // Cargo's locks and the process scan keep one in use, as for any other.
+    for (record_path, directory) in untracked_views(root)? {
+        total_views += 1;
+        let files = ledger.measure(&directory, &HashSet::new());
+        // Only a limit looks at it, so a collection with none does not walk
+        // the tree a second time.
+        let (changed, seen) = if max_bytes.is_some() || max_age.is_some() {
+            // An age that could not be read is no age: kept from the budget
+            // as well, where ranking it newest would still let it go.
+            let Some(secs) = newest_modification(&directory) else {
+                continue;
+            };
+            (secs.min(now), secs)
+        } else {
+            (now, now)
+        };
+        entries.push((
+            record_path,
+            directory,
+            changed,
+            files,
+            true,
+            Standing::Normal,
+            // What the walk saw, uncapped, for the recheck under the
+            // reservation to compare against: a write after the sweep's
+            // clock was read must still count as newer.
+            seen,
+            true,
         ));
     }
     // A file a view still links stays counted there; a deletion that stops
@@ -1580,15 +1636,16 @@ fn collect_with(
     // Before the budget is weighed, so a checkout's unused units go ahead of
     // a whole directory somebody may still be using.
     if let Some(max_age) = max_age
-        && entries
-            .iter()
-            .any(|entry| entry.4 && entry.5 != Standing::Keep && !expired(entry.2, entry.5))
+        && entries.iter().any(|entry| {
+            entry.4 && !entry.7 && entry.5 != Standing::Keep && !expired(entry.2, entry.5)
+        })
         && runs_tracked
     {
-        for (_, directory, updated, files, live, standing, built) in &mut entries {
+        for (_, directory, updated, files, live, standing, built, untracked) in &mut entries {
             // A kept target keeps what it holds: one built for a bisect or a
             // release and left alone is exactly one whose units look unused.
-            if !*live || *standing == Standing::Keep || expired(*updated, *standing) {
+            // One without a record is taken whole or not at all.
+            if !*live || *untracked || *standing == Standing::Keep || expired(*updated, *standing) {
                 continue;
             }
             // So does one only its programs' runs keep: no build has read its
@@ -1659,7 +1716,7 @@ fn collect_with(
     let mut projection = max_bytes.map(|_| ledger.clone());
     let mut remaining = ledger.total();
     let mut selected = HashSet::new();
-    for (record_path, _, updated, files, live, standing, _) in &entries {
+    for (record_path, _, updated, files, live, standing, _, _) in &entries {
         if !live || expired(*updated, *standing) {
             selected.insert(record_path.clone());
             if let Some(projection) = &mut projection {
@@ -1695,7 +1752,7 @@ fn collect_with(
     }
 
     before_removal();
-    for (record_path, directory, _, files, live, _, updated) in entries {
+    for (record_path, directory, _, files, live, _, updated, untracked) in entries {
         if !selected.contains(&record_path) {
             continue;
         }
@@ -1731,7 +1788,7 @@ fn collect_with(
         let reservation = if dry_run {
             // Told, not taken: a real run would keep this view, and a preview
             // that listed it for removal would be wrong about it.
-            if view_in_use(&directory) {
+            if view_in_use(&directory) || (untracked && record_path.exists()) {
                 outcome.kept_active_views += 1;
                 continue;
             }
@@ -1747,6 +1804,13 @@ fn collect_with(
         if !dry_run {
             let claimed_since = read_view_record(&record_path)
                 .is_some_and(|record| recently_claimed(root, &record, updated, now));
+            // Before Cargo's locks are taken: releasing them truncates the
+            // lock files, which would date this sweep's own touch as a build.
+            // Selected on the age it had then. A build that took no lease can
+            // have written to it since and finished before the reservation,
+            // and an age that cannot be read again is no age: next sweep.
+            let changed_since =
+                untracked && newest_modification(&directory).is_none_or(|secs| secs > updated);
             let in_use = match cargo_locks(&directory) {
                 Ok(locks) => locks.is_none(),
                 Err(error) => {
@@ -1757,7 +1821,10 @@ fn collect_with(
                     true
                 }
             };
-            if claimed_since || in_use {
+            // A build that placed it meanwhile has written the record it
+            // lacked, and is no longer an orphan to take.
+            let recorded_since = untracked && record_path.exists();
+            if claimed_since || in_use || recorded_since || changed_since {
                 outcome.kept_active_views += 1;
                 continue;
             }
@@ -1794,11 +1861,7 @@ fn collect_with(
                         ..Removal::default()
                     });
                 }
-                if live {
-                    outcome.removed_live_views += 1;
-                } else {
-                    outcome.removed_stale_views += 1;
-                }
+                outcome.count_removed(live, untracked);
                 aside
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1806,11 +1869,7 @@ fn collect_with(
                 // freed by this collection.
                 ledger.release(&files);
                 outcome.removed_views += 1;
-                if live {
-                    outcome.removed_live_views += 1;
-                } else {
-                    outcome.removed_stale_views += 1;
-                }
+                outcome.count_removed(live, untracked);
                 None
             }
             Err(error) if refused_while_open(&error) => {
@@ -1965,6 +2024,74 @@ fn views(root: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
         }
     }
     Ok(views)
+}
+
+/// Whether `name` is shaped like a view directory's: the digest of a
+/// checkout's path, which is all the directories placement makes.
+fn is_view_name(name: &str) -> bool {
+    name.len() == view_key(Path::new("")).len() && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Every managed target directory with no record beside it, as the record it
+/// would have and the directory.
+///
+/// Placement writes the record before the directory exists, so a directory
+/// without one lost it afterwards: to a collector that predates view leases,
+/// or to a deletion by hand. Nothing names its checkout, so `views` cannot
+/// reach it, and it would otherwise stay on disk unseen. Removal entries and
+/// anything not named like a view are left out.
+fn untracked_views(root: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let directory = views_root(root);
+    let listing = match std::fs::read_dir(&directory) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).wrap_err_with(|| format!("failed to read {}", directory.display()));
+        }
+    };
+    let mut untracked = Vec::new();
+    for entry in listing {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_view_name(&name) || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let path = entry.path();
+        let record = path.with_extension("json");
+        if !record.exists() {
+            untracked.push((record, path));
+        }
+    }
+    Ok(untracked)
+}
+
+/// When anything under `directory` last changed, in seconds since the epoch.
+/// Symlinks are not followed.
+///
+/// `None` when any part of the tree could not be inspected: what an unreadable
+/// directory holds may be the newest change, so the age is unknown, and the
+/// caller must treat it as just changed.
+fn newest_modification(directory: &Path) -> Option<u64> {
+    let mut newest: Option<std::time::SystemTime> = None;
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        let modified = std::fs::symlink_metadata(&current)
+            .and_then(|metadata| metadata.modified())
+            .ok()?;
+        newest = newest.max(Some(modified));
+        for entry in std::fs::read_dir(&current).ok()? {
+            let entry = entry.ok()?;
+            if entry.file_type().ok()?.is_dir() {
+                pending.push(entry.path());
+            } else {
+                newest = newest.max(Some(entry.metadata().ok()?.modified().ok()?));
+            }
+        }
+    }
+    newest?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|since| since.as_secs())
 }
 
 fn record_view(root: &Path, workspace_root: &Path) -> Result<()> {

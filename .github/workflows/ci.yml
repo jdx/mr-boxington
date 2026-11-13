@@ -27,7 +27,7 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           persist-credentials: false
-      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
       - uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1.7.0
         with:
           cache: rust
@@ -43,10 +43,34 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
       - name: Test benchmark driver
         run: python3 -m unittest discover -s benchmarks -p 'test_*.py'
-      - name: Check dependencies
+      # Bans, licenses, and sources are policy over the manifests, so they always
+      # gate. The advisory database changes on its own, so a PR is held to it only
+      # when it touches the dependency graph; the daily advisories workflow
+      # reports new advisories against main otherwise.
+      - name: Check bans, licenses, and sources
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
-          command: check
+          command: check bans licenses sources
+      - name: Detect dependency changes
+        id: deps
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          deps_changed=true
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            deps_changed=false
+            if git diff --name-only "$BASE_SHA...$HEAD_SHA" | grep -qE '(^|/)(Cargo\.lock|Cargo\.toml|deny\.toml)$'; then
+              deps_changed=true
+            fi
+          fi
+          echo "deps-changed=$deps_changed" >> "$GITHUB_OUTPUT"
+      - name: Check advisories
+        if: steps.deps.outputs.deps-changed == 'true'
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories
       - name: Run lint, build, tests, and documentation checks
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -98,7 +122,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false # the token reaches only the push step
-      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
         with:
           install_args: jouet
           github_token: ""  # the job token can write, so the install gets none
@@ -166,7 +190,7 @@ jobs:
           submodules: recursive
           persist-credentials: false
       - if: runner.os != 'Windows'
-        uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+        uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
       - if: matrix.os != 'windows-latest'
         uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9 # v1.7.0
         with:

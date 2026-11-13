@@ -682,6 +682,16 @@ pub(crate) fn record_action_hit_with_diagnostic(
     crate_name: &str,
     diagnostic: Option<ActionDiagnostic>,
 ) {
+    record_action_hit_with_metadata(action, restore, crate_name, diagnostic, None);
+}
+
+pub(crate) fn record_action_hit_with_metadata(
+    action: &CacheDigest,
+    restore: RestoreStats,
+    crate_name: &str,
+    diagnostic: Option<ActionDiagnostic>,
+    metadata: Option<mbx_cache_core::CompileMetadata>,
+) {
     let mut requests = Vec::new();
     if let Some(diagnostic) = diagnostic
         && let Some(request) =
@@ -694,6 +704,7 @@ pub(crate) fn record_action_hit_with_diagnostic(
         action: action.clone(),
         restore,
         crate_name: Some(crate_name.to_string()),
+        metadata,
     });
     let responses = session::request_agent(&requests);
     match responses.map(|mut responses| responses.pop()) {
@@ -753,9 +764,16 @@ pub(crate) fn stream_divergence(name: &str, cached: &[u8], compiled: &[u8]) -> O
 }
 
 /// Tell the session whether a shadow compilation agreed with the cache.
-pub(crate) fn record_verification(matched: bool, restore: RestoreStats) {
-    let responses =
-        session::request_agent(&[AgentRequest::RecordActionVerification { matched, restore }]);
+pub(crate) fn record_verification(
+    matched: bool,
+    restore: RestoreStats,
+    metadata: Option<mbx_cache_core::CompileMetadata>,
+) {
+    let responses = session::request_agent(&[AgentRequest::RecordActionVerification {
+        matched,
+        restore,
+        metadata,
+    }]);
     match responses.map(|responses| responses.into_iter().next()) {
         Ok(Some(AgentResponse::ActionVerificationRecorded)) => {}
         Ok(Some(AgentResponse::Error { message })) => {
