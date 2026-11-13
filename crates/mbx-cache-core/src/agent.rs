@@ -373,6 +373,9 @@ pub struct CacheAgent {
     remote_staging_dir: Arc<PathBuf>,
     remote_download_limit: u64,
     remote_download_bytes: Arc<AtomicU64>,
+    /// Blobs a build's own lookup could not fetch because the download budget
+    /// was spent, so the response can say that instead of reporting them gone.
+    budget_refused_blobs: Arc<Mutex<BTreeSet<CacheDigest>>>,
     pending_remote_actions: Arc<Mutex<BTreeMap<CacheDigest, RemoteActionResult>>>,
     /// Results this session wrote to the local store and has not had a hit
     /// on yet. A record written just now looks recently used, but the objects
@@ -789,6 +792,34 @@ struct PrefetchedAction {
     result: RemoteActionResult,
 }
 
+#[derive(Debug)]
+struct DownloadBudgetExceeded {
+    requested: u64,
+    used: u64,
+    limit: u64,
+    speculative: bool,
+}
+
+impl std::fmt::Display for DownloadBudgetExceeded {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "remote cache {} download budget exceeded: {} bytes requested with {} of {} bytes already used",
+            if self.speculative {
+                "prefetch"
+            } else {
+                "restore"
+            },
+            self.requested,
+            self.used,
+            self.limit
+        )
+    }
+}
+
+impl std::error::Error for DownloadBudgetExceeded {}
+
+#[derive(Debug)]
 struct RemoteDownloadReservation {
     counter: Arc<AtomicU64>,
     reserved: u64,
@@ -927,6 +958,7 @@ impl CacheAgent {
             remote_staging_dir: Arc::new(remote_staging_dir),
             remote_download_limit,
             remote_download_bytes: Arc::new(AtomicU64::new(0)),
+            budget_refused_blobs: Arc::new(Mutex::new(BTreeSet::new())),
             pending_remote_actions: Arc::new(Mutex::new(BTreeMap::new())),
             stored_results: Arc::new(Mutex::new(BTreeSet::new())),
             remote_transfers,
@@ -992,19 +1024,40 @@ impl CacheAgent {
         }
     }
 
-    fn reserve_remote_download(&self, bytes: u64) -> Result<RemoteDownloadReservation> {
+    /// The most the session's speculative downloads may have used. The rest of
+    /// the budget is kept for blobs the build asks for, which would otherwise
+    /// be refused after prefetch had spent it on units this build never runs.
+    fn prefetch_download_ceiling(&self) -> u64 {
+        self.remote_download_limit / 2
+    }
+
+    fn download_ceiling(&self, speculative: bool) -> u64 {
+        if speculative {
+            self.prefetch_download_ceiling()
+        } else {
+            self.remote_download_limit
+        }
+    }
+
+    fn reserve_remote_download(
+        &self,
+        bytes: u64,
+        speculative: bool,
+    ) -> Result<RemoteDownloadReservation> {
+        let ceiling = self.download_ceiling(speculative);
         let mut current = self.remote_download_bytes.load(Ordering::Acquire);
         loop {
             let next = current
                 .checked_add(bytes)
                 .ok_or_else(|| eyre::eyre!("remote cache download budget overflowed"))?;
-            if next > self.remote_download_limit {
-                bail!(
-                    "remote cache download budget exceeded: {} bytes requested with {} of {} bytes already used",
-                    bytes,
-                    current,
-                    self.remote_download_limit
-                );
+            if next > ceiling {
+                return Err(DownloadBudgetExceeded {
+                    requested: bytes,
+                    used: current,
+                    limit: ceiling,
+                    speculative,
+                }
+                .into());
             }
             match self.remote_download_bytes.compare_exchange_weak(
                 current,
@@ -1024,10 +1077,15 @@ impl CacheAgent {
         }
     }
 
-    fn reserve_remote_download_up_to(&self, requested: u64) -> Result<RemoteDownloadReservation> {
+    fn reserve_remote_download_up_to(
+        &self,
+        requested: u64,
+        speculative: bool,
+    ) -> Result<RemoteDownloadReservation> {
+        let ceiling = self.download_ceiling(speculative);
         let mut current = self.remote_download_bytes.load(Ordering::Acquire);
         loop {
-            let reserved = requested.min(self.remote_download_limit.saturating_sub(current));
+            let reserved = requested.min(ceiling.saturating_sub(current));
             let next = current + reserved;
             match self.remote_download_bytes.compare_exchange_weak(
                 current,
@@ -1045,6 +1103,19 @@ impl CacheAgent {
                 Err(observed) => current = observed,
             }
         }
+    }
+
+    /// The error to answer a lookup with when the budget, not the remote, is
+    /// why a blob is not here.
+    fn budget_refusal(&self, digests: &[CacheDigest]) -> Option<AgentResponse> {
+        let refused = self.budget_refused_blobs.lock().unwrap();
+        let digest = digests.iter().find(|digest| refused.contains(*digest))?;
+        Some(AgentResponse::Error {
+            message: format!(
+                "remote cache download budget of {} bytes is spent, so blob {} was not fetched; raise MBX_GC_MAX_SIZE",
+                self.remote_download_limit, digest.hash
+            ),
+        })
     }
 
     /// Load the last committed action manifest for a task into this session.
@@ -2210,7 +2281,9 @@ impl CacheAgent {
                     "remote cache blob lookup failed for {}: {error}",
                     digest.hash
                 );
-                Ok(AgentResponse::Blob { path: None })
+                Ok(self
+                    .budget_refusal(std::slice::from_ref(digest))
+                    .unwrap_or(AgentResponse::Blob { path: None }))
             }
         }
     }
@@ -2252,6 +2325,11 @@ impl CacheAgent {
             && let Some(remote) = &self.remote
         {
             paths.extend(self.fetch_remote_blobs(remote, missing, None).await);
+        }
+        if digests.iter().any(|digest| !paths.contains_key(digest))
+            && let Some(refusal) = self.budget_refusal(&digests)
+        {
+            return Ok(refusal);
         }
 
         Ok(AgentResponse::Blobs {
