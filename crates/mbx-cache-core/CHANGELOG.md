@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.21.0...mbx-cache-core-v0.22.0) - 2026-11-14
+
+### Added
+
+- *(remote)* stop uploading once a cache server keeps failing ([#959](https://github.com/jdx/mr-boxington/pull/959))
+
+### Fixed
+
+- *(cache)* let the umask decide cache file modes so a group can share one cache ([#952](https://github.com/jdx/mr-boxington/pull/952))
+- *(cache)* keep part of the download budget for restores ([#951](https://github.com/jdx/mr-boxington/pull/951))
+- *(rustc)* stop seeding incremental state from other checkouts ([#943](https://github.com/jdx/mr-boxington/pull/943))
+
 ## [0.21.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.20.8...mbx-cache-core-v0.21.0) - 2026-11-09
 
 ### Added
