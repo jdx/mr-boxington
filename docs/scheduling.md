@@ -51,7 +51,9 @@ The pool has two independent budgets: CPU cores and memory bytes. The CPU
 budget is `scheduler.cpus` (default: the machine's online logical CPUs) minus
 `scheduler.reserve_cpus` (default: 0), with at least one core remaining.
 The memory budget is `scheduler.memory`, which defaults to 85% of physical
-memory. Each container also has its own CPU and memory ceilings, described below.
+memory. If a parent cgroup has a lower memory limit, the default is 85% of that
+limit instead, because sibling cgroups under that parent share it. Each
+container also has its own CPU and memory ceilings, described below.
 Reserving CPUs does not reduce the memory budget.
 
 A request must fit both budgets. CPU charges follow the compiler's thread
@@ -265,7 +267,9 @@ supervision in any container has frozen a compilation, every container sharing
 the cache waits for it to resume.
 
 Containers sharing a cache directory default to the machine's CPU and physical
-memory budgets for their common pool. Explicit `scheduler.cpus` and
+memory budgets for their common pool. A memory limit set on each container's
+own cgroup does not lower that pool; a limit on a parent cgroup above the
+containers does. Explicit `scheduler.cpus` and
 `scheduler.memory` settings override that host budget. For example:
 
 ```toml

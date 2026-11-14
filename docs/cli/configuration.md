@@ -544,7 +544,7 @@ Cache hits never take a permit. A compilation that runs the compiler takes one f
 
 - **Type:** `option<string>`
 - **Optional:** true
-- **Default:** 85% of physical memory; builds in a Linux cgroup with a memory limit are also held to 85% of that limit
+- **Default:** 85% of physical memory, or of a lower memory limit on a parent cgroup; builds in a Linux cgroup with a memory limit are also held to 85% of that limit
 - **Set with:** `MBX_SCHEDULER_MEMORY`
 
 Independent memory budget, such as `24GiB`, or `"none"`.

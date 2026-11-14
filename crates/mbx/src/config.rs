@@ -449,7 +449,7 @@ struct RawScheduler {
     /// variable wins.
     #[usage(
         env = "MBX_SCHEDULER_MEMORY",
-        default_note = "85% of physical memory; builds in a Linux cgroup with a memory limit are also held to 85% of that limit"
+        default_note = "85% of physical memory, or of a lower memory limit on a parent cgroup; builds in a Linux cgroup with a memory limit are also held to 85% of that limit"
     )]
     memory: Option<String>,
     /// Priority of this build's compilations in the machine-wide permit pool.
@@ -1298,7 +1298,7 @@ impl Config {
             env,
             file,
             crate::util::disk_total_bytes,
-            crate::util::physical_memory_bytes,
+            crate::util::shared_pool_memory_bytes,
             crate::util::machine_cpus,
         )
     }

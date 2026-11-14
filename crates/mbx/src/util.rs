@@ -474,6 +474,18 @@ pub fn physical_memory_bytes() -> Option<u64> {
     memory_total_bytes()
 }
 
+/// Memory a scheduler pool shared with other cgroups can count on: physical
+/// RAM, or a lower limit inherited from a parent cgroup that siblings may
+/// share. A limit on the process's own cgroup is left to its local ceiling.
+pub fn shared_pool_memory_bytes() -> Option<u64> {
+    let physical = physical_memory_bytes()?;
+    #[cfg(target_os = "linux")]
+    if let Some(limit) = crate::cgroup::inherited_memory_limit() {
+        return Some(physical.min(limit));
+    }
+    Some(physical)
+}
+
 /// Physical memory installed in this machine, when it can be measured.
 #[cfg(target_vendor = "apple")]
 pub fn memory_total_bytes() -> Option<u64> {

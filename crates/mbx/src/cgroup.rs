@@ -56,6 +56,47 @@ pub(crate) fn memory() -> Memory {
     snapshot(&visible_domains())
 }
 
+/// The lowest memory limit on a visible ancestor of this process's cgroup,
+/// not counting the process's own cgroup.
+///
+/// Sibling cgroups can share an ancestor's limit, so a scheduler pool they
+/// share must stay within it. A limit on the process's own cgroup, as a
+/// container runtime sets one, belongs to that cgroup alone.
+pub(crate) fn inherited_memory_limit() -> Option<u64> {
+    inherited_limit(&visible_domains())
+}
+
+fn inherited_limit(domains: &[Domain]) -> Option<u64> {
+    domains
+        .iter()
+        .flat_map(|domain| {
+            domain
+                .current
+                .ancestors()
+                .skip(1)
+                .take_while(|path| path.starts_with(&domain.mount))
+                .filter_map(|directory| read_limit(directory, domain.v2))
+        })
+        .min()
+}
+
+fn read_limit(directory: &Path, v2: bool) -> Option<u64> {
+    let name = if v2 {
+        "memory.max"
+    } else {
+        "memory.limit_in_bytes"
+    };
+    std::fs::read_to_string(directory.join(name))
+        .ok()
+        .and_then(|s| {
+            if s.trim() == "0" {
+                Some(0)
+            } else {
+                read_cgroup_text(&s)
+            }
+        })
+}
+
 fn visible_domains() -> Vec<Domain> {
     let domains = std::fs::read_to_string("/proc/self/cgroup")
         .ok()
@@ -156,25 +197,12 @@ fn snapshot(domains: &[Domain]) -> Memory {
             if !directory.starts_with(&domain.mount) {
                 break;
             }
-            let (limit_name, usage_name, reclaim_field) = if domain.v2 {
-                ("memory.max", "memory.current", "inactive_file")
+            let (usage_name, reclaim_field) = if domain.v2 {
+                ("memory.current", "inactive_file")
             } else {
-                (
-                    "memory.limit_in_bytes",
-                    "memory.usage_in_bytes",
-                    "total_inactive_file",
-                )
+                ("memory.usage_in_bytes", "total_inactive_file")
             };
-            let Some(limit) = std::fs::read_to_string(directory.join(limit_name))
-                .ok()
-                .and_then(|s| {
-                    if s.trim() == "0" {
-                        Some(0)
-                    } else {
-                        read_cgroup_text(&s)
-                    }
-                })
-            else {
+            let Some(limit) = read_limit(directory, domain.v2) else {
                 continue;
             };
             let usage = std::fs::read_to_string(directory.join(usage_name))
@@ -232,6 +260,33 @@ mod tests {
         );
         write_memory(&mount.join("slice"), "1000", 1100, 0, true);
         assert_eq!(snapshot(&domains).headroom, Some(0));
+    }
+
+    #[test]
+    fn only_ancestor_limits_are_inherited() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path();
+        write_memory(mount, "max", 0, 0, true);
+        write_memory(&mount.join("slice"), "max", 0, 0, true);
+        write_memory(&mount.join("slice/build"), "800", 0, 0, true);
+        let mounts = format!("1 0 0:1 / {} rw - cgroup2 cgroup rw", mount.display());
+        let found = domains("0::/slice/build\n", &mounts);
+        assert_eq!(inherited_limit(&found), None, "the cgroup's own limit");
+        write_memory(&mount.join("slice"), "1000", 0, 0, true);
+        assert_eq!(
+            inherited_limit(&found),
+            Some(1000),
+            "a limit siblings share"
+        );
+        // A container's own cgroup is the root of what it can see.
+        let own = domains(
+            "0::/\n",
+            &format!(
+                "1 0 0:1 /slice/build {} rw - cgroup2 cgroup rw",
+                mount.join("slice/build").display()
+            ),
+        );
+        assert_eq!(inherited_limit(&own), None);
     }
 
     #[test]
