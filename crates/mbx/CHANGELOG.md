@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.31.0](https://github.com/jdx/mr-boxington/compare/v1.30.0...v1.31.0) - 2026-11-14
+
+### Added
+
+- *(remote)* stop uploading once a cache server keeps failing ([#959](https://github.com/jdx/mr-boxington/pull/959))
+
+### Fixed
+
+- *(rustc)* keep mbx incremental off for opt-level 1 builds that run local ThinLTO ([#942](https://github.com/jdx/mr-boxington/pull/942))
+- cache the crates mbx fix compiles ([#963](https://github.com/jdx/mr-boxington/pull/963))
+- *(incremental)* restore cached content when returning to it after edits ([#956](https://github.com/jdx/mr-boxington/pull/956))
+- *(cache)* let the umask decide cache file modes so a group can share one cache ([#952](https://github.com/jdx/mr-boxington/pull/952))
+- *(rustc)* restore compilations across profiles that compile identically ([#953](https://github.com/jdx/mr-boxington/pull/953))
+- *(rustc)* stop seeding incremental state from other checkouts ([#943](https://github.com/jdx/mr-boxington/pull/943))
+- *(cache)* rerun build scripts with missing watched inputs ([#926](https://github.com/jdx/mr-boxington/pull/926))
+- *(cc)* share C++ objects across target dirs when duplicated header names are never looked up ([#940](https://github.com/jdx/mr-boxington/pull/940))
+- *(cc)* share cache entries across include-directory orderings ([#937](https://github.com/jdx/mr-boxington/pull/937))
+- *(doctor)* detect the mise cargo wrapper from project directories ([#934](https://github.com/jdx/mr-boxington/pull/934))
+- *(scheduler)* stop cargo llvm-cov from deadlocking on scheduler slots ([#931](https://github.com/jdx/mr-boxington/pull/931))
+- *(target)* collect and report managed targets that lost their record ([#929](https://github.com/jdx/mr-boxington/pull/929))
+- *(cache)* deduplicate only non-workspace Rust dependencies ([#927](https://github.com/jdx/mr-boxington/pull/927))
+
 ## [1.30.0](https://github.com/jdx/mr-boxington/compare/v1.29.2...v1.30.0) - 2026-11-09
 
 ### Added

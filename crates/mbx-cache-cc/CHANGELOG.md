@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.21.0...mbx-cache-cc-v0.22.0) - 2026-11-14
+
+### Fixed
+
+- *(cc)* share C++ objects across target dirs when duplicated header names are never looked up ([#940](https://github.com/jdx/mr-boxington/pull/940))
+- *(cc)* share cache entries across include-directory orderings ([#937](https://github.com/jdx/mr-boxington/pull/937))
+
 ## [0.20.7](https://github.com/jdx/mr-boxington/compare/mbx-cache-cc-v0.20.6...mbx-cache-cc-v0.20.7) - 2026-10-28
 
 ### Added

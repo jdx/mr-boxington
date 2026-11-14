@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.23](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.3.22...mbx-cache-cargo-v0.3.23) - 2026-11-14
+
+### Fixed
+
+- *(cache)* deduplicate only non-workspace Rust dependencies ([#927](https://github.com/jdx/mr-boxington/pull/927))
+
 ## [0.3.22](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.3.21...mbx-cache-cargo-v0.3.22) - 2026-11-09
 
 ### Other
