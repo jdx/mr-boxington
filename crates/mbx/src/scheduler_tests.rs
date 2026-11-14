@@ -3525,7 +3525,7 @@ fn demand_vectors_keep_mode_link_window_and_nextest_predictions_in_bytes() {
     assert_eq!(
         plan.resources,
         Resources {
-            cpu: 32,
+            cpu: 64,
             memory_bytes: 123
         }
     );
@@ -5313,9 +5313,33 @@ fn an_unsized_container_test_uses_local_threads_and_is_admitted() {
             .unwrap()
             .is_some()
     );
-    for demand in [Demand::test("wide", Some(64)), Demand::new("link", true)] {
-        assert!(pool.demand_vector(&demand).resources.cpu <= 4);
-    }
+    // A declared thread count is charged in full, so other builds sharing the
+    // pool see what it really uses; it runs once its container is idle.
+    let demand = Demand::test("wide", Some(64));
+    let wide = pool.demand_vector(&demand);
+    assert_eq!(wide.resources.cpu, 64);
+    assert!(
+        wide.weight <= 4,
+        "the legacy weight stays within the container"
+    );
+    let other = host_pool_with_container_budget(dir.path(), "b");
+    let held = other
+        .try_admit_named(plan.resources, plan.weight, None, &mut None, None)
+        .unwrap()
+        .unwrap();
+    assert!(
+        pool.try_admit_named(wide.resources, wide.weight, None, &mut None, Some(&demand))
+            .unwrap()
+            .is_none(),
+        "it waits while another build holds part of the host"
+    );
+    drop(held);
+    assert!(
+        pool.try_admit_named(wide.resources, wide.weight, None, &mut None, Some(&demand))
+            .unwrap()
+            .is_some()
+    );
+    assert!(pool.demand_vector(&Demand::new("link", true)).resources.cpu <= 4);
 }
 
 #[test]

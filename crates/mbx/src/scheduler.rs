@@ -2171,7 +2171,7 @@ impl Pool {
             let cores = measurement
                 .and_then(|measurement| measurement.cores)
                 .unwrap_or(1)
-                .clamp(1, self.domain_capacity);
+                .max(1);
             if self.bytes_per_permit == 0 {
                 return Plan {
                     resources: Resources {
@@ -2218,15 +2218,12 @@ impl Pool {
         let threads = learned
             .or(demand.threads)
             .unwrap_or_else(|| self.domain_capacity.div_ceil(2))
-            .clamp(1, self.domain_capacity);
+            .max(1);
         let link_floor = demand.links.then_some(LINK_WEIGHT);
         if self.bytes_per_permit == 0 {
             return Plan {
                 resources: Resources {
-                    cpu: link_floor
-                        .unwrap_or(1)
-                        .max(threads)
-                        .min(self.domain_capacity),
+                    cpu: link_floor.unwrap_or(1).max(threads),
                     memory_bytes: 0,
                 },
                 weight: link_floor
