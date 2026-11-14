@@ -464,6 +464,106 @@ fn transparent_rustc_replaces_the_shim_process() {
     );
 }
 
+/// `cargo fix` compiles its primary units through a proxy that starts the
+/// compiler with only the workspace wrapper, so the units being fixed used to
+/// reach neither the cache lookup nor publication.
+#[cfg(unix)]
+#[test]
+fn cargo_fix_compiles_its_primary_unit_through_the_cache() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let fix = |report: &str| {
+        cargo_with(
+            project.path(),
+            store.path(),
+            &reports.path().join(report),
+            &["fix", "--offline", "--allow-no-vcs"],
+            &[],
+        )
+        .0
+    };
+
+    let cold = fix("cold.json");
+    assert!(
+        cold["stored_bytes"].as_u64().unwrap() > 0,
+        "the first fix should publish its primary unit: {cold}"
+    );
+
+    // Same bytes, new mtime: cargo recompiles, and the cache answers.
+    let source = project.path().join("src/lib.rs");
+    let contents = std::fs::read(&source).unwrap();
+    std::fs::write(&source, contents).unwrap();
+    let warm = fix("warm.json");
+    assert!(
+        count(&warm, "hits") > 0,
+        "the second fix should restore its primary unit: {warm}"
+    );
+}
+
+/// A restored `cargo fix` result still carries the compiler's suggestions, so
+/// Cargo applies the edit from the cache just as it does from a compilation.
+#[cfg(unix)]
+#[test]
+fn cargo_fix_applies_a_suggestion_when_its_unit_is_restored() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let source = project.path().join("src/lib.rs");
+    let original = "pub fn value() -> u32 {\n    let mut x = 7;\n    x\n}\n";
+    let fix = |report: &str| {
+        std::fs::write(&source, original).unwrap();
+        let stats = cargo_with(
+            project.path(),
+            store.path(),
+            &reports.path().join(report),
+            &["fix", "--offline", "--allow-no-vcs"],
+            &[("MBX_INCREMENTAL", "0"), ("MBX_LEARNED_INCREMENTAL", "0")],
+        )
+        .0;
+        (stats, std::fs::read_to_string(&source).unwrap())
+    };
+
+    let (cold, fixed) = fix("cold.json");
+    assert!(
+        !fixed.contains("let mut"),
+        "the first fix should edit: {fixed}"
+    );
+    assert_eq!(count(&cold, "hits"), 0);
+    let (warm, fixed) = fix("warm.json");
+    assert!(
+        count(&warm, "hits") > 0,
+        "the second fix should restore: {warm}"
+    );
+    assert!(
+        !fixed.contains("let mut"),
+        "a restored unit should still fix: {fixed}"
+    );
+}
+
+/// A Cargo alias for `fix` reaches the same proxy, so it is routed the same way.
+#[cfg(unix)]
+#[test]
+fn a_cargo_alias_for_fix_compiles_its_primary_unit_through_the_cache() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let (stats, _) = cargo_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("alias.json"),
+        &["repair", "--offline"],
+        &[("CARGO_ALIAS_REPAIR", "fix --allow-no-vcs")],
+    );
+    assert!(
+        stats["stored_bytes"].as_u64().unwrap() > 0,
+        "an aliased fix should publish its primary unit: {stats}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn rustc_workspace_wrapper_is_preserved_without_becoming_the_compiler() {
