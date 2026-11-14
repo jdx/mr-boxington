@@ -106,6 +106,8 @@ pub(crate) const SCHED_SLOTS_ENV: &str = "MBX_SCHED_SLOTS";
 const SCHED_CPUS_ENV: &str = "MBX_SCHED_CPUS";
 /// Exact memory budget, independent of legacy permit rounding.
 const SCHED_MEMORY_BYTES_ENV: &str = "MBX_SCHED_MEMORY_BYTES";
+/// `1` when the memory budget is the machine default rather than configured.
+const SCHED_MEMORY_DEFAULT_ENV: &str = "MBX_SCHED_MEMORY_DEFAULT";
 /// Legacy memory share; zero disables memory predictions.
 pub(crate) const SCHED_SLOT_BYTES_ENV: &str = "MBX_SCHED_SLOT_BYTES";
 /// Permit priority of this build's compilations.
@@ -1601,8 +1603,12 @@ pub(crate) fn reservation_pool(config: &Config, priority: SchedulerPriority) -> 
             bytes_per_permit(scheduler.memory_bytes, permits),
             priority,
         );
-        pool.domain_capacity = scheduler.cpus.min(default_capacity()).max(1);
-        pool.set_memory_capacity(scheduler.memory_bytes.unwrap_or(0));
+        pool.set_local_budget(
+            scheduler.memory_bytes.unwrap_or(0),
+            scheduler.memory_is_default,
+            local_cpus(scheduler.reserve_cpus),
+            crate::util::memory_total_bytes(),
+        );
         pool.events = config.events;
         pool.pressure = scheduler.pressure;
         pool
@@ -1623,14 +1629,16 @@ fn resolve_pool() -> Option<Pool> {
                     .and_then(|value| value.parse().ok())
                     .unwrap_or_default(),
             );
-            pool.domain_capacity = env_number(SCHED_CPUS_ENV)
-                .unwrap_or(capacity)
-                .min(default_capacity())
-                .max(1);
             pool.events = env_number(SCHED_EVENTS_ENV) != Some(0);
-            pool.set_memory_capacity(
+            // The session exports the CPU count before and after the reserve.
+            let reserve =
+                env_number(SCHED_CPUS_ENV).map_or(0, |cpus| cpus.saturating_sub(capacity));
+            pool.set_local_budget(
                 env_number(SCHED_MEMORY_BYTES_ENV)
                     .unwrap_or_else(|| capacity.saturating_mul(pool.bytes_per_permit)),
+                env_number(SCHED_MEMORY_DEFAULT_ENV) == Some(1),
+                local_cpus(reserve),
+                crate::util::memory_total_bytes(),
             );
             pool.pressure = env_number(SCHED_PRESSURE_ENV) == Some(1);
             pool.export_permit_marker = true;
@@ -1663,6 +1671,14 @@ fn default_capacity() -> u64 {
     std::thread::available_parallelism().map_or(1, |cpus| cpus.get() as u64)
 }
 
+/// The CPUs this process's own builds may use: its CPU limit, less the
+/// reserve. The reserve also comes off the shared pool, so a bare host or a
+/// single container keeps the budget it had before the pool was sized from
+/// the machine.
+fn local_cpus(reserve: u64) -> u64 {
+    default_capacity().saturating_sub(reserve).max(1)
+}
+
 /// The environment a session hands its shims so they schedule consistently.
 ///
 /// An explicit empty directory means "off", stated rather than omitted for the
@@ -1678,7 +1694,8 @@ pub(crate) fn session_environment_with_jobs(
         return vec![(SCHED_DIR_ENV.into(), String::new())];
     }
     let permits = scheduler.permits();
-    let build_permits = cargo_jobs.map_or(permits, |jobs| permits.min(jobs.max(1)));
+    let local_permits = permits.min(local_cpus(scheduler.reserve_cpus));
+    let build_permits = cargo_jobs.map_or(local_permits, |jobs| local_permits.min(jobs.max(1)));
     vec![
         (
             SCHED_DIR_ENV.into(),
@@ -1696,12 +1713,24 @@ pub(crate) fn session_environment_with_jobs(
             scheduler.memory_bytes.unwrap_or(0).to_string(),
         ),
         (
+            SCHED_MEMORY_DEFAULT_ENV.into(),
+            u8::from(scheduler.memory_is_default).to_string(),
+        ),
+        (
             SCHED_PRESSURE_ENV.into(),
             u8::from(scheduler.pressure).to_string(),
         ),
         (
             SCHED_SLOT_BYTES_ENV.into(),
-            bytes_per_permit(scheduler.memory_bytes, permits).to_string(),
+            bytes_per_permit(
+                Some(domain_memory_ceiling(
+                    scheduler.memory_bytes.unwrap_or(0),
+                    scheduler.memory_is_default,
+                    crate::util::memory_total_bytes(),
+                )),
+                local_permits,
+            )
+            .to_string(),
         ),
         (
             SCHED_PRIORITY_ENV.into(),
@@ -1828,6 +1857,17 @@ fn legacy_local_ceiling(
     capacity.min(cpus).min(memory).max(1)
 }
 
+/// The memory ceiling for builds in this process's domain. The machine default
+/// describes the whole host, so it always leaves a cgroup 15% of its limit,
+/// as the default did when it was measured inside the container.
+fn domain_memory_ceiling(budget: u64, is_default: bool, local: Option<u64>) -> u64 {
+    if is_default {
+        local.map_or(budget, |bytes| budget.min(bytes / 100 * 85))
+    } else {
+        local_memory_ceiling(budget, local)
+    }
+}
+
 /// Pure local ceilings, independently applied to each physical axis.
 fn local_ceiling(cpu: u64, memory: u64, local_cpus: u64, local_memory: Option<u64>) -> Resources {
     Resources {
@@ -1837,10 +1877,25 @@ fn local_ceiling(cpu: u64, memory: u64, local_cpus: u64, local_memory: Option<u6
 }
 
 impl Pool {
-    fn set_memory_capacity(&mut self, memory: u64) {
+    // `memory` and `self.capacity` are the shared pool's budgets. The domain
+    // gets the process's own CPUs (already less the reserve) and memory limit.
+    fn set_local_budget(
+        &mut self,
+        memory: u64,
+        memory_is_default: bool,
+        local_cpus: u64,
+        local_memory: Option<u64>,
+    ) {
         self.memory_capacity = memory;
-        self.domain_memory_capacity =
-            local_memory_ceiling(memory, crate::util::memory_total_bytes());
+        let domain = Resources {
+            cpu: local_ceiling(self.capacity, memory, local_cpus, local_memory).cpu,
+            memory_bytes: domain_memory_ceiling(memory, memory_is_default, local_memory),
+        };
+        self.domain_capacity = domain.cpu;
+        self.domain_memory_capacity = domain.memory_bytes;
+        self.bytes_per_permit = bytes_per_permit(Some(domain.memory_bytes), domain.cpu);
+        self.legacy_domain_capacity =
+            legacy_local_ceiling(domain.cpu, self.bytes_per_permit, local_cpus, local_memory);
     }
 
     fn effective_budget(&self) -> Resources {
@@ -1905,8 +1960,12 @@ impl Pool {
                 bytes_per_permit(scheduler.memory_bytes, permits),
                 scheduler.priority,
             );
-            pool.domain_capacity = scheduler.cpus.min(default_capacity()).max(1);
-            pool.set_memory_capacity(scheduler.memory_bytes.unwrap_or(0));
+            pool.set_local_budget(
+                scheduler.memory_bytes.unwrap_or(0),
+                scheduler.memory_is_default,
+                local_cpus(scheduler.reserve_cpus),
+                crate::util::memory_total_bytes(),
+            );
             pool.events = config.events;
             pool.pressure = scheduler.pressure;
             pool
@@ -2119,7 +2178,7 @@ impl Pool {
                         cpu: cores,
                         memory_bytes: 0,
                     },
-                    weight: cores.min(self.capacity),
+                    weight: cores.min(self.domain_capacity),
                     predicted: None,
                     source: "unmeasured",
                 };
@@ -2130,7 +2189,7 @@ impl Pool {
             let weight = predicted
                 .div_ceil(self.bytes_per_permit)
                 .max(cores)
-                .clamp(1, self.capacity);
+                .clamp(1, self.domain_capacity);
             return Plan {
                 resources: Resources {
                     cpu: cores,
@@ -2158,7 +2217,7 @@ impl Pool {
             .flatten();
         let threads = learned
             .or(demand.threads)
-            .unwrap_or_else(|| self.capacity.div_ceil(2))
+            .unwrap_or_else(|| self.domain_capacity.div_ceil(2))
             .max(1);
         let link_floor = demand.links.then_some(LINK_WEIGHT);
         if self.bytes_per_permit == 0 {
@@ -2167,7 +2226,10 @@ impl Pool {
                     cpu: link_floor.unwrap_or(1).max(threads),
                     memory_bytes: 0,
                 },
-                weight: link_floor.unwrap_or(1).max(threads).min(self.capacity),
+                weight: link_floor
+                    .unwrap_or(1)
+                    .max(threads)
+                    .min(self.domain_capacity),
                 predicted: None,
                 source: "unmeasured",
             };
@@ -2221,7 +2283,7 @@ impl Pool {
         let weight = predicted
             .map_or(1, |bytes| bytes.div_ceil(self.bytes_per_permit))
             .max(threads)
-            .clamp(1, self.capacity);
+            .clamp(1, self.domain_capacity);
         let memory_bytes =
             if predicted.is_none() || matches!(source, "unmeasured" | "default" | "link-floor") {
                 predicted

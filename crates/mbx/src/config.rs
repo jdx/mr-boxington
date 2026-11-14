@@ -429,7 +429,10 @@ struct RawScheduler {
     /// Compilers charge their thread counts; test binaries can use learned core
     /// counts. Memory has its own independent budget. This may also be set in
     /// workspace `.mbx.toml`; the environment variable wins.
-    #[usage(env = "MBX_SCHEDULER_CPUS", default_note = "logical CPUs")]
+    #[usage(
+        env = "MBX_SCHEDULER_CPUS",
+        default_note = "the machine's logical CPUs, or a lower CPU quota on a parent cgroup; builds in a container are also held to its CPU limit"
+    )]
     cpus: Option<i64>,
     /// CPU cores withheld from `scheduler.cpus` to leave CPUs for other work.
     ///
@@ -446,7 +449,7 @@ struct RawScheduler {
     /// variable wins.
     #[usage(
         env = "MBX_SCHEDULER_MEMORY",
-        default_note = "85% of physical memory, or of the Linux cgroup memory limit if lower"
+        default_note = "85% of physical memory, or of a lower memory limit on a parent cgroup; builds in a Linux cgroup with a memory limit are also held to 85% of that limit"
     )]
     memory: Option<String>,
     /// Priority of this build's compilations in the machine-wide permit pool.
@@ -916,6 +919,11 @@ pub struct SchedulerSettings {
     pub reserve_cpus: u64,
     /// Independent memory budget; `None` leaves CPU-only scheduling.
     pub memory_bytes: Option<u64>,
+    /// Whether `memory_bytes` is the machine default rather than a configured
+    /// budget. A default always holds builds in a cgroup with a memory limit
+    /// to 85% of that limit; a configured budget that fits the limit applies
+    /// as configured.
+    pub memory_is_default: bool,
     /// Priority of this build's compilations against other builds.
     pub priority: SchedulerPriority,
     /// Whether `cargo test` and `cargo nextest` binaries take permits too.
@@ -949,6 +957,7 @@ impl Default for SchedulerSettings {
             cpus: 1,
             reserve_cpus: 0,
             memory_bytes: None,
+            memory_is_default: false,
             priority: SchedulerPriority::Normal,
             tests: false,
             pressure: false,
@@ -1289,7 +1298,8 @@ impl Config {
             env,
             file,
             crate::util::disk_total_bytes,
-            crate::util::memory_total_bytes,
+            crate::util::shared_pool_memory_bytes,
+            crate::util::shared_pool_cpus,
         )
     }
 
@@ -1298,6 +1308,7 @@ impl Config {
         file: Option<&FileLayer>,
         measure_disk: impl Fn(&Path) -> Option<u64>,
         measure_memory: impl Fn() -> Option<u64>,
+        measure_cpus: impl Fn() -> u64,
     ) -> Result<(Self, CliSettings)> {
         let mut layers = Layers::new().then(env);
         if let Some(file) = file {
@@ -1328,7 +1339,8 @@ impl Config {
             bail!("invalid configuration:\n{problems}");
         }
         let raw = RawConfig::read(&resolved)?;
-        let (config, mut settings) = Self::from_raw_measuring(raw, measure_disk, measure_memory)?;
+        let (config, mut settings) =
+            Self::from_raw_measuring(raw, measure_disk, measure_memory, measure_cpus)?;
         settings.removed_incremental_cap = removed_incremental_cap;
         settings.retired_seed_setting =
             resolved
@@ -1350,6 +1362,7 @@ impl Config {
         raw: RawConfig,
         measure_disk: impl Fn(&Path) -> Option<u64>,
         measure_memory: impl Fn() -> Option<u64>,
+        measure_cpus: impl Fn() -> u64,
     ) -> Result<(Self, CliSettings)> {
         let cache_dir = raw.cache_dir.or_else(default_cache_dir).ok_or_else(|| {
             eyre::eyre!(
@@ -1508,7 +1521,7 @@ impl Config {
                 .ok_or_else(|| {
                     eyre::eyre!("must be a positive count").wrap_err(Invalid("scheduler.cpus"))
                 })?,
-            None => std::thread::available_parallelism().map_or(1, |cpus| cpus.get() as u64),
+            None => measure_cpus().max(1),
         };
         let scheduler_reserve_cpus = u64::try_from(raw.scheduler.reserve_cpus).map_err(|_| {
             eyre::eyre!("must be a non-negative count").wrap_err(Invalid("scheduler.reserve_cpus"))
@@ -1532,6 +1545,7 @@ impl Config {
             cpus: scheduler_cpus,
             reserve_cpus: scheduler_reserve_cpus,
             memory_bytes: scheduler_memory,
+            memory_is_default: raw.scheduler.memory.is_none(),
             priority: raw
                 .scheduler
                 .priority
@@ -1697,6 +1711,7 @@ impl Config {
                                 .wrap_err_with(|| {
                                     format!("invalid {}.{setting}", path.display())
                                 })?;
+                            self.scheduler.memory_is_default = false;
                         }
                         "priority" if !environment_contains("MBX_SCHEDULER_PRIORITY") => {
                             let priority = value.as_str().ok_or_else(|| {
@@ -2150,7 +2165,7 @@ mod tests {
             std::fs::write(&path, contents).unwrap();
             FileLayer::at(path, FileScope::Global)
         });
-        Config::from_layers_measuring(&env, file.as_ref(), measure_disk, || Some(32 * GIB))
+        Config::from_layers_measuring(&env, file.as_ref(), measure_disk, || Some(32 * GIB), || 8)
     }
 
     /// Compare the two public cache-root resolution paths in a child process
@@ -3341,6 +3356,7 @@ default = "rust-lld"
         )
         .unwrap();
         let mut config = configured(None, &[("MBX_SCHEDULER", "false")]).unwrap();
+        assert!(config.scheduler.memory_is_default);
 
         config
             .apply_workspace_policy_with(directory.path(), |name| name == "MBX_SCHEDULER")
@@ -3351,6 +3367,7 @@ default = "rust-lld"
         assert_eq!(config.scheduler.reserve_cpus, 2);
         assert_eq!(config.scheduler.permits(), 6);
         assert_eq!(config.scheduler.memory_bytes, Some(6 * GIB));
+        assert!(!config.scheduler.memory_is_default);
         assert_eq!(config.scheduler.priority, SchedulerPriority::Low);
         assert!(config.scheduler.tests);
     }
@@ -3590,10 +3607,7 @@ default = "rust-lld"
     fn the_scheduler_defaults_on_with_most_of_the_measured_memory() {
         let config = configured(None, &[]).unwrap();
         assert!(config.scheduler.enabled);
-        assert_eq!(
-            config.scheduler.cpus,
-            std::thread::available_parallelism().unwrap().get() as u64
-        );
+        assert_eq!(config.scheduler.cpus, 8);
         // 85% of the 32GiB the test harness reports.
         assert_eq!(
             config.scheduler.memory_bytes,
@@ -3653,6 +3667,35 @@ default = "rust-lld"
     }
 
     #[test]
+    fn machine_defaults_do_not_use_the_process_cpu_budget() {
+        let env = EnvLayer::new([] as [(String, String); 0]);
+        let machine_cpus = std::thread::available_parallelism().unwrap().get() as u64 + 17;
+        let (config, _) = Config::from_layers_measuring(
+            &env,
+            None,
+            |_| None,
+            || Some(128 * GIB),
+            || machine_cpus,
+        )
+        .unwrap();
+        assert_eq!(config.scheduler.cpus, machine_cpus);
+        assert_eq!(config.scheduler.memory_bytes, Some(128 * GIB / 100 * 85));
+        assert!(config.scheduler.memory_is_default);
+
+        let env = EnvLayer::new([("MBX_SCHEDULER_MEMORY".to_string(), "24GiB".to_string())]);
+        let (config, _) = Config::from_layers_measuring(
+            &env,
+            None,
+            |_| None,
+            || Some(128 * GIB),
+            || machine_cpus,
+        )
+        .unwrap();
+        assert_eq!(config.scheduler.memory_bytes, Some(24 * GIB));
+        assert!(!config.scheduler.memory_is_default);
+    }
+
+    #[test]
     fn a_disabled_scheduler_needs_no_memory_measurement() {
         let env = EnvLayer::new([("MBX_SCHEDULER".to_string(), "false".to_string())]);
         let (config, _) = Config::from_layers_measuring(
@@ -3660,6 +3703,7 @@ default = "rust-lld"
             None,
             |_| None,
             || panic!("a disabled scheduler must not probe memory"),
+            || 8,
         )
         .unwrap();
         assert!(!config.scheduler.enabled);
