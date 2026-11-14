@@ -65,9 +65,8 @@ CPU request still needs memory room.
 For unmeasured work, the memory guess is one share: the memory ceiling of the
 build's own domain divided by its CPU ceiling, rounded down. In a container,
 these are the container's own ceilings, and the host budgets only limit what
-all containers run together. `scheduler.reserve_cpus` is taken once from the
-shared pool; each domain can use all of its own CPUs while the rest of the
-pool has room. Ordinary single-threaded
+all containers run together. `scheduler.reserve_cpus` comes off both the
+shared pool and each build's own CPUs. Ordinary single-threaded
 compiles start at one such share, native links at two, and unmeasured nextest
 tests at two. Higher thread counts retain at least their old memory guess.
 Measurements refine later admissions and use raw predicted bytes, without
@@ -276,9 +275,11 @@ memory = "256GiB"
 ```
 
 mbx also enforces a separate ceiling for each container. The ceiling is the
-container's available CPUs and, when the configured memory budget exceeds the
-container's memory limit, 85% of that limit. A memory budget that fits within
-local memory applies as configured. All builds in that container share the
+container's available CPUs, less `scheduler.reserve_cpus`, and a memory
+ceiling. With the default memory budget, the memory ceiling is 85% of the
+container's memory limit. A configured budget larger than the limit is also
+held to 85% of it; a configured budget that fits within the limit applies as
+configured. All builds in that container share the
 ceiling; other containers draw from their own ceilings and the common host pool.
 Pressure control remains local to each container. During an upgrade, older
 compiler leases without a container identity count against every container

@@ -106,6 +106,8 @@ pub(crate) const SCHED_SLOTS_ENV: &str = "MBX_SCHED_SLOTS";
 const SCHED_CPUS_ENV: &str = "MBX_SCHED_CPUS";
 /// Exact memory budget, independent of legacy permit rounding.
 const SCHED_MEMORY_BYTES_ENV: &str = "MBX_SCHED_MEMORY_BYTES";
+/// `1` when the memory budget is the machine default rather than configured.
+const SCHED_MEMORY_DEFAULT_ENV: &str = "MBX_SCHED_MEMORY_DEFAULT";
 /// Legacy memory share; zero disables memory predictions.
 pub(crate) const SCHED_SLOT_BYTES_ENV: &str = "MBX_SCHED_SLOT_BYTES";
 /// Permit priority of this build's compilations.
@@ -1603,7 +1605,8 @@ pub(crate) fn reservation_pool(config: &Config, priority: SchedulerPriority) -> 
         );
         pool.set_local_budget(
             scheduler.memory_bytes.unwrap_or(0),
-            default_capacity(),
+            scheduler.memory_is_default,
+            local_cpus(scheduler.reserve_cpus),
             crate::util::memory_total_bytes(),
         );
         pool.events = config.events;
@@ -1627,12 +1630,14 @@ fn resolve_pool() -> Option<Pool> {
                     .unwrap_or_default(),
             );
             pool.events = env_number(SCHED_EVENTS_ENV) != Some(0);
+            // The session exports the CPU count before and after the reserve.
+            let reserve =
+                env_number(SCHED_CPUS_ENV).map_or(0, |cpus| cpus.saturating_sub(capacity));
             pool.set_local_budget(
                 env_number(SCHED_MEMORY_BYTES_ENV)
                     .unwrap_or_else(|| capacity.saturating_mul(pool.bytes_per_permit)),
-                env_number(SCHED_CPUS_ENV)
-                    .unwrap_or(capacity)
-                    .min(default_capacity()),
+                env_number(SCHED_MEMORY_DEFAULT_ENV) == Some(1),
+                local_cpus(reserve),
                 crate::util::memory_total_bytes(),
             );
             pool.pressure = env_number(SCHED_PRESSURE_ENV) == Some(1);
@@ -1666,6 +1671,14 @@ fn default_capacity() -> u64 {
     std::thread::available_parallelism().map_or(1, |cpus| cpus.get() as u64)
 }
 
+/// The CPUs this process's own builds may use: its CPU limit, less the
+/// reserve. The reserve also comes off the shared pool, so a bare host or a
+/// single container keeps the budget it had before the pool was sized from
+/// the machine.
+fn local_cpus(reserve: u64) -> u64 {
+    default_capacity().saturating_sub(reserve).max(1)
+}
+
 /// The environment a session hands its shims so they schedule consistently.
 ///
 /// An explicit empty directory means "off", stated rather than omitted for the
@@ -1681,7 +1694,7 @@ pub(crate) fn session_environment_with_jobs(
         return vec![(SCHED_DIR_ENV.into(), String::new())];
     }
     let permits = scheduler.permits();
-    let local_permits = permits.min(default_capacity());
+    let local_permits = permits.min(local_cpus(scheduler.reserve_cpus));
     let build_permits = cargo_jobs.map_or(local_permits, |jobs| local_permits.min(jobs.max(1)));
     vec![
         (
@@ -1700,14 +1713,19 @@ pub(crate) fn session_environment_with_jobs(
             scheduler.memory_bytes.unwrap_or(0).to_string(),
         ),
         (
+            SCHED_MEMORY_DEFAULT_ENV.into(),
+            u8::from(scheduler.memory_is_default).to_string(),
+        ),
+        (
             SCHED_PRESSURE_ENV.into(),
             u8::from(scheduler.pressure).to_string(),
         ),
         (
             SCHED_SLOT_BYTES_ENV.into(),
             bytes_per_permit(
-                Some(local_memory_ceiling(
+                Some(domain_memory_ceiling(
                     scheduler.memory_bytes.unwrap_or(0),
+                    scheduler.memory_is_default,
                     crate::util::memory_total_bytes(),
                 )),
                 local_permits,
@@ -1839,6 +1857,17 @@ fn legacy_local_ceiling(
     capacity.min(cpus).min(memory).max(1)
 }
 
+/// The memory ceiling for builds in this process's domain. The machine default
+/// describes the whole host, so it always leaves a cgroup 15% of its limit,
+/// as the default did when it was measured inside the container.
+fn domain_memory_ceiling(budget: u64, is_default: bool, local: Option<u64>) -> u64 {
+    if is_default {
+        local.map_or(budget, |bytes| budget.min(bytes / 100 * 85))
+    } else {
+        local_memory_ceiling(budget, local)
+    }
+}
+
 /// Pure local ceilings, independently applied to each physical axis.
 fn local_ceiling(cpu: u64, memory: u64, local_cpus: u64, local_memory: Option<u64>) -> Resources {
     Resources {
@@ -1848,11 +1877,20 @@ fn local_ceiling(cpu: u64, memory: u64, local_cpus: u64, local_memory: Option<u6
 }
 
 impl Pool {
-    // Reserve CPUs once from the host pool. A domain can use all of its local
-    // CPUs provided they fit the remaining host budget.
-    fn set_local_budget(&mut self, memory: u64, local_cpus: u64, local_memory: Option<u64>) {
+    // `memory` and `self.capacity` are the shared pool's budgets. The domain
+    // gets the process's own CPUs (already less the reserve) and memory limit.
+    fn set_local_budget(
+        &mut self,
+        memory: u64,
+        memory_is_default: bool,
+        local_cpus: u64,
+        local_memory: Option<u64>,
+    ) {
         self.memory_capacity = memory;
-        let domain = local_ceiling(self.capacity, memory, local_cpus, local_memory);
+        let domain = Resources {
+            cpu: local_ceiling(self.capacity, memory, local_cpus, local_memory).cpu,
+            memory_bytes: domain_memory_ceiling(memory, memory_is_default, local_memory),
+        };
         self.domain_capacity = domain.cpu;
         self.domain_memory_capacity = domain.memory_bytes;
         self.bytes_per_permit = bytes_per_permit(Some(domain.memory_bytes), domain.cpu);
@@ -1924,7 +1962,8 @@ impl Pool {
             );
             pool.set_local_budget(
                 scheduler.memory_bytes.unwrap_or(0),
-                default_capacity(),
+                scheduler.memory_is_default,
+                local_cpus(scheduler.reserve_cpus),
                 crate::util::memory_total_bytes(),
             );
             pool.events = config.events;

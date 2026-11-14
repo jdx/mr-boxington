@@ -939,14 +939,15 @@ fn session_environment_states_off_explicitly() {
         value(SCHED_DIR_ENV),
         Path::new("/cache").join("scheduler").to_str().unwrap()
     );
+    // One share is the local memory ceiling over the local CPUs, both after
+    // the reserve; the pool itself keeps the configured size.
+    let local = 6.min(local_cpus(2));
     assert_eq!(value(SCHED_SLOTS_ENV), "6");
-    assert_eq!(value(SCHED_SLOT_BYTES_ENV), "1333");
+    assert_eq!(value(SCHED_SLOT_BYTES_ENV), (8000 / local).to_string());
+    assert_eq!(value(SCHED_MEMORY_DEFAULT_ENV), "0");
     assert_eq!(value(SCHED_PRIORITY_ENV), "normal");
     assert!(!value(SCHED_BUILD_ID_ENV).is_empty());
-    assert_eq!(
-        value(SCHED_BUILD_SLOTS_ENV),
-        6.min(default_capacity()).to_string()
-    );
+    assert_eq!(value(SCHED_BUILD_SLOTS_ENV), local.to_string());
 
     let environment = session_environment_with_jobs(&config, Some(3));
     let value = |name: &str| {
@@ -957,11 +958,8 @@ fn session_environment_states_off_explicitly() {
             .unwrap()
     };
     assert_eq!(value(SCHED_SLOTS_ENV), "6", "the machine pool stays global");
-    assert_eq!(value(SCHED_SLOT_BYTES_ENV), "1333");
-    assert_eq!(
-        value(SCHED_BUILD_SLOTS_ENV),
-        3.min(default_capacity()).to_string()
-    );
+    assert_eq!(value(SCHED_SLOT_BYTES_ENV), (8000 / local).to_string());
+    assert_eq!(value(SCHED_BUILD_SLOTS_ENV), 3.min(local).to_string());
 }
 
 #[test]
@@ -3543,13 +3541,14 @@ fn exact_memory_budget_and_legacy_transport_defaults_are_conservative() {
     config.scheduler.reserve_cpus = 2;
     config.scheduler.memory_bytes = Some(12001);
     let pool = Pool::from_config(&config).unwrap();
+    let share = 12001 / 6.min(local_cpus(2));
     assert_eq!(pool.capacity, 6);
-    assert_eq!(pool.bytes_per_permit, 2000);
+    assert_eq!(pool.bytes_per_permit, share);
     assert_eq!(pool.memory_capacity, 12001);
     assert_eq!(scheduler_report(&config).memory_capacity, 12001);
     let env = session_environment_with_jobs(&config, None);
     assert!(env.contains(&(SCHED_MEMORY_BYTES_ENV.into(), "12001".into())));
-    assert!(env.contains(&(SCHED_SLOT_BYTES_ENV.into(), "2000".into())));
+    assert!(env.contains(&(SCHED_SLOT_BYTES_ENV.into(), share.to_string())));
     assert!(env.contains(&(SCHED_SLOTS_ENV.into(), "6".into())));
     assert_eq!(
         Pool::new(dir.path().into(), 6, 2000, SchedulerPriority::Normal).memory_capacity,
@@ -5273,7 +5272,7 @@ fn host_pool_with_container_budget(dir: &Path, domain: &'static str) -> Pool {
     let memory = 256 * GIB / 100 * 85;
     let mut pool = pool_at(dir, 32, memory / 32);
     pool.pressure_domain = domain;
-    pool.set_local_budget(memory, 4, Some(8 * GIB));
+    pool.set_local_budget(memory, true, 4, Some(8 * GIB));
     pool
 }
 
@@ -5326,7 +5325,8 @@ fn bare_host_request_estimates_preserve_the_original_units() {
     for reserve in [0, 2] {
         let capacity = 32 - reserve;
         let mut pool = pool_at(dir.path(), capacity, memory / capacity);
-        pool.set_local_budget(memory, 32, Some(256 * GIB));
+        // Callers pass the local CPUs already less the reserve.
+        pool.set_local_budget(memory, true, 32 - reserve, Some(256 * GIB));
         assert_eq!(pool.bytes_per_permit, memory / capacity);
         assert_eq!(
             pool.demand_vector(&Demand::test("cold-suite", None))
@@ -5335,4 +5335,67 @@ fn bare_host_request_estimates_preserve_the_original_units() {
             capacity.div_ceil(2)
         );
     }
+}
+
+#[test]
+fn a_default_memory_budget_leaves_a_large_cgroup_its_headroom() {
+    // 100 GiB host, so the default shared budget is 85 GiB.
+    let host = 100 * GIB / 100 * 85;
+    let container = 90 * GIB;
+    assert_eq!(
+        domain_memory_ceiling(host, true, Some(container)),
+        container / 100 * 85,
+        "a default leaves the container 15% of its limit"
+    );
+    assert_eq!(
+        domain_memory_ceiling(host, false, Some(container)),
+        host,
+        "a configured budget that fits the limit applies as configured"
+    );
+    assert_eq!(domain_memory_ceiling(host, true, Some(100 * GIB)), host);
+    assert_eq!(domain_memory_ceiling(host, true, None), host);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut pool = pool_at(dir.path(), 32, host / 32);
+    pool.set_local_budget(host, true, 32, Some(container));
+    assert_eq!(pool.domain_memory_capacity, container / 100 * 85);
+    assert_eq!(
+        pool.memory_capacity, host,
+        "the shared pool keeps the host budget"
+    );
+}
+
+#[test]
+fn a_reserve_in_a_container_keeps_the_budget_it_had() {
+    // A 4-CPU, 8 GiB container on a 32-CPU host with two CPUs reserved. Before
+    // the pool was sized from the machine, its builds had 4 - 2 CPUs and one
+    // share of 85% of 8 GiB over those two.
+    let dir = tempfile::tempdir().unwrap();
+    let memory = 256 * GIB / 100 * 85;
+    let mut pool = pool_at(dir.path(), 30, memory / 30);
+    pool.set_local_budget(memory, true, 4 - 2, Some(8 * GIB));
+    assert_eq!(pool.domain_capacity, 2);
+    assert_eq!(pool.bytes_per_permit, (8 * GIB / 100 * 85) / 2);
+    assert_eq!(local_cpus(0), default_capacity());
+    assert_eq!(local_cpus(default_capacity() + 5), 1);
+}
+
+#[test]
+fn a_reserve_comes_off_the_processs_own_cpus_as_well_as_the_pool() {
+    // A configured host budget larger than this process's CPUs, with a
+    // reserve that leaves the process one CPU of its own.
+    let local = default_capacity();
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::for_test(dir.path());
+    config.scheduler.enabled = true;
+    config.scheduler.cpus = local + 10;
+    config.scheduler.reserve_cpus = local - 1;
+    config.scheduler.memory_bytes = Some(GIB);
+    let pool = Pool::from_config(&config).unwrap();
+    assert_eq!(pool.capacity, 11);
+    assert_eq!(pool.domain_capacity, 1);
+    assert_eq!(pool.bytes_per_permit, GIB);
+    let env = session_environment_with_jobs(&config, None);
+    assert!(env.contains(&(SCHED_BUILD_SLOTS_ENV.into(), "1".into())));
+    assert!(env.contains(&(SCHED_SLOT_BYTES_ENV.into(), GIB.to_string())));
 }

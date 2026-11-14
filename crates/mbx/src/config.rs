@@ -919,6 +919,11 @@ pub struct SchedulerSettings {
     pub reserve_cpus: u64,
     /// Independent memory budget; `None` leaves CPU-only scheduling.
     pub memory_bytes: Option<u64>,
+    /// Whether `memory_bytes` is the machine default rather than a configured
+    /// budget. A default always holds builds in a cgroup with a memory limit
+    /// to 85% of that limit; a configured budget that fits the limit applies
+    /// as configured.
+    pub memory_is_default: bool,
     /// Priority of this build's compilations against other builds.
     pub priority: SchedulerPriority,
     /// Whether `cargo test` and `cargo nextest` binaries take permits too.
@@ -952,6 +957,7 @@ impl Default for SchedulerSettings {
             cpus: 1,
             reserve_cpus: 0,
             memory_bytes: None,
+            memory_is_default: false,
             priority: SchedulerPriority::Normal,
             tests: false,
             pressure: false,
@@ -1539,6 +1545,7 @@ impl Config {
             cpus: scheduler_cpus,
             reserve_cpus: scheduler_reserve_cpus,
             memory_bytes: scheduler_memory,
+            memory_is_default: raw.scheduler.memory.is_none(),
             priority: raw
                 .scheduler
                 .priority
@@ -1704,6 +1711,7 @@ impl Config {
                                 .wrap_err_with(|| {
                                     format!("invalid {}.{setting}", path.display())
                                 })?;
+                            self.scheduler.memory_is_default = false;
                         }
                         "priority" if !environment_contains("MBX_SCHEDULER_PRIORITY") => {
                             let priority = value.as_str().ok_or_else(|| {
@@ -3348,6 +3356,7 @@ default = "rust-lld"
         )
         .unwrap();
         let mut config = configured(None, &[("MBX_SCHEDULER", "false")]).unwrap();
+        assert!(config.scheduler.memory_is_default);
 
         config
             .apply_workspace_policy_with(directory.path(), |name| name == "MBX_SCHEDULER")
@@ -3358,6 +3367,7 @@ default = "rust-lld"
         assert_eq!(config.scheduler.reserve_cpus, 2);
         assert_eq!(config.scheduler.permits(), 6);
         assert_eq!(config.scheduler.memory_bytes, Some(6 * GIB));
+        assert!(!config.scheduler.memory_is_default);
         assert_eq!(config.scheduler.priority, SchedulerPriority::Low);
         assert!(config.scheduler.tests);
     }
@@ -3670,6 +3680,19 @@ default = "rust-lld"
         .unwrap();
         assert_eq!(config.scheduler.cpus, machine_cpus);
         assert_eq!(config.scheduler.memory_bytes, Some(128 * GIB / 100 * 85));
+        assert!(config.scheduler.memory_is_default);
+
+        let env = EnvLayer::new([("MBX_SCHEDULER_MEMORY".to_string(), "24GiB".to_string())]);
+        let (config, _) = Config::from_layers_measuring(
+            &env,
+            None,
+            |_| None,
+            || Some(128 * GIB),
+            || machine_cpus,
+        )
+        .unwrap();
+        assert_eq!(config.scheduler.memory_bytes, Some(24 * GIB));
+        assert!(!config.scheduler.memory_is_default);
     }
 
     #[test]
