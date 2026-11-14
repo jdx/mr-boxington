@@ -861,6 +861,8 @@ fn a_static_library_changes_the_action_key_with_its_contents() {
 fn an_untyped_search_path_is_held_to_the_native_rules() {
     let (directory, working_dir, native) = static_library_fixture();
     std::fs::write(native.join("libzstd.a"), "first").unwrap();
+    // Nothing names this file: only scanning the searched directory finds it.
+    std::fs::write(native.join("libunnamed.a"), "scanned").unwrap();
     let dep_info = RustcDepInfo::parse("target/debug/deps/zstd_sys.d: src.rs\n").unwrap();
     for kind in ["", "all="] {
         let invocation =
@@ -885,8 +887,8 @@ fn an_untyped_search_path_is_held_to_the_native_rules() {
             discovered
                 .inputs
                 .iter()
-                .any(|input| input.path.ends_with("libzstd.a")),
-            "the archive in the searched directory is an input"
+                .any(|input| input.path.ends_with("libunnamed.a")),
+            "the searched directory is scanned, not just the archives named by -l"
         );
         // Outside every admitted root it still bypasses, as `native=` does.
         assert_eq!(
