@@ -1212,3 +1212,41 @@ fn aliases_cannot_introduce_a_compiler_argument_separator() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
 }
+
+#[test]
+fn cargo_fix_gets_the_shim_as_its_workspace_wrapper_too() {
+    let session = |extra: &[(&str, &str)]| {
+        let mut environment =
+            std::collections::BTreeMap::from([("RUSTC_WRAPPER".to_string(), "/shim".to_string())]);
+        environment.extend(
+            extra
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string())),
+        );
+        environment
+    };
+    let run = |arguments: &[&str], environment: &mut std::collections::BTreeMap<String, String>| {
+        let arguments = arguments
+            .iter()
+            .map(|a| (*a).to_string())
+            .collect::<Vec<_>>();
+        cargo::route_primary_fix_units_through_the_shim(&arguments, environment);
+    };
+
+    let mut environment = session(&[]);
+    run(&["+stable", "fix", "--allow-no-vcs"], &mut environment);
+    assert_eq!(environment["RUSTC_WORKSPACE_WRAPPER"], "/shim");
+
+    // Other commands keep Cargo's ordinary wrapper chain.
+    let mut environment = session(&[]);
+    run(&["check"], &mut environment);
+    assert!(!environment.contains_key("RUSTC_WORKSPACE_WRAPPER"));
+
+    // A configured workspace wrapper, or one deferred to, keeps its place.
+    let mut environment = session(&[("RUSTC_WORKSPACE_WRAPPER", "/clippy-driver")]);
+    run(&["fix"], &mut environment);
+    assert_eq!(environment["RUSTC_WORKSPACE_WRAPPER"], "/clippy-driver");
+    let mut environment = session(&[("MBX_PREVIOUS_RUSTC_WRAPPER", "/sccache")]);
+    run(&["fix"], &mut environment);
+    assert!(!environment.contains_key("RUSTC_WORKSPACE_WRAPPER"));
+}

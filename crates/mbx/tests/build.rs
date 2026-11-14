@@ -464,6 +464,44 @@ fn transparent_rustc_replaces_the_shim_process() {
     );
 }
 
+/// `cargo fix` compiles its primary units through a proxy that starts the
+/// compiler with only the workspace wrapper, so the units being fixed used to
+/// reach neither the cache lookup nor publication.
+#[cfg(unix)]
+#[test]
+fn cargo_fix_compiles_its_primary_unit_through_the_cache() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let fix = |report: &str| {
+        cargo_with(
+            project.path(),
+            store.path(),
+            &reports.path().join(report),
+            &["fix", "--offline", "--allow-no-vcs"],
+            &[],
+        )
+        .0
+    };
+
+    let cold = fix("cold.json");
+    assert!(
+        cold["stored_bytes"].as_u64().unwrap() > 0,
+        "the first fix should publish its primary unit: {cold}"
+    );
+
+    // Same bytes, new mtime: cargo recompiles, and the cache answers.
+    let source = project.path().join("src/lib.rs");
+    let contents = std::fs::read(&source).unwrap();
+    std::fs::write(&source, contents).unwrap();
+    let warm = fix("warm.json");
+    assert!(
+        count(&warm, "hits") > 0,
+        "the second fix should restore its primary unit: {warm}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn rustc_workspace_wrapper_is_preserved_without_becoming_the_compiler() {
