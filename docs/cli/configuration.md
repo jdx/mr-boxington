@@ -523,7 +523,7 @@ mbx must be able to write to it. mbx uses it only on Linux, and only while `sche
 
 - **Type:** `option<int>`
 - **Optional:** true
-- **Default:** the machine's logical CPUs; builds in a container are also held to its CPU limit
+- **Default:** the machine's logical CPUs, or a lower CPU quota on a parent cgroup; builds in a container are also held to its CPU limit
 - **Set with:** `MBX_SCHEDULER_CPUS`
 
 CPU core budget in the machine-wide pool before `scheduler.reserve_cpus`.

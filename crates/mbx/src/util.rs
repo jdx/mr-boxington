@@ -474,6 +474,19 @@ pub fn physical_memory_bytes() -> Option<u64> {
     memory_total_bytes()
 }
 
+/// CPUs a scheduler pool shared with other cgroups can count on: the
+/// machine's online CPUs, or a lower quota inherited from a parent cgroup
+/// that siblings may share. A quota on the process's own cgroup is left to
+/// its local ceiling.
+pub fn shared_pool_cpus() -> u64 {
+    let machine = machine_cpus();
+    #[cfg(target_os = "linux")]
+    if let Some(limit) = crate::cgroup::inherited_cpu_limit() {
+        return machine.min(limit).max(1);
+    }
+    machine
+}
+
 /// Memory a scheduler pool shared with other cgroups can count on: physical
 /// RAM, or a lower limit inherited from a parent cgroup that siblings may
 /// share. A limit on the process's own cgroup is left to its local ceiling.

@@ -80,6 +80,41 @@ fn inherited_limit(domains: &[Domain]) -> Option<u64> {
         .min()
 }
 
+/// The lowest CPU quota on a visible ancestor of this process's cgroup, in
+/// whole CPUs, not counting the process's own cgroup. Only cgroup v2's
+/// `cpu.max` is read.
+///
+/// For the reason [`inherited_memory_limit`] gives: siblings share a parent's
+/// quota, while a container's own quota belongs to it alone.
+pub(crate) fn inherited_cpu_limit() -> Option<u64> {
+    inherited_cpus(&visible_domains())
+}
+
+fn inherited_cpus(domains: &[Domain]) -> Option<u64> {
+    domains
+        .iter()
+        .filter(|domain| domain.v2)
+        .flat_map(|domain| {
+            domain
+                .current
+                .ancestors()
+                .skip(1)
+                .take_while(|path| path.starts_with(&domain.mount))
+                .filter_map(read_cpu_quota)
+        })
+        .min()
+}
+
+/// `cpu.max` as whole CPUs, rounded down as the standard library rounds a
+/// quota, and at least one. `max` is no quota.
+fn read_cpu_quota(directory: &Path) -> Option<u64> {
+    let text = std::fs::read_to_string(directory.join("cpu.max")).ok()?;
+    let mut fields = text.split_whitespace();
+    let quota: u64 = fields.next()?.parse().ok()?;
+    let period: u64 = fields.next()?.parse().ok().filter(|period| *period > 0)?;
+    Some((quota / period).max(1))
+}
+
 fn read_limit(directory: &Path, v2: bool) -> Option<u64> {
     let name = if v2 {
         "memory.max"
@@ -287,6 +322,23 @@ mod tests {
             ),
         );
         assert_eq!(inherited_limit(&own), None);
+    }
+
+    #[test]
+    fn only_ancestor_cpu_quotas_are_inherited() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path();
+        let build = mount.join("slice/build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(mount.join("slice/cpu.max"), "max 100000\n").unwrap();
+        std::fs::write(build.join("cpu.max"), "200000 100000\n").unwrap();
+        let mounts = format!("1 0 0:1 / {} rw - cgroup2 cgroup rw", mount.display());
+        let found = domains("0::/slice/build\n", &mounts);
+        assert_eq!(inherited_cpus(&found), None, "the cgroup's own quota");
+        std::fs::write(mount.join("slice/cpu.max"), "450000 100000\n").unwrap();
+        assert_eq!(inherited_cpus(&found), Some(4), "a quota siblings share");
+        std::fs::write(mount.join("slice/cpu.max"), "50000 100000\n").unwrap();
+        assert_eq!(inherited_cpus(&found), Some(1), "at least one CPU");
     }
 
     #[test]

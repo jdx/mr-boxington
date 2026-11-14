@@ -48,8 +48,9 @@ comfortably run. mbx coordinates them through a shared pool under the cache
 directory. Scheduling is on by default; `MBX_SCHEDULER=0` disables it.
 
 The pool has two independent budgets: CPU cores and memory bytes. The CPU
-budget is `scheduler.cpus` (default: the machine's online logical CPUs) minus
-`scheduler.reserve_cpus` (default: 0), with at least one core remaining.
+budget is `scheduler.cpus` (default: the machine's online logical CPUs, or a
+lower CPU quota on a parent cgroup) minus `scheduler.reserve_cpus` (default:
+0), with at least one core remaining.
 The memory budget is `scheduler.memory`, which defaults to 85% of physical
 memory. If a parent cgroup has a lower memory limit, the default is 85% of that
 limit instead, because sibling cgroups under that parent share it. Each
@@ -267,9 +268,9 @@ supervision in any container has frozen a compilation, every container sharing
 the cache waits for it to resume.
 
 Containers sharing a cache directory default to the machine's CPU and physical
-memory budgets for their common pool. A memory limit set on each container's
-own cgroup does not lower that pool; a limit on a parent cgroup above the
-containers does. Explicit `scheduler.cpus` and
+memory budgets for their common pool. A CPU quota or memory limit set on each
+container's own cgroup does not lower that pool; one on a parent cgroup above
+the containers does. Explicit `scheduler.cpus` and
 `scheduler.memory` settings override that host budget. For example:
 
 ```toml
