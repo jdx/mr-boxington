@@ -541,7 +541,7 @@ impl RustcInvocation {
         for argument in &self.arguments {
             if path_mappings.is_some()
                 && let Argument::SearchPath { kind, path } = argument
-                && kind == "native"
+                && super::searches_native(kind)
             {
                 let directory = if path.is_absolute() {
                     path.clone()
@@ -561,7 +561,9 @@ impl RustcInvocation {
             .arguments
             .iter()
             .filter_map(|argument| match argument {
-                Argument::SearchPath { kind, path } if kind == "native" => Some(absolute(path)),
+                Argument::SearchPath { kind, path } if super::searches_native(kind) => {
+                    Some(absolute(path))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();

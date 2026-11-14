@@ -858,6 +858,60 @@ fn a_static_library_changes_the_action_key_with_its_contents() {
     );
 }
 
+/// An untyped `cargo:rustc-link-search` reaches rustc as a bare `-L`, whose kind
+/// is `all`. It searches native libraries like `native=` does, so it must be
+/// admitted and held to the same rules rather than refused outright.
+#[test]
+fn an_untyped_search_path_is_held_to_the_native_rules() {
+    let (directory, working_dir, native) = static_library_fixture();
+    std::fs::write(native.join("libzstd.a"), "first").unwrap();
+    // Nothing names this file: only scanning the searched directory finds it.
+    std::fs::write(native.join("libunnamed.a"), "scanned").unwrap();
+    let dep_info = RustcDepInfo::parse("target/debug/deps/zstd_sys.d: src.rs\n").unwrap();
+    for kind in ["", "all="] {
+        let invocation =
+            RustcInvocation::parse(&library_linking(&[(kind, &native)], &["static=zstd"])).unwrap();
+        assert_eq!(
+            invocation.native_search_paths().collect::<Vec<_>>(),
+            [&native]
+        );
+        let mappings = vec![
+            PathMapping::new(&working_dir, "workspace"),
+            PathMapping::new(directory.path().join("target"), "target"),
+        ];
+        let discovered = invocation
+            .discover_inputs_with_mappings(
+                &dep_info,
+                &working_dir,
+                &mappings,
+                &mbx_cache_core::NoFileDigestCache,
+            )
+            .unwrap();
+        assert!(
+            discovered
+                .inputs
+                .iter()
+                .any(|input| input.path.ends_with("libunnamed.a")),
+            "the searched directory is scanned, not just the archives named by -l"
+        );
+        // Outside every admitted root it still bypasses, as `native=` does.
+        assert_eq!(
+            invocation.discover_inputs_with_mappings(
+                &dep_info,
+                &working_dir,
+                &[],
+                &mbx_cache_core::NoFileDigestCache,
+            ),
+            Err(BypassReason::UnsupportedSearchPath("native".into()))
+        );
+    }
+    // A kind that is neither dependency nor native-searching is still refused.
+    assert_eq!(
+        RustcInvocation::parse(&library_linking(&[("framework=", &native)], &[])).unwrap_err(),
+        BypassReason::UnsupportedSearchPath("framework".into())
+    );
+}
+
 /// A static archive outside every mapped root has no portable name, so the
 /// invocation bypasses like an `--extern` there would, on both discovery
 /// paths.

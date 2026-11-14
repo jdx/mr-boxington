@@ -344,6 +344,14 @@ pub enum BypassReason {
     InvalidPredictedInput(String),
 }
 
+/// Whether a `-L` kind makes rustc look for native libraries. A bare `-L path`,
+/// which is what an untyped `cargo:rustc-link-search` produces, is `all`: it
+/// searches for crates and native libraries alike, so it is held to the same
+/// rules as `native`.
+fn searches_native(kind: &str) -> bool {
+    matches!(kind, "native" | "all")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Argument {
     Plain(String),
@@ -570,7 +578,7 @@ impl RustcInvocation {
     /// and prediction, rather than treating their paths as immutable inputs.
     pub fn native_search_paths(&self) -> impl Iterator<Item = &Path> {
         self.arguments.iter().filter_map(|argument| match argument {
-            Argument::SearchPath { kind, path } if kind == "native" => Some(path.as_path()),
+            Argument::SearchPath { kind, path } if searches_native(kind) => Some(path.as_path()),
             _ => None,
         })
     }
@@ -824,7 +832,7 @@ impl RustcInvocation {
         let mut native_directories = BTreeSet::new();
         for argument in &self.arguments {
             if let Argument::SearchPath { kind, path } = argument
-                && kind == "native"
+                && searches_native(kind)
             {
                 native_directories.insert(builder.normalize_path(path)?);
             }
@@ -1710,7 +1718,7 @@ impl<'a> Parser<'a> {
             let (kind, path) = search
                 .split_once('=')
                 .map_or(("all", search.as_str()), |(kind, path)| (kind, path));
-            if !matches!(kind, "dependency" | "native") {
+            if kind != "dependency" && !searches_native(kind) {
                 return Err(BypassReason::UnsupportedSearchPath(kind.into()));
             }
             self.parsed.push(Argument::SearchPath {
@@ -1927,7 +1935,7 @@ impl<'a> Parser<'a> {
             .parsed
             .iter()
             .filter_map(|argument| match argument {
-                Argument::SearchPath { kind, path } if kind == "native" => Some(path),
+                Argument::SearchPath { kind, path } if searches_native(kind) => Some(path),
                 _ => None,
             })
             .flat_map(|directory| {
