@@ -58,6 +58,7 @@ pub mod util;
 mod analyze;
 mod ar;
 mod build_script;
+mod cargo_layout;
 mod cc;
 mod digest_ledger;
 mod disk_usage;

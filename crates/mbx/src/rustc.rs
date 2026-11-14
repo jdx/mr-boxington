@@ -72,18 +72,10 @@ struct LearnedPlan {
 }
 
 impl LearnedPlan {
-    /// Find somewhere to keep the state, for a unit that earned it. State
-    /// that does not depend on the checkout's location may start from another
-    /// checkout's; see [`incremental::seed`].
-    fn resolved(
-        mut self,
-        compilation: &Compilation<'_>,
-        unit: &CacheDigest,
-        mode: IncrementalSeedMode,
-    ) -> Self {
+    /// Find somewhere to keep this checkout's state for a unit that earned it.
+    fn resolved(mut self, compilation: &Compilation<'_>, unit: &CacheDigest) -> Self {
         if self.hot {
-            // Check this checkout's existing state before seeding. A rejected
-            // unit takes the shared path without copying a donor's sessions.
+            // Check this checkout's state before engaging private compilation.
             let directory = incremental_unit_path(unit);
             let rejected = directory
                 .as_deref()
@@ -98,12 +90,8 @@ impl LearnedPlan {
                 self.hot = false;
                 self.directory = None;
             } else {
-                let seedable = mode_in_state_directory(mode, directory.as_deref()).shares_state();
-                let (path, state) = incremental_directory_with_state(
-                    unit,
-                    compilation.invocation.crate_name(),
-                    seedable,
-                );
+                let (path, state) =
+                    incremental_directory_with_state(unit, compilation.invocation.crate_name());
                 self.directory = path;
                 self.incremental_state = state;
                 if let Some(directory) = &self.directory {
@@ -349,6 +337,22 @@ pub(crate) fn compile(
             ChangedEnvironment::LookUp,
         )
     };
+    // A workspace crate whose sources changed again is planned for private
+    // incremental state without a lookup. Returning to content the cache holds,
+    // as after a branch switch or a revert, would then recompile the crate and
+    // all its dependents. Set the plan aside, look up first, and take it back
+    // on a miss.
+    let hot_after_lookup = if !verify
+        && !private_inputs
+        && !eager_requested
+        && learned.engaged()
+        && learned.record.is_some()
+        && outputs.dep_info.is_file()
+    {
+        Some(std::mem::take(&mut learned))
+    } else {
+        None
+    };
     let mut unshareable = false;
     if !private_inputs
         && !learned.engaged()
@@ -410,7 +414,7 @@ pub(crate) fn compile(
             }
             Ok(None) => {
                 // The fast plan already measured this unit for this compile.
-                if !learned.backstop_rejected {
+                if !learned.backstop_rejected && hot_after_lookup.is_none() {
                     learned = plan_learned_reuse(&compilation, &discovered, &[], learned_enabled);
                 }
             }
@@ -421,7 +425,12 @@ pub(crate) fn compile(
     }
     // A compilation that cannot be keyed for the cache still has sources worth
     // watching: private incremental state needs no shareable key.
-    if unshareable && learned_enabled && !learned.engaged() && learned.record.is_none() {
+    if unshareable
+        && hot_after_lookup.is_none()
+        && learned_enabled
+        && !learned.engaged()
+        && learned.record.is_none()
+    {
         learned = plan_learned_without_action_key(&compilation, &outputs);
     }
     let mut prediction_missing = private_inputs;
@@ -459,6 +468,10 @@ pub(crate) fn compile(
                 session::report_shim_warning(&format!("prediction was not restored: {error:#}"));
             }
         }
+    }
+    // Neither lookup restored the crate: take back the private plan set aside.
+    if let Some(hot) = hot_after_lookup {
+        learned = hot;
     }
 
     // Everything past this point would run the real compiler, so this is
@@ -635,26 +648,11 @@ pub(crate) fn compile(
     );
     let compilation_started = SystemTime::now();
     let compiler_timer = Instant::now();
-    let seed_mode = mode_in_state_directory(
-        incremental_seed_mode(rustc, &invocation, &arguments, incremental_flag.is_some()),
-        learned.directory.as_deref(),
-    );
-    let (mut command, response_file) = match private_compiler_command(
-        rustc,
-        wrapper_argument,
-        &arguments,
-        &working_dir,
-        incremental_flag.as_deref(),
-        seed_mode,
-    ) {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            session::report_shim_error(&format!(
-                "compiler arguments could not be prepared: {error:#}"
-            ));
-            return Ok(ExitCode::FAILURE);
-        }
-    };
+    let mut command = compiler_command(rustc, wrapper_argument);
+    command.args(&arguments).current_dir(&working_dir);
+    if let Some(flag) = &incremental_flag {
+        command.arg(flag);
+    }
     if let Some(permit) = &permit {
         permit.mark_held(&mut command);
     }
@@ -697,69 +695,12 @@ pub(crate) fn compile(
         &profile_arguments(&arguments),
         &working_dir,
     );
-    // Bootstrap may be visible to env!/option_env!. Hold notifications too:
-    // Cargo must not give dependents metadata that the retry will discard.
-    let held = seed_mode == IncrementalSeedMode::Inject { bootstrap: true };
     let eligible =
         wrapper_argument.is_none() && !invocation.crate_name().starts_with("build_script_");
-    clear_bootstrap_dep_info(seed_mode, &outputs.dep_info)?;
-    let mut output = crate::phase_timing::measure("compiler", || {
-        run_compiler(
-            &mut command,
-            forwarded && !held,
-            eligible,
-            &portable.mappings,
-        )
+    let output = crate::phase_timing::measure("compiler", || {
+        run_compiler(&mut command, forwarded, eligible, &portable.mappings)
     })
     .wrap_err("failed to execute rustc")?;
-    drop(response_file);
-    if bootstrap_dep_info_requires_retry(seed_mode, &outputs.dep_info) {
-        let retry = (|| -> Result<()> {
-            let directory = learned.directory.as_deref().ok_or_else(|| {
-                eyre::eyre!("bootstrap compilation has no private state directory")
-            })?;
-            std::fs::write(directory.join(BOOTSTRAP_ENV_DEP_MARKER), b"")
-                .wrap_err("failed to remember the compiler bootstrap dependency")?;
-            for path in outputs
-                .files
-                .iter()
-                .chain(std::iter::once(&outputs.dep_info))
-            {
-                match std::fs::remove_file(path) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        return Err(error).wrap_err("failed to discard bootstrap compiler output");
-                    }
-                }
-            }
-            Ok(())
-        })();
-        if let Err(error) = retry {
-            session::report_shim_error(&format!(
-                "bootstrap compilation could not be discarded: {error:#}"
-            ));
-            return Ok(ExitCode::FAILURE);
-        }
-        let (mut command, response_file) = private_compiler_command(
-            rustc,
-            wrapper_argument,
-            &arguments,
-            &working_dir,
-            incremental_flag.as_deref(),
-            IncrementalSeedMode::Disabled,
-        )?;
-        if let Some(permit) = &permit {
-            permit.mark_held(&mut command);
-        }
-        output = crate::phase_timing::measure("compiler", || {
-            run_compiler(&mut command, forwarded, eligible, &portable.mappings)
-        })
-        .wrap_err("failed to execute rustc without bootstrap")?;
-        drop(response_file);
-    } else if forwarded && held {
-        let _ = replay_bytes(&output.stdout, &output.stderr);
-    }
     // Released before the outputs are read back and published: hashing and
     // storing cost I/O, not the CPU and memory the permit stands for.
     drop(permit);
@@ -1579,109 +1520,6 @@ fn compiler_command(rustc: &OsStr, wrapper_argument: Option<&OsStr>) -> Command 
     command
 }
 
-/// The arguments with every path under the working directory named relative
-/// to it.
-///
-/// rustc checks incremental state against its options and records where it
-/// found upstream crates and wrote its outputs; state recorded with other
-/// paths is ignored or mostly recompiled. Each checkout has its own target
-/// directory, so the absolute paths in a compilation -- search paths, extern
-/// crates, the output directory, mbx's own `OUT_DIR` remapping -- differ
-/// between checkouts even where nothing else does. Relative to the working
-/// directory, which `-Zremap-cwd-prefix` keeps out of the state, they are the
-/// same in each, and they still name this checkout's files.
-///
-/// Only the command that runs changes: the key resolves relative paths against
-/// the working directory too. See [`relative_in`] for what counts as a path.
-fn paths_relative_to(arguments: &[OsString], working_dir: &Path) -> Vec<OsString> {
-    let Some(root) = working_dir.to_str() else {
-        return arguments.to_vec();
-    };
-    let mut rewritten = Vec::with_capacity(arguments.len());
-    let mut previous = None;
-    for argument in arguments {
-        let Some(text) = argument.to_str() else {
-            previous = None;
-            rewritten.push(argument.clone());
-            continue;
-        };
-        let value = if previous == Some("--remap-path-prefix") {
-            remap_relative_in(text, root)
-        } else if let Some(remap) = text.strip_prefix("--remap-path-prefix=") {
-            format!("--remap-path-prefix={}", remap_relative_in(remap, root))
-        } else if text.starts_with("-Zremap-cwd-prefix")
-            || (previous == Some("-Z") && text.starts_with("remap-cwd-prefix"))
-        {
-            // The virtual directory written in the working directory's place.
-            text.to_owned()
-        } else if is_link_option(text, previous) {
-            // Only the linker reads these, and rustc leaves them out of what
-            // its state is checked against. They can also embed a path in the
-            // output, such as an rpath, which has to stay absolute.
-            text.to_owned()
-        } else {
-            relative_in(text, root)
-        };
-        previous = Some(text);
-        rewritten.push(OsString::from(value));
-    }
-    rewritten
-}
-
-/// `-C link-arg`, `-C link-args`, `-C linker`, and `-Z pre-link-arg(s)`,
-/// attached or after a separate `-C`/`-Z`.
-fn is_link_option(text: &str, previous: Option<&str>) -> bool {
-    const CODEGEN: [&str; 2] = ["link-arg", "linker"];
-    const UNSTABLE: [&str; 1] = ["pre-link-arg"];
-    let starts = |value: &str, names: &[&str]| names.iter().any(|name| value.starts_with(name));
-    text.strip_prefix("-C")
-        .is_some_and(|value| starts(value, &CODEGEN))
-        || text
-            .strip_prefix("-Z")
-            .is_some_and(|value| starts(value, &UNSTABLE))
-        || (previous == Some("-C") && starts(text, &CODEGEN))
-        || (previous == Some("-Z") && starts(text, &UNSTABLE))
-}
-
-/// A `--remap-path-prefix` value with its source made relative. rustc splits
-/// it at the last `=`, and the destination is the literal text recorded in the
-/// source's place, not a path to open, so it stays as written.
-fn remap_relative_in(remap: &str, root: &str) -> String {
-    match remap.rsplit_once('=') {
-        Some((from, to)) => format!("{}={to}", relative_in(from, root)),
-        None => remap.to_owned(),
-    }
-}
-
-/// `text` with the working directory written as `.` wherever a path starts:
-/// at the beginning, or after `=` or `,`. `./` rather than nothing keeps a
-/// shortened executable, such as a linker, from being looked up on `PATH`.
-fn relative_in(text: &str, root: &str) -> String {
-    let mut rewritten = String::with_capacity(text.len());
-    let mut rest = text;
-    let mut at_start = true;
-    while !rest.is_empty() {
-        if at_start
-            && let Some(after) = rest.strip_prefix(root)
-            // Windows accepts either separator, and Cargo can mix them.
-            && after
-                .chars()
-                .next()
-                .is_none_or(|next| std::path::is_separator(next) || matches!(next, '=' | ','))
-        {
-            rewritten.push('.');
-            rest = after;
-        }
-        let Some(next) = rest.chars().next() else {
-            break;
-        };
-        rewritten.push(next);
-        rest = &rest[next.len_utf8()..];
-        at_start = matches!(next, '=' | ',');
-    }
-    rewritten
-}
-
 /// The executable Cargo will run as a build script, when this compilation
 /// produced one; see [`session::is_cargo_build_script`].
 fn cargo_build_script_executable<'a>(
@@ -1747,305 +1585,30 @@ fn learned_plan(
     }
 }
 
-/// Whether one checkout's incremental state for this compilation is as good as
-/// another's, so that it can be seeded from one and its paths made relative.
-///
-/// That takes `-Zremap-cwd-prefix`, and a rustc that checks its state against
-/// the working directory as the flag presents it, which it first does in 1.98.
-/// Earlier releases compare the real directory and ignore state recorded in
-/// any other checkout, so copying it would only cost time and disk.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum IncrementalSeedMode {
-    Disabled,
-    UserRemap,
-    Inject { bootstrap: bool },
-}
-
-impl IncrementalSeedMode {
-    fn shares_state(self) -> bool {
-        self != Self::Disabled
-    }
-
-    fn apply(self, command: &mut Command) {
-        if let Self::Inject { bootstrap } = self {
-            command.arg("-Zremap-cwd-prefix=.");
-            if bootstrap {
-                command.env("RUSTC_BOOTSTRAP", "1");
-                // Last, so a preceding allow-features cannot enable language features.
-                command.arg("-Zallow-features=");
-            }
-        }
-    }
-}
-
-fn seed_mode_for(
-    version: &str,
-    enabled: bool,
-    private: bool,
-    user_remap: bool,
-    bootstrap_set: bool,
-) -> IncrementalSeedMode {
-    if !private || !release_at_least(version, (1, 98)) {
-        return IncrementalSeedMode::Disabled;
-    }
-    if user_remap {
-        return IncrementalSeedMode::UserRemap;
-    }
-    if !enabled || bootstrap_set {
-        return IncrementalSeedMode::Disabled;
-    }
-    let release = version.split_whitespace().nth(1).unwrap_or_default();
-    IncrementalSeedMode::Inject {
-        bootstrap: !release.contains("nightly") && !release.contains("dev"),
-    }
-}
-
-/// Both directory selection and command construction use this decision.
-fn incremental_seed_mode(
-    rustc: &OsStr,
-    invocation: &RustcInvocation,
-    arguments: &[OsString],
-    private: bool,
-) -> IncrementalSeedMode {
-    let enabled = session::seed_incremental_requested();
-    let user_remap = invocation.remaps_working_directory();
-    let bootstrap_set = std::env::var_os("RUSTC_BOOTSTRAP").is_some();
-    if !private || (!user_remap && (!enabled || bootstrap_set)) {
-        return IncrementalSeedMode::Disabled;
-    }
-    let Ok(identity) = compiler_identity(rustc) else {
-        return IncrementalSeedMode::Disabled;
-    };
-    let mode = injection_for_invocation(
-        seed_mode_for(
-            &identity.rustc_version,
-            enabled,
-            private,
-            user_remap,
-            bootstrap_set,
-        ),
-        arguments,
-        session::is_cargo_build_script(invocation.crate_name()),
-    );
-    if matches!(mode, IncrementalSeedMode::Inject { .. }) && !remap_cwd_supported(rustc) {
-        return IncrementalSeedMode::Disabled;
-    }
-    mode
-}
-
-/// Keep Cargo's unstable-feature choices and build-script execution keys intact.
-fn injection_for_invocation(
-    mode: IncrementalSeedMode,
-    arguments: &[OsString],
-    build_script_name: bool,
-) -> IncrementalSeedMode {
-    let uses_response_file = arguments
-        .iter()
-        .any(|argument| argument.as_encoded_bytes().starts_with(b"@"));
-    let arguments = profile_arguments(arguments);
-    let lossless_response_file = !uses_response_file
-        || arguments
-            .iter()
-            .all(|argument| response_file_argument_is_lossless(argument));
-    let build_script = build_script_name && session::compiles_only_a_binary(&arguments);
-    let unstable_flags = arguments
-        .iter()
-        .any(|arg| arg.as_encoded_bytes().starts_with(b"-Z"));
-    match mode {
-        IncrementalSeedMode::Inject { .. } if build_script || !lossless_response_file => {
-            IncrementalSeedMode::Disabled
-        }
-        IncrementalSeedMode::Inject { bootstrap: true } if unstable_flags => {
-            IncrementalSeedMode::Disabled
-        }
-        _ => mode,
-    }
-}
-
-const BOOTSTRAP_ENV_DEP_MARKER: &str = "bootstrap-env-dependency";
-
 fn incremental_unit_path(unit: &CacheDigest) -> Option<PathBuf> {
-    let key = unit.key();
-    Some(incremental_root()?.join(key.get(..16)?))
+    Some(incremental_root()?.join(unit.key().get(..16)?))
 }
 
-fn mode_in_state_directory(
-    mode: IncrementalSeedMode,
-    directory: Option<&Path>,
-) -> IncrementalSeedMode {
-    if matches!(mode, IncrementalSeedMode::Inject { .. })
-        && directory.is_some_and(|directory| directory.join(BOOTSTRAP_ENV_DEP_MARKER).exists())
-    {
-        IncrementalSeedMode::Disabled
-    } else {
-        mode
-    }
-}
-
-/// A failed compiler may leave no dep-info. Remove any previous attempt's
-/// file first so that only the current attempt can trigger a retry.
-fn clear_bootstrap_dep_info(mode: IncrementalSeedMode, path: &Path) -> Result<()> {
-    if mode == (IncrementalSeedMode::Inject { bootstrap: true }) {
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).wrap_err("failed to remove previous bootstrap dep-info");
-            }
-        }
-    }
-    Ok(())
-}
-
-fn bootstrap_dep_info_requires_retry(mode: IncrementalSeedMode, path: &Path) -> bool {
-    mode == (IncrementalSeedMode::Inject { bootstrap: true })
-        && RustcDepInfo::read(path)
-            .is_ok_and(|dep_info| dep_info.environment.contains_key("RUSTC_BOOTSTRAP"))
-}
-
-/// rustc reads one UTF-8 argument per line, without shell escaping. A trailing
-/// carriage return would become part of a CRLF terminator and lose that byte.
-fn response_file_argument_is_lossless(argument: &OsStr) -> bool {
-    argument
-        .to_str()
-        .is_some_and(|argument| !argument.contains('\n') && !argument.ends_with('\r'))
-}
-
-fn response_file_contents(arguments: &[OsString]) -> Option<Vec<u8>> {
-    let mut contents = Vec::new();
-    for argument in arguments {
-        if !response_file_argument_is_lossless(argument) {
-            return None;
-        }
-        let argument = argument.to_str()?;
-        contents.extend_from_slice(argument.as_bytes());
-        contents.push(b'\n');
-    }
-    Some(contents)
-}
-
-fn private_compiler_command(
-    rustc: &OsStr,
-    wrapper_argument: Option<&OsStr>,
-    arguments: &[OsString],
-    working_dir: &Path,
-    incremental_flag: Option<&OsStr>,
-    mode: IncrementalSeedMode,
-) -> Result<(Command, Option<tempfile::NamedTempFile>)> {
-    let mut command = compiler_command(rustc, wrapper_argument);
-    let mut response_file = None;
-    if mode.shares_state() {
-        if arguments
-            .iter()
-            .any(|argument| argument.as_encoded_bytes().starts_with(b"@"))
-        {
-            let expanded = RustcInvocation::expand_arguments(arguments)?;
-            // Check original arguments too: rewriting a checkout path could remove its newline.
-            let contents = if expanded
-                .iter()
-                .any(|argument| argument.as_encoded_bytes().contains(&b'\n'))
-            {
-                None
-            } else {
-                response_file_contents(&paths_relative_to(&expanded, working_dir))
-            };
-            if let Some(contents) = contents {
-                let mut file = tempfile::Builder::new()
-                    .prefix(&format!("mbx-rustc-args-{}-", std::process::id()))
-                    .tempfile()
-                    .wrap_err("failed to create the compiler response file")?;
-                file.write_all(&contents)
-                    .wrap_err("failed to write the compiler response file")?;
-                let mut argument = OsString::from("@");
-                argument.push(file.path());
-                command.arg(argument);
-                response_file = Some(file);
-            } else {
-                // Preserve arguments that rustc's line-based format cannot represent.
-                command.args(arguments);
-            }
-        } else {
-            command.args(paths_relative_to(arguments, working_dir));
-        }
-    } else {
-        command.args(arguments);
-    }
-    command.current_dir(working_dir);
-    if let Some(flag) = incremental_flag {
-        command.arg(flag);
-    }
-    mode.apply(&mut command);
-    Ok((command, response_file))
-}
-
-/// Choose the private unit identity before reading or writing its history.
-/// The injection policy is known even before the unit earns private state;
-/// a bootstrap env-dependency marker only suppresses injection within that unit.
-fn incremental_unit_identity(
-    compilation: &Compilation<'_>,
-) -> Result<(CacheDigest, IncrementalSeedMode)> {
+fn incremental_unit_identity(compilation: &Compilation<'_>) -> Result<CacheDigest> {
     let context = base_action_context(
         compilation.rustc,
         compilation.working_dir,
         compilation.portable,
     )?;
-    let unit = compilation.invocation.invocation_digest(&context)?;
-    let mode = incremental_seed_mode(
-        compilation.rustc,
-        compilation.invocation,
-        compilation.arguments,
-        true,
-    );
-    Ok((incremental_state_identity(&unit, mode), mode))
+    Ok(current_incremental_generation(
+        &compilation.invocation.invocation_digest(&context)?,
+    ))
 }
 
-/// Separate automatically remapped state from state compiled with Cargo's flags.
-fn incremental_state_identity(unit: &CacheDigest, mode: IncrementalSeedMode) -> CacheDigest {
-    if matches!(mode, IncrementalSeedMode::Inject { .. }) {
-        CacheDigest::blake3(format!("{}\0mbx-remap-cwd-prefix-dot-v1", unit.key()).as_bytes())
-    } else {
-        unit.clone()
-    }
-}
-
-// Populated from the executable identity cache without entering the action key.
-static REMAP_CWD_SUPPORTED: OnceLock<(OsString, bool)> = OnceLock::new();
-
-fn remap_cwd_supported(rustc: &OsStr) -> bool {
-    REMAP_CWD_SUPPORTED
-        .get()
-        .is_some_and(|(known, supported)| known == rustc && *supported)
-}
-
-/// Probe the exact flags used for private state. Output is kept in the existing
-/// pinned compiler identity record, separately from its cache-key fields.
-fn probe_remap_cwd(executable: &Path, release: &str) -> bool {
-    if !release_at_least(&format!("rustc {release}"), (1, 98)) {
-        return false;
-    }
-    let mut command = Command::new(executable);
-    command.args(["--print=cfg", "-Zremap-cwd-prefix=."]);
-    if release.contains("nightly") || release.contains("dev") {
-        command.env_remove("RUSTC_BOOTSTRAP");
-    } else {
-        command.env("RUSTC_BOOTSTRAP", "1");
-        command.arg("-Zallow-features=");
-    }
-    command.output().is_ok_and(|output| output.status.success())
-}
-
-/// Whether a [`CompilerIdentity::rustc_version`] names `minimum` or later, by
-/// its `rustc <major>.<minor>.<patch>` line.
-fn release_at_least(rustc_version: &str, minimum: (u32, u32)) -> bool {
-    let Some(release) = rustc_version
-        .split(['\n', ';'])
-        .find_map(|line| line.trim().strip_prefix("rustc "))
-    else {
-        return false;
-    };
-    let mut parts = release.split(|c: char| !c.is_ascii_digit());
-    let mut next = || parts.next().and_then(|part| part.parse::<u32>().ok());
-    matches!((next(), next()), (Some(major), Some(minor)) if (major, minor) >= minimum)
+/// The generation private incremental state is named under.
+///
+/// State an older mbx left may hold a session seeded from another checkout
+/// while that checkout's rustc was rewriting it, which links rlibs with
+/// undefined symbols. A build that passed `-Zremap-cwd-prefix` itself kept the
+/// same invocation digest, so naming state under a new generation is what
+/// keeps every checkout from reusing it. Collection removes the old units.
+fn current_incremental_generation(invocation: &CacheDigest) -> CacheDigest {
+    CacheDigest::blake3(format!("{}\0mbx-incremental-state-v2", invocation.key()).as_bytes())
 }
 
 /// Why a compilation that ran without a lookup had none, for its event row.
@@ -2088,10 +1651,6 @@ fn cold_state(reason: &str) -> IncrementalState {
     IncrementalState {
         source: "cold".into(),
         reason: Some(reason.into()),
-        donor: None,
-        files: None,
-        bytes: None,
-        copy_ns: None,
     }
 }
 
@@ -2102,12 +1661,9 @@ fn cold_state(reason: &str) -> IncrementalState {
 /// directory. A standalone shim falls back to its target directory when one is
 /// available, and compiles normally when it has nowhere to put state.
 ///
-/// A `seedable` unit starting without state here takes another checkout's
-/// first, so the checkout's first edit to it compiles incrementally too.
 fn incremental_directory_with_state(
     invocation: &CacheDigest,
     crate_name: &str,
-    seedable: bool,
 ) -> (Option<PathBuf>, Option<IncrementalState>) {
     let Some(root) = incremental_root() else {
         return (None, None);
@@ -2119,47 +1675,15 @@ fn incremental_directory_with_state(
     let directory = root.join(shard);
     // A directory that is there but holds no finished rustc session, as after
     // a compilation that failed before rustc saved one, gives rustc nothing to
-    // start from, and seeding passes it over too. Report that as an empty
+    // start from. Report that as an empty
     // start rather than as state this checkout already had.
     let state = if directory.is_dir() && incremental::holds_finished_session(&directory) {
         IncrementalState {
             source: "existing".into(),
             reason: None,
-            donor: None,
-            files: None,
-            bytes: None,
-            copy_ns: None,
         }
-    } else if directory.is_dir() {
-        cold_state("empty-directory")
-    } else if !seedable {
-        cold_state("seeding-off")
     } else {
-        match incremental::seed(&root, shard) {
-            Ok(incremental::SeedOutcome::Seeded(report)) => IncrementalState {
-                source: "seeded".into(),
-                reason: None,
-                donor: Some(report.donor_workspace),
-                files: Some(report.files),
-                bytes: Some(report.bytes),
-                copy_ns: Some(report.duration_ns),
-            },
-            Ok(incremental::SeedOutcome::NoDonor) => cold_state("no-donor"),
-            Ok(incremental::SeedOutcome::NotReady) => cold_state("not-ready"),
-            Err(error) => {
-                session::report_shim_warning(&format!(
-                    "incremental state for {crate_name} was not seeded: {error:#}"
-                ));
-                IncrementalState {
-                    source: "failed".into(),
-                    reason: None,
-                    donor: None,
-                    files: None,
-                    bytes: None,
-                    copy_ns: None,
-                }
-            }
-        }
+        cold_state("empty-directory")
     };
     match std::fs::create_dir_all(&directory) {
         Ok(()) => (Some(directory), Some(state)),
@@ -2181,8 +1705,8 @@ fn private_incremental_flag(directory: &Path) -> OsString {
 /// Whether mbx may add incremental state to this rustc invocation.
 ///
 /// rustc runs local ThinLTO above opt-level 0 when LTO is unset and there are
-/// multiple codegen units. rustc rewrites finished incremental sessions in
-/// place, so seeds copied during rewrites and interrupted builds can leave
+/// multiple codegen units. rustc rewrites files of the previous, finished
+/// incremental session in place, so a build interrupted partway can leave
 /// state whose rlibs do not link. This includes opt-level 1.
 /// `-C lto=n|no|off|false` and `codegen-units=1` avoid this mode.
 fn mbx_incremental_is_safe(arguments: &[OsString]) -> bool {
@@ -2269,7 +1793,7 @@ pub(crate) fn bypassed_library_incremental_flag(arguments: &[OsString]) -> Optio
 
 /// The flag that gives an uncacheable workspace library private incremental
 /// state, and where that state came from for the compilation's event row.
-/// This path never seeds, so the state either already existed or starts empty.
+/// The state either already existed in this checkout or starts empty.
 pub(crate) fn bypassed_library_incremental(
     arguments: &[OsString],
 ) -> Option<(OsString, Option<IncrementalState>)> {
@@ -2302,7 +1826,7 @@ pub(crate) fn bypassed_library_incremental(
         return None;
     }
     let (directory, state) =
-        incremental_directory_with_state(&bypassed_library_identity(arguments), &crate_name, false);
+        incremental_directory_with_state(&bypassed_library_identity(arguments), &crate_name);
     let directory = directory?;
     if incremental_state_exceeds_backstop(&directory, session::incremental_budget()) {
         return None;
@@ -2352,7 +1876,7 @@ fn plan_learned_reuse(
 ) -> LearnedPlan {
     let planned = (|| {
         let sources = churn_fingerprint(compilation, discovered, absent);
-        let (unit, mode) = incremental_unit_identity(compilation)?;
+        let unit = incremental_unit_identity(compilation)?;
         let Some(state_path) = churn_state_path(&unit) else {
             return Result::<LearnedPlan>::Ok(LearnedPlan::default());
         };
@@ -2373,7 +1897,7 @@ fn plan_learned_reuse(
             record: Some((state_path, sources)),
             ..plan
         }
-        .resolved(compilation, &unit, mode))
+        .resolved(compilation, &unit))
     })();
     match planned {
         Ok(plan) => plan,
@@ -2578,13 +2102,13 @@ fn eager_incremental_plan(compilation: &Compilation<'_>) -> LearnedPlan {
         return LearnedPlan::default();
     }
     let planned = (|| {
-        let (unit, mode) = incremental_unit_identity(compilation)?;
+        let unit = incremental_unit_identity(compilation)?;
         Ok::<_, eyre::Report>(
             LearnedPlan {
                 hot: true,
                 ..LearnedPlan::default()
             }
-            .resolved(compilation, &unit, mode),
+            .resolved(compilation, &unit),
         )
     })();
     planned.unwrap_or_else(|error| {
@@ -2627,7 +2151,7 @@ fn reuse_hot_workspace_plan(
         return LearnedPlan::default();
     }
     let planned = (|| {
-        let (unit, mode) = incremental_unit_identity(compilation)?;
+        let unit = incremental_unit_identity(compilation)?;
         let Some(state_path) = churn_state_path(&unit) else {
             return Result::<LearnedPlan>::Ok(LearnedPlan::default());
         };
@@ -2666,7 +2190,7 @@ fn reuse_hot_workspace_plan(
             incremental_state: None,
             record: Some((state_path, sources)),
         }
-        .resolved(compilation, &unit, mode))
+        .resolved(compilation, &unit))
     })();
     match planned {
         Ok(plan) => plan,
@@ -2748,7 +2272,7 @@ fn source_is_in_workspace(compilation: &Compilation<'_>) -> bool {
 /// it from the cache without running rustc, so no new session shows it.
 fn record_learned_baseline(compilation: &Compilation<'_>, discovered: &DiscoveredInputs) {
     let recorded = (|| {
-        let (unit, _) = incremental_unit_identity(compilation)?;
+        let unit = incremental_unit_identity(compilation)?;
         if let Some(directory) = incremental_unit_path(&unit) {
             incremental::stamp_use(&directory, session::incremental_budget());
         }
@@ -2980,7 +2504,7 @@ fn dep_info_record(compilation: &Compilation<'_>, outputs: &RustcOutputs) -> Opt
     {
         return None;
     }
-    let (unit, _) = incremental_unit_identity(compilation).ok()?;
+    let unit = incremental_unit_identity(compilation).ok()?;
     churn_state_path(&unit)
 }
 
@@ -3556,10 +3080,16 @@ fn with_oso_prefix(arguments: &[OsString], cache_links: bool) -> Cow<'_, [OsStri
     // Examples link rlibs from the sibling deps directory, and build scripts
     // can live further below build/. Strip the shared target root rather than
     // only the directory receiving this particular executable.
-    let prefix = std::env::var_os(session::TARGET_DIR_ENV)
-        .map(PathBuf::from)
-        .filter(|root| root.is_absolute() && out_dir.starts_with(root))
-        .unwrap_or_else(|| standalone_target_root(&out_dir, None));
+    // The profile directory, not the target root: the debug map then names
+    // `deps/x.o` in every profile that shares the link.
+    let prefix = crate::cargo_layout::profile_dir(&out_dir)
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            std::env::var_os(session::TARGET_DIR_ENV)
+                .map(PathBuf::from)
+                .filter(|root| root.is_absolute() && out_dir.starts_with(root))
+        })
+        .unwrap_or_else(|| out_dir.clone());
     // ld64 resolves archive paths through Cargo's target symlink before
     // recording them, so the prefix must use the same physical spelling.
     let prefix = std::fs::canonicalize(&prefix).unwrap_or(prefix);
@@ -4284,11 +3814,7 @@ fn query_compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
     let Some(AgentResponse::ExecutableIdentity { stdout }) = responses.into_iter().next() else {
         bail!("cache agent did not return the rustc identity");
     };
-    let stdout = if let Some(stdout) = stdout.filter(|bytes| {
-        String::from_utf8_lossy(bytes)
-            .lines()
-            .any(|line| line.starts_with("mbx-remap-cwd-dot-v1: "))
-    }) {
+    let stdout = if let Some(stdout) = stdout {
         stdout
     } else {
         // Described before the compiler runs, so a binary replaced while it
@@ -4312,9 +3838,6 @@ fn query_compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
             );
         }
         let mut stdout = output.stdout;
-        let release = identity_field(&String::from_utf8_lossy(&stdout), "release")?.to_string();
-        let remap = probe_remap_cwd(&executable, &release);
-        stdout.extend_from_slice(format!("\nmbx-remap-cwd-dot-v1: {remap}\n").as_bytes());
         let host = identity_field(&String::from_utf8_lossy(&stdout), "host")?.to_string();
         if clippy {
             let mut command = Command::new(&executable);
@@ -4359,10 +3882,6 @@ fn query_compiler_identity(rustc: &OsStr) -> Result<CompilerIdentity> {
         stdout
     };
     let verbose = std::str::from_utf8(&stdout).wrap_err("rustc identity is not UTF-8")?;
-    let supported = verbose
-        .lines()
-        .any(|line| line == "mbx-remap-cwd-dot-v1: true");
-    let _ = REMAP_CWD_SUPPORTED.set((rustc.to_os_string(), supported));
     let release = identity_field(verbose, "release")?;
     let host = identity_field(verbose, "host")?;
     let rustc_version = verbose
@@ -4699,6 +4218,23 @@ fn path_mappings_with_env(
             .filter(|root| root.is_absolute())
             .map(|output| standalone_target_root(output, target))
     }) {
+        // Deeper than the target root: a profile that compiles a unit exactly
+        // as another does differs from it only by this directory's name, so it
+        // gets a placeholder of its own and the two share one key.
+        if let Some(profile) = target_output
+            .and_then(crate::cargo_layout::profile_dir)
+            .filter(|profile| profile.starts_with(&root) && *profile != root)
+        {
+            add_mapping(&mut mappings, &mut roots, profile.to_path_buf(), "profile");
+            // With `--target`, host artifacts (proc macros, build scripts)
+            // sit in the plain profile directory beside the triple's.
+            if let Some(name) = profile
+                .file_name()
+                .filter(|_| profile.parent() != Some(&root))
+            {
+                add_mapping(&mut mappings, &mut roots, root.join(name), "host_profile");
+            }
+        }
         add_mapping(&mut mappings, &mut roots, root, "target");
     }
     if let Some(root) = environment(session::WORKSPACE_ROOT_ENV)
@@ -4788,21 +4324,7 @@ fn path_mappings_with_env(
 /// than only the output directory, also covers the other units' outputs and
 /// generated inputs below `build/`.
 fn standalone_target_root(output: &Path, target: Option<&str>) -> PathBuf {
-    let profile = if matches!(
-        output.file_name().and_then(OsStr::to_str),
-        Some("deps" | "examples")
-    ) {
-        output.parent()
-    } else if output.parent().and_then(Path::file_name) == Some(OsStr::new("build")) {
-        output.parent().and_then(Path::parent)
-    } else if output.file_name() == Some(OsStr::new("out"))
-        && output.ancestors().nth(3).and_then(Path::file_name) == Some(OsStr::new("build"))
-    {
-        output.ancestors().nth(4)
-    } else {
-        None
-    };
-    if let Some(profile_root) = profile.and_then(Path::parent) {
+    if let Some(profile_root) = crate::cargo_layout::profile_dir(output).and_then(Path::parent) {
         let target_component = target.and_then(|target| Path::new(target).file_stem());
         if target_component.is_some_and(|target| profile_root.file_name() == Some(target))
             && let Some(root) = profile_root.parent()

@@ -513,7 +513,7 @@ impl S3RemoteCache {
         let download = retry_async("GET", &url, self.retries, || async {
             let mut response = self.get(&url).await?;
             fs::create_dir_all(staging_dir)?;
-            let temporary = tempfile::NamedTempFile::new_in(staging_dir)?;
+            let temporary = crate::shared_tempfile_builder().tempfile_in(staging_dir)?;
             let mut output = tokio::fs::File::from_std(temporary.reopen()?);
             let mut written = 0u64;
             while let Some(chunk) = response.chunk().await? {

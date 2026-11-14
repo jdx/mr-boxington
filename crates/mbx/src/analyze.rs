@@ -117,11 +117,9 @@ struct Group {
 /// Where private incremental state came from, over one build.
 #[derive(Debug, Default)]
 struct PrivateState {
-    /// Compilations and their compiler time, by source: `existing`, `seeded`,
-    /// `failed`, or `cold` with its reason.
+    /// Compilations and their compiler time, by source: `existing`,
+    /// or `cold` with its reason.
     sources: BTreeMap<(String, Option<String>), (u64, u64)>,
-    seeded_bytes: u64,
-    seeded_copy_ns: u64,
 }
 
 /// A recorded build, with its uncached compiler time grouped by cause.
@@ -176,12 +174,6 @@ impl Analysis {
                     .or_default();
                 entry.0 += 1;
                 entry.1 = entry.1.saturating_add(*duration_ns);
-                private_state.seeded_bytes = private_state
-                    .seeded_bytes
-                    .saturating_add(state.bytes.unwrap_or(0));
-                private_state.seeded_copy_ns = private_state
-                    .seeded_copy_ns
-                    .saturating_add(state.copy_ns.unwrap_or(0));
             }
             let own = match outcome {
                 ActionOutcome::Hit => {
@@ -455,23 +447,10 @@ impl Analysis {
         for ((source, reason), (count, duration_ns)) in ranked {
             let label = match (source.as_str(), reason.as_deref()) {
                 ("existing", _) => "started from this checkout's earlier state".to_string(),
-                ("seeded", _) => format!(
-                    "seeded from another checkout, copying {} in {}",
-                    crate::stats::size(self.private_state.seeded_bytes),
-                    duration(self.private_state.seeded_copy_ns),
-                ),
-                ("cold", Some("no-donor")) => "started empty: no other checkout had it".into(),
-                ("cold", Some("not-ready")) => {
-                    "started empty: seeding waits for a one-time state discard".into()
-                }
-                ("cold", Some("seeding-off")) => {
-                    "started empty: this state cannot be shared between checkouts".into()
-                }
                 ("cold", Some("empty-directory")) => {
                     "started empty: this checkout's state directory held no finished session".into()
                 }
                 ("cold", _) => "started empty".into(),
-                ("failed", _) => "seeding failed, so it started empty".into(),
                 (other, _) => other.to_string(),
             };
             let _ = writeln!(out, "{:>7}  {label} ({count})", duration(*duration_ns));

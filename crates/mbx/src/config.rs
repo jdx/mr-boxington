@@ -15,6 +15,7 @@ use usage_config::{EnvLayer, FileLayer, FileScope, Layers};
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_HTTP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_HTTP_READ_STALL_BUDGET: Duration = Duration::from_secs(90);
+const DEFAULT_HTTP_WRITE_STALL_BUDGET: Duration = Duration::from_secs(30);
 const DEFAULT_HTTP_RETRIES: i64 = 3;
 const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// How long a managed target directory may sit unused before collection.
@@ -216,13 +217,7 @@ pub(crate) struct RawConfig {
         default = true
     )]
     _learned_incremental: bool,
-    /// Seed private incremental state from another checkout on rustc 1.98 or later.
-    ///
-    /// Uses `.` as the working directory in debug info and backtrace frames.
-    /// On stable and beta, enables compiler bootstrap only for private-state
-    /// compilations, while still rejecting `#![feature]`. An existing
-    /// `RUSTC_BOOTSTRAP` disables automatic flag injection. A user-supplied
-    /// `-Zremap-cwd-prefix` still enables seeding when this setting is off.
+    /// Has no effect; seeding from other checkouts was removed.
     #[usage(env = "MBX_SEED_INCREMENTAL", default = true)]
     seed_incremental: bool,
     /// Cap on the per-compilation history one build records, or `"none"`.
@@ -739,6 +734,16 @@ struct RawHttp {
     /// `s3://` remote.
     #[usage(env = "MBX_HTTP_READ_STALL_BUDGET", default = "90s", ty = "duration")]
     read_stall_budget: String,
+    /// Wall-clock time a build may lose to failed uploads to a cache server.
+    ///
+    /// Each failed attempt (a timeout, a refused connection, a 5xx) counts
+    /// against it, including the attempts of uploads already in flight. Once it
+    /// is spent, the build stops uploading and finishes without the remote, so
+    /// a server that is down costs about one timeout instead of one per
+    /// uploaded object. `0` keeps uploading however long it takes. Has no
+    /// effect on an `s3://` remote.
+    #[usage(env = "MBX_HTTP_WRITE_STALL_BUDGET", default = "30s", ty = "duration")]
+    write_stall_budget: String,
     /// How many times to retry a remote cache request after a transient failure.
     #[usage(env = "MBX_HTTP_RETRIES", default = 3)]
     retries: i64,
@@ -1007,6 +1012,7 @@ pub struct HttpSettings {
     pub timeout: Duration,
     pub download_timeout: Duration,
     pub read_stall_budget: Duration,
+    pub write_stall_budget: Duration,
     pub retries: i64,
 }
 
@@ -1089,7 +1095,8 @@ pub(crate) struct CliSettings {
     pub plain_output: bool,
     /// Whether a churning crate may compile with its own incremental state.
     pub learned_incremental: bool,
-    pub seed_incremental: bool,
+    pub _seed_incremental: bool,
+    pub retired_seed_setting: bool,
     /// A retired global setting was present; only the CLI reports this notice.
     pub removed_incremental_cap: bool,
     /// Whether natively linked programs may be cached.
@@ -1112,7 +1119,8 @@ impl Default for CliSettings {
             pretty_inspect: false,
             plain_output: false,
             learned_incremental: true,
-            seed_incremental: true,
+            _seed_incremental: true,
+            retired_seed_setting: false,
             removed_incremental_cap: false,
             cache_links: true,
             blaze: false,
@@ -1240,6 +1248,7 @@ impl Default for HttpSettings {
             timeout: DEFAULT_HTTP_TIMEOUT,
             download_timeout: DEFAULT_HTTP_DOWNLOAD_TIMEOUT,
             read_stall_budget: DEFAULT_HTTP_READ_STALL_BUDGET,
+            write_stall_budget: DEFAULT_HTTP_WRITE_STALL_BUDGET,
             retries: DEFAULT_HTTP_RETRIES,
         }
     }
@@ -1254,6 +1263,9 @@ impl Config {
     pub(crate) fn load_for_cli() -> Result<(Self, CliSettings)> {
         let (config, settings) = Self::load_from_environment()?;
         // Compiler shims use load(), so only the outer CLI reports this notice.
+        if settings.retired_seed_setting {
+            log::warn!("seed_incremental has no effect; seeding from other checkouts was removed");
+        }
         if settings.removed_incremental_cap {
             log::warn!(
                 "learned_incremental_max_size was removed and is ignored; use gc.incremental_max_size to bound aggregate state"
@@ -1318,6 +1330,15 @@ impl Config {
         let raw = RawConfig::read(&resolved)?;
         let (config, mut settings) = Self::from_raw_measuring(raw, measure_disk, measure_memory)?;
         settings.removed_incremental_cap = removed_incremental_cap;
+        settings.retired_seed_setting =
+            resolved
+                .origin_key("seed_incremental")
+                .is_some_and(|origin| {
+                    matches!(
+                        origin.kind,
+                        usage_config::SourceKind::FILE | usage_config::SourceKind::ENV
+                    )
+                });
         Ok((config, settings))
     }
 
@@ -1463,6 +1484,8 @@ impl Config {
                 .wrap_err(Invalid("http.download_timeout"))?,
             read_stall_budget: parse_duration(&raw.http.read_stall_budget)
                 .wrap_err(Invalid("http.read_stall_budget"))?,
+            write_stall_budget: parse_duration(&raw.http.write_stall_budget)
+                .wrap_err(Invalid("http.write_stall_budget"))?,
             retries: raw.http.retries,
         };
         let gc = GcSettings {
@@ -1572,7 +1595,8 @@ impl Config {
                 pretty_inspect: raw.pretty_inspect,
                 plain_output: raw.display == "plain",
                 learned_incremental: raw._learned_incremental,
-                seed_incremental: raw.seed_incremental,
+                _seed_incremental: raw.seed_incremental,
+                retired_seed_setting: false,
                 removed_incremental_cap: false,
                 cache_links: raw.cache_links,
                 blaze: raw.blaze,
@@ -3033,22 +3057,39 @@ incremental_max_size = "none"
         assert!(!config.eager_incremental);
     }
 
-    /// On by default: a crate nobody is editing never reaches the threshold, so
-    /// the setting only matters to the one the developer is working in.
+    /// Retired values still parse so existing configuration remains valid.
     #[test]
-    fn seed_incremental_defaults_on_and_respects_config_and_environment() {
-        assert!(configured_for_cli(None, &[]).unwrap().1.seed_incremental);
+    fn retired_seed_incremental_accepts_config_and_environment() {
+        assert!(configured_for_cli(None, &[]).unwrap().1._seed_incremental);
+        assert!(
+            !configured_for_cli(None, &[])
+                .unwrap()
+                .1
+                .retired_seed_setting
+        );
+        assert!(
+            configured_for_cli(Some("seed_incremental = false"), &[])
+                .unwrap()
+                .1
+                .retired_seed_setting
+        );
+        assert!(
+            configured_for_cli(None, &[("MBX_SEED_INCREMENTAL", "0")])
+                .unwrap()
+                .1
+                .retired_seed_setting
+        );
         assert!(
             !configured_for_cli(Some("seed_incremental = false"), &[])
                 .unwrap()
                 .1
-                .seed_incremental
+                ._seed_incremental
         );
         assert!(
             !configured_for_cli(None, &[("MBX_SEED_INCREMENTAL", "0")])
                 .unwrap()
                 .1
-                .seed_incremental
+                ._seed_incremental
         );
         assert!(
             configured_for_cli(
@@ -3057,7 +3098,7 @@ incremental_max_size = "none"
             )
             .unwrap()
             .1
-            .seed_incremental
+            ._seed_incremental
         );
     }
 
@@ -3072,7 +3113,7 @@ incremental_max_size = "none"
                 configured_for_cli(file, &[("MBX_SESSION_SEED_INCREMENTAL", inherited)])
                     .unwrap()
                     .1
-                    .seed_incremental,
+                    ._seed_incremental,
                 expected
             );
         }

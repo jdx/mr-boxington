@@ -11,7 +11,7 @@ normal edit/build loop.
 | --- | --- | --- |
 | Shared cache | Complete matching compiler outputs | Across equivalent builds and checkouts |
 | Learned incremental reuse | Intermediate work from earlier source edits | Private to one checkout |
-| Eager incremental reuse | Private intermediate work seeded on the first compilation | One checkout, locally or in CI |
+| Eager incremental reuse | Private intermediate work saved on the first compilation | One checkout, locally or in CI |
 | Cargo incremental mode | Cargo-managed incremental state | Private to Cargo's target directory |
 
 ## Learned incremental reuse
@@ -26,10 +26,10 @@ compilation as `incremental`.
 mbx does not add incremental state to compiles that use LTO, or to compiles
 optimized at any opt-level above 0 (1, 2, 3, `s`, or `z`). Above opt-level 0,
 rustc runs local ThinLTO across a crate's codegen units, and it rewrites files
-of the previous, finished incremental session in place. A copy taken while that
-happens, or a build interrupted partway, can leave state whose rlibs do not
-link. Cargo compiles opt-level 1 dev profiles incrementally itself; mbx does
-not add to that. In a Cargo profile, `lto = "off"` or `codegen-units = 1` turns local ThinLTO off, so those
+of the previous, finished incremental session in place. A build interrupted
+partway can leave state whose rlibs do not link. Cargo compiles opt-level 1 dev
+profiles incrementally itself; mbx does not add to that. In a Cargo profile,
+`lto = "off"` or `codegen-units = 1` turns local ThinLTO off, so those
 compiles stay eligible at any opt-level. `lto = false`, Cargo's default, does
 not turn it off.
 
@@ -37,69 +37,18 @@ The trigger is a source change, or a changed value of an environment variable
 the crate reads with `env!` or `option_env!`, such as one its build script sets
 with `cargo:rustc-env`. An unchanged crate in a fresh target or a new checkout
 still compiles and publishes normally when it misses the cache. Later source
-edits to a known active workspace crate go directly to its private state,
-without a cache lookup. A changed environment value is looked up first, so a
-value the cache already holds, such as a commit hash another checkout
-published, restores instead of compiling.
+edits to a known active workspace crate look up the cache first and fall back
+to its private state on a miss. Returning to content the cache already holds,
+as after a revert, a rebase onto a cached branch, or a branch switch, restores
+the crate and its dependents instead of recompiling them. The exception is a revert that removes a module the edits added: the cache remembers the crate's most recent input list, which names a file the reverted checkout lacks, so the crate still compiles. A changed environment
+value is looked up the same way, so a value the cache already holds, such as a
+commit hash another checkout published, restores instead of compiling.
 
 Dependents of a crate using private incremental state also keep private state,
 because their inputs contain an artifact other checkouts cannot share. They can
 publish again after the edited crate compiles once more without a source change.
 
-### Start new checkouts warm
-
-With rustc 1.98 or later, mbx seeds private incremental state from another
-checkout by default. When a crate first needs private state, mbx copies the
-most recently used checkout's state for the same crate and flags. Files use
-copy-on-write filesystem clones where supported and plain copies otherwise,
-so a later compile cannot change the donor's session. rustc validates that state
-against the current sources, so the first edit in a new checkout can compile
-incrementally too.
-
-Upgrading from a version that seeded state with hard links discards learned
-incremental state once: those links let one checkout's compiler overwrite
-another checkout's state. A checkout another build is using at that moment is
-discarded at a later build once it is idle. Stop builds running under older mbx
-versions before upgrading, since an older version can still create shared files.
-
-For these compilations only, mbx adds `-Zremap-cwd-prefix=.` and makes paths
-under the checkout relative. Cargo's arguments and shared cache keys stay the
-same. Debug info records `.` as the working directory for crates being edited,
-and backtrace frames show paths such as `./src/lib.rs`. For sources passed by
-absolute path, `file!()` and panic locations also change to that relative path.
-Build-script compilations are not affected. Debuggers started from
-the checkout can find those sources. When starting a debugger elsewhere, map
-that directory to the checkout:
-
-```text
-# gdb
-set substitute-path . /absolute/path/to/checkout
-# lldb
-settings set target.source-map . /absolute/path/to/checkout
-```
-
-On stable and beta compilers, mbx sets `RUSTC_BOOTSTRAP=1` only on the compiler
-processes using this private state. It appends `-Zallow-features=` so that
-`#![feature]` declarations remain rejected. Nightly and dev compilers need
-neither addition. If `RUSTC_BOOTSTRAP` is already set to any value, mbx leaves
-that choice in place and does not add the remap flag. On stable and beta it
-also skips injection when the invocation has any `-Z` flag. If a crate reads
-`RUSTC_BOOTSTRAP` with `env!()` or `option_env!()`, mbx retries without injection
-and remembers that choice for the unit. It checks that the compiler accepts the
-flag before adding it.
-
-To turn off automatic seeding, run:
-
-```sh
-mbx settings set seed_incremental false
-# Or for one build:
-MBX_SEED_INCREMENTAL=0 mbx build
-```
-
-A user-supplied `-Zremap-cwd-prefix` still enables seeding on rustc 1.98 or
-later, even with `seed_incremental` off. mbx keeps its value and does not add a
-second flag or change bootstrap. Earlier compilers keep checkout-specific
-state and do not seed it.
+Each checkout keeps its own incremental state.
 
 ### Where state lives
 
@@ -107,8 +56,7 @@ mbx keeps the state and its records under `incremental/` in the cache
 directory, separately for each checkout. `cargo clean` does not remove this
 state. `mbx clean` and `mbx cache remove` remove it for the selected workspace.
 [Collection](/managed-targets#collection) collects individual compilation units
-across all checkouts. A deleted checkout can still seed a new checkout until
-its units expire or the budget needs their space. Each profile, target kind,
+across all checkouts. Each profile, target kind,
 feature set, or dependency identity can have its own unit. A unit's last use
 is the newest of its last-use stamp, its newest rustc session directory, and,
 when it has no sessions, the unit directory's modification time. The stamp is
@@ -118,22 +66,20 @@ served by the cache on every build does not look idle. While its state is over
 the backstop described below, the stamp records the budget it was rejected
 under, and cache hits stop refreshing it until a compilation accepts the state
 again or the budget changes. Building another unit in the same checkout
-does not refresh old units. Seeding takes state from the checkout whose unit
-was used last.
+does not refresh old units.
 
 A checkout a build is using keeps every unit directory. Collection removes
 only the unit's finished rustc sessions there, each under an exclusive lock on
 the session's own lock file, taken without waiting, the way rustc's own
-session cleanup does. A compiler starting from a session, or a seed copying
-it, holds that lock, and the session stays. Sessions still being written,
-crate directories, churn records, stamps, and seeding staging directories are
+session cleanup does. A compiler starting from a session holds that lock, and the session stays. Sessions still being written,
+crate directories, churn records, stamps are
 left alone. A compiler that starts while its unit's newest session is being
 removed finds no session and compiles that unit from scratch once. Under the
 size budget, units of such a checkout used within the last hour are kept,
 unless they have expired, their state exceeds half the budget, or the disk is
 short of `gc.min_free_size`. In checkouts no build is using, held rustc
-session locks protect a whole unit, including donor leases during seeding.
-New sessions, lock files, and seeding staging directories receive a 60-second
+session locks protect a whole unit.
+New sessions, lock files receive a 60-second
 grace period; stale staging directories can be collected like other units.
 A preview (`mbx gc --dry-run`) takes no rustc lock, so it can count a session a
 real run keeps.
@@ -144,8 +90,6 @@ real run keeps.
 defaults to 5% of the cache disk, between 10 GiB and 100 GiB.
 `gc.incremental_max_age` defaults to 30 days. Collection removes expired units
 first, then remaining units least recently used first until the budget is met.
-Seeded copies have separate inodes and count separately toward this logical
-budget, even when filesystem clones share their data blocks.
 Shared hard-linked files count once across the whole sweep and in
 `mbx cache stats`. A collection credits a file's bytes as freed only when it
 removes the file's last link, whether it removes a whole unit or a session:
@@ -170,9 +114,7 @@ still apply. See [Single cache budget](/configuration#single-cache-budget).
 The former `learned_incremental_max_size` setting is removed; existing config
 files containing it warn and continue. As an internal backstop, a learned unit
 whose existing state exceeds half the resolved aggregate incremental budget,
-counting each hard-linked file once as collection does, takes the shared compilation path for that compile without seeding from a
-donor. Otherwise, eligible units can seed before compiling with private
-state. Existing oversized state remains for GC;
+counting each hard-linked file once as collection does, takes the shared compilation path for that compile without private state. Existing oversized state remains for GC;
 with no aggregate budget, this backstop is disabled.
 
 ## Eager incremental reuse
@@ -257,7 +199,7 @@ enabled; see [Overrides and CI](#overrides-and-ci).
 - `MBX_LEARNED_INCREMENTAL=0` disables learned incremental reuse.
 - `MBX_INCREMENTAL=1` hands incremental control to Cargo unless eager
   incremental reuse is enabled.
-- `MBX_EAGER_INCREMENTAL=1` takes precedence over both policies and seeds
+- `MBX_EAGER_INCREMENTAL=1` takes precedence over both policies and saves
   private workspace state from the first compilation, locally or in CI.
 - `MBX_VERIFY=1` disables learned and eager incremental reuse for the build
   being verified.

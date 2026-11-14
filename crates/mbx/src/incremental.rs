@@ -80,7 +80,7 @@ fn discard_pre_copy_state(root: &Path) -> Result<()> {
             };
             // Save the original set before renaming anything. After a crash,
             // newly created checkouts must not become migration candidates.
-            crate::util::write_atomic(&root.join(EPOCH_FILE), &serde_json::to_vec(&state)?)?;
+            crate::util::write_atomic_shared(&root.join(EPOCH_FILE), &serde_json::to_vec(&state)?)?;
             state
         }
     };
@@ -131,7 +131,7 @@ fn discard_pre_copy_state(root: &Path) -> Result<()> {
             }
         }
     }
-    crate::util::write_atomic(
+    crate::util::write_atomic_shared(
         &root.join(EPOCH_FILE),
         &serde_json::to_vec(&StateEpoch { pending, ..state })?,
     )?;
@@ -274,7 +274,7 @@ pub(crate) fn workspaces(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// Collect expired units, then units in least-recently-used order.
-/// Deleted checkouts remain donors until their last unit is collected.
+/// Deleted checkouts remain recorded until their last unit is collected.
 ///
 /// A unit of a live checkout keeps its directory: only its finished rustc
 /// sessions go, each under rustc's own lock (see [`evict_session`]). With
@@ -384,7 +384,7 @@ fn collect_with_retire_and_unlink(
             break;
         }
         let entry = &entries[index];
-        // seed() holds the donor's checkout lease while linking its sessions.
+        // Checkout leases protect state while a build is using it.
         let guard = match deletion_guard(root, &entry.key, !dry_run) {
             Ok(guard) => guard,
             Err(error) => {
@@ -412,12 +412,7 @@ fn collect_with_retire_and_unlink(
                 continue;
             }
             let mut evicted = false;
-            // A staging directory is a seed's, not rustc's.
-            for session in unit
-                .sessions
-                .iter()
-                .filter(|_| !is_seeding(&unit.directory))
-            {
+            for session in &unit.sessions {
                 if satisfied(unit, inodes.bytes) {
                     break;
                 }
@@ -432,7 +427,7 @@ fn collect_with_retire_and_unlink(
                 }
                 // Bytes are credited only for files whose last link went,
                 // inside `evict_session`. A file another owner holds, or that
-                // a compile or seed linked after the snapshot, is still on
+                // a compile linked after the snapshot, is still on
                 // disk however many measured owners it has left.
                 match evict_session(session, &mut inodes) {
                     Some(true) => {
@@ -558,7 +553,7 @@ fn collect_with_retire_and_unlink(
         }
     }
     // Only empty, deleted checkouts lose their bookkeeping. An abandoned
-    // checkout with usable units is still a donor, regardless of its path.
+    // checkout with usable units is still counted, regardless of its path.
     for (index, entry) in entries.iter().enumerate() {
         let Some(workspace) = &entry.workspace_root else {
             continue;
@@ -847,7 +842,8 @@ fn last_used(directory: &Path) -> Option<u64> {
     if !metadata.is_dir() {
         return None;
     }
-    let stamp = (!is_seeding(directory))
+    // A leftover staging directory's stamp path is its destination unit's.
+    let stamp = (!is_leftover_staging(directory))
         .then(|| std::fs::metadata(use_stamp_path(directory)).ok())
         .flatten()
         .and_then(|stamp| stamp.modified().ok());
@@ -918,9 +914,9 @@ fn finished_sessions(unit: &Path) -> Vec<(PathBuf, PathBuf)> {
 
 fn measure_unit(directory: PathBuf, inodes: &mut Inodes) -> Option<Unit> {
     let last_used = last_used(&directory)?;
-    // A staging name has a dot before seeding; with_extension would otherwise
-    // point at the destination unit's churn record and stamp.
-    let records = if is_seeding(&directory) {
+    // A leftover staging directory's adjacent records are its destination
+    // unit's, so do not collect them.
+    let records = if is_leftover_staging(&directory) {
         Vec::new()
     } else {
         vec![directory.with_extension("json"), use_stamp_path(&directory)]
@@ -999,6 +995,15 @@ fn use_stamp_path(unit: &Path) -> PathBuf {
     unit.with_extension(USE_STAMP_EXTENSION)
 }
 
+/// A `<unit>.seeding-<pid>` directory that an mbx version which seeded state
+/// from other checkouts left behind. `with_extension` maps its name to the
+/// destination unit's records and stamp.
+fn is_leftover_staging(directory: &Path) -> bool {
+    directory
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().contains(".seeding-"))
+}
+
 fn rejection(budget: u64) -> Vec<u8> {
     format!("r {budget}").into_bytes()
 }
@@ -1072,21 +1077,6 @@ pub(crate) fn clear_rejection(unit: &Path) {
 /// the unit is in use. Never wait for a compiler while collecting.
 fn unit_locks(directory: &Path, dry_run: bool) -> Result<Option<Vec<fslock::LockFile>>> {
     let now = now_secs();
-    // seed() builds <unit>.seeding-<pid> before its atomic rename. Protect a
-    // newly started copy even before it has created its first session.
-    if is_seeding(directory)
-        && std::fs::metadata(directory)
-            .and_then(|metadata| metadata.modified())
-            .is_ok_and(|mtime| {
-                now.saturating_sub(
-                    mtime
-                        .duration_since(UNIX_EPOCH)
-                        .map_or(now, |time| time.as_secs()),
-                ) <= SESSION_START_GRACE_SECS
-            })
-    {
-        return Ok(None);
-    }
     let mut paths = Vec::new();
     let mut pending = vec![directory.to_path_buf()];
     while let Some(directory) = pending.pop() {
@@ -1191,12 +1181,12 @@ fn session_is_settled(session: &Session, now: u64) -> bool {
 
 /// Remove one finished session of a live checkout the way rustc's own
 /// collector does: only under an exclusive lock on its lock file, taken
-/// without waiting. A compiler starting from the session, or a seed copying
+/// without waiting. A compiler starting from the session, or a compiler reusing
 /// it, holds that lock shared, and the session is kept.
 ///
 /// Under the lock, the session is first renamed to the unfinished name rustc
 /// gives a session it is writing, so if removal stops halfway no compiler or
-/// seed ever starts from what is left; rustc collects such a directory once
+/// compiler ever starts from what is left; rustc collects such a directory once
 /// its lock is free. The lock file goes once the session has.
 ///
 /// Returns `None` when the session was kept, and otherwise whether it is
@@ -1301,7 +1291,7 @@ fn remove_workspace_with_unlink(
     Ok(RemoveOutcome::Removed(bytes))
 }
 
-/// Restore under the registrar before a failed unlink can expose a donor.
+/// Restore under the registrar before a failed unlink can expose state.
 fn restore_retired_checkout(
     tree: &RetiredTree,
     live: &Path,
@@ -1317,7 +1307,7 @@ fn restore_retired_checkout(
 }
 
 /// Remove the record under the registrar so older binaries cannot discover
-/// the retired checkout as a seed donor, even though they scan its name.
+/// the retired checkout as usable state, even though they scan its name.
 fn unlink_retired_checkout_record(
     tree: &RetiredTree,
     inodes: Option<&mut Inodes>,
@@ -1415,12 +1405,6 @@ fn entries(root: &Path, include_retired: bool) -> Result<Snapshot> {
     Ok(snapshot)
 }
 
-fn is_seeding(directory: &Path) -> bool {
-    directory
-        .file_name()
-        .is_some_and(|name| name.to_string_lossy().contains(".seeding-"))
-}
-
 fn checkout_key(workspace_root: &Path) -> String {
     CacheDigest::blake3(workspace_root.as_os_str().as_encoded_bytes()).hash[..16].to_string()
 }
@@ -1467,7 +1451,7 @@ fn acquire_lease(root: &Path, key: &str) -> Result<ActiveLease> {
 ///
 /// The build's lease protects the checkout only while the build runs. Ours
 /// keeps `mbx clean` or `mbx cache remove` from removing the checkout, and a
-/// new build from reseeding it under the same session names, between or
+/// new build from recreating it under the same session names, between or
 /// during the evictions of its units. Leases are per process, so builds are
 /// not held up; later units of the checkout count as live for this sweep.
 fn lease_for_trimming(
@@ -1556,132 +1540,6 @@ fn cleanup_lock_dir(locks: &Path) {
     let _ = std::fs::remove_dir(locks);
 }
 
-/// What seeding did for one unit directory.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum SeedOutcome {
-    /// State was copied from another checkout.
-    Seeded(SeedReport),
-    /// No other checkout had finished state for the unit.
-    NoDonor,
-    /// The one-time copy epoch is not complete, so seeding stays off.
-    NotReady,
-}
-
-/// Where seeded state came from, and what copying it cost.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct SeedReport {
-    pub(crate) donor_workspace: PathBuf,
-    /// Files and bytes actually copied into this checkout, counting only the
-    /// donor that succeeded.
-    pub(crate) files: u64,
-    pub(crate) bytes: u64,
-    /// Time from starting this donor's copy through its rename, in nanoseconds.
-    pub(crate) duration_ns: u64,
-}
-
-/// Copy the other checkout's state for one unit used most recently into
-/// `checkout`, under the same unit name. Returns where the state came from
-/// and what was copied, or why there was nothing to copy.
-///
-/// Only worth doing for a compilation whose state does not depend on where
-/// the checkout lives (`-Zremap-cwd-prefix`): rustc ignores state recorded
-/// under another working directory. The unit's name is the digest of its
-/// path-normalized invocation, so it is the same in every checkout of the
-/// project, and rustc validates whatever it inherits against the sources it
-/// compiles, as it does after any edit.
-///
-/// The donor holds a lease while it is read, so collection cannot remove it
-/// halfway, and each session it copies is locked the way rustc locks it, so
-/// the donor's own compiler cannot remove that either. A session the donor's
-/// compiler is still writing, or may be removing, is left out. The copy is
-/// made beside its final name and renamed into place, so an interrupted copy
-/// leaves no partial state; a donor that cannot be copied gives way to the
-/// next.
-///
-/// Files are independent copies, using a filesystem clone where supported.
-/// rustc can rewrite inherited files in place (including ThinLTO bitcode),
-/// so hard links would let a later compilation change the donor's session.
-pub(crate) fn seed(checkout: &Path, unit: &str) -> Result<SeedOutcome> {
-    let (Some(root), Some(own)) = (checkout.parent(), checkout.file_name()) else {
-        return Ok(SeedOutcome::NoDonor);
-    };
-    if !copy_state_ready(root) {
-        return Ok(SeedOutcome::NotReady);
-    }
-    let mut donors = Vec::new();
-    for entry in std::fs::read_dir(root)?.flatten() {
-        let name = entry.file_name();
-        if name == own
-            || name == LOCKS_DIR
-            || retired::is_retired_name(&name)
-            || !entry.path().join(unit).is_dir()
-        {
-            continue;
-        }
-        if let Some(record) = read_record(&entry.path().join(RECORD_FILE)) {
-            let used = last_used(&entry.path().join(unit)).unwrap_or_default();
-            donors.push((used, record.updated_secs, name, record.workspace_root));
-        }
-    }
-    // The donor whose state for this unit was used last is likeliest to be
-    // close to this checkout's sources. Ties, as with coarse timestamps, go
-    // to the checkout built last, then by name, so the choice is stable.
-    donors.sort_by(|a, b| (b.0, b.1, &a.2).cmp(&(a.0, a.1, &b.2)));
-    let destination = checkout.join(unit);
-    let mut failure = None;
-    for (_, _, name, workspace_root) in donors {
-        let Some(key) = name.to_str() else {
-            continue;
-        };
-        let _lease = acquire_lease(root, key)?;
-        let source = root.join(key).join(unit);
-        if !holds_finished_session(&source) {
-            continue;
-        }
-        let mut staging = destination.clone().into_os_string();
-        staging.push(format!(".seeding-{}", std::process::id()));
-        let staging = PathBuf::from(staging);
-        let mut held = Vec::new();
-        let started = std::time::Instant::now();
-        let mut counts = CopyCounts::default();
-        let copied = destination
-            .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| copy_state(&source, &staging, &mut held, &mut counts));
-        // Every session the donor's compiler could have been removing was
-        // skipped, so there may be nothing left to start from.
-        let copied = copied.and_then(|()| {
-            if holds_finished_session(&staging) {
-                std::fs::rename(&staging, &destination).map(|()| true)
-            } else {
-                Ok(false)
-            }
-        });
-        drop(held);
-        match copied {
-            Ok(true) => {
-                return Ok(SeedOutcome::Seeded(SeedReport {
-                    donor_workspace: workspace_root,
-                    files: counts.files,
-                    bytes: counts.bytes,
-                    duration_ns: started.elapsed().as_nanos().try_into().unwrap_or(u64::MAX),
-                }));
-            }
-            Ok(false) => {
-                let _ = std::fs::remove_dir_all(&staging);
-            }
-            Err(error) => {
-                let _ = std::fs::remove_dir_all(&staging);
-                failure = Some(eyre::Report::from(error).wrap_err(format!(
-                    "failed to copy incremental state from {}",
-                    workspace_root.display()
-                )));
-            }
-        }
-    }
-    failure.map_or(Ok(SeedOutcome::NoDonor), Err)
-}
-
 /// rustc names a session it is still writing `s-<time>-<random>-working`,
 /// and renames it once the compilation finishes.
 fn is_unfinished_session(name: &std::ffi::OsStr) -> bool {
@@ -1714,136 +1572,6 @@ fn session_lock_name(session: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
     let name = session.to_str()?;
     let (end, _) = name.match_indices('-').nth(2)?;
     Some(format!("{}.lock", &name[..end]).into())
-}
-
-/// Hold a shared lock on a finished session's lock file, as a reader.
-///
-/// rustc removes a superseded session only after it takes that lock
-/// exclusively, so a session locked here cannot disappear while it is being
-/// copied. A session whose lock is taken, or that has no lock file, may be
-/// going away and is left out. rustc locks through the same primitive as
-/// `File::try_lock_shared`.
-fn lock_session(lock: &Path) -> Option<std::fs::File> {
-    let lock = std::fs::File::open(lock).ok()?;
-    lock.try_lock_shared().ok()?;
-    Some(lock)
-}
-
-/// Copy one unit's state: `<unit>/<crate>-<hash>/<session>`. Sessions are
-/// only ever directly inside a crate's directory, which is the only level
-/// where they are treated as such: a crate may be named `s`.
-fn copy_state(
-    unit: &Path,
-    destination: &Path,
-    held: &mut Vec<std::fs::File>,
-    counts: &mut CopyCounts,
-) -> std::io::Result<()> {
-    std::fs::create_dir(destination)?;
-    for entry in std::fs::read_dir(unit)? {
-        let entry = entry?;
-        let to = destination.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_crate_state(&entry.path(), &to, held, counts)?;
-        } else {
-            counts.add(copy_file(&entry.path(), &to)?);
-        }
-    }
-    Ok(())
-}
-
-/// Copy a crate's finished sessions, holding each one's lock, and the lock
-/// files of the sessions copied.
-fn copy_crate_state(
-    krate: &Path,
-    destination: &Path,
-    held: &mut Vec<std::fs::File>,
-    counts: &mut CopyCounts,
-) -> std::io::Result<()> {
-    std::fs::create_dir(destination)?;
-    let mut entries = Vec::new();
-    for entry in std::fs::read_dir(krate)? {
-        let entry = entry?;
-        entries.push((entry.file_name(), entry.path(), entry.file_type()?));
-    }
-    // Lock every finished session first, so the lock files of the sessions
-    // left out are left out too.
-    let mut skipped = HashSet::new();
-    for (name, path, kind) in &entries {
-        if !kind.is_dir() {
-            continue;
-        }
-        let lock_name = session_lock_name(name);
-        let lock = lock_name
-            .as_ref()
-            .filter(|_| !is_unfinished_session(name))
-            .and_then(|lock_name| lock_session(&path.with_file_name(lock_name)));
-        match lock {
-            Some(lock) => held.push(lock),
-            None => {
-                skipped.extend(lock_name);
-                skipped.insert(name.clone());
-            }
-        }
-    }
-    for (name, from, kind) in &entries {
-        if skipped.contains(name) {
-            continue;
-        }
-        let to = destination.join(name);
-        if kind.is_dir() {
-            copy_tree(from, &to, counts)?;
-        } else if kind.is_file() {
-            counts.add(copy_file(from, &to)?);
-        }
-    }
-    Ok(())
-}
-
-/// What a seeding copy has written so far.
-#[derive(Default)]
-struct CopyCounts {
-    files: u64,
-    bytes: u64,
-}
-
-impl CopyCounts {
-    fn add(&mut self, bytes: u64) {
-        self.files = self.files.saturating_add(1);
-        self.bytes = self.bytes.saturating_add(bytes);
-    }
-}
-
-/// Copy a finished session's files as they are.
-fn copy_tree(source: &Path, destination: &Path, counts: &mut CopyCounts) -> std::io::Result<()> {
-    std::fs::create_dir(destination)?;
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        let to = destination.join(entry.file_name());
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            copy_tree(&entry.path(), &to, counts)?;
-        } else if kind.is_file() {
-            counts.add(copy_file(&entry.path(), &to)?);
-        }
-    }
-    Ok(())
-}
-
-/// Copy a state file without sharing its inode with the donor. The enclosing
-/// staging directory keeps partial copies out of rustc's session search.
-fn copy_file(from: &Path, to: &Path) -> std::io::Result<u64> {
-    let metadata = std::fs::metadata(from)?;
-    let modified = metadata.modified()?;
-    let bytes = metadata.len();
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    reflink_copy::reflink_or_copy(from, to)?;
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    std::fs::copy(from, to)?;
-    // rustc selects sessions by the timestamp in their name, but keep the
-    // original mtime too, independent of the platform's copy implementation.
-    crate::materialize::set_modified(to, modified)
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
-    Ok(bytes)
 }
 
 fn read_record(path: &Path) -> Option<CheckoutRecord> {
@@ -1986,34 +1714,67 @@ pub(crate) fn tree_bytes(root: &Path) -> u64 {
 mod tests {
     use super::*;
 
-    /// The checkout a seed copied from. Its counts must describe exactly what
-    /// landed in `destination`, however long the copy took.
-    fn seeded_from(outcome: SeedOutcome, destination: Option<&Path>) -> PathBuf {
-        let SeedOutcome::Seeded(report) = outcome else {
-            panic!("expected seeded state, got {outcome:?}");
-        };
-        if let Some(destination) = destination {
-            fn walk(path: &Path, files: &mut u64, bytes: &mut u64) {
-                for entry in std::fs::read_dir(path).unwrap().flatten() {
-                    let metadata = entry.metadata().unwrap();
-                    if metadata.is_dir() {
-                        walk(&entry.path(), files, bytes);
-                    } else {
-                        *files += 1;
-                        *bytes += metadata.len();
-                    }
-                }
-            }
-            let (mut files, mut bytes) = (0, 0);
-            walk(destination, &mut files, &mut bytes);
-            assert!(
-                files > 0,
-                "nothing was copied into {}",
-                destination.display()
-            );
-            assert_eq!((report.files, report.bytes), (files, bytes));
-        }
-        report.donor_workspace
+    #[test]
+    fn retired_checkouts_and_units_are_hidden_and_swept() {
+        let cache = tempfile::tempdir().unwrap();
+        let unit = "blake3/0123456789";
+        let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
+        let donor = checkout_with_sessions(cache.path(), "donor", 20, unit, &["s-2-b-finished"]);
+        let retired = donor.with_file_name("donor.retired-123-leftover");
+        std::fs::rename(&donor, &retired).unwrap();
+        let nested = own.join("blake3/unused.retired-123-leftover");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("state"), b"nested").unwrap();
+        let bytes = tree_bytes(&retired) + tree_bytes(&nested);
+        assert_eq!(stats(cache.path()).unwrap().directories, 1);
+        assert_eq!(stats(cache.path()).unwrap().units, 0);
+        assert_eq!(
+            workspaces(cache.path()).unwrap(),
+            [PathBuf::from("/work/own")]
+        );
+        collect(cache.path(), None, None, true, false, None).unwrap();
+        assert!(retired.exists());
+        assert!(nested.exists());
+        let outcome = collect(cache.path(), None, None, false, false, None).unwrap();
+        assert!(outcome.removed_bytes >= bytes);
+        assert!(!retired.exists());
+        assert!(!nested.exists());
+    }
+
+    #[test]
+    fn upgrading_defers_active_checkouts_and_never_discards_new_ones() {
+        let cache = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let unit = "blake3/0123456789";
+        let busy = checkout_with_sessions(cache.path(), "busy", 20, unit, &["s-2-b-finished"]);
+        checkout_with_sessions(cache.path(), "idle", 10, unit, &["s-1-a-finished"]);
+        std::fs::remove_file(cache.path().join(EPOCH_FILE)).unwrap();
+        let lease = acquire_lease(cache.path(), "busy").unwrap();
+        assert!(deletion_guard(cache.path(), "busy", false).unwrap().active);
+        let _checkout = touch(cache.path(), workspace.path()).unwrap();
+        assert_eq!(read_epoch(cache.path()).unwrap().pending, ["busy"]);
+        assert!(busy.exists());
+        assert!(!cache.path().join("idle").exists());
+
+        let fresh_workspace = tempfile::tempdir().unwrap();
+        let fresh = touch(cache.path(), fresh_workspace.path()).unwrap();
+        let session = fresh
+            .directory
+            .join(unit)
+            .join("widget-0abc/s-3-c-finished");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join("dep-graph.bin"), b"fresh state").unwrap();
+        std::fs::write(session.with_file_name("s-3-c.lock"), b"").unwrap();
+        drop(fresh);
+        let _again = touch(cache.path(), workspace.path()).unwrap();
+        assert!(session.exists());
+        assert_eq!(read_epoch(cache.path()).unwrap().pending, ["busy"]);
+        drop(lease);
+        let _last = touch(cache.path(), workspace.path()).unwrap();
+        assert!(!busy.exists());
+        assert!(session.exists());
+        assert!(copy_state_ready(cache.path()));
+        assert!(!lock_dir(cache.path(), "busy").exists());
     }
 
     #[test]
@@ -2104,7 +1865,7 @@ mod tests {
         let kept = collect(cache.path(), None, None, false, true, None).unwrap();
         assert_eq!(
             kept.removed_directories, 0,
-            "a new checkout may seed from it"
+            "its state remains available until collection"
         );
         assert!(directory.exists());
 
@@ -2529,6 +2290,42 @@ mod tests {
     }
 
     #[test]
+    fn leftover_staging_ages_on_its_own_and_leaves_its_destinations_records() {
+        let cache = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let state = touch(cache.path(), workspace.path()).unwrap();
+        let destination = unit(&state.directory, "unit", now_secs());
+        let staging = state.directory.join("blake3/unit.seeding-123");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("partial"), b"partial").unwrap();
+        set_mtime(&staging, 0);
+        let stamp = use_stamp_path(&staging);
+        assert_eq!(stamp, use_stamp_path(&destination));
+        std::fs::write(&stamp, b"").unwrap();
+        let churn = destination.with_extension("json");
+        std::fs::write(&churn, b"destination churn").unwrap();
+        assert_eq!(
+            last_used(&staging),
+            Some(0),
+            "the destination's fresh stamp does not keep the staging directory"
+        );
+        drop(state.lease);
+        let outcome = collect(
+            cache.path(),
+            None,
+            Some(Duration::from_secs(60)),
+            false,
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(outcome.removed_units, 1);
+        assert_eq!(outcome.removed_bytes, 7);
+        assert!(!staging.exists());
+        assert!(destination.exists() && stamp.exists() && churn.exists());
+    }
+
+    #[test]
     fn a_stamp_goes_with_its_unit_and_an_orphan_on_its_own() {
         let cache = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
@@ -2624,7 +2421,7 @@ mod tests {
         let directory = unit_with_sessions(&state.directory, "unit", &[("s-1-a-old", 10)]);
         let session = directory.join("widget-0abc/s-1-a-old");
         set_mtime(&session, 0);
-        // A link the snapshot never measured, as when a compile or a seed
+        // A link the snapshot never measured, as when a compile
         // links the file after collection listed the unit.
         let elsewhere = tempfile::tempdir().unwrap();
         let kept = elsewhere.path().join("still-linked.bin");
@@ -2716,7 +2513,7 @@ mod tests {
         let stamp = use_stamp_path(&directory);
         std::fs::write(&stamp, b"").unwrap();
         set_mtime(&stamp, 0);
-        // A starting compiler, or a seed, copying the older session.
+        // A starting compiler reusing the older session.
         let reader = lock_shared(&krate.join("s-1-a.lock"));
 
         let preview = collect(cache.path(), Some(0), None, true, true, Some(0)).unwrap();
@@ -2820,7 +2617,7 @@ mod tests {
         let idle_state = touch(cache.path(), idle.path()).unwrap();
         let idle_unit = unit(&idle_state.directory, "unit", 10);
         drop(idle_state.lease);
-        // A seed linked the idle unit's file into the live one.
+        // A compiler linked the idle unit's file into the live one.
         let shared = session_unit.join("widget-0abc/s-1-a-x/dep-graph.bin");
         let linked = idle_unit.join("crate-id/s-session/dep-graph.bin");
         std::fs::remove_file(&linked).unwrap();
@@ -3212,7 +3009,7 @@ mod tests {
     }
 
     #[test]
-    fn a_seed_donors_lease_protects_its_units_after_the_workspace_is_deleted() {
+    fn a_checkout_lease_protects_its_units_after_the_workspace_is_deleted() {
         let cache = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let key = checkout_key(workspace.path());
@@ -3234,34 +3031,6 @@ mod tests {
                 .unwrap()
                 .removed_directories,
             1
-        );
-    }
-
-    #[test]
-    fn fresh_seeding_staging_is_protected_and_stale_staging_is_collected() {
-        let cache = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        let state = touch(cache.path(), workspace.path()).unwrap();
-        let staging = state.directory.join("blake3/unit.seeding-123");
-        std::fs::create_dir_all(&staging).unwrap();
-        std::fs::write(staging.join("partial"), b"partial").unwrap();
-        let churn = state.directory.join("blake3/unit.json");
-        std::fs::write(&churn, b"destination churn").unwrap();
-        drop(state.lease);
-        for dry_run in [true, false] {
-            let outcome = collect(cache.path(), Some(0), None, dry_run, true, Some(0)).unwrap();
-            assert_eq!(outcome.removed_units, 0);
-            assert_eq!(outcome.skipped_active_units, 1);
-            assert!(staging.exists());
-        }
-        filetime::set_file_mtime(&staging, filetime::FileTime::from_unix_time(0, 0)).unwrap();
-        let outcome = collect(cache.path(), Some(0), None, false, true, Some(0)).unwrap();
-        assert_eq!(outcome.removed_units, 1);
-        assert_eq!(outcome.removed_bytes, 7);
-        assert!(!staging.exists());
-        assert!(
-            churn.exists(),
-            "staging must not own the destination's churn record"
         );
     }
 
@@ -3427,34 +3196,6 @@ mod tests {
             error.source().is_some(),
             "retain the rename error as a cause"
         );
-    }
-
-    #[test]
-    fn retired_checkouts_and_units_are_hidden_and_swept() {
-        let cache = tempfile::tempdir().unwrap();
-        let unit = "blake3/0123456789";
-        let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
-        let donor = checkout_with_sessions(cache.path(), "donor", 20, unit, &["s-2-b-finished"]);
-        let retired = donor.with_file_name("donor.retired-123-leftover");
-        std::fs::rename(&donor, &retired).unwrap();
-        let nested = own.join("blake3/unused.retired-123-leftover");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(nested.join("state"), b"nested").unwrap();
-        let bytes = tree_bytes(&retired) + tree_bytes(&nested);
-        assert_eq!(stats(cache.path()).unwrap().directories, 1);
-        assert_eq!(stats(cache.path()).unwrap().units, 0);
-        assert_eq!(
-            workspaces(cache.path()).unwrap(),
-            [PathBuf::from("/work/own")]
-        );
-        assert_eq!(seed(&own, unit).unwrap(), SeedOutcome::NoDonor);
-        collect(cache.path(), None, None, true, false, None).unwrap();
-        assert!(retired.exists());
-        assert!(nested.exists());
-        let outcome = collect(cache.path(), None, None, false, false, None).unwrap();
-        assert!(outcome.removed_bytes >= bytes);
-        assert!(!retired.exists());
-        assert!(!nested.exists());
     }
 
     #[test]
@@ -3664,61 +3405,6 @@ mod tests {
     }
 
     #[test]
-    fn upgrading_defers_active_checkouts_and_never_discards_new_ones() {
-        let cache = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        let unit = "blake3/0123456789";
-        let busy = checkout_with_sessions(cache.path(), "busy", 20, unit, &["s-2-b-finished"]);
-        checkout_with_sessions(cache.path(), "idle", 10, unit, &["s-1-a-finished"]);
-        std::fs::remove_file(cache.path().join(EPOCH_FILE)).unwrap();
-        let lease = acquire_lease(cache.path(), "busy").unwrap();
-        assert!(deletion_guard(cache.path(), "busy", false).unwrap().active);
-        let checkout = touch(cache.path(), workspace.path()).unwrap();
-        assert_eq!(read_epoch(cache.path()).unwrap().pending, ["busy"]);
-        assert!(busy.exists());
-        assert!(!cache.path().join("idle").exists());
-        assert_eq!(
-            seed(&checkout.directory, unit).unwrap(),
-            SeedOutcome::NotReady
-        );
-
-        let fresh_workspace = tempfile::tempdir().unwrap();
-        let fresh = touch(cache.path(), fresh_workspace.path()).unwrap();
-        let session = fresh
-            .directory
-            .join(unit)
-            .join("widget-0abc/s-3-c-finished");
-        std::fs::create_dir_all(&session).unwrap();
-        std::fs::write(session.join("dep-graph.bin"), b"fresh state").unwrap();
-        std::fs::write(session.with_file_name("s-3-c.lock"), b"").unwrap();
-        drop(fresh);
-        let again = touch(cache.path(), workspace.path()).unwrap();
-        assert!(session.exists());
-        assert_eq!(read_epoch(cache.path()).unwrap().pending, ["busy"]);
-        assert_eq!(seed(&again.directory, unit).unwrap(), SeedOutcome::NotReady);
-        drop(lease);
-        let _last = touch(cache.path(), workspace.path()).unwrap();
-        assert!(!busy.exists());
-        assert!(session.exists());
-        assert!(copy_state_ready(cache.path()));
-        assert!(matches!(
-            seed(&checkout.directory, unit).unwrap(),
-            SeedOutcome::Seeded(report) if report.donor_workspace == fresh_workspace.path()
-        ));
-        assert_eq!(
-            std::fs::read(
-                checkout
-                    .directory
-                    .join(unit)
-                    .join("widget-0abc/s-3-c-finished/dep-graph.bin")
-            )
-            .unwrap(),
-            b"fresh state"
-        );
-        assert!(!lock_dir(cache.path(), "busy").exists());
-    }
-
-    #[test]
     fn fresh_roots_record_the_copy_epoch_without_retiring_anything() {
         let cache = tempfile::tempdir().unwrap();
         let root = cache.path().join("incremental");
@@ -3734,273 +3420,5 @@ mod tests {
         let outcome = collect(&root, None, None, false, false, None).unwrap();
         assert_eq!(outcome.remaining_directories, 1);
         assert_eq!(outcome.removed_bytes, 0);
-    }
-
-    #[test]
-    fn seeding_waits_for_a_readable_complete_copy_epoch() {
-        let cache = tempfile::tempdir().unwrap();
-        let unit = "blake3/0123456789";
-        let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
-        checkout_with_sessions(cache.path(), "donor", 20, unit, &["s-2-b-finished"]);
-        std::fs::remove_file(cache.path().join(EPOCH_FILE)).unwrap();
-        assert_eq!(seed(&own, unit).unwrap(), SeedOutcome::NotReady);
-        for content in [
-            "invalid JSON",
-            r#"{"epoch":0,"pending":[]}"#,
-            r#"{"epoch":1,"pending":["donor"]}"#,
-        ] {
-            std::fs::write(cache.path().join(EPOCH_FILE), content).unwrap();
-            assert_eq!(seed(&own, unit).unwrap(), SeedOutcome::NotReady);
-        }
-        std::fs::write(
-            cache.path().join(EPOCH_FILE),
-            br#"{"epoch":2,"pending":[]}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            seeded_from(seed(&own, unit).unwrap(), Some(&own.join(unit))),
-            PathBuf::from("/work/donor")
-        );
-    }
-
-    #[test]
-    fn seeding_copies_the_newest_finished_state_of_another_checkout() {
-        let cache = tempfile::tempdir().unwrap();
-        let unit = "blake3/0123456789";
-        let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
-        checkout_with_sessions(cache.path(), "older", 10, unit, &["s-1-a-finished"]);
-        checkout_with_sessions(cache.path(), "newer", 20, unit, &["s-2-b-finished"]);
-        // The most recent, but its compiler is still writing its only session.
-        checkout_with_sessions(cache.path(), "busy", 30, unit, &["s-3-c-working"]);
-        checkout_with_sessions(
-            cache.path(),
-            "other",
-            50,
-            "blake3/9876543210",
-            &["s-4-d-done"],
-        );
-
-        let SeedOutcome::Seeded(report) = seed(&own, unit).unwrap() else {
-            panic!("expected seeded outcome")
-        };
-
-        assert_eq!(report.donor_workspace, PathBuf::from("/work/newer"));
-        assert_eq!(report.files, 2);
-        assert_eq!(report.bytes, 5);
-        assert!(report.duration_ns > 0);
-        let copied = own.join(unit).join("widget-0abc");
-        assert_eq!(
-            std::fs::read_to_string(copied.join("s-2-b-finished/dep-graph.bin")).unwrap(),
-            "newer"
-        );
-        // One session, and its lock file.
-        assert_eq!(std::fs::read_dir(&copied).unwrap().count(), 2);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            let donor = cache.path().join("newer").join(unit).join("widget-0abc");
-            let inode = |path: &Path| std::fs::metadata(path).unwrap().ino();
-            assert_ne!(
-                inode(&copied.join("s-2-b-finished/dep-graph.bin")),
-                inode(&donor.join("s-2-b-finished/dep-graph.bin")),
-                "state files must have independent inodes"
-            );
-            assert_ne!(
-                inode(&copied.join("s-2-b.lock")),
-                inode(&donor.join("s-2-b.lock")),
-                "lock files are not shared"
-            );
-        }
-        let original = cache
-            .path()
-            .join("newer")
-            .join(unit)
-            .join("widget-0abc/s-2-b-finished/dep-graph.bin");
-        let copy = copied.join("s-2-b-finished/dep-graph.bin");
-        assert_eq!(
-            std::fs::metadata(&original).unwrap().modified().unwrap(),
-            std::fs::metadata(&copy).unwrap().modified().unwrap()
-        );
-        // Model rustc truncating and rewriting an inherited session file.
-        std::fs::write(&copy, b"rewritten by recipient").unwrap();
-        assert_eq!(std::fs::read(&original).unwrap(), b"newer");
-        assert_eq!(
-            std::fs::read_dir(own.join("blake3")).unwrap().count(),
-            1,
-            "no staging directory is left behind"
-        );
-    }
-
-    #[test]
-    fn seeding_prefers_the_donor_whose_unit_was_used_last() {
-        let cache = tempfile::tempdir().unwrap();
-        let unit = "blake3/0123456789";
-        let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
-        // Its checkout record is newer, but its state for this unit is older.
-        checkout_with_sessions(cache.path(), "recorded", 30, unit, &["s-1-a-finished"]);
-        let hit = checkout_with_sessions(cache.path(), "hit", 10, unit, &["s-2-b-finished"]);
-        let stamp = use_stamp_path(&hit.join(unit));
-        std::fs::write(&stamp, b"").unwrap();
-        set_mtime(&stamp, 35);
-
-        assert_eq!(
-            seeded_from(seed(&own, unit).unwrap(), Some(&own.join(unit))),
-            PathBuf::from("/work/hit")
-        );
-    }
-
-    #[test]
-    fn seeding_breaks_a_tie_in_last_use_by_the_checkout_built_last_then_by_name() {
-        let unit = "blake3/0123456789";
-        let tied = |donors: &[(&str, u64)]| {
-            let cache = tempfile::tempdir().unwrap();
-            let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
-            for (key, updated) in donors {
-                let donor =
-                    checkout_with_sessions(cache.path(), key, *updated, unit, &["s-1-a-finished"]);
-                set_mtime(&donor.join(unit).join("widget-0abc/s-1-a-finished"), 20);
-            }
-            seed(&own, unit).unwrap()
-        };
-
-        assert_eq!(
-            seeded_from(tied(&[("a", 20), ("b", 30)]), None),
-            PathBuf::from("/work/b")
-        );
-        assert_eq!(
-            seeded_from(tied(&[("b", 20), ("a", 20)]), None),
-            PathBuf::from("/work/a")
-        );
-    }
-
-    #[test]
-    fn seeding_leaves_unfinished_sessions_and_unknown_units_alone() {
-        let cache = tempfile::tempdir().unwrap();
-        let unit = "blake3/0123456789";
-        let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
-        checkout_with_sessions(
-            cache.path(),
-            "donor",
-            20,
-            unit,
-            &["s-1-a-finished", "s-2-b-working"],
-        );
-
-        assert_eq!(
-            seed(&own, "blake3/9999999999").unwrap(),
-            SeedOutcome::NoDonor
-        );
-        assert!(!own.join("blake3/9999999999").exists());
-
-        seed(&own, unit).unwrap();
-        let copied = own.join(unit).join("widget-0abc");
-        assert!(copied.join("s-1-a-finished").is_dir());
-        assert!(!copied.join("s-2-b-working").exists());
-    }
-
-    /// Hold `session`'s lock the way rustc does while it removes the session.
-    fn lock_exclusively(checkout: &Path, unit: &str, session: &str) -> std::fs::File {
-        let lock = checkout
-            .join(unit)
-            .join("widget-0abc")
-            .join(session_lock_name(std::ffi::OsStr::new(session)).unwrap());
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(lock)
-            .unwrap();
-        file.try_lock().unwrap();
-        file
-    }
-
-    #[test]
-    fn seeding_leaves_out_a_session_the_donor_is_removing() {
-        let cache = tempfile::tempdir().unwrap();
-        let unit = "blake3/0123456789";
-        let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
-        let donor = checkout_with_sessions(
-            cache.path(),
-            "donor",
-            20,
-            unit,
-            &["s-1-a-superseded", "s-2-b-current"],
-        );
-        let _removing = lock_exclusively(&donor, unit, "s-1-a-superseded");
-
-        seed(&own, unit).unwrap();
-
-        let copied = own.join(unit).join("widget-0abc");
-        assert!(copied.join("s-2-b-current").is_dir());
-        assert!(copied.join("s-2-b.lock").is_file());
-        assert!(!copied.join("s-1-a-superseded").exists());
-        assert!(!copied.join("s-1-a.lock").exists());
-    }
-
-    #[test]
-    fn seeding_falls_back_to_another_donor_when_one_has_nothing_to_give() {
-        let cache = tempfile::tempdir().unwrap();
-        let unit = "blake3/0123456789";
-        let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
-        checkout_with_sessions(cache.path(), "older", 10, unit, &["s-1-a-finished"]);
-        let busy = checkout_with_sessions(cache.path(), "newer", 20, unit, &["s-2-b-finished"]);
-        let _removing = lock_exclusively(&busy, unit, "s-2-b-finished");
-
-        assert_eq!(
-            seeded_from(seed(&own, unit).unwrap(), Some(&own.join(unit))),
-            PathBuf::from("/work/older")
-        );
-        assert!(
-            own.join(unit)
-                .join("widget-0abc")
-                .join("s-1-a-finished")
-                .is_dir()
-        );
-        assert_eq!(
-            std::fs::read_dir(own.join("blake3")).unwrap().count(),
-            1,
-            "the abandoned copy is cleaned up"
-        );
-    }
-
-    #[test]
-    fn a_crate_named_s_is_seeded_too() {
-        let cache = tempfile::tempdir().unwrap();
-        let unit = "blake3/0123456789";
-        let own = checkout_with_sessions(cache.path(), "own", 40, unit, &[]);
-        let donor = cache.path().join("donor");
-        let krate = donor.join(unit).join("s-0abc");
-        std::fs::create_dir_all(krate.join("s-1-a-finished")).unwrap();
-        std::fs::write(krate.join("s-1-a-finished/dep-graph.bin"), b"s").unwrap();
-        std::fs::write(krate.join("s-1-a.lock"), b"").unwrap();
-        let record = CheckoutRecord {
-            version: RECORD_VERSION,
-            workspace_root: PathBuf::from("/work/donor"),
-            updated_secs: 20,
-        };
-        std::fs::write(
-            donor.join(RECORD_FILE),
-            serde_json::to_vec(&record).unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            seeded_from(seed(&own, unit).unwrap(), Some(&own.join(unit))),
-            PathBuf::from("/work/donor")
-        );
-        assert!(
-            own.join(unit)
-                .join("s-0abc/s-1-a-finished/dep-graph.bin")
-                .is_file()
-        );
-    }
-
-    #[test]
-    fn a_checkout_never_seeds_from_itself() {
-        let cache = tempfile::tempdir().unwrap();
-        let unit = "blake3/0123456789";
-        let own = checkout_with_sessions(cache.path(), "own", 40, unit, &["s-1-a-finished"]);
-        std::fs::remove_dir_all(own.join(unit)).unwrap();
-
-        assert_eq!(seed(&own, unit).unwrap(), SeedOutcome::NoDonor);
     }
 }
