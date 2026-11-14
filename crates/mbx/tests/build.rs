@@ -543,6 +543,27 @@ fn cargo_fix_applies_a_suggestion_when_its_unit_is_restored() {
     );
 }
 
+/// A Cargo alias for `fix` reaches the same proxy, so it is routed the same way.
+#[cfg(unix)]
+#[test]
+fn a_cargo_alias_for_fix_compiles_its_primary_unit_through_the_cache() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let (stats, _) = cargo_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("alias.json"),
+        &["repair", "--offline"],
+        &[("CARGO_ALIAS_REPAIR", "fix --allow-no-vcs")],
+    );
+    assert!(
+        stats["stored_bytes"].as_u64().unwrap() > 0,
+        "an aliased fix should publish its primary unit: {stats}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn rustc_workspace_wrapper_is_preserved_without_becoming_the_compiler() {
