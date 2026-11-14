@@ -15,6 +15,7 @@ use usage_config::{EnvLayer, FileLayer, FileScope, Layers};
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_HTTP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_HTTP_READ_STALL_BUDGET: Duration = Duration::from_secs(90);
+const DEFAULT_HTTP_WRITE_STALL_BUDGET: Duration = Duration::from_secs(30);
 const DEFAULT_HTTP_RETRIES: i64 = 3;
 const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// How long a managed target directory may sit unused before collection.
@@ -733,6 +734,16 @@ struct RawHttp {
     /// `s3://` remote.
     #[usage(env = "MBX_HTTP_READ_STALL_BUDGET", default = "90s", ty = "duration")]
     read_stall_budget: String,
+    /// Wall-clock time a build may lose to failed uploads to a cache server.
+    ///
+    /// Each failed attempt (a timeout, a refused connection, a 5xx) counts
+    /// against it, including the attempts of uploads already in flight. Once it
+    /// is spent, the build stops uploading and finishes without the remote, so
+    /// a server that is down costs about one timeout instead of one per
+    /// uploaded object. `0` keeps uploading however long it takes. Has no
+    /// effect on an `s3://` remote.
+    #[usage(env = "MBX_HTTP_WRITE_STALL_BUDGET", default = "30s", ty = "duration")]
+    write_stall_budget: String,
     /// How many times to retry a remote cache request after a transient failure.
     #[usage(env = "MBX_HTTP_RETRIES", default = 3)]
     retries: i64,
@@ -1001,6 +1012,7 @@ pub struct HttpSettings {
     pub timeout: Duration,
     pub download_timeout: Duration,
     pub read_stall_budget: Duration,
+    pub write_stall_budget: Duration,
     pub retries: i64,
 }
 
@@ -1236,6 +1248,7 @@ impl Default for HttpSettings {
             timeout: DEFAULT_HTTP_TIMEOUT,
             download_timeout: DEFAULT_HTTP_DOWNLOAD_TIMEOUT,
             read_stall_budget: DEFAULT_HTTP_READ_STALL_BUDGET,
+            write_stall_budget: DEFAULT_HTTP_WRITE_STALL_BUDGET,
             retries: DEFAULT_HTTP_RETRIES,
         }
     }
@@ -1471,6 +1484,8 @@ impl Config {
                 .wrap_err(Invalid("http.download_timeout"))?,
             read_stall_budget: parse_duration(&raw.http.read_stall_budget)
                 .wrap_err(Invalid("http.read_stall_budget"))?,
+            write_stall_budget: parse_duration(&raw.http.write_stall_budget)
+                .wrap_err(Invalid("http.write_stall_budget"))?,
             retries: raw.http.retries,
         };
         let gc = GcSettings {

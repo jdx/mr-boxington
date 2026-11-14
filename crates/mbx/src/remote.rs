@@ -358,7 +358,8 @@ pub(crate) fn remote_client_with(
             download_timeout: config.http.download_timeout,
             retries: config.http.retries,
         })?
-        .with_read_stall_budget(config.http.read_stall_budget),
+        .with_read_stall_budget(config.http.read_stall_budget)
+        .with_write_stall_budget(config.http.write_stall_budget),
     ))
 }
 

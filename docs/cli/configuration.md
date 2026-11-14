@@ -289,6 +289,16 @@ Connect timeout, and how long a remote cache request may wait for data.
 
 A response must begin within this time of its request starting, so an upload's whole body has to be sent within it. After that, the clock restarts whenever response bytes arrive: a long download keeps going while data flows and fails only after this long with none. `http.download_timeout` caps a whole blob download, retries included. Managed linker downloads use this setting only as their connect timeout.
 
+### `http.write_stall_budget`
+
+- **Type:** `duration`
+- **Default:** `30s`
+- **Set with:** `MBX_HTTP_WRITE_STALL_BUDGET`
+
+Wall-clock time a build may lose to failed uploads to a cache server.
+
+Each failed attempt (a timeout, a refused connection, a 5xx) counts against it, including the attempts of uploads already in flight. Once it is spent, the build stops uploading and finishes without the remote, so a server that is down costs about one timeout instead of one per uploaded object. `0` keeps uploading however long it takes. Has no effect on an `s3://` remote.
+
 ### `incremental`
 
 - **Type:** `bool`

@@ -15,7 +15,7 @@ use crate::{
     MAX_STAGED_BLOB_PACK_BYTES, MAX_STAGED_BLOB_PACK_ITEMS, ManifestPutOutcome, NAMESPACE_HEADER,
     PACK_STREAM_CHUNK_BYTES, PROTOCOL_HEADER, PROTOCOL_VERSION, RemoteActionManifest,
     RemoteActionResult, RemoteBlobPack, RemoteCacheConfig, TASK_ACTION_MANIFEST_MEDIA_TYPE,
-    parse_strong_etag, quoted_etag, read_bounded_json, read_json_within, retry_async,
+    is_transient, parse_strong_etag, quoted_etag, read_bounded_json, read_json_within, retry_async,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use eyre::{Result, bail, eyre};
@@ -181,16 +181,63 @@ pub(crate) struct HttpRemoteCache {
     action_batches_disabled: AtomicBool,
     action_promises_disabled: AtomicBool,
     /// Wall clock this session may lose to reads that fail before it stops
-    /// asking, and the total lost so far.
+    /// asking.
     ///
     /// `download_timeout` bounds one logical download. It cannot bound what a
     /// session pays for an unhealthy server, because every object is charged
     /// that deadline again. Reads are best effort — a miss costs a local
     /// compile — so once the losses add up past the budget the session stops
     /// reading and builds instead.
-    read_stall_budget: Duration,
-    read_stall_nanos: AtomicU64,
-    reads_abandoned: AtomicBool,
+    read_stall: StallBudget,
+    /// The same bound for uploads, charged per failed attempt rather than per
+    /// object so concurrent uploads stop retrying together.
+    write_stall: StallBudget,
+}
+
+/// Wall clock a session may lose to failed requests of one kind before it
+/// stops making them.
+struct StallBudget {
+    budget: Duration,
+    lost_nanos: AtomicU64,
+    abandoned: AtomicBool,
+}
+
+impl StallBudget {
+    fn new() -> Self {
+        Self {
+            // Zero keeps asking no matter how long the remote takes to fail.
+            budget: Duration::ZERO,
+            lost_nanos: AtomicU64::new(0),
+            abandoned: AtomicBool::new(false),
+        }
+    }
+
+    fn abandoned(&self) -> bool {
+        self.abandoned.load(Ordering::Relaxed)
+    }
+
+    /// Charge a failure's elapsed time. Crossing the budget abandons the kind
+    /// of request for the rest of the session and says so once.
+    fn charge(&self, elapsed: Duration, what: &str) {
+        if self.budget.is_zero() {
+            return;
+        }
+        let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+        let total = self
+            .lost_nanos
+            .fetch_add(nanos, Ordering::Relaxed)
+            .saturating_add(nanos);
+        if Duration::from_nanos(total) < self.budget {
+            return;
+        }
+        if !self.abandoned.swap(true, Ordering::Relaxed) {
+            warn!(
+                "remote cache {what} gave up after losing {:?} to failed requests, over the {:?} budget; skipping them for the rest of this session",
+                Duration::from_nanos(total),
+                self.budget
+            );
+        }
+    }
 }
 
 impl HttpRemoteCache {
@@ -223,48 +270,80 @@ impl HttpRemoteCache {
             blob_pack_uploads_disabled: AtomicBool::new(false),
             action_batches_disabled: AtomicBool::new(false),
             action_promises_disabled: AtomicBool::new(false),
-            read_stall_budget: Duration::ZERO,
-            read_stall_nanos: AtomicU64::new(0),
-            reads_abandoned: AtomicBool::new(false),
+            read_stall: StallBudget::new(),
+            write_stall: StallBudget::new(),
         })
     }
 
     /// Set the budget from [`RemoteCacheClient::with_read_stall_budget`].
     pub(crate) fn set_read_stall_budget(&mut self, budget: Duration) {
-        self.read_stall_budget = budget;
+        self.read_stall.budget = budget;
+    }
+
+    /// Set the budget from [`RemoteCacheClient::with_write_stall_budget`].
+    pub(crate) fn set_write_stall_budget(&mut self, budget: Duration) {
+        self.write_stall.budget = budget;
     }
 
     /// Whether this session has given up on reading from the remote.
     fn reads_abandoned(&self) -> bool {
-        self.reads_abandoned.load(Ordering::Relaxed)
+        self.read_stall.abandoned()
+    }
+
+    /// Whether this session has given up on uploading to the remote.
+    pub(crate) fn writes_abandoned(&self) -> bool {
+        self.write_stall.abandoned()
     }
 
     /// Charge a failed read against the session's stall budget.
     ///
     /// Only failures are charged: a slow read that returns an object paid for
-    /// itself, while a slow read that returns nothing is pure loss. Crossing
-    /// the budget abandons reads for the rest of the session and says so once.
+    /// itself, while a slow read that returns nothing is pure loss.
     fn charge_read_stall(&self, elapsed: Duration) {
-        // A zero budget means the operator asked to keep reading no matter how
-        // long the remote takes to fail.
-        if self.read_stall_budget.is_zero() {
-            return;
+        self.read_stall.charge(elapsed, "reads");
+    }
+
+    /// Negotiated capabilities, asked for on behalf of an upload.
+    ///
+    /// A server that never answers fails this lookup, and a failed lookup
+    /// leaves the cell empty, so each waiting upload would otherwise start its
+    /// own request and pay its own timeout. Going through the write budget
+    /// charges those failures and stops asking once it is spent.
+    async fn upload_capabilities(&self) -> Result<NegotiatedCapabilities> {
+        // The budget check and charge live inside the initializer, which runs
+        // when this waiter is handed the cell. Checking before waiting on the
+        // cell would miss an upload already queued behind a lookup that fails.
+        // Read-side callers keep their own initializer, so reads are unaffected.
+        self.capabilities
+            .get_or_try_init(|| self.write_attempt(self.fetch_capabilities(true)))
+            .await
+            .copied()
+    }
+
+    /// Run one upload attempt against the write budget.
+    ///
+    /// Only transient failures (timeouts, refused connections, 5xx) are
+    /// charged: a 4xx says the request was wrong, not that the server is
+    /// unhealthy. Charging each attempt, instead of each finished upload, lets
+    /// every in-flight upload stop at its next retry once the budget is spent,
+    /// so a down server costs about one timeout rather than one per upload.
+    async fn write_attempt<T>(&self, attempt: impl Future<Output = Result<T>>) -> Result<T> {
+        if self.writes_abandoned() {
+            bail!("remote cache uploads were abandoned for this session");
         }
-        let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
-        let total = self
-            .read_stall_nanos
-            .fetch_add(nanos, Ordering::Relaxed)
-            .saturating_add(nanos);
-        if Duration::from_nanos(total) < self.read_stall_budget {
-            return;
+        let started_at = Instant::now();
+        let result = attempt.await;
+        if let Err(error) = &result
+            && is_transient(error)
+        {
+            self.write_stall.charge(started_at.elapsed(), "uploads");
+            // The charge that spends the budget ends the retries too, rather
+            // than leaving `retry_async` to back off and find out next attempt.
+            if self.writes_abandoned() {
+                bail!("remote cache uploads were abandoned for this session");
+            }
         }
-        if !self.reads_abandoned.swap(true, Ordering::Relaxed) {
-            warn!(
-                "remote cache reads gave up after losing {:?} to failed reads, over the {:?} budget; building locally for the rest of this session",
-                Duration::from_nanos(total),
-                self.read_stall_budget
-            );
-        }
+        result
     }
 
     pub(crate) async fn check_connection(&self) -> Result<()> {
@@ -759,22 +838,24 @@ impl HttpRemoteCache {
     pub(crate) async fn put_action_result(&self, result: &RemoteActionResult) -> Result<()> {
         let url = self.action_result_endpoint(&result.action)?;
         let body = serde_json::to_vec(result)?;
-        retry_async("PUT", &url, self.retries, || async {
-            let response = self
-                .request(reqwest::Method::PUT, url.clone(), ACTION_RESULT_MEDIA_TYPE)
-                .await?
-                .header(CONTENT_TYPE, ACTION_RESULT_MEDIA_TYPE)
-                .header(IF_NONE_MATCH, "*")
-                .body(body.clone())
-                .send()
-                .await?;
-            if !matches!(
-                response.status(),
-                StatusCode::PRECONDITION_FAILED | StatusCode::CONFLICT
-            ) {
-                error_for_status_with_body(response).await?;
-            }
-            Ok(())
+        retry_async("PUT", &url, self.retries, || {
+            self.write_attempt(async {
+                let response = self
+                    .request(reqwest::Method::PUT, url.clone(), ACTION_RESULT_MEDIA_TYPE)
+                    .await?
+                    .header(CONTENT_TYPE, ACTION_RESULT_MEDIA_TYPE)
+                    .header(IF_NONE_MATCH, "*")
+                    .body(body.clone())
+                    .send()
+                    .await?;
+                if !matches!(
+                    response.status(),
+                    StatusCode::PRECONDITION_FAILED | StatusCode::CONFLICT
+                ) {
+                    error_for_status_with_body(response).await?;
+                }
+                Ok(())
+            })
         })
         .await
     }
@@ -814,27 +895,29 @@ impl HttpRemoteCache {
         let url = self.action_manifest_endpoint(key)?;
         let body = bytes.to_vec();
         let expected_etag = expected_etag.map(quoted_etag).transpose()?;
-        retry_async("PUT", &url, self.retries, || async {
-            let mut request = self
-                .request(
-                    reqwest::Method::PUT,
-                    url.clone(),
-                    TASK_ACTION_MANIFEST_MEDIA_TYPE,
-                )
-                .await?
-                .header(CONTENT_TYPE, TASK_ACTION_MANIFEST_MEDIA_TYPE)
-                .body(body.clone());
-            request = if let Some(etag) = &expected_etag {
-                request.header(IF_MATCH, etag)
-            } else {
-                request.header(IF_NONE_MATCH, "*")
-            };
-            let response = request.send().await?;
-            if response.status() == StatusCode::PRECONDITION_FAILED {
-                return Ok(ManifestPutOutcome::PreconditionFailed);
-            }
-            error_for_status_with_body(response).await?;
-            Ok(ManifestPutOutcome::Stored)
+        retry_async("PUT", &url, self.retries, || {
+            self.write_attempt(async {
+                let mut request = self
+                    .request(
+                        reqwest::Method::PUT,
+                        url.clone(),
+                        TASK_ACTION_MANIFEST_MEDIA_TYPE,
+                    )
+                    .await?
+                    .header(CONTENT_TYPE, TASK_ACTION_MANIFEST_MEDIA_TYPE)
+                    .body(body.clone());
+                request = if let Some(etag) = &expected_etag {
+                    request.header(IF_MATCH, etag)
+                } else {
+                    request.header(IF_NONE_MATCH, "*")
+                };
+                let response = request.send().await?;
+                if response.status() == StatusCode::PRECONDITION_FAILED {
+                    return Ok(ManifestPutOutcome::PreconditionFailed);
+                }
+                error_for_status_with_body(response).await?;
+                Ok(ManifestPutOutcome::Stored)
+            })
         })
         .await
     }
@@ -945,7 +1028,7 @@ impl HttpRemoteCache {
         if self.blob_pack_uploads_disabled.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        Ok(self.negotiated_capabilities().await?.blob_pack_uploads)
+        Ok(self.upload_capabilities().await?.blob_pack_uploads)
     }
 
     pub(crate) async fn put_blob_pack(
@@ -985,56 +1068,58 @@ impl HttpRemoteCache {
             + payload_bytes
             + BLOB_PACK_HEADER_BYTES * uploads.len() as u64;
         let compress = self
-            .negotiated_capabilities()
+            .upload_capabilities()
             .await
             .map(|capabilities| capabilities.zstd_uploads)
             .unwrap_or(false);
         let url = self.blob_pack_upload_endpoint()?;
-        retry_async("POST", &url, self.retries, || async {
-            let request = self
-                .request(
-                    reqwest::Method::POST,
-                    url.clone(),
-                    BLOB_PACK_RECEIPT_MEDIA_TYPE,
+        retry_async("POST", &url, self.retries, || {
+            self.write_attempt(async {
+                let request = self
+                    .request(
+                        reqwest::Method::POST,
+                        url.clone(),
+                        BLOB_PACK_RECEIPT_MEDIA_TYPE,
+                    )
+                    .await?
+                    .header(CONTENT_TYPE, BLOB_PACK_MEDIA_TYPE)
+                    .header(BLOB_PACK_BLOBS_HEADER, uploads.len())
+                    .header(BLOB_PACK_BYTES_HEADER, payload_bytes);
+                // Each attempt reads the sources again, so the pack is rebuilt here
+                // rather than buffered once and held in memory.
+                let stream = blob_pack_stream(blob_pack_members(uploads)?);
+                let request = if compress {
+                    let encoder = async_compression::tokio::bufread::ZstdEncoder::new(
+                        tokio::io::BufReader::new(tokio_util::io::StreamReader::new(stream)),
+                    );
+                    request
+                        .header(CONTENT_ENCODING, "zstd")
+                        .body(reqwest::Body::wrap_stream(
+                            tokio_util::io::ReaderStream::new(encoder),
+                        ))
+                } else {
+                    request
+                        .header(CONTENT_LENGTH, framed_bytes)
+                        .body(reqwest::Body::wrap_stream(stream))
+                };
+                let response = request.send().await?;
+                if matches!(
+                    response.status(),
+                    StatusCode::NOT_FOUND
+                        | StatusCode::METHOD_NOT_ALLOWED
+                        | StatusCode::NOT_IMPLEMENTED
+                ) {
+                    self.blob_pack_uploads_disabled
+                        .store(true, Ordering::Relaxed);
+                    return Ok(None);
+                }
+                let bytes = read_bounded_json(
+                    error_for_status_with_body(response).await?,
+                    "blob pack receipt",
                 )
-                .await?
-                .header(CONTENT_TYPE, BLOB_PACK_MEDIA_TYPE)
-                .header(BLOB_PACK_BLOBS_HEADER, uploads.len())
-                .header(BLOB_PACK_BYTES_HEADER, payload_bytes);
-            // Each attempt reads the sources again, so the pack is rebuilt here
-            // rather than buffered once and held in memory.
-            let stream = blob_pack_stream(blob_pack_members(uploads)?);
-            let request = if compress {
-                let encoder = async_compression::tokio::bufread::ZstdEncoder::new(
-                    tokio::io::BufReader::new(tokio_util::io::StreamReader::new(stream)),
-                );
-                request
-                    .header(CONTENT_ENCODING, "zstd")
-                    .body(reqwest::Body::wrap_stream(
-                        tokio_util::io::ReaderStream::new(encoder),
-                    ))
-            } else {
-                request
-                    .header(CONTENT_LENGTH, framed_bytes)
-                    .body(reqwest::Body::wrap_stream(stream))
-            };
-            let response = request.send().await?;
-            if matches!(
-                response.status(),
-                StatusCode::NOT_FOUND
-                    | StatusCode::METHOD_NOT_ALLOWED
-                    | StatusCode::NOT_IMPLEMENTED
-            ) {
-                self.blob_pack_uploads_disabled
-                    .store(true, Ordering::Relaxed);
-                return Ok(None);
-            }
-            let bytes = read_bounded_json(
-                error_for_status_with_body(response).await?,
-                "blob pack receipt",
-            )
-            .await?;
-            Ok(Some(serde_json::from_slice::<BlobPackReceipt>(&bytes)?))
+                .await?;
+                Ok(Some(serde_json::from_slice::<BlobPackReceipt>(&bytes)?))
+            })
         })
         .await
     }
@@ -1044,60 +1129,64 @@ impl HttpRemoteCache {
         // A failed negotiation downgrades to identity rather than failing the
         // upload: compression is an economy, not a requirement.
         let compress = self
-            .negotiated_capabilities()
+            .upload_capabilities()
             .await
             .map(|capabilities| capabilities.zstd_uploads)
             .unwrap_or(false);
-        retry_async("PUT", &url, self.retries, || async {
-            let request = self
-                .request(reqwest::Method::PUT, url.clone(), BLOB_MEDIA_TYPE)
-                .await?
-                .header(CONTENT_TYPE, BLOB_MEDIA_TYPE)
-                .header(IF_NONE_MATCH, "*");
-            let request = if compress {
-                // Compressed and therefore chunked: the length of the encoded
-                // stream is not known up front, and the digest already tells
-                // the server the decompressed size it must enforce.
-                let reader: Box<dyn tokio::io::AsyncRead + Send + Sync + Unpin> = match &upload
-                    .source
-                {
-                    BlobSource::Bytes(bytes) => Box::new(std::io::Cursor::new(bytes.clone())),
-                    BlobSource::File(file) => Box::new(tokio::fs::File::open(file.path()).await?),
-                    BlobSource::Path(path) => Box::new(tokio::fs::File::open(path).await?),
+        retry_async("PUT", &url, self.retries, || {
+            self.write_attempt(async {
+                let request = self
+                    .request(reqwest::Method::PUT, url.clone(), BLOB_MEDIA_TYPE)
+                    .await?
+                    .header(CONTENT_TYPE, BLOB_MEDIA_TYPE)
+                    .header(IF_NONE_MATCH, "*");
+                let request = if compress {
+                    // Compressed and therefore chunked: the length of the encoded
+                    // stream is not known up front, and the digest already tells
+                    // the server the decompressed size it must enforce.
+                    let reader: Box<dyn tokio::io::AsyncRead + Send + Sync + Unpin> = match &upload
+                        .source
+                    {
+                        BlobSource::Bytes(bytes) => Box::new(std::io::Cursor::new(bytes.clone())),
+                        BlobSource::File(file) => {
+                            Box::new(tokio::fs::File::open(file.path()).await?)
+                        }
+                        BlobSource::Path(path) => Box::new(tokio::fs::File::open(path).await?),
+                    };
+                    let encoder = async_compression::tokio::bufread::ZstdEncoder::new(
+                        tokio::io::BufReader::new(reader),
+                    );
+                    request
+                        .header(CONTENT_ENCODING, "zstd")
+                        .body(reqwest::Body::wrap_stream(
+                            tokio_util::io::ReaderStream::new(encoder),
+                        ))
+                } else {
+                    let (length, body) = match &upload.source {
+                        BlobSource::Bytes(bytes) => {
+                            (bytes.len() as u64, reqwest::Body::from(bytes.clone()))
+                        }
+                        BlobSource::File(file) => {
+                            let file = tokio::fs::File::open(file.path()).await?;
+                            let length = file.metadata().await?.len();
+                            let stream = tokio_util::io::ReaderStream::new(file);
+                            (length, reqwest::Body::wrap_stream(stream))
+                        }
+                        BlobSource::Path(path) => {
+                            let file = tokio::fs::File::open(path).await?;
+                            let length = file.metadata().await?.len();
+                            let stream = tokio_util::io::ReaderStream::new(file);
+                            (length, reqwest::Body::wrap_stream(stream))
+                        }
+                    };
+                    request.header(CONTENT_LENGTH, length).body(body)
                 };
-                let encoder = async_compression::tokio::bufread::ZstdEncoder::new(
-                    tokio::io::BufReader::new(reader),
-                );
-                request
-                    .header(CONTENT_ENCODING, "zstd")
-                    .body(reqwest::Body::wrap_stream(
-                        tokio_util::io::ReaderStream::new(encoder),
-                    ))
-            } else {
-                let (length, body) = match &upload.source {
-                    BlobSource::Bytes(bytes) => {
-                        (bytes.len() as u64, reqwest::Body::from(bytes.clone()))
-                    }
-                    BlobSource::File(file) => {
-                        let file = tokio::fs::File::open(file.path()).await?;
-                        let length = file.metadata().await?.len();
-                        let stream = tokio_util::io::ReaderStream::new(file);
-                        (length, reqwest::Body::wrap_stream(stream))
-                    }
-                    BlobSource::Path(path) => {
-                        let file = tokio::fs::File::open(path).await?;
-                        let length = file.metadata().await?.len();
-                        let stream = tokio_util::io::ReaderStream::new(file);
-                        (length, reqwest::Body::wrap_stream(stream))
-                    }
-                };
-                request.header(CONTENT_LENGTH, length).body(body)
-            };
-            let response = request.send().await?;
-            if response.status() != StatusCode::PRECONDITION_FAILED {
-                error_for_status_with_body(response).await?;
-            }
-            Ok(())
+                let response = request.send().await?;
+                if response.status() != StatusCode::PRECONDITION_FAILED {
+                    error_for_status_with_body(response).await?;
+                }
+                Ok(())
+            })
         })
         .await
     }
