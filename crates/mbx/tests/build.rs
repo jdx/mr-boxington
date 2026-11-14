@@ -502,6 +502,47 @@ fn cargo_fix_compiles_its_primary_unit_through_the_cache() {
     );
 }
 
+/// A restored `cargo fix` result still carries the compiler's suggestions, so
+/// Cargo applies the edit from the cache just as it does from a compilation.
+#[cfg(unix)]
+#[test]
+fn cargo_fix_applies_a_suggestion_when_its_unit_is_restored() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let source = project.path().join("src/lib.rs");
+    let original = "pub fn value() -> u32 {\n    let mut x = 7;\n    x\n}\n";
+    let fix = |report: &str| {
+        std::fs::write(&source, original).unwrap();
+        let stats = cargo_with(
+            project.path(),
+            store.path(),
+            &reports.path().join(report),
+            &["fix", "--offline", "--allow-no-vcs"],
+            &[("MBX_INCREMENTAL", "0"), ("MBX_LEARNED_INCREMENTAL", "0")],
+        )
+        .0;
+        (stats, std::fs::read_to_string(&source).unwrap())
+    };
+
+    let (cold, fixed) = fix("cold.json");
+    assert!(
+        !fixed.contains("let mut"),
+        "the first fix should edit: {fixed}"
+    );
+    assert_eq!(count(&cold, "hits"), 0);
+    let (warm, fixed) = fix("warm.json");
+    assert!(
+        count(&warm, "hits") > 0,
+        "the second fix should restore: {warm}"
+    );
+    assert!(
+        !fixed.contains("let mut"),
+        "a restored unit should still fix: {fixed}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn rustc_workspace_wrapper_is_preserved_without_becoming_the_compiler() {

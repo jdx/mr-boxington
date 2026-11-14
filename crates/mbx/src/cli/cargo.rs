@@ -549,7 +549,7 @@ fn cargo_with_settings_bypass_log_and_roots(
                 &mut environment,
             )
             .await;
-        route_primary_fix_units_through_the_shim(arguments, &mut environment);
+        route_primary_fix_units_through_the_shim(&expanded, &mut environment);
         // Clear inherited selections, including when this build uses the system linker.
         environment.insert(session::MANAGED_LINKER_ENV.into(), String::new());
         environment.insert(session::MANAGED_TARGET_LINKERS_ENV.into(), String::new());
