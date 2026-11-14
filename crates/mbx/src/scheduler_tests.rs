@@ -943,7 +943,10 @@ fn session_environment_states_off_explicitly() {
     assert_eq!(value(SCHED_SLOT_BYTES_ENV), "1333");
     assert_eq!(value(SCHED_PRIORITY_ENV), "normal");
     assert!(!value(SCHED_BUILD_ID_ENV).is_empty());
-    assert_eq!(value(SCHED_BUILD_SLOTS_ENV), "6");
+    assert_eq!(
+        value(SCHED_BUILD_SLOTS_ENV),
+        6.min(default_capacity()).to_string()
+    );
 
     let environment = session_environment_with_jobs(&config, Some(3));
     let value = |name: &str| {
@@ -955,7 +958,10 @@ fn session_environment_states_off_explicitly() {
     };
     assert_eq!(value(SCHED_SLOTS_ENV), "6", "the machine pool stays global");
     assert_eq!(value(SCHED_SLOT_BYTES_ENV), "1333");
-    assert_eq!(value(SCHED_BUILD_SLOTS_ENV), "3");
+    assert_eq!(
+        value(SCHED_BUILD_SLOTS_ENV),
+        3.min(default_capacity()).to_string()
+    );
 }
 
 #[test]
@@ -3521,7 +3527,7 @@ fn demand_vectors_keep_mode_link_window_and_nextest_predictions_in_bytes() {
     assert_eq!(
         plan.resources,
         Resources {
-            cpu: 64,
+            cpu: 32,
             memory_bytes: 123
         }
     );
@@ -3896,7 +3902,12 @@ fn legacy_lease_and_waiter_schema_is_preserved_across_estimator_demands_and_limi
                 suite,
                 Demand::nextest("bin", "case"),
             ] {
+                // Request sizing retains the legacy calculation at the local
+                // CPU ceiling, rather than the shared host capacity.
+                let host_capacity = pool.capacity;
+                pool.capacity = pool.domain_capacity;
                 let expected = legacy::prediction(&pool, &demand);
+                pool.capacity = host_capacity;
                 let plan = pool.demand_vector(&demand);
                 if demand.compile_mode.is_none() && !demand.links {
                     assert_eq!((plan.weight, plan.predicted), (expected.0, expected.1));
@@ -5235,4 +5246,93 @@ fn a_compiler_beneath_a_permit_holder_does_not_ask_for_a_second_permit() {
             .is_none()
     );
     drop(outer);
+}
+
+#[test]
+fn eight_machine_cpus_allow_two_four_cpu_domains() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut a = pool_at(directory.path(), 8, 0);
+    a.pressure_domain = "container-a";
+    a.domain_capacity = local_ceiling(8, 0, 4, None).cpu;
+    let mut b = pool_at(directory.path(), 8, 0);
+    b.pressure_domain = "container-b";
+    b.domain_capacity = local_ceiling(8, 0, 4, None).cpu;
+    let mut c = pool_at(directory.path(), 8, 0);
+    c.pressure_domain = "container-c";
+    c.domain_capacity = local_ceiling(8, 0, 4, None).cpu;
+    let first = a.try_admit(4, None).unwrap().unwrap();
+    assert!(a.try_admit(1, None).unwrap().is_none());
+    let second = b.try_admit(4, None).unwrap().unwrap();
+    assert!(c.try_admit(1, None).unwrap().is_none());
+    drop(first);
+    assert!(c.try_admit(4, None).unwrap().is_some());
+    drop(second);
+}
+
+fn host_pool_with_container_budget(dir: &Path, domain: &'static str) -> Pool {
+    let memory = 256 * GIB / 100 * 85;
+    let mut pool = pool_at(dir, 32, memory / 32);
+    pool.pressure_domain = domain;
+    pool.set_local_budget(memory, 4, Some(8 * GIB));
+    pool
+}
+
+#[test]
+fn local_estimates_allow_four_cold_compiles_per_container() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = host_pool_with_container_budget(dir.path(), "a");
+    let b = host_pool_with_container_budget(dir.path(), "b");
+    assert_eq!(a.bytes_per_permit, (8 * GIB / 100 * 85) / 4);
+    let demand = Demand::new("cold", false);
+    let mut held = Vec::new();
+    for pool in [&a, &b] {
+        let plan = pool.demand_vector(&demand);
+        for _ in 0..4 {
+            held.push(
+                pool.try_admit_named(plan.resources, plan.weight, None, &mut None, Some(&demand))
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        assert!(
+            pool.try_admit_named(plan.resources, plan.weight, None, &mut None, Some(&demand))
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn an_unsized_container_test_uses_local_threads_and_is_admitted() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = host_pool_with_container_budget(dir.path(), "a");
+    let demand = Demand::test("cold-suite", None);
+    let plan = pool.demand_vector(&demand);
+    assert_eq!(plan.resources.cpu, 2);
+    assert!(
+        pool.try_admit_named(plan.resources, plan.weight, None, &mut None, Some(&demand))
+            .unwrap()
+            .is_some()
+    );
+    for demand in [Demand::test("wide", Some(64)), Demand::new("link", true)] {
+        assert!(pool.demand_vector(&demand).resources.cpu <= 4);
+    }
+}
+
+#[test]
+fn bare_host_request_estimates_preserve_the_original_units() {
+    let dir = tempfile::tempdir().unwrap();
+    let memory = 256 * GIB / 100 * 85;
+    for reserve in [0, 2] {
+        let capacity = 32 - reserve;
+        let mut pool = pool_at(dir.path(), capacity, memory / capacity);
+        pool.set_local_budget(memory, 32, Some(256 * GIB));
+        assert_eq!(pool.bytes_per_permit, memory / capacity);
+        assert_eq!(
+            pool.demand_vector(&Demand::test("cold-suite", None))
+                .resources
+                .cpu,
+            capacity.div_ceil(2)
+        );
+    }
 }

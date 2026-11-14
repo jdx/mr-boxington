@@ -429,7 +429,10 @@ struct RawScheduler {
     /// Compilers charge their thread counts; test binaries can use learned core
     /// counts. Memory has its own independent budget. This may also be set in
     /// workspace `.mbx.toml`; the environment variable wins.
-    #[usage(env = "MBX_SCHEDULER_CPUS", default_note = "logical CPUs")]
+    #[usage(
+        env = "MBX_SCHEDULER_CPUS",
+        default_note = "the machine's logical CPUs; builds in a container are also held to its CPU limit"
+    )]
     cpus: Option<i64>,
     /// CPU cores withheld from `scheduler.cpus` to leave CPUs for other work.
     ///
@@ -446,7 +449,7 @@ struct RawScheduler {
     /// variable wins.
     #[usage(
         env = "MBX_SCHEDULER_MEMORY",
-        default_note = "85% of physical memory, or of the Linux cgroup memory limit if lower"
+        default_note = "85% of physical memory; builds in a Linux cgroup with a memory limit are also held to 85% of that limit"
     )]
     memory: Option<String>,
     /// Priority of this build's compilations in the machine-wide permit pool.
@@ -1289,7 +1292,8 @@ impl Config {
             env,
             file,
             crate::util::disk_total_bytes,
-            crate::util::memory_total_bytes,
+            crate::util::physical_memory_bytes,
+            crate::util::machine_cpus,
         )
     }
 
@@ -1298,6 +1302,7 @@ impl Config {
         file: Option<&FileLayer>,
         measure_disk: impl Fn(&Path) -> Option<u64>,
         measure_memory: impl Fn() -> Option<u64>,
+        measure_cpus: impl Fn() -> u64,
     ) -> Result<(Self, CliSettings)> {
         let mut layers = Layers::new().then(env);
         if let Some(file) = file {
@@ -1328,7 +1333,8 @@ impl Config {
             bail!("invalid configuration:\n{problems}");
         }
         let raw = RawConfig::read(&resolved)?;
-        let (config, mut settings) = Self::from_raw_measuring(raw, measure_disk, measure_memory)?;
+        let (config, mut settings) =
+            Self::from_raw_measuring(raw, measure_disk, measure_memory, measure_cpus)?;
         settings.removed_incremental_cap = removed_incremental_cap;
         settings.retired_seed_setting =
             resolved
@@ -1350,6 +1356,7 @@ impl Config {
         raw: RawConfig,
         measure_disk: impl Fn(&Path) -> Option<u64>,
         measure_memory: impl Fn() -> Option<u64>,
+        measure_cpus: impl Fn() -> u64,
     ) -> Result<(Self, CliSettings)> {
         let cache_dir = raw.cache_dir.or_else(default_cache_dir).ok_or_else(|| {
             eyre::eyre!(
@@ -1508,7 +1515,7 @@ impl Config {
                 .ok_or_else(|| {
                     eyre::eyre!("must be a positive count").wrap_err(Invalid("scheduler.cpus"))
                 })?,
-            None => std::thread::available_parallelism().map_or(1, |cpus| cpus.get() as u64),
+            None => measure_cpus().max(1),
         };
         let scheduler_reserve_cpus = u64::try_from(raw.scheduler.reserve_cpus).map_err(|_| {
             eyre::eyre!("must be a non-negative count").wrap_err(Invalid("scheduler.reserve_cpus"))
@@ -2150,7 +2157,7 @@ mod tests {
             std::fs::write(&path, contents).unwrap();
             FileLayer::at(path, FileScope::Global)
         });
-        Config::from_layers_measuring(&env, file.as_ref(), measure_disk, || Some(32 * GIB))
+        Config::from_layers_measuring(&env, file.as_ref(), measure_disk, || Some(32 * GIB), || 8)
     }
 
     /// Compare the two public cache-root resolution paths in a child process
@@ -3590,10 +3597,7 @@ default = "rust-lld"
     fn the_scheduler_defaults_on_with_most_of_the_measured_memory() {
         let config = configured(None, &[]).unwrap();
         assert!(config.scheduler.enabled);
-        assert_eq!(
-            config.scheduler.cpus,
-            std::thread::available_parallelism().unwrap().get() as u64
-        );
+        assert_eq!(config.scheduler.cpus, 8);
         // 85% of the 32GiB the test harness reports.
         assert_eq!(
             config.scheduler.memory_bytes,
@@ -3653,6 +3657,22 @@ default = "rust-lld"
     }
 
     #[test]
+    fn machine_defaults_do_not_use_the_process_cpu_budget() {
+        let env = EnvLayer::new([] as [(String, String); 0]);
+        let machine_cpus = std::thread::available_parallelism().unwrap().get() as u64 + 17;
+        let (config, _) = Config::from_layers_measuring(
+            &env,
+            None,
+            |_| None,
+            || Some(128 * GIB),
+            || machine_cpus,
+        )
+        .unwrap();
+        assert_eq!(config.scheduler.cpus, machine_cpus);
+        assert_eq!(config.scheduler.memory_bytes, Some(128 * GIB / 100 * 85));
+    }
+
+    #[test]
     fn a_disabled_scheduler_needs_no_memory_measurement() {
         let env = EnvLayer::new([("MBX_SCHEDULER".to_string(), "false".to_string())]);
         let (config, _) = Config::from_layers_measuring(
@@ -3660,6 +3680,7 @@ default = "rust-lld"
             None,
             |_| None,
             || panic!("a disabled scheduler must not probe memory"),
+            || 8,
         )
         .unwrap();
         assert!(!config.scheduler.enabled);

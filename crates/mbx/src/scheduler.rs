@@ -1601,8 +1601,11 @@ pub(crate) fn reservation_pool(config: &Config, priority: SchedulerPriority) -> 
             bytes_per_permit(scheduler.memory_bytes, permits),
             priority,
         );
-        pool.domain_capacity = scheduler.cpus.min(default_capacity()).max(1);
-        pool.set_memory_capacity(scheduler.memory_bytes.unwrap_or(0));
+        pool.set_local_budget(
+            scheduler.memory_bytes.unwrap_or(0),
+            default_capacity(),
+            crate::util::memory_total_bytes(),
+        );
         pool.events = config.events;
         pool.pressure = scheduler.pressure;
         pool
@@ -1623,14 +1626,14 @@ fn resolve_pool() -> Option<Pool> {
                     .and_then(|value| value.parse().ok())
                     .unwrap_or_default(),
             );
-            pool.domain_capacity = env_number(SCHED_CPUS_ENV)
-                .unwrap_or(capacity)
-                .min(default_capacity())
-                .max(1);
             pool.events = env_number(SCHED_EVENTS_ENV) != Some(0);
-            pool.set_memory_capacity(
+            pool.set_local_budget(
                 env_number(SCHED_MEMORY_BYTES_ENV)
                     .unwrap_or_else(|| capacity.saturating_mul(pool.bytes_per_permit)),
+                env_number(SCHED_CPUS_ENV)
+                    .unwrap_or(capacity)
+                    .min(default_capacity()),
+                crate::util::memory_total_bytes(),
             );
             pool.pressure = env_number(SCHED_PRESSURE_ENV) == Some(1);
             pool.export_permit_marker = true;
@@ -1678,7 +1681,8 @@ pub(crate) fn session_environment_with_jobs(
         return vec![(SCHED_DIR_ENV.into(), String::new())];
     }
     let permits = scheduler.permits();
-    let build_permits = cargo_jobs.map_or(permits, |jobs| permits.min(jobs.max(1)));
+    let local_permits = permits.min(default_capacity());
+    let build_permits = cargo_jobs.map_or(local_permits, |jobs| local_permits.min(jobs.max(1)));
     vec![
         (
             SCHED_DIR_ENV.into(),
@@ -1701,7 +1705,14 @@ pub(crate) fn session_environment_with_jobs(
         ),
         (
             SCHED_SLOT_BYTES_ENV.into(),
-            bytes_per_permit(scheduler.memory_bytes, permits).to_string(),
+            bytes_per_permit(
+                Some(local_memory_ceiling(
+                    scheduler.memory_bytes.unwrap_or(0),
+                    crate::util::memory_total_bytes(),
+                )),
+                local_permits,
+            )
+            .to_string(),
         ),
         (
             SCHED_PRIORITY_ENV.into(),
@@ -1837,10 +1848,16 @@ fn local_ceiling(cpu: u64, memory: u64, local_cpus: u64, local_memory: Option<u6
 }
 
 impl Pool {
-    fn set_memory_capacity(&mut self, memory: u64) {
+    // Reserve CPUs once from the host pool. A domain can use all of its local
+    // CPUs provided they fit the remaining host budget.
+    fn set_local_budget(&mut self, memory: u64, local_cpus: u64, local_memory: Option<u64>) {
         self.memory_capacity = memory;
-        self.domain_memory_capacity =
-            local_memory_ceiling(memory, crate::util::memory_total_bytes());
+        let domain = local_ceiling(self.capacity, memory, local_cpus, local_memory);
+        self.domain_capacity = domain.cpu;
+        self.domain_memory_capacity = domain.memory_bytes;
+        self.bytes_per_permit = bytes_per_permit(Some(domain.memory_bytes), domain.cpu);
+        self.legacy_domain_capacity =
+            legacy_local_ceiling(domain.cpu, self.bytes_per_permit, local_cpus, local_memory);
     }
 
     fn effective_budget(&self) -> Resources {
@@ -1905,8 +1922,11 @@ impl Pool {
                 bytes_per_permit(scheduler.memory_bytes, permits),
                 scheduler.priority,
             );
-            pool.domain_capacity = scheduler.cpus.min(default_capacity()).max(1);
-            pool.set_memory_capacity(scheduler.memory_bytes.unwrap_or(0));
+            pool.set_local_budget(
+                scheduler.memory_bytes.unwrap_or(0),
+                default_capacity(),
+                crate::util::memory_total_bytes(),
+            );
             pool.events = config.events;
             pool.pressure = scheduler.pressure;
             pool
@@ -2112,14 +2132,14 @@ impl Pool {
             let cores = measurement
                 .and_then(|measurement| measurement.cores)
                 .unwrap_or(1)
-                .max(1);
+                .clamp(1, self.domain_capacity);
             if self.bytes_per_permit == 0 {
                 return Plan {
                     resources: Resources {
                         cpu: cores,
                         memory_bytes: 0,
                     },
-                    weight: cores.min(self.capacity),
+                    weight: cores.min(self.domain_capacity),
                     predicted: None,
                     source: "unmeasured",
                 };
@@ -2130,7 +2150,7 @@ impl Pool {
             let weight = predicted
                 .div_ceil(self.bytes_per_permit)
                 .max(cores)
-                .clamp(1, self.capacity);
+                .clamp(1, self.domain_capacity);
             return Plan {
                 resources: Resources {
                     cpu: cores,
@@ -2158,16 +2178,22 @@ impl Pool {
             .flatten();
         let threads = learned
             .or(demand.threads)
-            .unwrap_or_else(|| self.capacity.div_ceil(2))
-            .max(1);
+            .unwrap_or_else(|| self.domain_capacity.div_ceil(2))
+            .clamp(1, self.domain_capacity);
         let link_floor = demand.links.then_some(LINK_WEIGHT);
         if self.bytes_per_permit == 0 {
             return Plan {
                 resources: Resources {
-                    cpu: link_floor.unwrap_or(1).max(threads),
+                    cpu: link_floor
+                        .unwrap_or(1)
+                        .max(threads)
+                        .min(self.domain_capacity),
                     memory_bytes: 0,
                 },
-                weight: link_floor.unwrap_or(1).max(threads).min(self.capacity),
+                weight: link_floor
+                    .unwrap_or(1)
+                    .max(threads)
+                    .min(self.domain_capacity),
                 predicted: None,
                 source: "unmeasured",
             };
@@ -2221,7 +2247,7 @@ impl Pool {
         let weight = predicted
             .map_or(1, |bytes| bytes.div_ceil(self.bytes_per_permit))
             .max(threads)
-            .clamp(1, self.capacity);
+            .clamp(1, self.domain_capacity);
         let memory_bytes =
             if predicted.is_none() || matches!(source, "unmeasured" | "default" | "link-floor") {
                 predicted

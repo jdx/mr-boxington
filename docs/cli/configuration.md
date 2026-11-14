@@ -523,7 +523,7 @@ mbx must be able to write to it. mbx uses it only on Linux, and only while `sche
 
 - **Type:** `option<int>`
 - **Optional:** true
-- **Default:** logical CPUs
+- **Default:** the machine's logical CPUs; builds in a container are also held to its CPU limit
 - **Set with:** `MBX_SCHEDULER_CPUS`
 
 CPU core budget in the machine-wide pool before `scheduler.reserve_cpus`.
@@ -544,7 +544,7 @@ Cache hits never take a permit. A compilation that runs the compiler takes one f
 
 - **Type:** `option<string>`
 - **Optional:** true
-- **Default:** 85% of physical memory, or of the Linux cgroup memory limit if lower
+- **Default:** 85% of physical memory; builds in a Linux cgroup with a memory limit are also held to 85% of that limit
 - **Set with:** `MBX_SCHEDULER_MEMORY`
 
 Independent memory budget, such as `24GiB`, or `"none"`.

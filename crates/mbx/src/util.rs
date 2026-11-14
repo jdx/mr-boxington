@@ -453,6 +453,27 @@ fn disk_space_at(path: &Path) -> Option<DiskSpace> {
     }
 }
 
+/// Online logical CPUs of the machine, independent of process affinity or quota.
+pub fn machine_cpus() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: sysconf reads a system constant and takes no pointers.
+        let cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+        if let Ok(cpus) = u64::try_from(cpus)
+            && cpus > 0
+        {
+            return cpus;
+        }
+    }
+    std::thread::available_parallelism().map_or(1, |cpus| cpus.get() as u64)
+}
+
+/// Physical RAM, without the process's cgroup memory limit.
+#[cfg(not(target_os = "linux"))]
+pub fn physical_memory_bytes() -> Option<u64> {
+    memory_total_bytes()
+}
+
 /// Physical memory installed in this machine, when it can be measured.
 #[cfg(target_vendor = "apple")]
 pub fn memory_total_bytes() -> Option<u64> {
@@ -482,6 +503,16 @@ pub fn memory_total_bytes() -> Option<u64> {
 /// out-of-memory kill rather than a slow build.
 #[cfg(target_os = "linux")]
 pub fn memory_total_bytes() -> Option<u64> {
+    let physical = physical_memory_bytes()?;
+    Some(match crate::cgroup::memory().limit {
+        Some(limit) => physical.min(limit),
+        None => physical,
+    })
+}
+
+/// Physical RAM reported by the kernel, without cgroup limits.
+#[cfg(target_os = "linux")]
+pub fn physical_memory_bytes() -> Option<u64> {
     // SAFETY: `sysinfo` only writes into the zeroed struct it is given.
     let info = unsafe {
         let mut info = std::mem::zeroed::<libc::sysinfo>();
@@ -496,11 +527,7 @@ pub fn memory_total_bytes() -> Option<u64> {
     let unit = u64::from(info.mem_unit);
     #[allow(clippy::useless_conversion)]
     let total = u64::try_from(info.totalram).ok()?;
-    let physical = total.checked_mul(unit).filter(|total| *total > 0)?;
-    Some(match crate::cgroup::memory().limit {
-        Some(limit) => physical.min(limit),
-        None => physical,
-    })
+    total.checked_mul(unit).filter(|total| *total > 0)
 }
 
 /// The parsing half, separated so it can be tested without a cgroup mount.

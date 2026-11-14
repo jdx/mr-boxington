@@ -48,10 +48,10 @@ comfortably run. mbx coordinates them through a shared pool under the cache
 directory. Scheduling is on by default; `MBX_SCHEDULER=0` disables it.
 
 The pool has two independent budgets: CPU cores and memory bytes. The CPU
-budget is `scheduler.cpus` (default: logical CPUs) minus
+budget is `scheduler.cpus` (default: the machine's online logical CPUs) minus
 `scheduler.reserve_cpus` (default: 0), with at least one core remaining.
 The memory budget is `scheduler.memory`, which defaults to 85% of physical
-memory. In a Linux container, the cgroup's memory limit constrains that default.
+memory. Each container also has its own CPU and memory ceilings, described below.
 Reserving CPUs does not reduce the memory budget.
 
 A request must fit both budgets. CPU charges follow the compiler's thread
@@ -62,8 +62,12 @@ Each budget allows an oversize request when no running request consumes that
 resource: an oversize memory request still needs CPU room, and an oversize
 CPU request still needs memory room.
 
-For unmeasured work, the memory guess retains the old permit size: memory
-budget divided by the CPU budget, rounded down. Ordinary single-threaded
+For unmeasured work, the memory guess is one share: the memory ceiling of the
+build's own domain divided by its CPU ceiling, rounded down. In a container,
+these are the container's own ceilings, and the host budgets only limit what
+all containers run together. `scheduler.reserve_cpus` is taken once from the
+shared pool; each domain can use all of its own CPUs while the rest of the
+pool has room. Ordinary single-threaded
 compiles start at one such share, native links at two, and unmeasured nextest
 tests at two. Higher thread counts retain at least their old memory guess.
 Measurements refine later admissions and use raw predicted bytes, without
@@ -261,10 +265,9 @@ container's admissions. Suspended work is the exception: while compiler
 supervision in any container has frozen a compilation, every container sharing
 the cache waits for it to resume.
 
-When containers share a cache directory, configure `scheduler.cpus` and
-`scheduler.memory` in their shared configuration using the host's budget.
-Otherwise each container defaults the shared pool to its own limits. For
-example, a host budget of 64 CPUs and 256 GiB is:
+Containers sharing a cache directory default to the machine's CPU and physical
+memory budgets for their common pool. Explicit `scheduler.cpus` and
+`scheduler.memory` settings override that host budget. For example:
 
 ```toml
 [scheduler]
