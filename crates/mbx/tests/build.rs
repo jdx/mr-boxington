@@ -1977,6 +1977,56 @@ fn incremental_checkouts(cache: &Path) -> Vec<(PathBuf, PathBuf)> {
 }
 
 #[test]
+fn local_thin_lto_links_without_mbx_incremental() {
+    // With local ThinLTO, rustc rewrites a finished session's files in place,
+    // so an interrupted build can leave state whose rlibs do not link. mbx must
+    // not add incremental state to such profiles, and they must still link.
+    for mode in ["MBX_LEARNED_INCREMENTAL", "MBX_EAGER_INCREMENTAL"] {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_dependent_project(project.path());
+        let manifest = project.path().join("Cargo.toml");
+        let mut contents = std::fs::read_to_string(&manifest).unwrap();
+        contents.push_str("\n[profile.dev]\nopt-level = 1\n");
+        std::fs::write(manifest, contents).unwrap();
+        std::fs::remove_file(project.path().join("above/src/lib.rs")).unwrap();
+        std::fs::write(
+            project.path().join("above/src/main.rs"),
+            "fn main() { println!(\"{}\", base::value()); }\n",
+        )
+        .unwrap();
+        for revision in 0..3 {
+            std::fs::write(
+                project.path().join("base/src/lib.rs"),
+                format!("pub fn value() -> u32 {{ {revision} }}\n"),
+            )
+            .unwrap();
+            let (stats, stderr) = build_with(
+                project.path(),
+                store.path(),
+                &reports.path().join(format!("{revision}.json")),
+                &[(mode, "1")],
+            );
+            assert_eq!(compiled_incrementally(&stats), 0, "{stats}\n{stderr}");
+            let output = Command::new(
+                project
+                    .path()
+                    .join("target/debug")
+                    .join(format!("above{}", std::env::consts::EXE_SUFFIX)),
+            )
+            .output()
+            .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap().trim(),
+                revision.to_string()
+            );
+        }
+    }
+}
+
+#[test]
 fn learned_private_dependents_reuse_state_after_the_target_is_removed() {
     let store = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
@@ -2374,17 +2424,22 @@ fn a_changed_build_script_environment_value_counts_as_an_edit() {
 }
 
 #[test]
-fn learned_incremental_skips_optimized_compiles_and_keeps_dev_levels() {
+fn learned_incremental_skips_local_thin_lto_and_keeps_safe_profiles() {
     let store = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();
 
-    for (label, level, expected) in [("dev0", "0", true), ("dev1", "1", true)] {
+    for (label, level, extra, expected) in [
+        ("dev0", "0", "", true),
+        ("dev1", "1", "", false),
+        ("dev1off", "1", "lto = \"off\"\n", true),
+        ("dev1cgu", "1", "codegen-units = 1\n", true),
+    ] {
         let project = tempfile::tempdir().unwrap();
         write_named_project(project.path(), label);
         std::fs::write(
             project.path().join("Cargo.toml"),
             format!(
-                "[package]\nname = \"{label}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[profile.dev]\nopt-level = {level}\n"
+                "[package]\nname = \"{label}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[profile.dev]\nopt-level = {level}\n{extra}"
             ),
         )
         .unwrap();
@@ -2470,8 +2525,10 @@ fn eager_incremental_skips_optimized_compiles() {
 fn response_file_profiles_follow_incremental_safety_gates() {
     for (mode, level, expected) in [
         ("MBX_LEARNED_INCREMENTAL", "0", true),
+        ("MBX_LEARNED_INCREMENTAL", "1", false),
         ("MBX_LEARNED_INCREMENTAL", "3", false),
         ("MBX_EAGER_INCREMENTAL", "0", true),
+        ("MBX_EAGER_INCREMENTAL", "1", false),
         ("MBX_EAGER_INCREMENTAL", "3", false),
     ] {
         let store = tempfile::tempdir().unwrap();

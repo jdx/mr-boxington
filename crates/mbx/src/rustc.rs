@@ -1705,9 +1705,10 @@ fn private_incremental_flag(directory: &Path) -> OsString {
 /// Whether mbx may add incremental state to this rustc invocation.
 ///
 /// rustc runs local ThinLTO above opt-level 0 when LTO is unset and there are
-/// multiple codegen units. Incremental ThinLTO can leave an rlib whose units do
-/// not link. mbx blocks opt-level 2 and higher; opt-level 1 stays allowed for
-/// Cargo parity. `-C lto=n|no|off|false` and `codegen-units=1` avoid this mode.
+/// multiple codegen units. rustc rewrites files of the previous, finished
+/// incremental session in place, so a build interrupted partway can leave
+/// state whose rlibs do not link. This includes opt-level 1.
+/// `-C lto=n|no|off|false` and `codegen-units=1` avoid this mode.
 fn mbx_incremental_is_safe(arguments: &[OsString]) -> bool {
     mbx_incremental_unsafe_reason(arguments).is_none()
 }
@@ -1759,9 +1760,7 @@ fn mbx_incremental_unsafe_reason(arguments: &[OsString]) -> Option<&'static str>
     if lto.is_some() && !lto_is_off {
         return Some("an explicit LTO request");
     }
-    let optimized = opt_level
-        .as_deref()
-        .is_some_and(|level| matches!(level, "2" | "3" | "s" | "z"));
+    let optimized = opt_level.as_deref().is_some_and(|level| level != "0");
     let multiple_codegen_units = codegen_units.as_deref() != Some("1");
     (optimized && lto.is_none() && multiple_codegen_units)
         .then_some("optimized compile with local ThinLTO")
