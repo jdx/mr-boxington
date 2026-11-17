@@ -211,7 +211,13 @@ fn record_cargo_selection(
 fn loop_note_path() -> PathBuf {
     mbx_cache_cargo::cache_root()
         .unwrap_or_else(std::env::temp_dir)
-        .join(format!("cargo-shim-loop-{}", std::process::id()))
+        // Containers sharing the cache can have identical process IDs. The
+        // inherited random name identifies this selection tree across them.
+        .join(format!(
+            "cargo-shim-loop-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ))
 }
 
 fn leave_loop_note(message: &str) {
@@ -799,6 +805,11 @@ fn run_real_cargo(cargo: &OsStr, arguments: &[OsString]) -> Result<ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn independent_selections_with_the_same_pid_have_distinct_loop_notes() {
+        assert_ne!(loop_note_path(), loop_note_path());
+    }
 
     #[test]
     fn repeated_cargo_shim_entry_fails_with_the_selected_cargo() {
