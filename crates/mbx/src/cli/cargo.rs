@@ -141,7 +141,7 @@ fn cargo_with_settings_bypass_log_and_roots(
                     &cargo,
                     &os_arguments,
                     target_dir_env.as_deref(),
-                ) {
+                )? {
                     super::shim::FailedProbe::Roots(roots) => *roots,
                     super::shim::FailedProbe::Passthrough => {
                         return run_cargo(&cargo, arguments, BTreeMap::new());

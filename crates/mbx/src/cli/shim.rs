@@ -11,14 +11,26 @@ const CARGO_SHIM_MODE_ENV: &str = "MBX_CARGO_SHIM_MODE";
 const CARGO_SHIM_PATH_ENV: &str = "MBX_CARGO_SHIM_PATH";
 pub(super) const CARGO_SHIM_DEPTH_ENV: &str = "MBX_CARGO_SHIM_DEPTH";
 pub(super) const CARGO_SHIM_CHAIN_ENV: &str = "MBX_CARGO_SHIM_CHAIN";
-/// Build scripts and Cargo subcommands legitimately reach the shim again, so a
+/// Build scripts and Cargo subcommands legitimately reach mbx again, so a
 /// repeat is not proof of a cycle. A real wrapper loop never stops, so a depth
 /// far beyond any plausible nesting is.
 const MAX_CARGO_SHIM_DEPTH: usize = 12;
 const CARGO_SHIM_NOTE_ENV: &str = "MBX_CARGO_SHIM_NOTE";
-/// Whether this process chose the loop note path, and so removes the note.
-static OWNS_LOOP_NOTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static PATH_BEFORE_SHIM_EXCLUSION: OnceLock<OsString> = OnceLock::new();
+
+/// Only the outermost Cargo selection owns the diagnostic note. Keep it until
+/// that command finishes so failed probes cannot restart a known wrapper loop.
+pub(super) struct CargoSelection {
+    note: Option<PathBuf>,
+}
+
+impl Drop for CargoSelection {
+    fn drop(&mut self) {
+        if let Some(path) = &self.note {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
 
 /// Whether this process was installed under Cargo's name by `mbx setup`.
 pub fn is_cargo_shim() -> bool {
@@ -50,17 +62,6 @@ fn is_cargo_shim_path(path: &OsStr) -> bool {
 
 /// Run an invocation received through the persistent Cargo shim.
 pub fn run_cargo_shim() -> Result<ExitCode> {
-    let result = run_cargo_shim_inner();
-    // Passthrough and early exits never read the note a loop may have left.
-    if OWNS_LOOP_NOTE.load(std::sync::atomic::Ordering::Relaxed)
-        && let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV)
-    {
-        let _ = std::fs::remove_file(path);
-    }
-    result
-}
-
-fn run_cargo_shim_inner() -> Result<ExitCode> {
     let reported_shim = std::env::var_os(CARGO_SHIM_PATH_ENV)
         .map(PathBuf::from)
         .or_else(|| {
@@ -104,7 +105,7 @@ fn run_cargo_shim_inner() -> Result<ExitCode> {
         blaze_shim = Some(shim);
         real_cargo
     };
-    record_cargo_selection(&real_cargo, configured_cargo.as_deref())?;
+    let _selection = record_cargo_selection(&real_cargo, configured_cargo.as_deref())?;
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     if mbx_disabled() {
         return run_real_cargo(&real_cargo, &arguments);
@@ -152,16 +153,13 @@ fn run_cargo_shim_inner() -> Result<ExitCode> {
         target_dir_env.as_deref(),
     ) {
         Ok(roots) => roots,
-        Err(reason) => match failed_probe(&real_cargo, &arguments, target_dir_env.as_deref()) {
+        Err(reason) => match failed_probe(&real_cargo, &arguments, target_dir_env.as_deref())? {
             FailedProbe::Roots(roots) => *roots,
             FailedProbe::Passthrough => return run_real_cargo(&real_cargo, &arguments),
             FailedProbe::Reject(retry_reason) => {
                 let reason = retry_reason.unwrap_or(reason);
-                let hint = take_loop_note()
-                    .map(|hint| format!(" ({hint})"))
-                    .unwrap_or_default();
                 eyre::bail!(
-                    "could not verify Cargo build storage: metadata probing failed{hint}; run cargo metadata --no-deps --format-version 1 with the same manifest and configuration options to diagnose it: {reason}"
+                    "could not verify Cargo build storage: metadata probing failed; run cargo metadata --no-deps --format-version 1 with the same manifest and configuration options to diagnose it: {reason}"
                 )
             }
         },
@@ -175,10 +173,14 @@ fn run_cargo_shim_inner() -> Result<ExitCode> {
     super::cargo::run_with_roots(&config, &settings, &string_arguments, roots)
 }
 
-/// Fail promptly when the "real" Cargo this shim selected leads back into an
-/// mbx shim, as a custom wrapper script that execs mbx does. Each shim entry
+/// Fail promptly when the "real" Cargo mbx selected leads back into mbx,
+/// as a custom wrapper script that execs mbx does. Each Cargo entry
 /// exports its depth and the Cargo it selected so the next one can see them.
-fn record_cargo_selection(real_cargo: &OsStr, configured: Option<&OsStr>) -> Result<()> {
+fn record_cargo_selection(
+    real_cargo: &OsStr,
+    configured: Option<&OsStr>,
+) -> Result<CargoSelection> {
+    reject_known_cargo_loop()?;
     let depth = std::env::var(CARGO_SHIM_DEPTH_ENV).ok();
     let chain = std::env::var_os(CARGO_SHIM_CHAIN_ENV);
     let (depth, chain) =
@@ -195,11 +197,12 @@ fn record_cargo_selection(real_cargo: &OsStr, configured: Option<&OsStr>) -> Res
     if let Some(chain) = chain {
         unsafe { std::env::set_var(CARGO_SHIM_CHAIN_ENV, chain) };
     }
-    if std::env::var_os(CARGO_SHIM_NOTE_ENV).is_none() {
-        unsafe { std::env::set_var(CARGO_SHIM_NOTE_ENV, loop_note_path()) };
-        OWNS_LOOP_NOTE.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-    Ok(())
+    let note = std::env::var_os(CARGO_SHIM_NOTE_ENV).is_none().then(|| {
+        let path = loop_note_path();
+        unsafe { std::env::set_var(CARGO_SHIM_NOTE_ENV, &path) };
+        path
+    });
+    Ok(CargoSelection { note })
 }
 
 /// Where a re-entered shim leaves its diagnosis for the outermost one. The
@@ -228,15 +231,16 @@ fn leave_loop_note(message: &str) {
     }
 }
 
-fn take_loop_note() -> Option<String> {
-    let path = PathBuf::from(std::env::var_os(CARGO_SHIM_NOTE_ENV)?);
-    let note = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-    note.and_then(|note| {
-        note.lines()
+fn reject_known_cargo_loop() -> Result<()> {
+    if let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV)
+        && let Ok(note) = std::fs::read_to_string(path)
+        && let Some(line) = note
+            .lines()
             .find(|line| line.contains("re-entered its Cargo shim"))
-            .map(|line| line.trim().to_string())
-    })
+    {
+        eyre::bail!("{}", line.trim());
+    }
+    Ok(())
 }
 
 /// The depth and chain to export, given those this shim inherited.
@@ -451,11 +455,15 @@ pub(super) fn failed_probe(
     cargo: &OsStr,
     arguments: &[OsString],
     target_dir_env: Option<&OsStr>,
-) -> FailedProbe {
+) -> Result<FailedProbe> {
+    // Do not ask a wrapper that already exhausted the recursion guard to
+    // classify commands or retry metadata: each request starts the loop again.
+    reject_known_cargo_loop()?;
     // An alias can name a manifest that the command line does not, so expand
     // it before reading the invocation: `i = "install --path /project"`
     // compiles a local package from a directory that has none of its own.
     let invocation = super::cargo_invocation::resolve(cargo, arguments);
+    reject_known_cargo_loop()?;
     // The first probe asked about the alias's own name and got nothing back.
     // Ask again as Cargo will read it: the roots belong to the package the
     // expansion names, though the child still receives the command line as it
@@ -466,15 +474,16 @@ pub(super) fn failed_probe(
         && let Ok(expanded) = super::strings(&resolved.arguments)
     {
         match super::cargo::cargo_roots_reported(cargo, &expanded, target_dir_env) {
-            Ok(roots) => return FailedProbe::Roots(Box::new(roots)),
+            Ok(roots) => return Ok(FailedProbe::Roots(Box::new(roots))),
             Err(reason) => retry_reason = Some(reason),
         }
+        reject_known_cargo_loop()?;
     }
     if metadata_failure_passthrough(invocation.as_ref()) {
         note_uncached_passthrough(invocation.as_ref());
-        return FailedProbe::Passthrough;
+        return Ok(FailedProbe::Passthrough);
     }
-    FailedProbe::Reject(retry_reason)
+    Ok(FailedProbe::Reject(retry_reason))
 }
 
 /// Say that a command is running without a cache session. An external
@@ -550,9 +559,18 @@ fn same_path(left: &Path, right: &Path) -> bool {
     }
 }
 
+/// Explicit commands need the same recursion guard as shim entries: a custom
+/// Cargo wrapper on PATH or in CARGO can exec `mbx` without entering shim mode.
+pub(super) fn prepare_explicit_cargo() -> Result<CargoSelection> {
+    let configured = std::env::var_os("CARGO");
+    prepare_explicit_cargo_environment()?;
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    record_cargo_selection(&cargo, configured.as_deref())
+}
+
 /// Keep explicit `mbx build`-style commands from rediscovering a persistent
 /// Cargo shim or mise command wrapper on PATH.
-pub(super) fn prepare_explicit_cargo() -> Result<()> {
+fn prepare_explicit_cargo_environment() -> Result<()> {
     let standalone_shim = super::setup_install_dir()
         .map(|directory| directory.join(if cfg!(windows) { "cargo.exe" } else { "cargo" }))
         .filter(|shim| shim.is_file());

@@ -128,3 +128,52 @@ fn wrapper_loop_through_a_plain_launch_still_stops() {
     assert!(!success, "{output}");
     assert!(output.contains("re-entered its Cargo shim"), "{output}");
 }
+
+/// Legacy launchers can invoke mbx explicitly rather than enter Cargo shim
+/// mode. Bound the fixture itself so a regression cannot exhaust the host.
+#[test]
+fn explicit_wrapper_loops_report_the_loop() {
+    for (configured, prefix) in [(false, "cargo "), (true, "cargo "), (false, ""), (true, "")] {
+        let root = tempfile::tempdir().unwrap();
+        let mbx_path = env!("CARGO_BIN_EXE_mbx");
+        let wrapper = fixture(
+            root.path(),
+            &format!(
+                "#!/bin/sh\ncount=$(cat entries 2>/dev/null || echo 0)\ncount=$((count + 1))\necho $count > entries\n[ $count -le 20 ] || {{ echo 'fixture stopped unguarded recursion' >&2; exit 99; }}\nexec '{mbx_path}' {prefix}\"$@\"\n"
+            ),
+        );
+        let mut command = mbx(root.path(), &wrapper);
+        command.env_remove("MBX_CARGO_SHIM_MODE");
+        if !configured {
+            command.env_remove("CARGO");
+        }
+        command.env(
+            "PATH",
+            std::env::join_paths(
+                std::iter::once(wrapper.parent().unwrap().to_path_buf())
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap(),
+        );
+        if !prefix.is_empty() {
+            command.arg("cargo");
+        }
+        command.args(["fmt", "--all", "--", "--check"]);
+        let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
+        assert!(!success, "{output}");
+        assert!(output.contains("re-entered its Cargo shim"), "{output}");
+        assert!(
+            !output.contains("fixture stopped unguarded recursion"),
+            "{output}"
+        );
+        assert!(
+            std::fs::read_dir(root.path().join("cache"))
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("cargo-shim-loop-"))
+        );
+    }
+}
