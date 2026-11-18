@@ -312,7 +312,10 @@ resource reserves zero of that resource. The command waits until both amounts
 fit, then a dedicated worker
 holds it until the external command exits. Killing the invoking `mbx reserve`
 process alone does not release capacity while that worker still waits for the
-command; a crashed worker does release its lease through the operating system.
+command. On Unix the worker also stays alive through HUP, INT, QUIT and TERM,
+so ^C, a hangup, or a signal sent to the whole process group does not release
+capacity until the command itself has exited. A crashed worker does release its lease
+through the operating system.
 The command runs with `MBX_RESERVED_CPUS` set to the cores the reservation
 holds, so a runner can size its own workers from the lease instead of being
 given the number twice:
