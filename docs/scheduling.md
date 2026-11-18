@@ -314,7 +314,18 @@ holds it until the external command exits. Killing the invoking `mbx reserve`
 process alone does not release capacity while that worker still waits for the
 command. The worker also stays alive through HUP, INT, QUIT and TERM, so ^C, a
 hangup, or a signal sent to the whole process group does not release capacity
-until the command itself has exited; a crashed worker does release its lease through the operating system.
+until the command itself has exited; a crashed worker does release its lease
+through the operating system.
+The command runs with `MBX_RESERVED_CPUS` set to the cores the reservation
+holds, so a runner can size its own workers from the lease instead of being
+given the number twice:
+
+```sh
+mbx reserve --cpus 4 -- sh -c 'gradle --max-workers "$MBX_RESERVED_CPUS" test'
+```
+
+A reservation that holds no cores, because `--cpus` is omitted or `0`, removes
+the variable, including one inherited from an enclosing reservation.
 The command must wait for work it launches: detached background processes can
 outlive the reservation and are not covered after the command exits.
 `--memory` is measured against `scheduler.memory`; omit it when memory

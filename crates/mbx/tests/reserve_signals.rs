@@ -44,6 +44,16 @@ while :; do sleep 0.05; done
         command
     }
 
+    /// Kills every process left in a group, including a worker and command that
+    /// outlive the invoker, so a failed assertion cannot leave them looping.
+    struct Group(i32);
+
+    impl Drop for Group {
+        fn drop(&mut self) {
+            unsafe { libc::kill(-self.0, libc::SIGKILL) };
+        }
+    }
+
     fn wait_for(path: &Path) {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
@@ -79,6 +89,7 @@ while :; do sleep 0.05; done
             .process_group(0)
             .spawn()
             .unwrap();
+        let _group = Group(probe.id() as i32);
         let deadline = Instant::now() + Duration::from_millis(1500);
         let mut admitted = false;
         while Instant::now() < deadline {
@@ -90,7 +101,7 @@ while :; do sleep 0.05; done
         }
         if !admitted {
             // Still queued behind the lease; do not leave it waiting.
-            unsafe { libc::kill(-(probe.id() as i32), libc::SIGKILL) };
+            drop(_group);
         }
         let _ = probe.wait();
         admitted
@@ -107,6 +118,7 @@ while :; do sleep 0.05; done
                 .process_group(0)
                 .spawn()
                 .unwrap();
+            let _group = Group(job.id() as i32);
             wait_for(&root.join("ready"));
 
             unsafe { libc::kill(-(job.id() as i32), signal) };
@@ -181,6 +193,7 @@ while :; do sleep 0.05; done
             .process_group(0)
             .spawn()
             .unwrap();
+        let _holder_group = Group(holder.id() as i32);
         wait_for(&root.join("ready"));
 
         let mut waiter = mbx(root)
@@ -189,13 +202,16 @@ while :; do sleep 0.05; done
             .process_group(0)
             .spawn()
             .unwrap();
+        let _waiter_group = Group(waiter.id() as i32);
         thread::sleep(Duration::from_millis(500));
         unsafe { libc::kill(-(waiter.id() as i32), libc::SIGTERM) };
         let status = wait_child(&mut waiter);
         assert_eq!(status.signal(), Some(libc::SIGTERM), "got {status}");
-        assert!(!root.join("ran").exists());
-
+        // The waiter's own worker must be gone too, or it would run the
+        // command once the holder lets go.
         unsafe { libc::kill(-(holder.id() as i32), libc::SIGKILL) };
         let _ = holder.wait();
+        thread::sleep(Duration::from_millis(500));
+        assert!(!root.join("ran").exists());
     }
 }
