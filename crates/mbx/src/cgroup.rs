@@ -80,18 +80,70 @@ fn inherited_limit(domains: &[Domain]) -> Option<u64> {
         .min()
 }
 
-/// The lowest CPU quota on a visible ancestor of this process's cgroup, in
-/// whole CPUs, not counting the process's own cgroup.
+/// The lowest CPU quota or cpuset size on a visible ancestor of this process's
+/// cgroup, in whole CPUs, not counting the process's own cgroup.
 ///
 /// For the reason [`inherited_memory_limit`] gives: siblings share a parent's
-/// quota, while a container's own quota belongs to it alone.
+/// quota or cpuset, while a container's own restriction belongs to it alone.
 pub(crate) fn inherited_cpu_limit() -> Option<u64> {
-    let domains = std::fs::read_to_string("/proc/self/cgroup")
-        .ok()
-        .zip(std::fs::read_to_string("/proc/self/mountinfo").ok())
-        .map(|(groups, mounts)| domains_for(&groups, &mounts, "cpu"))
-        .unwrap_or_default();
-    inherited_cpus(&domains)
+    let (Ok(groups), Ok(mounts)) = (
+        std::fs::read_to_string("/proc/self/cgroup"),
+        std::fs::read_to_string("/proc/self/mountinfo"),
+    ) else {
+        return None;
+    };
+    inherited_cpu_limits(&groups, &mounts)
+}
+
+fn inherited_cpu_limits(groups: &str, mounts: &str) -> Option<u64> {
+    let quotas = inherited_cpus(&domains_for(groups, mounts, "cpu"));
+    let cpusets = inherited_cpuset_cpus(&domains_for(groups, mounts, "cpuset"));
+    quotas.into_iter().chain(cpusets).min()
+}
+
+fn inherited_cpuset_cpus(domains: &[Domain]) -> Option<u64> {
+    domains
+        .iter()
+        .flat_map(|domain| {
+            domain
+                .current
+                .ancestors()
+                .skip(1)
+                .take_while(|path| path.starts_with(&domain.mount))
+                .filter_map(|directory| {
+                    // Effective sets include inherited restrictions and offline
+                    // CPUs. Older v1 mounts only expose the configured set;
+                    // empty configured sets inherit from the next ancestor.
+                    let effective = if domain.v2 {
+                        "cpuset.cpus.effective"
+                    } else {
+                        "cpuset.effective_cpus"
+                    };
+                    [effective, "cpuset.cpus"].into_iter().find_map(|name| {
+                        std::fs::read_to_string(directory.join(name))
+                            .ok()
+                            .and_then(|text| cpuset_size(&text))
+                    })
+                })
+        })
+        .min()
+}
+
+/// Kernel CPU lists contain ordered, disjoint CPU numbers or inclusive ranges.
+fn cpuset_size(text: &str) -> Option<u64> {
+    let mut count = 0_u64;
+    let mut previous = None;
+    for entry in text.trim().split(',') {
+        let (start, end) = entry.split_once('-').unwrap_or((entry, entry));
+        let start = start.parse::<u32>().ok()?;
+        let end = end.parse::<u32>().ok()?;
+        if end < start || previous.is_some_and(|previous| start <= previous) {
+            return None;
+        }
+        count += u64::from(end) - u64::from(start) + 1;
+        previous = Some(end);
+    }
+    Some(count)
 }
 
 fn inherited_cpus(domains: &[Domain]) -> Option<u64> {
@@ -358,6 +410,65 @@ mod tests {
         assert_eq!(inherited_cpus(&found), Some(4), "a quota siblings share");
         std::fs::write(mount.join("slice/cpu.max"), "50000 100000\n").unwrap();
         assert_eq!(inherited_cpus(&found), Some(1), "at least one CPU");
+    }
+
+    #[test]
+    fn parent_cpusets_cap_siblings_without_inheriting_the_leaf_set() {
+        for v2 in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let mount = temp.path();
+            let build = mount.join("slice/build");
+            std::fs::create_dir_all(&build).unwrap();
+            let (groups, mounts, effective) = if v2 {
+                (
+                    "0::/slice/build\n",
+                    format!("1 0 0:1 / {} rw - cgroup2 cgroup rw", mount.display()),
+                    "cpuset.cpus.effective",
+                )
+            } else {
+                (
+                    "3:cpuset:/slice/build\n",
+                    format!("1 0 0:1 / {} rw - cgroup cgroup rw,cpuset", mount.display()),
+                    "cpuset.effective_cpus",
+                )
+            };
+            std::fs::write(build.join(effective), "0\n").unwrap();
+            assert_eq!(
+                inherited_cpu_limits(groups, &mounts),
+                None,
+                "leaf stays local"
+            );
+            std::fs::write(mount.join(effective), "0-31\n").unwrap();
+            std::fs::write(mount.join("slice").join(effective), "0-3\n").unwrap();
+            assert_eq!(inherited_cpu_limits(groups, &mounts), Some(4));
+            if v2 {
+                std::fs::write(mount.join("slice/cpu.max"), "200000 100000\n").unwrap();
+                assert_eq!(
+                    inherited_cpu_limits(groups, &mounts),
+                    Some(2),
+                    "quota also applies"
+                );
+            }
+            std::fs::remove_file(mount.join("slice").join(effective)).unwrap();
+            std::fs::write(mount.join("slice/cpuset.cpus"), "0-2,8\n").unwrap();
+            let domains = domains_for(groups, &mounts, "cpuset");
+            assert_eq!(
+                inherited_cpuset_cpus(&domains),
+                Some(4),
+                "configured fallback"
+            );
+            std::fs::write(mount.join("slice/cpuset.cpus"), "\n").unwrap();
+            assert_eq!(inherited_cpuset_cpus(&domains), Some(32), "empty inherits");
+        }
+    }
+
+    #[test]
+    fn cpuset_lists_count_ranges_and_reject_malformed_input() {
+        assert_eq!(cpuset_size("0-3,8,10-11\n"), Some(7));
+        assert_eq!(cpuset_size("3"), Some(1));
+        for text in ["", "3-1", "0-3,2", "1,1", "0-", "x", "0,,2"] {
+            assert_eq!(cpuset_size(text), None, "{text:?}");
+        }
     }
 
     #[test]

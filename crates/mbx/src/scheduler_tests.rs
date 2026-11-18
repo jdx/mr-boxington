@@ -5414,12 +5414,13 @@ fn a_reserve_comes_off_the_processs_own_cpus_as_well_as_the_pool() {
     config.scheduler.enabled = true;
     config.scheduler.cpus = local + 10;
     config.scheduler.reserve_cpus = local - 1;
-    config.scheduler.memory_bytes = Some(GIB);
+    let memory = crate::util::memory_total_bytes().unwrap_or(GIB).min(GIB) / 2;
+    config.scheduler.memory_bytes = Some(memory);
     let pool = Pool::from_config(&config).unwrap();
     assert_eq!(pool.capacity, 11);
     assert_eq!(pool.domain_capacity, 1);
-    assert_eq!(pool.bytes_per_permit, GIB);
+    assert_eq!(pool.bytes_per_permit, memory);
     let env = session_environment_with_jobs(&config, None);
     assert!(env.contains(&(SCHED_BUILD_SLOTS_ENV.into(), "1".into())));
-    assert!(env.contains(&(SCHED_SLOT_BYTES_ENV.into(), GIB.to_string())));
+    assert!(env.contains(&(SCHED_SLOT_BYTES_ENV.into(), memory.to_string())));
 }

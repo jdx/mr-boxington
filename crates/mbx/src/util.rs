@@ -475,8 +475,8 @@ pub fn physical_memory_bytes() -> Option<u64> {
 }
 
 /// CPUs a scheduler pool shared with other cgroups can count on: the
-/// machine's online CPUs, or a lower quota inherited from a parent cgroup
-/// that siblings may share. A quota on the process's own cgroup is left to
+/// machine's online CPUs, or a lower quota or cpuset inherited from a parent
+/// cgroup that siblings may share. A quota on the process's own cgroup is left to
 /// its local ceiling.
 pub fn shared_pool_cpus() -> u64 {
     let machine = machine_cpus();

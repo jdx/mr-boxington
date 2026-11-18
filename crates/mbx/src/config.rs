@@ -431,7 +431,7 @@ struct RawScheduler {
     /// workspace `.mbx.toml`; the environment variable wins.
     #[usage(
         env = "MBX_SCHEDULER_CPUS",
-        default_note = "the machine's logical CPUs, or a lower CPU quota on a parent cgroup; builds in a container are also held to its CPU limit"
+        default_note = "the machine's logical CPUs, or a lower CPU quota or cpuset on a parent cgroup; builds in a container are also held to its CPU limit"
     )]
     cpus: Option<i64>,
     /// CPU cores withheld from `scheduler.cpus` to leave CPUs for other work.
