@@ -155,6 +155,10 @@ pub(crate) fn contains(
     else {
         return true;
     };
+    contains_at(pool, scope, path, cgroups, written)
+}
+
+fn contains_at(pool: &Path, scope: &str, path: &Path, cgroups: &[String], written: Stamp) -> bool {
     let found = |walk: &Walk| {
         walk.members
             .as_ref()
@@ -172,7 +176,9 @@ pub(crate) fn contains(
                 .began
                 .until(&now)
                 .is_some_and(|age| age < SUBTREE_REFRESH_MS);
-        let vouched = cgroups.iter().any(|id| walk.vouched.contains_key(id));
+        // One shared ancestor (or a shared v2 group on a hybrid host)
+        // cannot vouch for other groups created since the walk.
+        let vouched = cgroups.iter().all(|id| walk.vouched.contains_key(id));
         if fresh && (found(walk) || vouched || written.before(&walk.began)) {
             return found(walk);
         }
@@ -618,6 +624,63 @@ mod tests {
         // Both leases' cgroups stay vouched for across that walk.
         assert!(read().vouched.contains_key("0:2"));
         assert!(read().vouched.contains_key("0:3"));
+    }
+
+    #[test]
+    fn a_shared_hybrid_group_does_not_vouch_for_a_new_memory_group() {
+        let pool = tempfile::tempdir().unwrap();
+        let hierarchy = tempfile::tempdir().unwrap();
+        let scope = hierarchy.path().join("v1/limited");
+        let shared_v2 = hierarchy.path().join("v2/shared");
+        std::fs::create_dir_all(&scope).unwrap();
+        std::fs::create_dir_all(&shared_v2).unwrap();
+        let scope_id = identity(&scope).unwrap();
+        let shared_id = identity(&shared_v2).unwrap();
+        let file = pool
+            .path()
+            .join(SUBTREES_DIR)
+            .join(format!("{scope_id}.json"));
+        let now = Stamp::now();
+        let walk = Walk {
+            began: now,
+            boot: boot_id().to_owned(),
+            members: subtree(&scope),
+            vouched: BTreeMap::from([(shared_id.clone(), now)]),
+        };
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, serde_json::to_vec(&walk).unwrap()).unwrap();
+
+        // A second container shares the v2 group but creates its own v1
+        // memory group after the cached walk. Its namespace hides the
+        // limited ancestor, so only a new walk can find it inside scope.
+        let nested = scope.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let cgroups = [shared_id, identity(&nested).unwrap()];
+        // Also exercise clocks that cannot prove the lease predates the walk.
+        let ahead = stamp(now.wall_ms, now.boot_ms + 3_600_000);
+        assert!(contains_at(pool.path(), &scope_id, &scope, &cgroups, ahead));
+        let refreshed: Walk = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert!(cgroups.iter().all(|id| refreshed.vouched.contains_key(id)));
+
+        // Once every ID is vouched for, subsequent polls reuse that walk
+        // even if the lease's clocks remain unorderable.
+        let outside = [cgroups[0].clone(), "0:0".into()];
+        assert!(!contains_at(
+            pool.path(),
+            &scope_id,
+            &scope,
+            &outside,
+            ahead
+        ));
+        let cached = std::fs::read(&file).unwrap();
+        assert!(!contains_at(
+            pool.path(),
+            &scope_id,
+            &scope,
+            &outside,
+            ahead
+        ));
+        assert_eq!(std::fs::read(&file).unwrap(), cached);
     }
 
     #[test]
