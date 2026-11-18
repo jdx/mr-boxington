@@ -480,6 +480,7 @@ fn a_failed_branch_does_not_reject_a_different_sibling_command() {
 fn wrapper_can_retry_the_same_command_in_a_different_checkout() {
     let root = tempfile::tempdir().unwrap();
     let other = tempfile::tempdir().unwrap();
+    let other_root = other.path().canonicalize().unwrap();
     fixture(other.path(), "#!/bin/sh\nexit 0\n");
     let mbx_path = env!("CARGO_BIN_EXE_mbx");
     let real = std::env::var_os("CARGO").unwrap();
@@ -487,9 +488,9 @@ fn wrapper_can_retry_the_same_command_in_a_different_checkout() {
         root.path(),
         &format!(
             "#!/bin/sh\nif [ \"$PWD\" = '{}' ]; then exec '{}' \"$@\"; fi\nif [ -n \"$MBX_TEST_RECURSIVE_BRANCH\" ]; then exec '{mbx_path}' \"$@\"; fi\nMBX_TEST_RECURSIVE_BRANCH=1 '{mbx_path}' \"$@\" >/dev/null 2>&1\ncd '{}' || exit 98\nCARGO=\"$0\" exec '{mbx_path}' \"$@\"\n",
-            other.path().display(),
+            other_root.display(),
             Path::new(&real).display(),
-            other.path().display()
+            other_root.display()
         ),
     );
     let mut command = mbx(root.path(), &wrapper);
@@ -502,7 +503,7 @@ fn wrapper_can_retry_the_same_command_in_a_different_checkout() {
     let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
     assert!(success, "{output}");
     assert!(
-        output.contains(&other.path().display().to_string()),
+        output.contains(&other_root.display().to_string()),
         "{output}"
     );
 }
@@ -674,4 +675,46 @@ fn unusable_temporary_storage_stops_before_recursive_children() {
         .args(["metadata", "--no-deps", "--format-version", "1"]);
     let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
     assert!(success, "direct Cargo query needed guard storage: {output}");
+}
+
+#[test]
+fn successful_independent_probes_cannot_reset_a_failed_trees_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let mbx_path = env!("CARGO_BIN_EXE_mbx");
+    let real = std::env::var_os("CARGO").unwrap();
+    let entries = root.path().join("entries");
+    let cutoff = root.path().join("cutoff");
+    let observed = root.path().join("retries-observed");
+    let wrapper = fixture(
+        root.path(),
+        &format!(
+            "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || echo 0)\ncount=$((count + 1))\necho $count > '{}'\n[ $count -le 512 ] || {{ touch '{}'; exit 99; }}\nif [ -f \"$MBX_CARGO_SHIM_NOTE.retries\" ]; then cp \"$MBX_CARGO_SHIM_NOTE.retries\" '{}'; fi\nCARGO='{}' '{mbx_path}' check --mbx-test-invalid-flag >/dev/null 2>&1 || :\nPATH='{}':\"$PATH\" exec '{mbx_path}' nextest run\n",
+            entries.display(),
+            entries.display(),
+            cutoff.display(),
+            observed.display(),
+            Path::new(&real).display(),
+            root.path().join("bin").display()
+        ),
+    );
+    track_loop_note(&wrapper, root.path());
+    let mut command = mbx(root.path(), &wrapper);
+    command
+        .env_remove("MBX_CARGO_SHIM_MODE")
+        .env("MBX_GC_AUTO", "0")
+        .env("MBX_TARGET_ROOT", root.path().join("targets"))
+        .args(["nextest", "run"]);
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(30));
+    assert!(!success, "{output}");
+    assert!(
+        !cutoff.exists(),
+        "a successful probe reset the retry budget: {output}"
+    );
+    assert!(
+        read(&entries).trim().parse::<usize>().unwrap() <= 256,
+        "{output}"
+    );
+    let bytes: [u8; 8] = std::fs::read(&observed).unwrap().try_into().unwrap();
+    assert_eq!(u64::from_le_bytes(bytes) & !(1 << 63), 128);
+    assert_loop_note_removed(root.path());
 }

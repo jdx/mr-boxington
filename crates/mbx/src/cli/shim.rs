@@ -270,7 +270,9 @@ pub(super) fn reject_known_cargo_loop() -> Result<()> {
 
 pub(super) fn clear_loop_note() {
     if let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV) {
-        remove_loop_note(Path::new(&path));
+        // A recovered probe supersedes its diagnosis, but cannot reset the
+        // invocation tree's retry budget. Only the outer owner removes that.
+        let _ = std::fs::remove_file(path);
     }
 }
 
