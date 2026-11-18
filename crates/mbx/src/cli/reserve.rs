@@ -52,7 +52,7 @@ fn run_direct(config: &Config, args: ReserveArgs) -> Result<ExitCode> {
     };
     let (permit, admission) =
         pool.reserve_observed(args.cpus, args.memory.map(|memory| memory.as_u64()))?;
-    let status = external_command(program, arguments)
+    let status = external_command(program, arguments, args.cpus)
         // Nested mbx work is covered by this reservation. Letting its compiler
         // shims take new permits would deadlock when this lease fills the pool.
         .status()
@@ -63,7 +63,7 @@ fn run_direct(config: &Config, args: ReserveArgs) -> Result<ExitCode> {
     Ok(exit_code(status))
 }
 
-pub(super) fn external_command(program: &str, arguments: &[String]) -> Command {
+pub(super) fn external_command(program: &str, arguments: &[String], cpus: Option<u64>) -> Command {
     let mut command = Command::new(program);
     command
         .args(arguments)
@@ -75,5 +75,12 @@ pub(super) fn external_command(program: &str, arguments: &[String]) -> Command {
         // `mbx reserve` must start its own worker so its lease follows its
         // command even when this external command launches it in the background.
         .env_remove("MBX_RESERVE_WORKER");
+    // Tell the command how many cores it holds so a runner can size its own
+    // workers from the lease. A reservation that holds no cores clears the
+    // variable rather than passing on an enclosing reservation's value.
+    match cpus.filter(|cpus| *cpus > 0) {
+        Some(cpus) => command.env("MBX_RESERVED_CPUS", cpus.to_string()),
+        None => command.env_remove("MBX_RESERVED_CPUS"),
+    };
     command
 }
