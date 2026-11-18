@@ -243,6 +243,46 @@ while :; do sleep 0.05; done
         assert!(root.join("survived").exists());
     }
 
+    /// An inherited-ignored HUP can queue while the launch check has it
+    /// blocked; that must not be mistaken for a cancellation. HUP is sent to
+    /// the group continuously while reservations start.
+    #[test]
+    fn an_ignored_signal_during_startup_does_not_cancel_the_launch() {
+        for round in 0..15 {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let marker = root.join("ran");
+            let mut program = mbx(root);
+            program
+                .args(["reserve", "--cpus", "1", "--", "touch"])
+                .arg(&marker);
+            // Ignored from the first instruction, as under `nohup`.
+            unsafe {
+                program.pre_exec(|| {
+                    libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                    Ok(())
+                });
+            }
+            let mut job = Group::spawn(&mut program);
+            let group = job.id() as i32;
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let sender = {
+                let done = done.clone();
+                thread::spawn(move || {
+                    while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                        unsafe { libc::kill(-group, libc::SIGHUP) };
+                        thread::sleep(Duration::from_micros(200));
+                    }
+                })
+            };
+            let status = wait_child(&mut job);
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            sender.join().unwrap();
+            assert!(status.success(), "round {round}: got {status}");
+            assert!(marker.exists(), "round {round}: the command never ran");
+        }
+    }
+
     #[test]
     fn a_signal_while_waiting_for_capacity_ends_at_once_without_running() {
         let dir = tempfile::tempdir().unwrap();
