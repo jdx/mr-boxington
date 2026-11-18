@@ -509,3 +509,61 @@ fn wrapper_can_retry_the_same_command_with_a_different_environment() {
     assert!(success, "{output}");
     assert!(output.contains("workspace_root"), "{output}");
 }
+
+#[test]
+fn recursive_wrapper_outside_a_workspace_stays_bounded() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let mbx_path = env!("CARGO_BIN_EXE_mbx");
+    let entries = root.path().join("entries");
+    let cutoff = root.path().join("cutoff");
+    let wrapper = fixture(
+        root.path(),
+        &format!(
+            "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || echo 0)\ncount=$((count + 1))\necho $count > '{}'\n[ $count -le 128 ] || {{ touch '{}'; exit 99; }}\nexec '{mbx_path}' \"$@\"\n",
+            entries.display(),
+            entries.display(),
+            cutoff.display()
+        ),
+    );
+    let mut command = mbx(root.path(), &wrapper);
+    command
+        .env_remove("MBX_CARGO_SHIM_MODE")
+        .current_dir(outside.path())
+        .arg("build");
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
+    assert!(!success, "{output}");
+    assert!(
+        !cutoff.exists(),
+        "outside wrapper restarted the loop: {output}"
+    );
+    assert!(
+        read(&entries).trim().parse::<usize>().unwrap() <= 64,
+        "{output}"
+    );
+    assert!(output.contains("re-entered its Cargo shim"), "{output}");
+}
+
+#[test]
+fn real_cargo_fallback_blocked_at_the_limit_can_run_as_the_stack_unwinds() {
+    let root = tempfile::tempdir().unwrap();
+    let mbx_path = env!("CARGO_BIN_EXE_mbx");
+    let real = std::env::var_os("CARGO").unwrap();
+    let wrapper = fixture(
+        root.path(),
+        &format!(
+            "#!/bin/sh\n'{mbx_path}' \"$@\" 2>/dev/null && exit 0\nCARGO='{}' exec '{mbx_path}' \"$@\"\n",
+            Path::new(&real).display()
+        ),
+    );
+    let mut command = mbx(root.path(), &wrapper);
+    command.env_remove("MBX_CARGO_SHIM_MODE").args([
+        "metadata",
+        "--no-deps",
+        "--format-version",
+        "1",
+    ]);
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
+    assert!(success, "{output}");
+    assert!(output.contains("workspace_root"), "{output}");
+}

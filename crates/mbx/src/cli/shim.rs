@@ -192,7 +192,8 @@ fn record_cargo_selection(
     if !notes.is_empty() {
         let environment = loop_environment()?;
         if let Some(note) = notes.into_iter().find(|note| {
-            note.cargo == cargo
+            note.repeated
+                && note.cargo == cargo
                 && note.arguments == arguments
                 && note.directory == directory
                 && note.environment == environment
@@ -249,6 +250,7 @@ struct LoopNote {
     arguments: Vec<OsString>,
     directory: Option<OsString>,
     environment: String,
+    repeated: bool,
     message: String,
 }
 
@@ -336,6 +338,11 @@ fn leave_loop_note(cargo: &OsStr, message: &str) {
             arguments: std::env::args_os().skip(1).collect(),
             directory: std::env::current_dir().ok().map(PathBuf::into_os_string),
             environment,
+            // A fresh fallback selected at the depth limit was never run;
+            // keep its diagnosis without poisoning a later shallower retry.
+            repeated: cargo_chain(std::env::var_os(CARGO_SHIM_CHAIN_ENV).as_deref())
+                .iter()
+                .any(|selected| cargo_identity(selected.as_os_str()) == cargo_identity(cargo)),
             message: message.to_owned(),
         })
     {
@@ -357,6 +364,25 @@ pub(super) fn clear_loop_note() {
     }
 }
 
+/// The Cargo paths inherited from earlier selections in this invocation tree.
+fn cargo_chain(chain: Option<&OsStr>) -> Vec<PathBuf> {
+    let Some(chain) = chain else {
+        return Vec::new();
+    };
+    if let Some(value) = chain.to_str()
+        && let Ok(paths) = serde_json::from_str::<Vec<OsString>>(value)
+    {
+        return paths.into_iter().map(PathBuf::from).collect();
+    }
+    // Accept diagnostic history from an older launcher in the same tree.
+    chain
+        .to_string_lossy()
+        .split('\n')
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
 /// The depth and chain to export, given those this shim inherited.
 fn next_cargo_selection(
     depth: Option<&str>,
@@ -367,18 +393,7 @@ fn next_cargo_selection(
     let depth = depth
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
-    // Diagnostic history, not a search path: a Cargo path may contain the PATH
-    // separator, so entries are newline-separated and kept as display text.
-    let mut selected = chain
-        .map(|chain| {
-            chain
-                .to_string_lossy()
-                .split('\n')
-                .filter(|path| !path.is_empty())
-                .map(PathBuf::from)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let mut selected = cargo_chain(chain);
     selected.push(PathBuf::from(real_cargo));
     if depth >= MAX_CARGO_SHIM_DEPTH {
         let source = if configured == Some(real_cargo) {
@@ -396,11 +411,14 @@ fn next_cargo_selection(
             Path::new(real_cargo).display()
         );
     }
-    let chain = selected
-        .iter()
-        .map(|path| path.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("\n");
+    // OsString serialization preserves non-UTF-8 bytes and newline-containing
+    // paths, while the error above still presents a human-readable chain.
+    let chain = serde_json::to_string(
+        &selected
+            .iter()
+            .map(|path| path.as_os_str())
+            .collect::<Vec<_>>(),
+    )?;
     Ok((depth + 1, Some(OsString::from(chain))))
 }
 
@@ -579,7 +597,6 @@ pub(super) fn failed_probe(
     // still authorize normal passthrough (notably outside a project). The
     // guard rejects recursive entries during that listing, so it stays bounded.
     if read_loop_note().is_some() && metadata_failure_passthrough(invocation.as_ref()) {
-        clear_loop_note();
         note_uncached_passthrough(invocation.as_ref());
         return Ok(FailedProbe::Passthrough);
     }
@@ -592,10 +609,9 @@ pub(super) fn failed_probe(
         && resolved.arguments != arguments
         && let Ok(expanded) = super::strings(&resolved.arguments)
     {
-        // The expanded alias can name a different manifest. Its probe is a
-        // new question, so an abandoned failure must not preempt it. Keep the
-        // cumulative depth limit even when starting this recovery attempt.
-        clear_loop_note();
+        // A different manifest gives this probe a distinct invocation key.
+        // Preserve failures from earlier probes so recovery cannot restart
+        // their loops; the cumulative depth limit still applies.
         match super::cargo::cargo_roots_reported(cargo, &expanded, target_dir_env) {
             Ok(roots) => return Ok(FailedProbe::Roots(Box::new(roots))),
             Err(reason) => retry_reason = Some(reason),
@@ -603,7 +619,6 @@ pub(super) fn failed_probe(
     }
     reject_known_cargo_loop()?;
     if metadata_failure_passthrough(invocation.as_ref()) {
-        clear_loop_note();
         note_uncached_passthrough(invocation.as_ref());
         return Ok(FailedProbe::Passthrough);
     }
@@ -966,7 +981,10 @@ mod tests {
         let (depth, chain) =
             next_cargo_selection(Some("2"), None, OsStr::new("/usr/bin/cargo"), None).unwrap();
         assert_eq!(depth, 3);
-        assert_eq!(chain.as_deref(), Some(OsStr::new("/usr/bin/cargo")));
+        assert_eq!(
+            cargo_chain(chain.as_deref()),
+            vec![PathBuf::from("/usr/bin/cargo")]
+        );
     }
 
     #[test]
