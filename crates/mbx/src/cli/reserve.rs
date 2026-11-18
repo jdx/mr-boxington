@@ -250,6 +250,12 @@ impl Drop for HoldThroughSignals {
 struct HoldThroughSignals;
 
 #[cfg(not(unix))]
+impl Drop for HoldThroughSignals {
+    /// Matches the Unix guard, whose drop restores the signal dispositions.
+    fn drop(&mut self) {}
+}
+
+#[cfg(not(unix))]
 impl HoldThroughSignals {
     fn install() -> Self {
         Self
