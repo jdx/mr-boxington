@@ -155,7 +155,7 @@ fn explicit_wrapper_loops_report_the_loop() {
         let mut wrapper = fixture(
             root.path(),
             &format!(
-                "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || echo 0)\ncount=$((count + 1))\necho $count > '{}'\n[ $count -le 20 ] || {{ touch '{}'; echo 'fixture stopped unguarded recursion' >&2; exit 99; }}\n{directory_change}exec '{mbx_path}' {prefix}\"$@\"\n",
+                "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || echo 0)\ncount=$((count + 1))\necho $count > '{}'\n[ $count -le 64 ] || {{ touch '{}'; echo 'fixture stopped unguarded recursion' >&2; exit 99; }}\n{directory_change}exec '{mbx_path}' {prefix}\"$@\"\n",
                 entries.display(),
                 entries.display(),
                 cutoff.display(),
@@ -193,7 +193,9 @@ fn explicit_wrapper_loops_report_the_loop() {
         assert!(!success, "{output}");
         assert!(!cutoff.exists(), "fixture cutoff reached: {output}");
         let calls: usize = read(&entries).trim().parse().unwrap();
-        assert!(calls <= 12, "wrapper launched {calls} times: {output}");
+        // At most twelve nested selections, each allowed one bounded listing
+        // attempt to recognize a wrapper that recovered directly with Cargo.
+        assert!(calls <= 24, "wrapper launched {calls} times: {output}");
         assert!(output.contains("re-entered its Cargo shim"), "{output}");
         assert!(
             !output.contains("fixture stopped unguarded recursion"),
@@ -300,4 +302,38 @@ fn alternating_fallbacks_cannot_reset_the_depth_limit() {
         "fallback reset the recursion budget: {output}"
     );
     assert_eq!(read(&entries).trim(), "1", "{output}");
+}
+
+#[test]
+fn direct_cargo_fallback_can_run_external_commands_without_a_manifest() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let mbx_path = env!("CARGO_BIN_EXE_mbx");
+    let real = std::env::var_os("CARGO").unwrap();
+    let wrapper = fixture(
+        root.path(),
+        &format!(
+            "#!/bin/sh\nif [ -n \"$MBX_TEST_RECURSIVE_BRANCH\" ]; then exec '{mbx_path}' \"$@\"; fi\nMBX_TEST_RECURSIVE_BRANCH=1 '{mbx_path}' \"$@\" && exit 0\nexec '{}' \"$@\"\n",
+            Path::new(&real).display()
+        ),
+    );
+    let external = wrapper.parent().unwrap().join("cargo-probe");
+    std::fs::write(&external, "#!/bin/sh\necho recovered-direct\n").unwrap();
+    std::fs::set_permissions(&external, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut command = mbx(root.path(), &wrapper);
+    command
+        .env_remove("MBX_CARGO_SHIM_MODE")
+        .current_dir(outside.path())
+        .env(
+            "PATH",
+            std::env::join_paths(
+                std::iter::once(wrapper.parent().unwrap().to_path_buf())
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap(),
+        )
+        .arg("probe");
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
+    assert!(success, "{output}");
+    assert!(output.contains("recovered-direct"), "{output}");
 }

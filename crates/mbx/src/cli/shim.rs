@@ -242,7 +242,9 @@ struct LoopNote {
 
 fn cargo_identity(cargo: &OsStr) -> OsString {
     let path = which::which(cargo).unwrap_or_else(|_| PathBuf::from(cargo));
-    path.canonicalize().unwrap_or(path).into_os_string()
+    // Preserve the invocation name: a script may dispatch on $0 even when
+    // two entry points ultimately resolve to the same inode.
+    std::path::absolute(&path).unwrap_or(path).into_os_string()
 }
 
 fn read_loop_note() -> Option<LoopNote> {
@@ -493,13 +495,18 @@ pub(super) fn failed_probe(
     arguments: &[OsString],
     target_dir_env: Option<&OsStr>,
 ) -> Result<FailedProbe> {
-    // Do not ask a wrapper that already exhausted the recursion guard to
-    // classify commands or retry metadata: each request starts the loop again.
-    reject_known_cargo_loop()?;
     // An alias can name a manifest that the command line does not, so expand
     // it before reading the invocation: `i = "install --path /project"`
     // compiles a local package from a directory that has none of its own.
     let invocation = super::cargo_invocation::resolve(cargo, arguments);
+    // A wrapper may catch the failed branch and fall back directly to real
+    // Cargo, which cannot clear our note. A successful command listing can
+    // still authorize normal passthrough (notably outside a project). The
+    // guard rejects recursive entries during that listing, so it stays bounded.
+    if read_loop_note().is_some() && metadata_failure_passthrough(invocation.as_ref()) {
+        note_uncached_passthrough(invocation.as_ref());
+        return Ok(FailedProbe::Passthrough);
+    }
     reject_known_cargo_loop()?;
     // The first probe asked about the alias's own name and got nothing back.
     // Ask again as Cargo will read it: the roots belong to the package the
@@ -840,6 +847,26 @@ mod tests {
     #[test]
     fn independent_selections_with_the_same_pid_have_distinct_loop_notes() {
         assert_ne!(loop_note_path(), loop_note_path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loop_identity_preserves_distinct_symlink_entry_points() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("wrapper");
+        std::fs::write(&script, b"#!/bin/sh\n").unwrap();
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        std::os::unix::fs::symlink(&script, &first).unwrap();
+        std::os::unix::fs::symlink(&script, &second).unwrap();
+        assert_eq!(
+            first.canonicalize().unwrap(),
+            second.canonicalize().unwrap()
+        );
+        assert_ne!(
+            cargo_identity(first.as_os_str()),
+            cargo_identity(second.as_os_str())
+        );
     }
 
     #[test]
