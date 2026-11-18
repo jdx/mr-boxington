@@ -313,7 +313,7 @@ fn direct_cargo_fallback_can_run_external_commands_without_a_manifest() {
     let wrapper = fixture(
         root.path(),
         &format!(
-            "#!/bin/sh\nif [ -n \"$MBX_TEST_RECURSIVE_BRANCH\" ]; then exec '{mbx_path}' \"$@\"; fi\nMBX_TEST_RECURSIVE_BRANCH=1 '{mbx_path}' \"$@\" && exit 0\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\nfor arg do if [ \"$arg\" = helper ]; then CARGO=\"$0\" exec '{mbx_path}' metadata --no-deps --format-version 1; fi; done\nif [ -n \"$MBX_TEST_RECURSIVE_BRANCH\" ]; then exec '{mbx_path}' \"$@\"; fi\nMBX_TEST_RECURSIVE_BRANCH=1 '{mbx_path}' \"$@\" && exit 0\nexec '{}' \"$@\"\n",
             Path::new(&real).display()
         ),
     );
@@ -336,4 +336,33 @@ fn direct_cargo_fallback_can_run_external_commands_without_a_manifest() {
     let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
     assert!(success, "{output}");
     assert!(output.contains("recovered-direct"), "{output}");
+
+    std::fs::create_dir(outside.path().join(".cargo")).unwrap();
+    let manifest = root.path().join("Cargo.toml");
+    std::fs::write(
+        outside.path().join(".cargo/config.toml"),
+        format!(
+            "[alias]\nbapp = ['build', '--manifest-path', '{}']\n",
+            manifest.display()
+        ),
+    )
+    .unwrap();
+    let mut command = mbx(root.path(), &wrapper);
+    command
+        .env_remove("MBX_CARGO_SHIM_MODE")
+        .current_dir(outside.path())
+        .arg("bapp");
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(30));
+    assert!(success, "alias did not recover its manifest: {output}");
+
+    // Successful metadata must discard the abandoned failure before the
+    // actual command starts another mbx invocation through the same wrapper.
+    let mut command = mbx(root.path(), &wrapper);
+    command.env_remove("MBX_CARGO_SHIM_MODE").arg("helper");
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
+    assert!(
+        success,
+        "successful metadata left a stale loop note: {output}"
+    );
+    assert!(output.contains("workspace_root"), "{output}");
 }

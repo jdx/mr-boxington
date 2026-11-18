@@ -282,6 +282,12 @@ pub(super) fn reject_known_cargo_loop() -> Result<()> {
     Ok(())
 }
 
+pub(super) fn clear_loop_note() {
+    if let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// The depth and chain to export, given those this shim inherited.
 fn next_cargo_selection(
     depth: Option<&str>,
@@ -507,7 +513,6 @@ pub(super) fn failed_probe(
         note_uncached_passthrough(invocation.as_ref());
         return Ok(FailedProbe::Passthrough);
     }
-    reject_known_cargo_loop()?;
     // The first probe asked about the alias's own name and got nothing back.
     // Ask again as Cargo will read it: the roots belong to the package the
     // expansion names, though the child still receives the command line as it
@@ -517,12 +522,16 @@ pub(super) fn failed_probe(
         && resolved.arguments != arguments
         && let Ok(expanded) = super::strings(&resolved.arguments)
     {
+        // The expanded alias can name a different manifest. Its probe is a
+        // new question, so an abandoned failure must not preempt it. Keep the
+        // cumulative depth limit even when starting this recovery attempt.
+        clear_loop_note();
         match super::cargo::cargo_roots_reported(cargo, &expanded, target_dir_env) {
             Ok(roots) => return Ok(FailedProbe::Roots(Box::new(roots))),
             Err(reason) => retry_reason = Some(reason),
         }
-        reject_known_cargo_loop()?;
     }
+    reject_known_cargo_loop()?;
     if metadata_failure_passthrough(invocation.as_ref()) {
         note_uncached_passthrough(invocation.as_ref());
         return Ok(FailedProbe::Passthrough);
