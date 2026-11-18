@@ -184,7 +184,7 @@ fn explicit_wrapper_loops_report_the_loop() {
         let mut wrapper = fixture(
             root.path(),
             &format!(
-                "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || echo 0)\ncount=$((count + 1))\necho $count > '{}'\n[ $count -le 64 ] || {{ touch '{}'; echo 'fixture stopped unguarded recursion' >&2; exit 99; }}\n{directory_change}exec '{mbx_path}' {prefix}\"$@\"\n",
+                "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || echo 0)\ncount=$((count + 1))\necho $count > '{}'\n[ $count -le 512 ] || {{ touch '{}'; echo 'fixture stopped unguarded recursion' >&2; exit 99; }}\n{directory_change}exec '{mbx_path}' {prefix}\"$@\"\n",
                 entries.display(),
                 entries.display(),
                 cutoff.display(),
@@ -223,9 +223,8 @@ fn explicit_wrapper_loops_report_the_loop() {
         assert!(!success, "{output}");
         assert!(!cutoff.exists(), "fixture cutoff reached: {output}");
         let calls: usize = read(&entries).trim().parse().unwrap();
-        // At most twelve nested selections, each allowed the normal trimmed
-        // probe and listing to recognize legitimate wrapper recovery.
-        assert!(calls <= 36, "wrapper launched {calls} times: {output}");
+        // The failed-tree budget bounds retries across all sibling probes.
+        assert!(calls <= 256, "wrapper launched {calls} times: {output}");
         assert!(output.contains("re-entered its Cargo shim"), "{output}");
         assert!(
             !output.contains("fixture stopped unguarded recursion"),
@@ -542,7 +541,7 @@ fn recursive_wrapper_outside_a_workspace_stays_bounded() {
     let wrapper = fixture(
         root.path(),
         &format!(
-            "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || echo 0)\ncount=$((count + 1))\necho $count > '{}'\n[ $count -le 128 ] || {{ touch '{}'; exit 99; }}\nexec '{mbx_path}' \"$@\"\n",
+            "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || echo 0)\ncount=$((count + 1))\necho $count > '{}'\n[ $count -le 512 ] || {{ touch '{}'; exit 99; }}\nexec '{mbx_path}' \"$@\"\n",
             entries.display(),
             entries.display(),
             cutoff.display()
@@ -560,7 +559,7 @@ fn recursive_wrapper_outside_a_workspace_stays_bounded() {
         "outside wrapper restarted the loop: {output}"
     );
     assert!(
-        read(&entries).trim().parse::<usize>().unwrap() <= 64,
+        read(&entries).trim().parse::<usize>().unwrap() <= 256,
         "{output}"
     );
     assert!(output.contains("re-entered its Cargo shim"), "{output}");
@@ -623,6 +622,56 @@ fn changing_path_cannot_restart_sibling_probe_trees() {
         read(&entries).trim().parse::<usize>().unwrap() <= 256,
         "{output}"
     );
-    assert_eq!(read(&observed), "128");
+    let bytes: [u8; 8] = std::fs::read(&observed).unwrap().try_into().unwrap();
+    assert_eq!(u64::from_le_bytes(bytes) & !(1 << 63), 128);
     assert_loop_note_removed(root.path());
+}
+
+#[test]
+fn unusable_temporary_storage_stops_before_recursive_children() {
+    let root = tempfile::tempdir().unwrap();
+    let mbx_path = env!("CARGO_BIN_EXE_mbx");
+    let entries = root.path().join("entries");
+    let cutoff = root.path().join("cutoff");
+    let wrapper = fixture(
+        root.path(),
+        &format!(
+            "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || echo 0)\ncount=$((count + 1))\necho $count > '{}'\n[ $count -le 32 ] || {{ touch '{}'; exit 99; }}\nexec '{mbx_path}' nextest run\n",
+            entries.display(),
+            entries.display(),
+            cutoff.display()
+        ),
+    );
+    let unavailable = root.path().join("not-a-directory");
+    std::fs::write(&unavailable, "cannot contain guard files").unwrap();
+    let mut command = mbx(root.path(), &wrapper);
+    command
+        .env_remove("MBX_CARGO_SHIM_MODE")
+        .env("TMPDIR", &unavailable)
+        .args(["nextest", "run"]);
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
+    assert!(!success, "{output}");
+    assert!(
+        !cutoff.exists(),
+        "unavailable storage restarted the probe tree: {output}"
+    );
+    assert!(
+        read(&entries).trim().parse::<usize>().unwrap() <= 8,
+        "{output}"
+    );
+    assert!(
+        output.contains("could not maintain Cargo recursion guard state"),
+        "{output}"
+    );
+
+    // An explicit query that reaches real Cargo directly needs no nested
+    // coordination state, even when TMPDIR cannot hold guard files.
+    let mut command = mbx(root.path(), &wrapper);
+    command
+        .env_remove("MBX_CARGO_SHIM_MODE")
+        .env("TMPDIR", &unavailable)
+        .env("CARGO", std::env::var_os("CARGO").unwrap())
+        .args(["metadata", "--no-deps", "--format-version", "1"]);
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
+    assert!(success, "direct Cargo query needed guard storage: {output}");
 }

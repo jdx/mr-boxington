@@ -181,35 +181,24 @@ fn record_cargo_selection(
     real_cargo: &OsStr,
     configured: Option<&OsStr>,
 ) -> Result<CargoSelection> {
-    // A wrapper may recover from a failed branch by selecting real Cargo.
-    // Only the same executable and arguments repeat the failed invocation.
-    // Different metadata flags or helper commands may legitimately recover;
-    // all entries still share the cumulative depth limit.
     let owns_note = std::env::var_os(CARGO_SHIM_NOTE_ENV).is_none();
-    let cargo = cargo_identity(real_cargo);
-    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
-    let directory = std::env::current_dir().ok().map(PathBuf::into_os_string);
-    let notes = read_loop_notes();
-    if !notes.is_empty() {
-        charge_loop_retry()?;
-        let environment = loop_environment()?;
-        if let Some(note) = notes.into_iter().find(|note| {
-            note.repeated
-                && note.cargo == cargo
-                && note.arguments == arguments
-                && note.directory == directory
-                && note.environment == environment
-        }) {
-            eyre::bail!("{}", note.message);
-        }
-    }
     let depth = std::env::var(CARGO_SHIM_DEPTH_ENV).ok();
+    let inherited_depth = depth
+        .as_deref()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    if inherited_depth > 0 {
+        // Establish writable shared state before another Cargo child can run.
+        // Its budget activates only once a depth limit is actually reached.
+        charge_loop_retry(inherited_depth >= MAX_CARGO_SHIM_DEPTH)
+            .wrap_err("could not maintain Cargo recursion guard state")?;
+    }
     let chain = std::env::var_os(CARGO_SHIM_CHAIN_ENV);
     let (depth, chain) =
         match next_cargo_selection(depth.as_deref(), chain.as_deref(), real_cargo, configured) {
             Ok(selection) => selection,
             Err(error) => {
-                leave_loop_note(real_cargo, &format!("{error}"));
+                leave_loop_note(&format!("{error}"));
                 return Err(error);
             }
         };
@@ -246,116 +235,35 @@ fn loop_note_path() -> PathBuf {
         ))
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct LoopNote {
-    cargo: OsString,
-    arguments: Vec<OsString>,
-    directory: Option<OsString>,
-    environment: String,
-    repeated: bool,
-    message: String,
+fn read_loop_note() -> Option<String> {
+    let path = std::env::var_os(CARGO_SHIM_NOTE_ENV)?;
+    std::fs::read_to_string(path)
+        .ok()
+        .filter(|note| note.contains("re-entered its Cargo shim"))
 }
 
-fn loop_environment() -> Result<String> {
-    // Cargo configuration and wrapper routing can depend on arbitrary env
-    // variables. Hash the values rather than recording secrets in the note.
-    // Tracking counters and shell bookkeeping cannot distinguish a recovery.
-    let mut variables = std::env::vars_os()
-        .filter(|(name, _)| {
-            ![
-                CARGO_SHIM_DEPTH_ENV,
-                CARGO_SHIM_CHAIN_ENV,
-                CARGO_SHIM_NOTE_ENV,
-                "SHLVL",
-                "OLDPWD",
-                "_",
-            ]
-            .iter()
-            .any(|key| name.eq_ignore_ascii_case(OsStr::new(key)))
-        })
-        .collect::<Vec<_>>();
-    variables.sort_unstable();
-    Ok(mbx_cache_core::CacheDigest::blake3(&serde_json::to_vec(&variables)?).hash)
-}
-
-fn cargo_identity(cargo: &OsStr) -> OsString {
-    let path = which::which(cargo).unwrap_or_else(|_| PathBuf::from(cargo));
-    // Preserve the invocation name: a script may dispatch on $0 even when
-    // two entry points ultimately resolve to the same inode.
-    std::path::absolute(&path).unwrap_or(path).into_os_string()
-}
-
-fn read_loop_note() -> Option<LoopNote> {
-    read_loop_notes().into_iter().next()
-}
-
-fn read_loop_notes() -> Vec<LoopNote> {
-    let Some(bytes) =
-        std::env::var_os(CARGO_SHIM_NOTE_ENV).and_then(|path| std::fs::read(path).ok())
-    else {
-        return Vec::new();
-    };
-    bytes
-        .split(|byte| *byte == b'\n')
-        .filter_map(|line| serde_json::from_slice(line).ok())
-        .collect()
-}
-
-fn leave_loop_note(cargo: &OsStr, message: &str) {
+fn leave_loop_note(message: &str) {
     let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV) else {
-        return;
-    };
-    let Ok(environment) = loop_environment() else {
         return;
     };
     if let Some(parent) = Path::new(&path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // Remember each failed invocation separately. A metadata probe and a
-    // command listing may both loop; neither should restart its failed tree.
     let mut options = std::fs::OpenOptions::new();
-    options.append(true).create_new(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let created = options.open(&path);
-    let file = match created {
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let mut options = std::fs::OpenOptions::new();
-            options.append(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.custom_flags(libc::O_NOFOLLOW);
-            }
-            options.open(&path)
-        }
-        other => other,
-    };
-    if let Ok(mut file) = file
-        && let Ok(mut bytes) = serde_json::to_vec(&LoopNote {
-            cargo: cargo_identity(cargo),
-            arguments: std::env::args_os().skip(1).collect(),
-            directory: std::env::current_dir().ok().map(PathBuf::into_os_string),
-            environment,
-            // A fresh fallback selected at the depth limit was never run;
-            // keep its diagnosis without poisoning a later shallower retry.
-            repeated: cargo_chain(std::env::var_os(CARGO_SHIM_CHAIN_ENV).as_deref())
-                .iter()
-                .any(|selected| cargo_identity(selected.as_os_str()) == cargo_identity(cargo)),
-            message: message.to_owned(),
-        })
-    {
-        bytes.push(b'\n');
-        let _ = std::io::Write::write_all(&mut file, &bytes);
+    if let Ok(mut file) = options.open(&path) {
+        let _ = std::io::Write::write_all(&mut file, message.as_bytes());
     }
 }
 
 pub(super) fn reject_known_cargo_loop() -> Result<()> {
     if let Some(note) = read_loop_note() {
-        eyre::bail!("{}", note.message);
+        eyre::bail!("{note}");
     }
     Ok(())
 }
@@ -377,9 +285,9 @@ fn remove_loop_note(note: &Path) {
     let _ = std::fs::remove_file(retry_counter_path(note));
 }
 
-/// Only failed trees pay this cost. A shared locked counter bounds sibling
-/// retries even when a wrapper changes PATH or another input on every entry.
-fn charge_loop_retry() -> Result<()> {
+/// Nested entries verify shared state is writable. Once a loop is detected,
+/// the counter bounds siblings even when a wrapper changes PATH every time.
+fn charge_loop_retry(activate: bool) -> Result<()> {
     use std::io::{Read, Seek, Write};
     let Some(note) = std::env::var_os(CARGO_SHIM_NOTE_ENV) else {
         return Ok(());
@@ -393,20 +301,32 @@ fn charge_loop_retry() -> Result<()> {
     }
     let mut file = options.open(retry_counter_path(Path::new(&note)))?;
     file.lock()?;
-    let mut count = String::new();
-    file.read_to_string(&mut count)?;
-    let count = count.parse::<usize>().unwrap_or(0);
+    let mut bytes = [0; 8];
+    let state = match file.metadata()?.len() {
+        0 => 0,
+        8 => {
+            file.read_exact(&mut bytes)?;
+            u64::from_le_bytes(bytes)
+        }
+        _ => eyre::bail!("invalid Cargo recursion guard state"),
+    };
+    let active = activate || state & (1 << 63) != 0;
+    let count = (state & !(1 << 63)) as usize;
     if count >= MAX_CARGO_LOOP_RETRIES {
-        let diagnosis = read_loop_note()
-            .map(|note| note.message)
-            .unwrap_or_default();
+        let diagnosis = read_loop_note().unwrap_or_default();
         eyre::bail!(
             "mbx re-entered its Cargo shim too many times: stopped after {count} retries in a failed invocation tree. {diagnosis}"
         );
     }
     file.rewind()?;
-    file.set_len(0)?;
-    file.write_all((count + 1).to_string().as_bytes())?;
+    // Always rewrite the fixed-size state, including inactive state, so an
+    // unwritable/full temporary filesystem fails before spawning a child.
+    let state = if active {
+        (1 << 63) | (count + 1) as u64
+    } else {
+        0
+    };
+    file.write_all(&state.to_le_bytes())?;
     Ok(())
 }
 
@@ -984,22 +904,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn loop_identity_preserves_distinct_symlink_entry_points() {
-        let directory = tempfile::tempdir().unwrap();
-        let script = directory.path().join("wrapper");
-        std::fs::write(&script, b"#!/bin/sh\n").unwrap();
-        let first = directory.path().join("first");
-        let second = directory.path().join("second");
-        std::os::unix::fs::symlink(&script, &first).unwrap();
-        std::os::unix::fs::symlink(&script, &second).unwrap();
-        assert_eq!(
-            first.canonicalize().unwrap(),
-            second.canonicalize().unwrap()
-        );
-        assert_ne!(
-            cargo_identity(first.as_os_str()),
-            cargo_identity(second.as_os_str())
-        );
+    fn cargo_chain_preserves_non_utf8_paths() {
+        use std::os::unix::ffi::OsStringExt;
+        let cargo = OsString::from_vec(b"/tool-\xff/cargo".to_vec());
+        let (_, chain) = next_cargo_selection(None, None, &cargo, None).unwrap();
+        assert_eq!(cargo_chain(chain.as_deref()), vec![PathBuf::from(cargo)]);
     }
 
     #[test]
