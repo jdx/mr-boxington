@@ -141,11 +141,10 @@ fn boot_id() -> &'static str {
     })
 }
 
-/// Whether any compilation represented by `cgroups` is charged to `scope`,
-/// one of this process's own memory cgroups. The list may combine several
-/// leases read before this call. `written` must be absent if any lease's
-/// timestamp is unknown; its value is not used to establish ordering.
-/// Called under the registrar lock of `pool`, which also guards shared walks.
+/// Whether a process sitting in `cgroups` is charged to the cgroup `scope`,
+/// one of this process's own memory cgroups. `written` is when the process
+/// recorded its cgroups, if known. Called under the registrar lock of
+/// `pool`, which also guards the walks shared there.
 ///
 /// Finding `scope` in the list is not enough. A process sees only the cgroups
 /// its namespace shows, so a compilation in a container nested below `scope`

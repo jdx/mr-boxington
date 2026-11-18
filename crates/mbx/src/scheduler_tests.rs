@@ -1334,52 +1334,6 @@ fn an_incompletely_identified_lease_gates_available_memory_in_every_container() 
 }
 
 #[test]
-fn short_memory_checks_all_live_cgroups_in_one_batch() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static CALLS: AtomicUsize = AtomicUsize::new(0);
-    fn check_batch(
-        _: &Path,
-        scope: &str,
-        groups: &[String],
-        written: Option<crate::util::Stamp>,
-    ) -> bool {
-        CALLS.fetch_add(1, Ordering::SeqCst);
-        assert!(written.is_some());
-        assert_eq!(groups, ["0:20", "0:21", "0:22"]);
-        groups.iter().any(|id| id == scope)
-    }
-    let directory = tempfile::tempdir().unwrap();
-    let mut pool = pool_at(directory.path(), 64, 100);
-    let mut permits = Vec::new();
-    for id in ["0:20", "0:21", "0:22"] {
-        pool.memory_cgroups = cgroups(&[id]);
-        permits.push(pool.try_admit(1, None).unwrap().unwrap());
-    }
-    let mut live = scan_leases(&directory.path().join(LEASES_DIR)).unwrap();
-    live.sort_by(|left, right| left.cgroups.cmp(&right.cgroups));
-    CALLS.store(0, Ordering::SeqCst);
-    assert!(!holds_short_memory(
-        directory.path(),
-        &live,
-        Some(&["0:30".into()]),
-        check_batch
-    ));
-    assert_eq!(
-        CALLS.load(Ordering::SeqCst),
-        1,
-        "one check for all siblings"
-    );
-    assert!(holds_short_memory(
-        directory.path(),
-        &live,
-        Some(&["0:21".into()]),
-        check_batch
-    ));
-    assert_eq!(CALLS.load(Ordering::SeqCst), 2);
-    drop(permits);
-}
-
-#[test]
 fn an_oversized_idle_grant_spaces_the_next_pools_admission() {
     let directory = tempfile::tempdir().unwrap();
     let mut low = pool_at(directory.path(), 4, 100);
