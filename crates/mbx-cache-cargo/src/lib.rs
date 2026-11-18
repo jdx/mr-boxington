@@ -247,6 +247,34 @@ pub fn try_resolve_reported_with_members(
     )
 }
 
+/// Resolve roots and workspace members, allowing the caller to stop recovery
+/// after a failed probe. Return `false` from `retry` when another probe would
+/// repeat a known fatal failure, such as a recursive Cargo wrapper.
+pub fn try_resolve_reported_with_members_and_retry_filter(
+    cargo: &OsStr,
+    arguments: &[String],
+    working_dir: &Path,
+    target_dir_env: Option<OsString>,
+    retry: impl Fn(&ProbeFailure) -> bool,
+) -> Result<(CargoInvocation, Option<Vec<PathBuf>>), ProbeFailure> {
+    let (reported, arguments) = probed_roots_with_retry_filter(
+        cache_root().as_deref(),
+        effective_cargo_home().as_deref(),
+        cargo,
+        arguments,
+        working_dir,
+        target_dir_env.as_deref(),
+        ProbePolicy {
+            require_members: true,
+            retry: &retry,
+        },
+    );
+    let metadata = reported?;
+    let invocation =
+        resolve_with_reported(arguments, working_dir, target_dir_env, Some(metadata.roots));
+    Ok((invocation, metadata.workspace_members))
+}
+
 fn resolve_reported_with_members_from_home(
     cache: Option<&Path>,
     cargo_home: Option<&Path>,
@@ -298,6 +326,34 @@ fn probed_roots<'a>(
     target_dir_env: Option<&OsStr>,
     require_members: bool,
 ) -> (Result<ReportedMetadata, ProbeFailure>, &'a [String]) {
+    probed_roots_with_retry_filter(
+        cache,
+        cargo_home,
+        cargo,
+        arguments,
+        working_dir,
+        target_dir_env,
+        ProbePolicy {
+            require_members,
+            retry: &|_| true,
+        },
+    )
+}
+
+struct ProbePolicy<'a> {
+    require_members: bool,
+    retry: &'a dyn Fn(&ProbeFailure) -> bool,
+}
+
+fn probed_roots_with_retry_filter<'a>(
+    cache: Option<&Path>,
+    cargo_home: Option<&Path>,
+    cargo: &OsStr,
+    arguments: &'a [String],
+    working_dir: &Path,
+    target_dir_env: Option<&OsStr>,
+    policy: ProbePolicy<'_>,
+) -> (Result<ReportedMetadata, ProbeFailure>, &'a [String]) {
     let probe = |arguments: &[String]| {
         recalled_cargo_roots(
             cache,
@@ -306,11 +362,15 @@ fn probed_roots<'a>(
             cargo_arguments(arguments),
             working_dir,
             target_dir_env,
-            require_members,
+            policy.require_members,
         )
     };
     let full = probe(arguments);
-    if full.is_ok() {
+    if full
+        .as_ref()
+        .err()
+        .is_none_or(|failure| !(policy.retry)(failure))
+    {
         return (full, arguments);
     }
     match owned_arguments(arguments) {

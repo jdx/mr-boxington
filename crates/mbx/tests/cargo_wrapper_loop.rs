@@ -133,19 +133,40 @@ fn wrapper_loop_through_a_plain_launch_still_stops() {
 /// mode. Bound the fixture itself so a regression cannot exhaust the host.
 #[test]
 fn explicit_wrapper_loops_report_the_loop() {
-    for (configured, prefix) in [(false, "cargo "), (true, "cargo "), (false, ""), (true, "")] {
+    for (configured, prefix, change_dir) in [
+        (false, "cargo ", false),
+        (true, "cargo ", false),
+        (false, "", false),
+        (true, "", false),
+        (false, "cargo ", true),
+    ] {
         let root = tempfile::tempdir().unwrap();
         let mbx_path = env!("CARGO_BIN_EXE_mbx");
+        let entries = root.path().join("entries");
+        let cutoff = root.path().join("cutoff");
+        let nested = root.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let directory_change = if change_dir {
+            format!("cd '{}' || exit 98\n", nested.display())
+        } else {
+            String::new()
+        };
         let wrapper = fixture(
             root.path(),
             &format!(
-                "#!/bin/sh\ncount=$(cat entries 2>/dev/null || echo 0)\ncount=$((count + 1))\necho $count > entries\n[ $count -le 20 ] || {{ echo 'fixture stopped unguarded recursion' >&2; exit 99; }}\nexec '{mbx_path}' {prefix}\"$@\"\n"
+                "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || echo 0)\ncount=$((count + 1))\necho $count > '{}'\n[ $count -le 20 ] || {{ touch '{}'; echo 'fixture stopped unguarded recursion' >&2; exit 99; }}\n{directory_change}exec '{mbx_path}' {prefix}\"$@\"\n",
+                entries.display(),
+                entries.display(),
+                cutoff.display(),
             ),
         );
         let mut command = mbx(root.path(), &wrapper);
         command.env_remove("MBX_CARGO_SHIM_MODE");
         if !configured {
             command.env_remove("CARGO");
+        }
+        if change_dir {
+            command.env("MBX_CACHE_DIR", "cache");
         }
         command.env(
             "PATH",
@@ -161,6 +182,9 @@ fn explicit_wrapper_loops_report_the_loop() {
         command.args(["fmt", "--all", "--", "--check"]);
         let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
         assert!(!success, "{output}");
+        assert!(!cutoff.exists(), "fixture cutoff reached: {output}");
+        let calls: usize = read(&entries).trim().parse().unwrap();
+        assert!(calls <= 12, "wrapper launched {calls} times: {output}");
         assert!(output.contains("re-entered its Cargo shim"), "{output}");
         assert!(
             !output.contains("fixture stopped unguarded recursion"),
@@ -175,5 +199,40 @@ fn explicit_wrapper_loops_report_the_loop() {
                     .to_string_lossy()
                     .starts_with("cargo-shim-loop-"))
         );
+        if change_dir {
+            assert!(
+                !nested.join("cache").exists(),
+                "relative note followed wrapper cwd"
+            );
+        }
     }
+}
+
+#[test]
+fn wrapper_can_recover_a_recursive_branch_with_real_cargo() {
+    let root = tempfile::tempdir().unwrap();
+    let mbx_path = env!("CARGO_BIN_EXE_mbx");
+    let real = std::env::var_os("CARGO").unwrap();
+    let wrapper = fixture(
+        root.path(),
+        &format!(
+            "#!/bin/sh\nif [ -n \"$MBX_TEST_RECURSIVE_BRANCH\" ]; then exec '{mbx_path}' \"$@\"; fi\nMBX_TEST_RECURSIVE_BRANCH=1 '{mbx_path}' \"$@\" && exit 0\nCARGO='{}' exec '{mbx_path}' \"$@\"\n",
+            Path::new(&real).display()
+        ),
+    );
+    let mut command = mbx(root.path(), &wrapper);
+    command.env_remove("MBX_CARGO_SHIM_MODE");
+    command.args(["metadata", "--no-deps", "--format-version", "1"]);
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
+    assert!(success, "{output}");
+    assert!(output.contains("workspace_root"), "{output}");
+    assert!(
+        std::fs::read_dir(root.path().join("cache"))
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("cargo-shim-loop-"))
+    );
 }

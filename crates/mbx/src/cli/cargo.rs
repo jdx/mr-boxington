@@ -1597,12 +1597,14 @@ pub(super) fn cargo_roots_reported(
         return remote_install_roots(arguments, &working_dir, target_dir_env)
             .ok_or_else(|| eyre::eyre!("could not resolve remote install storage"));
     }
-    let (resolved, workspace_members) = mbx_cache_cargo::try_resolve_reported_with_members(
-        cargo,
-        arguments,
-        &working_dir,
-        target_dir_env.map(std::ffi::OsStr::to_os_string),
-    )?;
+    let (resolved, workspace_members) =
+        mbx_cache_cargo::try_resolve_reported_with_members_and_retry_filter(
+            cargo,
+            arguments,
+            &working_dir,
+            target_dir_env.map(std::ffi::OsStr::to_os_string),
+            |_| super::shim::reject_known_cargo_loop().is_ok(),
+        )?;
     Ok(Roots {
         workspace_members,
         workspace_root: resolved.workspace_root,

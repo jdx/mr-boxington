@@ -180,14 +180,27 @@ fn record_cargo_selection(
     real_cargo: &OsStr,
     configured: Option<&OsStr>,
 ) -> Result<CargoSelection> {
-    reject_known_cargo_loop()?;
+    // A wrapper may recover from a failed branch by selecting real Cargo.
+    // Give that branch its own note, while the failed branch remains visible
+    // to its waiting parents. Reusing the same Cargo must still stop promptly.
+    let mut owns_note = std::env::var_os(CARGO_SHIM_NOTE_ENV).is_none();
+    if let Some(note) = read_loop_note() {
+        if note.cargo == cargo_identity(real_cargo) {
+            eyre::bail!("{}", note.message);
+        }
+        unsafe {
+            std::env::remove_var(CARGO_SHIM_DEPTH_ENV);
+            std::env::remove_var(CARGO_SHIM_CHAIN_ENV);
+        }
+        owns_note = true;
+    }
     let depth = std::env::var(CARGO_SHIM_DEPTH_ENV).ok();
     let chain = std::env::var_os(CARGO_SHIM_CHAIN_ENV);
     let (depth, chain) =
         match next_cargo_selection(depth.as_deref(), chain.as_deref(), real_cargo, configured) {
             Ok(selection) => selection,
             Err(error) => {
-                leave_loop_note(&format!("{error}"));
+                leave_loop_note(real_cargo, &format!("{error}"));
                 return Err(error);
             }
         };
@@ -197,7 +210,7 @@ fn record_cargo_selection(
     if let Some(chain) = chain {
         unsafe { std::env::set_var(CARGO_SHIM_CHAIN_ENV, chain) };
     }
-    let note = std::env::var_os(CARGO_SHIM_NOTE_ENV).is_none().then(|| {
+    let note = owns_note.then(|| {
         let path = loop_note_path();
         unsafe { std::env::set_var(CARGO_SHIM_NOTE_ENV, &path) };
         path
@@ -209,8 +222,10 @@ fn record_cargo_selection(
 /// roots probe discards its child's stderr, and asking a rejected Cargo to run
 /// again just to read the answer would launch it when nothing was verified.
 fn loop_note_path() -> PathBuf {
-    mbx_cache_cargo::cache_root()
-        .unwrap_or_else(std::env::temp_dir)
+    let root = mbx_cache_cargo::cache_root().unwrap_or_else(std::env::temp_dir);
+    // A wrapper may change directories before re-entering mbx.
+    let root = std::path::absolute(&root).unwrap_or_else(|_| std::env::temp_dir());
+    root
         // Containers sharing the cache can have identical process IDs. The
         // inherited random name identifies this selection tree across them.
         .join(format!(
@@ -220,7 +235,23 @@ fn loop_note_path() -> PathBuf {
         ))
 }
 
-fn leave_loop_note(message: &str) {
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LoopNote {
+    cargo: PathBuf,
+    message: String,
+}
+
+fn cargo_identity(cargo: &OsStr) -> PathBuf {
+    let path = which::which(cargo).unwrap_or_else(|_| PathBuf::from(cargo));
+    path.canonicalize().unwrap_or(path)
+}
+
+fn read_loop_note() -> Option<LoopNote> {
+    let path = std::env::var_os(CARGO_SHIM_NOTE_ENV)?;
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+fn leave_loop_note(cargo: &OsStr, message: &str) {
     let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV) else {
         return;
     };
@@ -233,18 +264,19 @@ fn leave_loop_note(message: &str) {
         .create_new(true)
         .open(path)
     {
-        let _ = std::io::Write::write_all(&mut file, message.as_bytes());
+        let _ = serde_json::to_writer(
+            &mut file,
+            &LoopNote {
+                cargo: cargo_identity(cargo),
+                message: message.to_owned(),
+            },
+        );
     }
 }
 
-fn reject_known_cargo_loop() -> Result<()> {
-    if let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV)
-        && let Ok(note) = std::fs::read_to_string(path)
-        && let Some(line) = note
-            .lines()
-            .find(|line| line.contains("re-entered its Cargo shim"))
-    {
-        eyre::bail!("{}", line.trim());
+pub(super) fn reject_known_cargo_loop() -> Result<()> {
+    if let Some(note) = read_loop_note() {
+        eyre::bail!("{}", note.message);
     }
     Ok(())
 }
