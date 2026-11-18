@@ -54,6 +54,7 @@ pub(super) fn plain_launch(
         for name in [
             super::shim::CARGO_SHIM_DEPTH_ENV,
             super::shim::CARGO_SHIM_CHAIN_ENV,
+            super::shim::CARGO_SHIM_NOTE_ENV,
         ] {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);

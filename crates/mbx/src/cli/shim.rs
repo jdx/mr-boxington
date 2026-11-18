@@ -15,7 +15,7 @@ pub(super) const CARGO_SHIM_CHAIN_ENV: &str = "MBX_CARGO_SHIM_CHAIN";
 /// repeat is not proof of a cycle. A real wrapper loop never stops, so a depth
 /// far beyond any plausible nesting is.
 const MAX_CARGO_SHIM_DEPTH: usize = 12;
-const CARGO_SHIM_NOTE_ENV: &str = "MBX_CARGO_SHIM_NOTE";
+pub(super) const CARGO_SHIM_NOTE_ENV: &str = "MBX_CARGO_SHIM_NOTE";
 static PATH_BEFORE_SHIM_EXCLUSION: OnceLock<OsString> = OnceLock::new();
 
 /// Only the outermost Cargo selection owns the diagnostic note. Keep it until
@@ -181,18 +181,17 @@ fn record_cargo_selection(
     configured: Option<&OsStr>,
 ) -> Result<CargoSelection> {
     // A wrapper may recover from a failed branch by selecting real Cargo.
-    // Give that branch its own note, while the failed branch remains visible
-    // to its waiting parents. Reusing the same Cargo must still stop promptly.
-    let mut owns_note = std::env::var_os(CARGO_SHIM_NOTE_ENV).is_none();
+    // Clear the abandoned diagnosis when its selected executable changes, but
+    // keep the cumulative depth: alternating fallbacks must remain bounded.
+    // Reusing the same Cargo must still stop promptly.
+    let owns_note = std::env::var_os(CARGO_SHIM_NOTE_ENV).is_none();
     if let Some(note) = read_loop_note() {
         if note.cargo == cargo_identity(real_cargo) {
             eyre::bail!("{}", note.message);
         }
-        unsafe {
-            std::env::remove_var(CARGO_SHIM_DEPTH_ENV);
-            std::env::remove_var(CARGO_SHIM_CHAIN_ENV);
+        if let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV) {
+            let _ = std::fs::remove_file(path);
         }
-        owns_note = true;
     }
     let depth = std::env::var(CARGO_SHIM_DEPTH_ENV).ok();
     let chain = std::env::var_os(CARGO_SHIM_CHAIN_ENV);
@@ -237,13 +236,13 @@ fn loop_note_path() -> PathBuf {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct LoopNote {
-    cargo: PathBuf,
+    cargo: OsString,
     message: String,
 }
 
-fn cargo_identity(cargo: &OsStr) -> PathBuf {
+fn cargo_identity(cargo: &OsStr) -> OsString {
     let path = which::which(cargo).unwrap_or_else(|_| PathBuf::from(cargo));
-    path.canonicalize().unwrap_or(path)
+    path.canonicalize().unwrap_or(path).into_os_string()
 }
 
 fn read_loop_note() -> Option<LoopNote> {
