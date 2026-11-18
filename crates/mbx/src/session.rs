@@ -118,7 +118,7 @@ pub const CACHE_EXPORT_GROUP_ENV: &str = "MBX_CACHE_EXPORT_GROUP";
 pub(crate) const WORKSPACE_ROOT_ENV: &str = "MBX_WORKSPACE_ROOT";
 pub(crate) const TARGET_DIR_ENV: &str = "MBX_TARGET_DIR";
 pub(crate) const BUILD_SCRIPT_REAL_SUFFIX: &str = ".mbx-real";
-const PREVIOUS_RUSTC_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WRAPPER";
+pub(crate) const PREVIOUS_RUSTC_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WRAPPER";
 const PREVIOUS_RUSTC_WORKSPACE_WRAPPER_ENV: &str = "MBX_PREVIOUS_RUSTC_WORKSPACE_WRAPPER";
 /// The bypass kind of a workspace crate a wrapper compiles instead of rustc.
 const WORKSPACE_WRAPPER_BYPASS: &str = "workspace-wrapper";
@@ -1817,6 +1817,16 @@ pub fn run_rustc_shim() -> ExitCode {
         return ExitCode::from(1);
     };
     let mut arguments = arguments.collect::<Vec<_>>();
+    // `cargo fix` runs the primary units through its own proxy, which starts
+    // the compiler with only the workspace wrapper. `mbx` names this shim as
+    // that wrapper too, so it can arrive as `shim shim rustc` for a workspace
+    // unit the proxy does not handle; the first of the pair is Cargo calling
+    // the wrapper chain and carries no information.
+    let rustc = if shim_is_both_wrappers(&rustc) && !arguments.is_empty() {
+        arguments.remove(0)
+    } else {
+        rustc
+    };
     if let Ok(selections) = std::env::var(MANAGED_TARGET_LINKERS_ENV)
         && let Ok(selections) = serde_json::from_str::<BTreeMap<String, PathBuf>>(&selections)
         && let Some(linker) = target_linker(&arguments, &selections)
@@ -1939,6 +1949,13 @@ fn executable_stem(executable: &OsStr) -> Option<&str> {
 /// own process, so both measure a real compile.
 pub(crate) fn compiler_runs_through_wrapper(compiler: &OsStr) -> bool {
     compiler_runs_through_wrapper_using(compiler, |name| std::env::var_os(name))
+}
+
+/// Whether `compiler` is this shim standing in as both `RUSTC_WRAPPER` and
+/// `RUSTC_WORKSPACE_WRAPPER`, which `mbx` arranges for `cargo fix`.
+fn shim_is_both_wrappers(compiler: &OsStr) -> bool {
+    std::env::var_os("RUSTC_WRAPPER").as_deref() == Some(compiler)
+        && std::env::var_os("RUSTC_WORKSPACE_WRAPPER").as_deref() == Some(compiler)
 }
 
 /// Cargo subcommands can set a workspace wrapper after mbx started its
