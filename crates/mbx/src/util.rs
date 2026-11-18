@@ -122,16 +122,32 @@ fn is_delta_worktree_root(directory: &Path) -> bool {
 }
 
 /// Write `contents` to `path` so readers never observe a partial file.
+///
+/// The file is private to the owner (`0600`). Use this for settings, which can
+/// hold a remote token. Cache state that several users share goes through
+/// [`write_atomic_shared`].
 pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
+    write_atomic_with(path, contents, tempfile::Builder::new())
+}
+
+/// [`write_atomic`] for cache state a group of users shares: the file follows
+/// the process umask instead of being owner-only.
+pub fn write_atomic_shared(path: &Path, contents: &[u8]) -> Result<()> {
+    write_atomic_with(path, contents, mbx_cache_core::shared_tempfile_builder())
+}
+
+fn write_atomic_with(
+    path: &Path,
+    contents: &[u8],
+    mut builder: tempfile::Builder<'_, '_>,
+) -> Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .ok_or_else(|| eyre::eyre!("path has no parent: {}", path.display()))?;
     std::fs::create_dir_all(parent)
         .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
-    let mut temporary = tempfile::Builder::new()
-        .prefix(".mbx-")
-        .tempfile_in(parent)?;
+    let mut temporary = builder.prefix(".mbx-").tempfile_in(parent)?;
     temporary.write_all(contents)?;
     temporary.as_file_mut().sync_all()?;
     temporary
@@ -156,7 +172,7 @@ pub fn write_advisory(path: &Path, contents: &[u8]) -> Result<()> {
         .ok_or_else(|| eyre::eyre!("path has no parent: {}", path.display()))?;
     std::fs::create_dir_all(parent)
         .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
-    let mut temporary = tempfile::Builder::new()
+    let mut temporary = mbx_cache_core::shared_tempfile_builder()
         .prefix(".mbx-")
         .tempfile_in(parent)?;
     temporary.write_all(contents)?;
@@ -678,6 +694,23 @@ mod tests {
         assert_eq!(parse_cgroup_stat(stat, "file"), Some(8000));
         assert_eq!(parse_cgroup_stat(stat, "absent"), None);
         assert_eq!(parse_cgroup_stat("malformed\n", "anon"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_stays_private_and_the_shared_variant_does_not() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        let private = directory.path().join("private");
+        let shared = directory.path().join("shared");
+        let plain = directory.path().join("plain");
+        write_atomic(&private, b"token").unwrap();
+        write_atomic_shared(&shared, b"state").unwrap();
+        drop(std::fs::File::create(&plain).unwrap());
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        // Settings can hold a remote token, so they never loosen with the umask.
+        assert_eq!(mode(&private), 0o600);
+        assert_eq!(mode(&shared), mode(&plain));
     }
 
     #[test]

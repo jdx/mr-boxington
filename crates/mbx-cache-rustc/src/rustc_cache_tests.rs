@@ -127,7 +127,11 @@ fn context(inputs: &[(&str, &str)]) -> ActionContext {
 }
 
 fn common_invocation() -> RustcInvocation {
-    let output = workspace().join("target/debug/deps");
+    common_invocation_in(&workspace().join("target/debug/deps"))
+}
+
+/// [`common_invocation`], writing to and linking from `output`.
+fn common_invocation_in(output: &Path) -> RustcInvocation {
     RustcInvocation::parse(&[
         "--crate-name".into(),
         "widget".into(),
@@ -140,7 +144,7 @@ fn common_invocation() -> RustcInvocation {
         "-C".into(),
         "metadata=abc123".into(),
         "--out-dir".into(),
-        output.clone().into_os_string(),
+        output.as_os_str().to_owned(),
         format!("-Ldependency={}", output.display()).into(),
         "--extern".into(),
         format!("serde={}", output.join("libserde.rlib").display()).into(),
@@ -854,6 +858,60 @@ fn a_static_library_changes_the_action_key_with_its_contents() {
     );
 }
 
+/// An untyped `cargo:rustc-link-search` reaches rustc as a bare `-L`, whose kind
+/// is `all`. It searches native libraries like `native=` does, so it must be
+/// admitted and held to the same rules rather than refused outright.
+#[test]
+fn an_untyped_search_path_is_held_to_the_native_rules() {
+    let (directory, working_dir, native) = static_library_fixture();
+    std::fs::write(native.join("libzstd.a"), "first").unwrap();
+    // Nothing names this file: only scanning the searched directory finds it.
+    std::fs::write(native.join("libunnamed.a"), "scanned").unwrap();
+    let dep_info = RustcDepInfo::parse("target/debug/deps/zstd_sys.d: src.rs\n").unwrap();
+    for kind in ["", "all="] {
+        let invocation =
+            RustcInvocation::parse(&library_linking(&[(kind, &native)], &["static=zstd"])).unwrap();
+        assert_eq!(
+            invocation.native_search_paths().collect::<Vec<_>>(),
+            [&native]
+        );
+        let mappings = vec![
+            PathMapping::new(&working_dir, "workspace"),
+            PathMapping::new(directory.path().join("target"), "target"),
+        ];
+        let discovered = invocation
+            .discover_inputs_with_mappings(
+                &dep_info,
+                &working_dir,
+                &mappings,
+                &mbx_cache_core::NoFileDigestCache,
+            )
+            .unwrap();
+        assert!(
+            discovered
+                .inputs
+                .iter()
+                .any(|input| input.path.ends_with("libunnamed.a")),
+            "the searched directory is scanned, not just the archives named by -l"
+        );
+        // Outside every admitted root it still bypasses, as `native=` does.
+        assert_eq!(
+            invocation.discover_inputs_with_mappings(
+                &dep_info,
+                &working_dir,
+                &[],
+                &mbx_cache_core::NoFileDigestCache,
+            ),
+            Err(BypassReason::UnsupportedSearchPath("native".into()))
+        );
+    }
+    // A kind that is neither dependency nor native-searching is still refused.
+    assert_eq!(
+        RustcInvocation::parse(&library_linking(&[("framework=", &native)], &[])).unwrap_err(),
+        BypassReason::UnsupportedSearchPath("framework".into())
+    );
+}
+
 /// A static archive outside every mapped root has no portable name, so the
 /// invocation bypasses like an `--extern` there would, on both discovery
 /// paths.
@@ -1270,6 +1328,34 @@ fn equivalent_worktrees_produce_the_same_action_key() {
     ];
     let second = invocation.action(second_context).unwrap();
     assert_eq!(first.digest, second.digest);
+}
+
+/// Cargo gives a profile that compiles a unit identically the same metadata
+/// hash, so the profile directory is all that tells the invocations apart.
+#[test]
+fn equivalent_profiles_produce_the_same_action_key() {
+    let keyed = |profile: &str, mapped: bool| {
+        let invocation =
+            common_invocation_in(&workspace().join("target").join(profile).join("deps"));
+        let serde = format!("target/{profile}/deps/libserde.rlib");
+        let mut context = context(&[("src/lib.rs", "source"), (&serde, "serde")]);
+        if mapped {
+            context.path_mappings.insert(
+                0,
+                PathMapping::new(workspace().join("target").join(profile), "profile"),
+            );
+        }
+        invocation.action(context).unwrap()
+    };
+
+    let debug = keyed("debug", true);
+    assert_eq!(debug.digest, keyed("alt", true).digest);
+    let json = String::from_utf8(debug.bytes).unwrap();
+    assert!(
+        json.contains(r#""--extern=serde=${profile}/deps/libserde.rlib""#),
+        "{json}"
+    );
+    assert_ne!(keyed("debug", false).digest, keyed("alt", false).digest);
 }
 
 #[test]

@@ -277,7 +277,7 @@ fn lock_receipts(store: &Path, workspace_root: &Path) -> Result<fslock::LockFile
         .join("locks")
         .join(format!("{}.lock", workspace_key(workspace_root)));
     std::fs::create_dir_all(lock_path.parent().expect("receipt lock has a parent"))?;
-    Ok(fslock::LockFile::open(&lock_path)?)
+    Ok(mbx_cache_core::open_shared_lock(&lock_path)?)
 }
 
 /// The predictions a restored Cargo target stands for.
@@ -1199,7 +1199,7 @@ fn merge_imported_manifest(destination: &Path, mut imported: TaskActionManifest)
     let destination_path = task_manifest_path(destination, &identity);
     let lock_path = task_manifest_lock_path(destination, &identity);
     std::fs::create_dir_all(lock_path.parent().expect("task manifest lock has a parent"))?;
-    let mut lock = fslock::LockFile::open(&lock_path)?;
+    let mut lock = mbx_cache_core::open_shared_lock(&lock_path)?;
     lock.lock()?;
     if let Ok(bytes) = std::fs::read(&destination_path)
         && let Ok(existing) = serde_json::from_slice::<TaskActionManifest>(&bytes)
@@ -1404,7 +1404,7 @@ fn task_manifest_is_idle(metadata: &std::fs::Metadata) -> bool {
 
 /// The lock on a task manifest, if nothing else holds it.
 fn claim_task_manifest_lock(path: &Path) -> Option<fslock::LockFile> {
-    let mut lock = fslock::LockFile::open(path).ok()?;
+    let mut lock = mbx_cache_core::open_shared_lock(path).ok()?;
     lock.try_lock().ok()?.then_some(lock)
 }
 
@@ -2544,7 +2544,7 @@ fn prune_import_staging(store: &Path, dry_run: bool) {
         // restore. A lock nobody holds is one the kernel released for a
         // process that is gone.
         let lock_path = import_staging_lock_path(&path);
-        let Ok(mut lock) = fslock::LockFile::open(&lock_path) else {
+        let Ok(mut lock) = mbx_cache_core::open_shared_lock(&lock_path) else {
             continue;
         };
         if !matches!(lock.try_lock(), Ok(true)) {
@@ -2599,7 +2599,7 @@ impl Drop for StagingClaim {
 /// Claim a staging tree for the lifetime of one import.
 fn lock_import_staging(staging: &Path) -> Result<StagingClaim> {
     let path = import_staging_lock_path(staging);
-    let mut lock = fslock::LockFile::open(&path)
+    let mut lock = mbx_cache_core::open_shared_lock(&path)
         .wrap_err_with(|| format!("failed to open {}", path.display()))?;
     lock.lock()?;
     Ok(StagingClaim {
@@ -2684,7 +2684,7 @@ pub fn sweep_if_due(store: &Path, max_bytes: u64, interval: Duration) -> Result<
 pub fn claim_sweep(store: &Path, interval: Duration) -> Result<bool> {
     let lock_path = store.join(SWEEP_LOCK);
     std::fs::create_dir_all(lock_path.parent().expect("sweep lock has a parent"))?;
-    let mut lock = fslock::LockFile::open(&lock_path)?;
+    let mut lock = mbx_cache_core::open_shared_lock(&lock_path)?;
     lock.lock()?;
 
     let stamp = store.join(SWEEP_STAMP);
@@ -3351,7 +3351,7 @@ fn write_advisory(path: &Path, contents: &[u8]) -> Result<()> {
         .ok_or_else(|| eyre::eyre!("path has no parent: {}", path.display()))?;
     std::fs::create_dir_all(parent)
         .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
-    let mut temporary = tempfile::Builder::new()
+    let mut temporary = mbx_cache_core::shared_tempfile_builder()
         .prefix(".mbx-")
         .tempfile_in(parent)?;
     use std::io::Write as _;
@@ -3370,7 +3370,7 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
         .ok_or_else(|| eyre::eyre!("path has no parent: {}", path.display()))?;
     std::fs::create_dir_all(parent)
         .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
-    let mut temporary = tempfile::Builder::new()
+    let mut temporary = mbx_cache_core::shared_tempfile_builder()
         .prefix(".mbx-")
         .tempfile_in(parent)?;
     use std::io::Write as _;

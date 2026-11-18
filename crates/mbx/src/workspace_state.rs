@@ -113,7 +113,7 @@ fn capture_workspace(
     executable_digest: &CacheDigest,
     objects: &mut BTreeSet<CacheDigest>,
 ) -> Result<WorkspaceState> {
-    let temporary = tempfile::NamedTempFile::new_in(cas.root())?;
+    let temporary = mbx_cache_core::shared_tempfile_builder().tempfile_in(cas.root())?;
     let mut archive = tar::Builder::new(temporary.reopen()?);
     let mut references = Vec::new();
     let mut inline_files = Vec::new();

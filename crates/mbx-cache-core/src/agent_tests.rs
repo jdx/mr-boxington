@@ -5936,7 +5936,7 @@ async fn bounds_cumulative_remote_downloads_for_a_session() {
         agent
             .respond(AgentRequest::FindBlob { digest: second })
             .await,
-        AgentResponse::Blob { path: None }
+        AgentResponse::Error { message } if message.contains("download budget")
     ));
     assert_eq!(
         agent.remote_download_bytes.load(Ordering::Relaxed),
@@ -5944,6 +5944,70 @@ async fn bounds_cumulative_remote_downloads_for_a_session() {
     );
     first_download.assert_async().await;
     second_download.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_recovered_budget_refusal_is_not_blamed_for_a_later_miss() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut server = mockito::Server::new_async().await;
+    let blob = CacheDigest::blake3(b"refused once");
+    let _gone = server
+        .mock("GET", blob_path(&blob).as_str())
+        .with_status(404)
+        .create_async()
+        .await;
+    let agent = remote_agent_url_with_limit(
+        server.url().parse().unwrap(),
+        directory.path().join("reader"),
+        RemoteCacheMode::ReadOnly,
+        100,
+    );
+    // An earlier lookup was refused while another download held the budget.
+    agent
+        .budget_refused_blobs
+        .lock()
+        .unwrap()
+        .insert(blob.clone());
+
+    assert!(matches!(
+        agent.respond(AgentRequest::FindBlob { digest: blob }).await,
+        AgentResponse::Blob { path: None }
+    ));
+}
+
+#[tokio::test]
+async fn prefetch_leaves_part_of_the_download_budget_for_restores() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = remote_agent_url_with_limit(
+        "http://127.0.0.1:1".parse().unwrap(),
+        directory.path().join("reader"),
+        RemoteCacheMode::ReadOnly,
+        100,
+    );
+
+    let prefetched = agent.reserve_remote_download(50, true).unwrap();
+    let refused = agent.reserve_remote_download(1, true).unwrap_err();
+    assert!(
+        refused.to_string().contains("prefetch download budget"),
+        "{refused}"
+    );
+    assert_eq!(
+        agent
+            .reserve_remote_download_up_to(10, true)
+            .unwrap()
+            .bytes(),
+        0
+    );
+    prefetched.commit(50);
+
+    // What prefetch left is still there for the build's own restores.
+    let restore = agent.reserve_remote_download(50, false).unwrap();
+    let refused = agent.reserve_remote_download(1, false).unwrap_err();
+    assert!(
+        refused.to_string().contains("restore download budget"),
+        "{refused}"
+    );
+    restore.commit(50);
 }
 
 #[tokio::test]
