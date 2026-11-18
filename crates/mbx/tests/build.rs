@@ -3830,13 +3830,22 @@ fn build_script_shim_does_not_redirty_its_compilation() {
     }
 
     let build_script_mtime = build_script.metadata().unwrap().modified().unwrap();
-    filetime::set_file_mtime(
-        &helper,
-        filetime::FileTime::from_system_time(
-            build_script_mtime + std::time::Duration::from_secs(4),
-        ),
-    )
-    .unwrap();
+    let newer = filetime::FileTime::from_system_time(
+        build_script_mtime + std::time::Duration::from_secs(4),
+    );
+    filetime::set_file_mtime(&helper, newer).unwrap();
+    // Cargo 1.102 stopped reading a dependency's age from its rlib and reads
+    // the unit's fingerprint timestamp instead. Bump that too so the
+    // dependency is newer under either rule.
+    for stamp in find_files(&project.path().join("target/debug"), |path| {
+        file_name_is(path, |name| name.ends_with(".timestamp"))
+            && path.components().any(|part| {
+                let part = part.as_os_str().to_string_lossy();
+                part == "helper" || part.starts_with("helper-")
+            })
+    }) {
+        filetime::set_file_mtime(&stamp, newer).unwrap();
+    }
     assert!(
         helper.metadata().unwrap().modified().unwrap() > build_script_mtime,
         "the fixture dependency must be newer than the compiled build script"
