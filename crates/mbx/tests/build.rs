@@ -5730,6 +5730,49 @@ fn two_checkouts(
     (store, stats)
 }
 
+/// Coverage instrumentation writes the checkout's source paths into the
+/// artifact, and `llvm-cov` reads them back, so an rlib restored into another
+/// checkout would report the first checkout's files.
+#[test]
+fn coverage_builds_do_not_restore_another_checkouts_artifacts() {
+    let hits_in_second_checkout = |settings: &[(&str, &str)]| {
+        let store = tempfile::tempdir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(first.path());
+        write_project(second.path());
+        build_with(
+            first.path(),
+            store.path(),
+            &reports.path().join("first.json"),
+            settings,
+        );
+        let (stats, _) = build_with(
+            second.path(),
+            store.path(),
+            &reports.path().join("second.json"),
+            settings,
+        );
+        count(&stats, "hits")
+    };
+
+    assert_eq!(
+        hits_in_second_checkout(&[("RUSTFLAGS", "-C instrument-coverage")]),
+        0,
+        "a coverage build should compile in the checkout it runs in"
+    );
+    // Sharing the workspace root remaps the recorded paths, which is what
+    // makes a shared artifact correct.
+    assert!(
+        hits_in_second_checkout(&[
+            ("RUSTFLAGS", "-C instrument-coverage"),
+            ("MBX_SHARE_WORKSPACE_ROOT", "1"),
+        ]) > 0,
+        "remapped coverage builds should share between checkouts"
+    );
+}
+
 #[test]
 fn an_empty_store_reports_nothing() {
     let store = tempfile::tempdir().unwrap();
