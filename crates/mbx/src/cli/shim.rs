@@ -15,6 +15,7 @@ pub(super) const CARGO_SHIM_CHAIN_ENV: &str = "MBX_CARGO_SHIM_CHAIN";
 /// repeat is not proof of a cycle. A real wrapper loop never stops, so a depth
 /// far beyond any plausible nesting is.
 const MAX_CARGO_SHIM_DEPTH: usize = 12;
+const MAX_CARGO_LOOP_RETRIES: usize = 128;
 pub(super) const CARGO_SHIM_NOTE_ENV: &str = "MBX_CARGO_SHIM_NOTE";
 static PATH_BEFORE_SHIM_EXCLUSION: OnceLock<OsString> = OnceLock::new();
 
@@ -27,7 +28,7 @@ pub(super) struct CargoSelection {
 impl Drop for CargoSelection {
     fn drop(&mut self) {
         if let Some(path) = &self.note {
-            let _ = std::fs::remove_file(path);
+            remove_loop_note(path);
         }
     }
 }
@@ -190,6 +191,7 @@ fn record_cargo_selection(
     let directory = std::env::current_dir().ok().map(PathBuf::into_os_string);
     let notes = read_loop_notes();
     if !notes.is_empty() {
+        charge_loop_retry()?;
         let environment = loop_environment()?;
         if let Some(note) = notes.into_iter().find(|note| {
             note.repeated
@@ -360,8 +362,52 @@ pub(super) fn reject_known_cargo_loop() -> Result<()> {
 
 pub(super) fn clear_loop_note() {
     if let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV) {
-        let _ = std::fs::remove_file(path);
+        remove_loop_note(Path::new(&path));
     }
+}
+
+fn retry_counter_path(note: &Path) -> PathBuf {
+    let mut path = note.as_os_str().to_owned();
+    path.push(".retries");
+    PathBuf::from(path)
+}
+
+fn remove_loop_note(note: &Path) {
+    let _ = std::fs::remove_file(note);
+    let _ = std::fs::remove_file(retry_counter_path(note));
+}
+
+/// Only failed trees pay this cost. A shared locked counter bounds sibling
+/// retries even when a wrapper changes PATH or another input on every entry.
+fn charge_loop_retry() -> Result<()> {
+    use std::io::{Read, Seek, Write};
+    let Some(note) = std::env::var_os(CARGO_SHIM_NOTE_ENV) else {
+        return Ok(());
+    };
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(retry_counter_path(Path::new(&note)))?;
+    file.lock()?;
+    let mut count = String::new();
+    file.read_to_string(&mut count)?;
+    let count = count.parse::<usize>().unwrap_or(0);
+    if count >= MAX_CARGO_LOOP_RETRIES {
+        let diagnosis = read_loop_note()
+            .map(|note| note.message)
+            .unwrap_or_default();
+        eyre::bail!(
+            "mbx re-entered its Cargo shim too many times: stopped after {count} retries in a failed invocation tree. {diagnosis}"
+        );
+    }
+    file.rewind()?;
+    file.set_len(0)?;
+    file.write_all((count + 1).to_string().as_bytes())?;
+    Ok(())
 }
 
 /// The Cargo paths inherited from earlier selections in this invocation tree.
@@ -592,14 +638,6 @@ pub(super) fn failed_probe(
     // it before reading the invocation: `i = "install --path /project"`
     // compiles a local package from a directory that has none of its own.
     let invocation = super::cargo_invocation::resolve(cargo, arguments);
-    // A wrapper may catch the failed branch and fall back directly to real
-    // Cargo, which cannot clear our note. A successful command listing can
-    // still authorize normal passthrough (notably outside a project). The
-    // guard rejects recursive entries during that listing, so it stays bounded.
-    if read_loop_note().is_some() && metadata_failure_passthrough(invocation.as_ref()) {
-        note_uncached_passthrough(invocation.as_ref());
-        return Ok(FailedProbe::Passthrough);
-    }
     // The first probe asked about the alias's own name and got nothing back.
     // Ask again as Cargo will read it: the roots belong to the package the
     // expansion names, though the child still receives the command line as it
@@ -617,11 +655,11 @@ pub(super) fn failed_probe(
             Err(reason) => retry_reason = Some(reason),
         }
     }
-    reject_known_cargo_loop()?;
     if metadata_failure_passthrough(invocation.as_ref()) {
         note_uncached_passthrough(invocation.as_ref());
         return Ok(FailedProbe::Passthrough);
     }
+    reject_known_cargo_loop()?;
     Ok(FailedProbe::Reject(retry_reason))
 }
 

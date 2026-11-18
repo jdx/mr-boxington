@@ -77,6 +77,10 @@ fn assert_loop_note_removed(root: &Path) {
         !Path::new(&note).exists(),
         "loop note was not removed: {note}"
     );
+    assert!(
+        !Path::new(&format!("{note}.retries")).exists(),
+        "retry counter was not removed"
+    );
 }
 
 fn mbx(root: &Path, wrapper: &Path) -> Command {
@@ -390,8 +394,8 @@ fn direct_cargo_fallback_can_run_external_commands_without_a_manifest() {
     std::fs::write(
         outside.path().join(".cargo/config.toml"),
         format!(
-            "[alias]\nbapp = ['build', '--manifest-path', '{}']\n",
-            manifest.display()
+            "[alias]\nbapp = ['build', '--manifest-path', '{}']\nnt = ['probe', 'run', '--manifest-path', '{}']\n",
+            manifest.display(), manifest.display()
         ),
     )
     .unwrap();
@@ -402,6 +406,24 @@ fn direct_cargo_fallback_can_run_external_commands_without_a_manifest() {
         .arg("bapp");
     let (success, output) = output_within(command, root.path(), Duration::from_secs(30));
     assert!(success, "alias did not recover its manifest: {output}");
+
+    std::fs::write(
+        &external,
+        "#!/bin/sh\n[ -n \"$MBX_SOCKET\" ] || exit 96\necho managed-alias\n",
+    )
+    .unwrap();
+    let mut command = mbx(root.path(), &wrapper);
+    command
+        .env_remove("MBX_CARGO_SHIM_MODE")
+        .env("PATH", &path)
+        .current_dir(outside.path())
+        .arg("nt");
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(30));
+    assert!(
+        success,
+        "external alias bypassed its manifest's cache session: {output}"
+    );
+    assert!(output.contains("managed-alias"), "{output}");
 
     // Successful metadata must discard the abandoned failure before the
     // actual command starts another mbx invocation through the same wrapper.
@@ -566,4 +588,41 @@ fn real_cargo_fallback_blocked_at_the_limit_can_run_as_the_stack_unwinds() {
     let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
     assert!(success, "{output}");
     assert!(output.contains("workspace_root"), "{output}");
+}
+
+#[test]
+fn changing_path_cannot_restart_sibling_probe_trees() {
+    let root = tempfile::tempdir().unwrap();
+    let mbx_path = env!("CARGO_BIN_EXE_mbx");
+    let entries = root.path().join("entries");
+    let cutoff = root.path().join("cutoff");
+    let observed = root.path().join("retries-observed");
+    let wrapper = fixture(
+        root.path(),
+        &format!(
+            "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || echo 0)\ncount=$((count + 1))\necho $count > '{}'\n[ $count -le 512 ] || {{ touch '{}'; exit 99; }}\nif [ -f \"$MBX_CARGO_SHIM_NOTE.retries\" ]; then cp \"$MBX_CARGO_SHIM_NOTE.retries\" '{}'; fi\nPATH='{}':\"$PATH\" exec '{mbx_path}' nextest run\n",
+            entries.display(),
+            entries.display(),
+            cutoff.display(),
+            observed.display(),
+            root.path().join("bin").display()
+        ),
+    );
+    track_loop_note(&wrapper, root.path());
+    let mut command = mbx(root.path(), &wrapper);
+    command
+        .env_remove("MBX_CARGO_SHIM_MODE")
+        .args(["nextest", "run"]);
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(30));
+    assert!(!success, "{output}");
+    assert!(
+        !cutoff.exists(),
+        "probe tree reached the fixture cutoff: {output}"
+    );
+    assert!(
+        read(&entries).trim().parse::<usize>().unwrap() <= 256,
+        "{output}"
+    );
+    assert_eq!(read(&observed), "128");
+    assert_loop_note_removed(root.path());
 }
