@@ -54,6 +54,31 @@ fn fixture(root: &Path, wrapper_body: &str) -> std::path::PathBuf {
     wrapper
 }
 
+fn track_loop_note(wrapper: &Path, root: &Path) {
+    let script = std::fs::read_to_string(wrapper).unwrap();
+    std::fs::write(
+        wrapper,
+        script.replacen(
+            "#!/bin/sh\n",
+            &format!(
+                "#!/bin/sh\nprintf '%s' \"$MBX_CARGO_SHIM_NOTE\" > '{}'\n",
+                root.join("note-path").display()
+            ),
+            1,
+        ),
+    )
+    .unwrap();
+}
+
+fn assert_loop_note_removed(root: &Path) {
+    let note = read(&root.join("note-path"));
+    assert!(!note.is_empty());
+    assert!(
+        !Path::new(&note).exists(),
+        "loop note was not removed: {note}"
+    );
+}
+
 fn mbx(root: &Path, wrapper: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_mbx"));
     command
@@ -169,6 +194,7 @@ fn explicit_wrapper_loops_report_the_loop() {
             std::fs::rename(wrapper.parent().unwrap(), &directory).unwrap();
             wrapper = directory.join("cargo");
         }
+        track_loop_note(&wrapper, root.path());
         let mut command = mbx(root.path(), &wrapper);
         command.env_remove("MBX_CARGO_SHIM_MODE");
         if !configured {
@@ -201,15 +227,7 @@ fn explicit_wrapper_loops_report_the_loop() {
             !output.contains("fixture stopped unguarded recursion"),
             "{output}"
         );
-        assert!(
-            std::fs::read_dir(root.path().join("cache"))
-                .unwrap()
-                .all(|entry| !entry
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("cargo-shim-loop-"))
-        );
+        assert_loop_note_removed(root.path());
         if change_dir {
             assert!(
                 !nested.join("cache").exists(),
@@ -232,21 +250,14 @@ fn wrapper_can_recover_a_recursive_branch_with_real_cargo() {
             Path::new(&real).display()
         ),
     );
+    track_loop_note(&wrapper, root.path());
     let mut command = mbx(root.path(), &wrapper);
     command.env_remove("MBX_CARGO_SHIM_MODE");
     command.args(["metadata", "--no-deps", "--format-version", "1"]);
     let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
     assert!(success, "{output}");
     assert!(output.contains("workspace_root"), "{output}");
-    assert!(
-        std::fs::read_dir(root.path().join("cache"))
-            .unwrap()
-            .all(|entry| !entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with("cargo-shim-loop-"))
-    );
+    assert_loop_note_removed(root.path());
 
     // Failed metadata outside a project must still allow Cargo to run an
     // external command after the wrapper recovers with real Cargo.
@@ -313,7 +324,8 @@ fn direct_cargo_fallback_can_run_external_commands_without_a_manifest() {
     let wrapper = fixture(
         root.path(),
         &format!(
-            "#!/bin/sh\nfor arg do if [ \"$arg\" = helper ]; then CARGO=\"$0\" exec '{mbx_path}' metadata --no-deps --format-version 1; fi; done\nif [ -n \"$MBX_TEST_RECURSIVE_BRANCH\" ]; then exec '{mbx_path}' \"$@\"; fi\nMBX_TEST_RECURSIVE_BRANCH=1 '{mbx_path}' \"$@\" && exit 0\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\nfor arg do if [ \"$arg\" = probe ]; then exec '{}' \"$@\"; fi; done\nfor arg do if [ \"$arg\" = helper ]; then CARGO=\"$0\" exec '{mbx_path}' metadata --no-deps --format-version 1; fi; done\nif [ -n \"$MBX_TEST_RECURSIVE_BRANCH\" ]; then exec '{mbx_path}' \"$@\"; fi\nMBX_TEST_RECURSIVE_BRANCH=1 '{mbx_path}' \"$@\" && exit 0\nexec '{}' \"$@\"\n",
+            Path::new(&real).display(),
             Path::new(&real).display()
         ),
     );
@@ -336,6 +348,39 @@ fn direct_cargo_fallback_can_run_external_commands_without_a_manifest() {
     let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
     assert!(success, "{output}");
     assert!(output.contains("recovered-direct"), "{output}");
+
+    let path = std::env::join_paths(
+        std::iter::once(wrapper.parent().unwrap().to_path_buf())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let mut command = mbx(root.path(), &wrapper);
+    command
+        .env_remove("MBX_CARGO_SHIM_MODE")
+        .env("PATH", &path)
+        .args(["probe", "--manifest-path", "not-the-workspace.toml"]);
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
+    assert!(
+        success,
+        "external arguments prevented metadata recovery: {output}"
+    );
+    assert!(output.contains("recovered-direct"), "{output}");
+
+    std::fs::write(&external, format!(
+        "#!/bin/sh\nmkdir -p generated/src\nprintf '%s\\n' '[package]' \"name='generated'\" \"version='0.0.0'\" > generated/Cargo.toml\nprintf '%s\\n' 'fn main() {{}}' > generated/src/main.rs\ncd generated || exit 98\nCARGO='{}' exec '{mbx_path}' build\n", wrapper.display()
+    )).unwrap();
+    let mut command = mbx(root.path(), &wrapper);
+    command
+        .env_remove("MBX_CARGO_SHIM_MODE")
+        .env("PATH", &path)
+        .current_dir(outside.path())
+        .arg("probe");
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(30));
+    assert!(
+        success,
+        "passthrough retained the failed probe's note: {output}"
+    );
+    assert!(outside.path().join("generated/Cargo.toml").exists());
 
     std::fs::create_dir(outside.path().join(".cargo")).unwrap();
     let manifest = root.path().join("Cargo.toml");

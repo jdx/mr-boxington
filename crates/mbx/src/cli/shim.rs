@@ -221,7 +221,9 @@ fn record_cargo_selection(
 /// roots probe discards its child's stderr, and asking a rejected Cargo to run
 /// again just to read the answer would launch it when nothing was verified.
 fn loop_note_path() -> PathBuf {
-    let root = mbx_cache_cargo::cache_root().unwrap_or_else(std::env::temp_dir);
+    // Passthrough commands must not touch configured cache storage, which may
+    // be unavailable. The note is ephemeral coordination between children.
+    let root = std::env::temp_dir();
     // A wrapper may change directories before re-entering mbx.
     let root = std::path::absolute(&root).unwrap_or_else(|_| std::env::temp_dir());
     root
@@ -286,6 +288,20 @@ pub(super) fn clear_loop_note() {
     if let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV) {
         let _ = std::fs::remove_file(path);
     }
+}
+
+pub(super) fn retry_metadata(failure: &mbx_cache_cargo::ProbeFailure) -> bool {
+    // Our guard exits with 1. Real Cargo's metadata errors (for example an
+    // external command's own --manifest-path) can still need the normal
+    // argument-trimming retry after a wrapper falls back to Cargo.
+    if matches!(failure, mbx_cache_cargo::ProbeFailure::Exit { status, .. }
+        if status.code() == Some(1))
+        && read_loop_note().is_some()
+    {
+        return false;
+    }
+    clear_loop_note();
+    true
 }
 
 /// The depth and chain to export, given those this shim inherited.
@@ -510,6 +526,7 @@ pub(super) fn failed_probe(
     // still authorize normal passthrough (notably outside a project). The
     // guard rejects recursive entries during that listing, so it stays bounded.
     if read_loop_note().is_some() && metadata_failure_passthrough(invocation.as_ref()) {
+        clear_loop_note();
         note_uncached_passthrough(invocation.as_ref());
         return Ok(FailedProbe::Passthrough);
     }
@@ -533,6 +550,7 @@ pub(super) fn failed_probe(
     }
     reject_known_cargo_loop()?;
     if metadata_failure_passthrough(invocation.as_ref()) {
+        clear_loop_note();
         note_uncached_passthrough(invocation.as_ref());
         return Ok(FailedProbe::Passthrough);
     }
