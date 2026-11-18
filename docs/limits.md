@@ -192,9 +192,11 @@ they enter the key as text:
 
 macOS needs one adjustment of its own. A debug-info link records absolute
 object paths and their timestamps in the binary's debug map, so mbx passes
-ld64 `-oso_prefix` for the build's target directory, which lets those links
-cache. The same prefix covers `-Csplit-debuginfo=unpacked`, which keeps debug
-information in the objects rather than beside the binary.
+ld64 `-oso_prefix` for the build's profile directory (such as `target/debug`),
+which lets those links cache and leaves the debug map naming `deps/...` in
+every profile that shares the link. The same prefix covers
+`-Csplit-debuginfo=unpacked`, which keeps debug information in the objects
+rather than beside the binary.
 
 ## Native libraries are inputs where nothing links
 
@@ -518,6 +520,13 @@ now get the same keys in every checkout and can hit the cache. The cost is that
 source paths under the workspace are recorded as the placeholder in debug
 information, `file!()`, and panic locations, which is why the setting is off
 by default.
+
+Builds with `-C instrument-coverage` (for example `cargo llvm-cov`) are the
+exception. The coverage mapping records absolute source paths that `llvm-cov`
+reads back, so a restored artifact would report another checkout's files. Each
+checkout therefore compiles its own workspace crates for a coverage build.
+With `share_workspace_root` on, the paths are remapped to a placeholder and the
+crates share again.
 
 <span id="collection-is-approximate"></span>
 For eviction order and what the action-store budget covers, see

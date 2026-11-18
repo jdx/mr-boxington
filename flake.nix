@@ -33,6 +33,11 @@
             nativeBuildInputs = [
               pkgs.cmake
               pkgs.makeWrapper
+              pkgs.pkg-config
+            ];
+            buildInputs = [
+              pkgs.zstd
+              pkgs.aws-lc
             ];
             dontUseCmakeConfigure = true;
 

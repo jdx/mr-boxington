@@ -23,7 +23,7 @@ fn a_toolchain_is_refused_for_reserve() {
 
 #[test]
 fn external_work_skips_nested_admission_without_leaking_the_worker_marker() {
-    let command = reserve::external_command("echo", &[]);
+    let command = reserve::external_command("echo", &[], None);
     let environment = command
         .get_envs()
         .map(|(name, value)| {
@@ -40,4 +40,22 @@ fn external_work_skips_nested_admission_without_leaking_the_worker_marker() {
         Some(&Some("1".into()))
     );
     assert_eq!(environment.get("MBX_RESERVE_WORKER"), Some(&None));
+}
+
+fn reserved_cpus(cpus: Option<u64>) -> Option<Option<String>> {
+    reserve::external_command("echo", &[], cpus)
+        .get_envs()
+        .find(|(name, _)| *name == "MBX_RESERVED_CPUS")
+        .map(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
+}
+
+#[test]
+fn external_work_is_told_how_many_cores_it_holds() {
+    assert_eq!(reserved_cpus(Some(4)), Some(Some("4".into())));
+}
+
+#[test]
+fn a_reservation_without_cores_clears_the_inherited_width() {
+    assert_eq!(reserved_cpus(None), Some(None));
+    assert_eq!(reserved_cpus(Some(0)), Some(None));
 }

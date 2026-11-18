@@ -854,6 +854,63 @@ fn standalone_target_mapping_covers_the_profile_tree() {
 }
 
 #[test]
+fn a_units_profile_directory_is_its_own_placeholder() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target");
+    let key = |output: &Path, target_name: Option<&str>| {
+        let mappings = PathMapping::ordered(&path_mappings_with_env(
+            directory.path(),
+            Some(output),
+            target_name,
+            |name| match name {
+                crate::session::TARGET_DIR_ENV => Some(target.as_os_str().to_owned()),
+                _ => None,
+            },
+        ));
+        normalize_mapped_path(&output.join("libwidget.rlib"), directory.path(), &mappings).unwrap()
+    };
+
+    assert_eq!(
+        key(&target.join("debug/deps"), None),
+        key(&target.join("alt/deps"), None)
+    );
+    assert_eq!(
+        key(&target.join("alt/deps"), None),
+        "${profile}/deps/libwidget.rlib"
+    );
+    // The `--target` layout nests the profile beneath the triple.
+    let triple = "x86_64-unknown-linux-gnu";
+    assert_eq!(
+        key(&target.join(triple).join("debug/deps"), Some(triple)),
+        key(&target.join(triple).join("alt/deps"), Some(triple))
+    );
+    // Host artifacts beside the triple directory are keyed the same way.
+    let mappings = PathMapping::ordered(&path_mappings_with_env(
+        directory.path(),
+        Some(&target.join(triple).join("alt/deps")),
+        Some(triple),
+        |name| match name {
+            crate::session::TARGET_DIR_ENV => Some(target.as_os_str().to_owned()),
+            _ => None,
+        },
+    ));
+    assert_eq!(
+        normalize_mapped_path(
+            &target.join("alt/deps/libmacro.so"),
+            directory.path(),
+            &mappings
+        )
+        .unwrap(),
+        "${host_profile}/deps/libmacro.so"
+    );
+    // A directory outside Cargo's layout keeps naming itself under the target.
+    assert_eq!(
+        key(&target.join("doc"), None),
+        "${target}/doc/libwidget.rlib"
+    );
+}
+
+#[test]
 fn validates_exact_rustc_output_set() {
     let root = tempfile::tempdir().unwrap();
     let outputs = test_outputs(root.path());
@@ -1437,7 +1494,7 @@ fn the_shim_appends_an_oso_prefix_for_cached_links() {
     let extended = with_oso_prefix(&base, true);
     assert_eq!(
         extended.last().unwrap(),
-        &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/target/"),
+        &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/target/debug/"),
     );
     let example = arguments(&["--out-dir=/work/target/debug/examples", "examples/app.rs"]);
     assert_eq!(with_oso_prefix(&example, true).last(), extended.last());
@@ -1480,7 +1537,7 @@ fn the_shim_appends_an_oso_prefix_for_cached_links() {
     let split = arguments(&["--out-dir=/work/target/debug/deps", "src/main.rs"]);
     assert_eq!(
         with_oso_prefix(&split, true).last().unwrap(),
-        &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/target/"),
+        &OsString::from("-Clink-arg=-Wl,-oso_prefix,/work/target/debug/"),
     );
 }
 
@@ -1926,10 +1983,8 @@ fn mbx_incremental_safety_tracks_optimization_lto_and_codegen_units() {
     let safe = |arguments: &[&str]| {
         mbx_incremental_is_safe(&arguments.iter().map(OsString::from).collect::<Vec<_>>())
     };
-    for level in ["0", "1"] {
-        assert!(safe(&["-C", &format!("opt-level={level}")]));
-    }
-    for level in ["2", "3", "s", "z"] {
+    assert!(safe(&["-C", "opt-level=0"]));
+    for level in ["1", "2", "3", "s", "z"] {
         assert!(!safe(&["-C", &format!("opt-level={level}")]));
     }
     assert!(!safe(&["-O"]));
@@ -1993,7 +2048,11 @@ fn mbx_incremental_safety_tracks_optimization_lto_and_codegen_units() {
     assert!(!safe(&["-Copt-level=3", "-Clto=off", "-Clto=thin"]));
     assert!(safe(&["-Copt-level=3", "-Clto=false"]));
     assert!(!safe(&["-Copt-level=0", "-Clto=false", "-Clto=thin"]));
-    assert!(safe(&["-O", "-Copt-level=1"]));
+    assert!(!safe(&["-O", "-Copt-level=1"]));
+    assert!(safe(&["-O", "-Copt-level=0"]));
+    assert!(!safe(&["-Copt-level=0", "-O"]));
+    assert!(safe(&["-Copt-level=1", "-Clto=off"]));
+    assert!(safe(&["-Copt-level=1", "-Ccodegen-units=1"]));
     assert!(!safe(&["-Copt-level=1", "-O"]));
 }
 
@@ -2024,10 +2083,12 @@ fn mbx_incremental_safety_expands_response_files() {
     assert!(!safe("-Copt-level=0\n-Clto=thin\n", &[]));
     assert!(safe("-Copt-level=3\n-Ccodegen-units=1\n", &[]));
     assert!(safe("-Copt-level=3\n", &["-Clto=off"]));
-    assert!(safe("-Copt-level=3\n", &["-Copt-level=1"]));
+    assert!(!safe("-Copt-level=3\n", &["-Copt-level=1"]));
     assert!(!safe("-Copt-level=3\n-Ccodegen-units=1\n", &["-Clto=fat"]));
     assert!(safe("-Copt-level=0\n", &[]));
-    assert!(safe("-Copt-level=1\n", &[]));
+    assert!(!safe("-Copt-level=1\n", &[]));
+    assert!(safe("-Copt-level=1\n", &["-Clto=off"]));
+    assert!(safe("-Copt-level=1\n", &["-Ccodegen-units=1"]));
 }
 
 #[test]
@@ -2284,4 +2345,43 @@ fn private_incremental_state_is_named_under_a_new_generation() {
         unit,
         current_incremental_generation(&CacheDigest::blake3(b"another invocation"))
     );
+}
+
+#[test]
+fn coverage_instrumentation_follows_the_last_codegen_option() {
+    let coverage = |flags: &[&str]| {
+        let arguments: Vec<OsString> = flags.iter().map(OsString::from).collect();
+        instruments_coverage(&arguments)
+    };
+    assert!(coverage(&["-Cinstrument-coverage"]));
+    assert!(coverage(&["-C", "instrument-coverage=all"]));
+    assert!(!coverage(&["--crate-name", "demo"]));
+    for off in ["off", "no", "n", "false", "0"] {
+        let disabled = format!("-Cinstrument-coverage={off}");
+        assert!(
+            !coverage(&["-Cinstrument-coverage", &disabled]),
+            "{off} should disable coverage"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_workspace_root_is_keyed_to_its_checkout() {
+    use std::os::unix::ffi::OsStrExt;
+    let key = |name: &[u8]| {
+        let mut portable = Portable {
+            mappings: vec![PathMapping::new(
+                PathBuf::from(OsStr::from_bytes(name)),
+                "workspace",
+            )],
+            arguments: Vec::new(),
+            build_script_inputs: None,
+        };
+        portable.key_workspace_to_checkout(false);
+        portable.mappings.remove(0).placeholder
+    };
+    let first = key(b"/work/\xff-a");
+    assert_ne!(first, "workspace");
+    assert_ne!(first, key(b"/work/\xff-b"));
 }

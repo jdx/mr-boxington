@@ -409,7 +409,7 @@ impl Summary {
                     median_peak_predicted_ratio: median,
                     p90_peak_predicted_ratio: p90,
                     average_reserved_unused_bytes: (samples.clean_n > 0)
-                        .then(|| samples.unused / samples.clean_n as f64),
+                        .then_some(samples.unused / samples.clean_n as f64),
                 }
             })
             .collect();

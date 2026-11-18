@@ -464,6 +464,106 @@ fn transparent_rustc_replaces_the_shim_process() {
     );
 }
 
+/// `cargo fix` compiles its primary units through a proxy that starts the
+/// compiler with only the workspace wrapper, so the units being fixed used to
+/// reach neither the cache lookup nor publication.
+#[cfg(unix)]
+#[test]
+fn cargo_fix_compiles_its_primary_unit_through_the_cache() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let fix = |report: &str| {
+        cargo_with(
+            project.path(),
+            store.path(),
+            &reports.path().join(report),
+            &["fix", "--offline", "--allow-no-vcs"],
+            &[],
+        )
+        .0
+    };
+
+    let cold = fix("cold.json");
+    assert!(
+        cold["stored_bytes"].as_u64().unwrap() > 0,
+        "the first fix should publish its primary unit: {cold}"
+    );
+
+    // Same bytes, new mtime: cargo recompiles, and the cache answers.
+    let source = project.path().join("src/lib.rs");
+    let contents = std::fs::read(&source).unwrap();
+    std::fs::write(&source, contents).unwrap();
+    let warm = fix("warm.json");
+    assert!(
+        count(&warm, "hits") > 0,
+        "the second fix should restore its primary unit: {warm}"
+    );
+}
+
+/// A restored `cargo fix` result still carries the compiler's suggestions, so
+/// Cargo applies the edit from the cache just as it does from a compilation.
+#[cfg(unix)]
+#[test]
+fn cargo_fix_applies_a_suggestion_when_its_unit_is_restored() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let source = project.path().join("src/lib.rs");
+    let original = "pub fn value() -> u32 {\n    let mut x = 7;\n    x\n}\n";
+    let fix = |report: &str| {
+        std::fs::write(&source, original).unwrap();
+        let stats = cargo_with(
+            project.path(),
+            store.path(),
+            &reports.path().join(report),
+            &["fix", "--offline", "--allow-no-vcs"],
+            &[("MBX_INCREMENTAL", "0"), ("MBX_LEARNED_INCREMENTAL", "0")],
+        )
+        .0;
+        (stats, std::fs::read_to_string(&source).unwrap())
+    };
+
+    let (cold, fixed) = fix("cold.json");
+    assert!(
+        !fixed.contains("let mut"),
+        "the first fix should edit: {fixed}"
+    );
+    assert_eq!(count(&cold, "hits"), 0);
+    let (warm, fixed) = fix("warm.json");
+    assert!(
+        count(&warm, "hits") > 0,
+        "the second fix should restore: {warm}"
+    );
+    assert!(
+        !fixed.contains("let mut"),
+        "a restored unit should still fix: {fixed}"
+    );
+}
+
+/// A Cargo alias for `fix` reaches the same proxy, so it is routed the same way.
+#[cfg(unix)]
+#[test]
+fn a_cargo_alias_for_fix_compiles_its_primary_unit_through_the_cache() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let (stats, _) = cargo_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("alias.json"),
+        &["repair", "--offline"],
+        &[("CARGO_ALIAS_REPAIR", "fix --allow-no-vcs")],
+    );
+    assert!(
+        stats["stored_bytes"].as_u64().unwrap() > 0,
+        "an aliased fix should publish its primary unit: {stats}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn rustc_workspace_wrapper_is_preserved_without_becoming_the_compiler() {
@@ -1166,6 +1266,45 @@ fn a_failed_mergeable_render_is_not_run_again_transparently() {
     assert_eq!(std::fs::read(&count).unwrap(), b"x");
 }
 
+/// A profile that inherits `dev` unchanged compiles every unit as `dev` does,
+/// so its build restores what the `dev` build stored instead of compiling again.
+#[test]
+fn a_profile_inheriting_dev_restores_the_dev_compilations() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let manifest = project.path().join("Cargo.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text.push_str("\n[profile.alt]\ninherits = \"dev\"\n");
+    std::fs::write(&manifest, text).unwrap();
+
+    let dev = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("dev.json"),
+    );
+    assert!(
+        count(&dev, "stored_bytes") > 0,
+        "the dev build stores: {dev}"
+    );
+
+    let (alt, _) = cargo_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("alt.json"),
+        &["build", "--offline", "--profile", "alt"],
+        &[],
+    );
+    assert!(
+        count(&alt, "hits") > 0,
+        "alt should restore from dev: {alt}"
+    );
+    assert_eq!(count(&alt, "misses"), 0, "alt compiled again: {alt}");
+    assert_eq!(count(&alt, "unconsulted"), 0, "alt compiled again: {alt}");
+    assert!(fixture_rlib_exists(&project.path().join("target/alt")));
+}
+
 /// Remove the outputs behind a target link so the next build must restore.
 fn wipe_target(project: &Path) {
     let target = project.join("target");
@@ -1838,6 +1977,56 @@ fn incremental_checkouts(cache: &Path) -> Vec<(PathBuf, PathBuf)> {
 }
 
 #[test]
+fn local_thin_lto_links_without_mbx_incremental() {
+    // With local ThinLTO, rustc rewrites a finished session's files in place,
+    // so an interrupted build can leave state whose rlibs do not link. mbx must
+    // not add incremental state to such profiles, and they must still link.
+    for mode in ["MBX_LEARNED_INCREMENTAL", "MBX_EAGER_INCREMENTAL"] {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_dependent_project(project.path());
+        let manifest = project.path().join("Cargo.toml");
+        let mut contents = std::fs::read_to_string(&manifest).unwrap();
+        contents.push_str("\n[profile.dev]\nopt-level = 1\n");
+        std::fs::write(manifest, contents).unwrap();
+        std::fs::remove_file(project.path().join("above/src/lib.rs")).unwrap();
+        std::fs::write(
+            project.path().join("above/src/main.rs"),
+            "fn main() { println!(\"{}\", base::value()); }\n",
+        )
+        .unwrap();
+        for revision in 0..3 {
+            std::fs::write(
+                project.path().join("base/src/lib.rs"),
+                format!("pub fn value() -> u32 {{ {revision} }}\n"),
+            )
+            .unwrap();
+            let (stats, stderr) = build_with(
+                project.path(),
+                store.path(),
+                &reports.path().join(format!("{revision}.json")),
+                &[(mode, "1")],
+            );
+            assert_eq!(compiled_incrementally(&stats), 0, "{stats}\n{stderr}");
+            let output = Command::new(
+                project
+                    .path()
+                    .join("target/debug")
+                    .join(format!("above{}", std::env::consts::EXE_SUFFIX)),
+            )
+            .output()
+            .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap().trim(),
+                revision.to_string()
+            );
+        }
+    }
+}
+
+#[test]
 fn learned_private_dependents_reuse_state_after_the_target_is_removed() {
     let store = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
@@ -2235,17 +2424,22 @@ fn a_changed_build_script_environment_value_counts_as_an_edit() {
 }
 
 #[test]
-fn learned_incremental_skips_optimized_compiles_and_keeps_dev_levels() {
+fn learned_incremental_skips_local_thin_lto_and_keeps_safe_profiles() {
     let store = tempfile::tempdir().unwrap();
     let reports = tempfile::tempdir().unwrap();
 
-    for (label, level, expected) in [("dev0", "0", true), ("dev1", "1", true)] {
+    for (label, level, extra, expected) in [
+        ("dev0", "0", "", true),
+        ("dev1", "1", "", false),
+        ("dev1off", "1", "lto = \"off\"\n", true),
+        ("dev1cgu", "1", "codegen-units = 1\n", true),
+    ] {
         let project = tempfile::tempdir().unwrap();
         write_named_project(project.path(), label);
         std::fs::write(
             project.path().join("Cargo.toml"),
             format!(
-                "[package]\nname = \"{label}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[profile.dev]\nopt-level = {level}\n"
+                "[package]\nname = \"{label}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[profile.dev]\nopt-level = {level}\n{extra}"
             ),
         )
         .unwrap();
@@ -2331,8 +2525,10 @@ fn eager_incremental_skips_optimized_compiles() {
 fn response_file_profiles_follow_incremental_safety_gates() {
     for (mode, level, expected) in [
         ("MBX_LEARNED_INCREMENTAL", "0", true),
+        ("MBX_LEARNED_INCREMENTAL", "1", false),
         ("MBX_LEARNED_INCREMENTAL", "3", false),
         ("MBX_EAGER_INCREMENTAL", "0", true),
+        ("MBX_EAGER_INCREMENTAL", "1", false),
         ("MBX_EAGER_INCREMENTAL", "3", false),
     ] {
         let store = tempfile::tempdir().unwrap();
@@ -2817,6 +3013,80 @@ fn a_settled_crate_publishes_again() {
     );
 }
 
+#[test]
+fn returning_to_cached_content_restores_instead_of_compiling_incrementally() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+    let run = |revision: u32| {
+        edit_project(project.path(), revision);
+        build(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("{revision}.json")),
+        )
+    };
+
+    run(0);
+    for revision in [1, 2] {
+        run(revision);
+    }
+    let edited = run(3);
+    assert!(
+        compiled_incrementally(&edited) > 0,
+        "new content still compiles incrementally: {edited}"
+    );
+
+    // Revision 0 is in the shared cache; a revert or branch switch back to it
+    // should restore it rather than recompile with private state.
+    let reverted = run(0);
+    assert_eq!(
+        compiled_incrementally(&reverted),
+        0,
+        "cached content should not compile incrementally: {reverted}"
+    );
+    assert!(
+        reverted["hits"].as_u64().unwrap_or(0) > 0,
+        "and should come from the cache: {reverted}"
+    );
+}
+
+#[test]
+fn returning_to_cached_content_restores_dependents_too() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_dependent_project(project.path());
+    let run = |revision: u32| {
+        std::fs::write(
+            project.path().join("base/src/lib.rs"),
+            format!("pub fn value() -> u32 {{ {revision} }}\n"),
+        )
+        .unwrap();
+        build(
+            project.path(),
+            store.path(),
+            &reports.path().join(format!("{revision}.json")),
+        )
+    };
+
+    run(0);
+    for revision in 1..=3 {
+        run(revision);
+    }
+    let reverted = run(0);
+    assert_eq!(
+        compiled_incrementally(&reverted),
+        0,
+        "neither the edited crate nor the crate linking it should compile incrementally: {reverted}"
+    );
+    assert!(
+        reverted["hits"].as_u64().unwrap_or(0) >= 2,
+        "both crates should come from the cache: {reverted}"
+    );
+}
+
 /// A compilation that failed left nothing behind to compare against, so the
 /// retry that follows -- with nothing edited in between -- must not read as a
 /// crate that had settled and drop it back to compiling from scratch.
@@ -2945,8 +3215,8 @@ fn editing_one_crate_takes_its_dependents_private_too() {
     );
     assert_eq!(
         stats["lookups"].as_u64(),
-        Some(0),
-        "neither crate can hit a shared action, so neither should look one up: {stats}"
+        Some(1),
+        "the edited crate looks up once, in case the cache holds its content, and the crate linking its private artifact cannot hit a shared action, so it looks up nothing: {stats}"
     );
 
     // Unchanged sources after a wiped target are not churn, above or below:
@@ -3560,13 +3830,27 @@ fn build_script_shim_does_not_redirty_its_compilation() {
     }
 
     let build_script_mtime = build_script.metadata().unwrap().modified().unwrap();
-    filetime::set_file_mtime(
-        &helper,
-        filetime::FileTime::from_system_time(
-            build_script_mtime + std::time::Duration::from_secs(4),
-        ),
-    )
-    .unwrap();
+    let newer = filetime::FileTime::from_system_time(
+        build_script_mtime + std::time::Duration::from_secs(4),
+    );
+    filetime::set_file_mtime(&helper, newer).unwrap();
+    // Cargo 1.102 stopped reading a dependency's age from its rlib and reads
+    // the unit's fingerprint timestamp instead. Bump that too so the
+    // dependency is newer under either rule.
+    // Match only components below the target directory, so a `helper`
+    // directory in the temporary path cannot select unrelated units.
+    let target = project.path().join("target/debug");
+    for stamp in find_files(&target, |path| {
+        file_name_is(path, |name| name.ends_with(".timestamp"))
+            && path.strip_prefix(&target).is_ok_and(|relative| {
+                relative.components().any(|part| {
+                    let part = part.as_os_str().to_string_lossy();
+                    part == "helper" || part.starts_with("helper-")
+                })
+            })
+    }) {
+        filetime::set_file_mtime(&stamp, newer).unwrap();
+    }
     assert!(
         helper.metadata().unwrap().modified().unwrap() > build_script_mtime,
         "the fixture dependency must be newer than the compiled build script"
@@ -5458,6 +5742,49 @@ fn two_checkouts(
         &settings,
     );
     (store, stats)
+}
+
+/// Coverage instrumentation writes the checkout's source paths into the
+/// artifact, and `llvm-cov` reads them back, so an rlib restored into another
+/// checkout would report the first checkout's files.
+#[test]
+fn coverage_builds_do_not_restore_another_checkouts_artifacts() {
+    let hits_in_second_checkout = |settings: &[(&str, &str)]| {
+        let store = tempfile::tempdir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(first.path());
+        write_project(second.path());
+        build_with(
+            first.path(),
+            store.path(),
+            &reports.path().join("first.json"),
+            settings,
+        );
+        let (stats, _) = build_with(
+            second.path(),
+            store.path(),
+            &reports.path().join("second.json"),
+            settings,
+        );
+        count(&stats, "hits")
+    };
+
+    assert_eq!(
+        hits_in_second_checkout(&[("RUSTFLAGS", "-C instrument-coverage")]),
+        0,
+        "a coverage build should compile in the checkout it runs in"
+    );
+    // Sharing the workspace root remaps the recorded paths, which is what
+    // makes a shared artifact correct.
+    assert!(
+        hits_in_second_checkout(&[
+            ("RUSTFLAGS", "-C instrument-coverage"),
+            ("MBX_SHARE_WORKSPACE_ROOT", "1"),
+        ]) > 0,
+        "remapped coverage builds should share between checkouts"
+    );
 }
 
 #[test]

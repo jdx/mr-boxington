@@ -1671,3 +1671,151 @@ async fn transient_failures_exhaust_retries_within_a_generous_deadline() {
     assert!(!error.to_string().contains("budget"), "{error}");
     request.assert_async().await;
 }
+
+#[tokio::test]
+async fn stops_uploading_once_failed_uploads_exhaust_the_stall_budget() {
+    let mut server = mockito::Server::new_async().await;
+    let first = CacheDigest::blake3(b"first upload");
+    let second = CacheDigest::blake3(b"second upload");
+    // `expect(1)` is the assertion: once the first upload has spent the budget
+    // the second must not reach the server. Without it a down server costs a
+    // timeout per uploaded object.
+    let request = server
+        .mock(
+            "PUT",
+            format!("/v1/blobs/blake3/{}/{}", first.hash, first.size).as_str(),
+        )
+        .with_status(503)
+        .expect(1)
+        .create_async()
+        .await;
+    server
+        .mock("GET", "/v1/capabilities")
+        .with_status(404)
+        .create_async()
+        .await;
+    let mut client = test_client(&server);
+    client.set_write_stall_budget(Duration::from_nanos(1));
+
+    let upload = |digest: &CacheDigest| BlobUpload {
+        digest: digest.clone(),
+        source: BlobSource::Bytes(b"first upload".to_vec()),
+    };
+    let _ = client
+        .put_blob(&upload(&first))
+        .await
+        .expect_err("the first upload fails against a 503");
+    assert!(client.writes_abandoned());
+
+    let error = client
+        .put_blob(&upload(&second))
+        .await
+        .expect_err("the second upload is abandoned rather than attempted");
+    assert!(
+        error.to_string().contains("uploads were abandoned"),
+        "{error}"
+    );
+    request.assert_async().await;
+}
+
+#[tokio::test]
+async fn client_errors_do_not_spend_the_upload_stall_budget() {
+    let mut server = mockito::Server::new_async().await;
+    let digest = CacheDigest::blake3(b"rejected upload");
+    let request = server
+        .mock(
+            "PUT",
+            format!("/v1/blobs/blake3/{}/{}", digest.hash, digest.size).as_str(),
+        )
+        .with_status(400)
+        .expect(2)
+        .create_async()
+        .await;
+    server
+        .mock("GET", "/v1/capabilities")
+        .with_status(404)
+        .create_async()
+        .await;
+    let mut client = test_client(&server);
+    client.set_write_stall_budget(Duration::from_nanos(1));
+    let upload = BlobUpload {
+        digest: digest.clone(),
+        source: BlobSource::Bytes(b"rejected upload".to_vec()),
+    };
+
+    for _ in 0..2 {
+        let _ = client
+            .put_blob(&upload)
+            .await
+            .expect_err("a 400 fails the upload");
+    }
+
+    assert!(!client.writes_abandoned());
+    request.assert_async().await;
+}
+
+#[tokio::test]
+async fn failed_capability_lookups_spend_the_upload_stall_budget() {
+    let mut server = mockito::Server::new_async().await;
+    let digest = CacheDigest::blake3(b"capability upload");
+    // One lookup fails and spends the budget; nothing after it, neither
+    // another lookup nor the upload itself, may reach the server.
+    let capabilities = server
+        .mock("GET", "/v1/capabilities")
+        .with_status(503)
+        .expect(1)
+        .create_async()
+        .await;
+    let put = server
+        .mock(
+            "PUT",
+            format!("/v1/blobs/blake3/{}/{}", digest.hash, digest.size).as_str(),
+        )
+        .expect(0)
+        .create_async()
+        .await;
+    let mut client = test_client(&server);
+    client.set_write_stall_budget(Duration::from_nanos(1));
+    let upload = BlobUpload {
+        digest: digest.clone(),
+        source: BlobSource::Bytes(b"capability upload".to_vec()),
+    };
+
+    for _ in 0..2 {
+        let _ = client
+            .put_blob(&upload)
+            .await
+            .expect_err("uploads fail once the lookup has spent the budget");
+    }
+
+    assert!(client.writes_abandoned());
+    capabilities.assert_async().await;
+    put.assert_async().await;
+}
+
+#[tokio::test]
+async fn uploads_queued_behind_a_failing_capability_lookup_do_not_repeat_it() {
+    let mut server = mockito::Server::new_async().await;
+    let digest = CacheDigest::blake3(b"concurrent capability upload");
+    // Every upload is already waiting on the lookup when it fails. Each waiter
+    // is handed the cell in turn, so without a check in the initializer each
+    // would send its own request and pay its own timeout.
+    let capabilities = server
+        .mock("GET", "/v1/capabilities")
+        .with_status(503)
+        .expect(1)
+        .create_async()
+        .await;
+    let mut client = test_client(&server);
+    client.set_write_stall_budget(Duration::from_nanos(1));
+    let upload = BlobUpload {
+        digest: digest.clone(),
+        source: BlobSource::Bytes(b"concurrent capability upload".to_vec()),
+    };
+
+    let results = futures_util::future::join_all((0..4).map(|_| client.put_blob(&upload))).await;
+
+    assert!(results.iter().all(Result::is_err));
+    assert!(client.writes_abandoned());
+    capabilities.assert_async().await;
+}

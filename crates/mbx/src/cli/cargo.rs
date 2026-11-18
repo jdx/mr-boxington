@@ -556,6 +556,7 @@ fn cargo_with_settings_bypass_log_and_roots(
                 &mut environment,
             )
             .await;
+        route_primary_fix_units_through_the_shim(&expanded, &mut environment);
         // Clear inherited selections, including when this build uses the system linker.
         environment.insert(session::MANAGED_LINKER_ENV.into(), String::new());
         environment.insert(session::MANAGED_TARGET_LINKERS_ENV.into(), String::new());
@@ -687,6 +688,28 @@ fn cargo_with_settings_bypass_log_and_roots(
     // ordinary policy applies to the view as soon as the command is over.
     drop(view_lease);
     account_session(config, settings, session_outcome, removed_target_bytes)
+}
+
+/// Make `cargo fix` compile its primary units through the shim.
+///
+/// Cargo runs those units through a proxy of its own that starts the real
+/// compiler with only the workspace wrapper, so a `RUSTC_WRAPPER` the shim
+/// occupies never sees them and the crates being fixed bypass the cache
+/// entirely. Naming the shim as the workspace wrapper as well makes the proxy
+/// start it. A wrapper the user configured keeps its place.
+pub(super) fn route_primary_fix_units_through_the_shim(
+    arguments: &[String],
+    environment: &mut BTreeMap<String, String>,
+) {
+    if super::launch::cargo_subcommand(arguments) != Some("fix")
+        || environment.contains_key("RUSTC_WORKSPACE_WRAPPER")
+        || environment.contains_key(session::PREVIOUS_RUSTC_WRAPPER_ENV)
+    {
+        return;
+    }
+    if let Some(shim) = environment.get("RUSTC_WRAPPER").cloned() {
+        environment.insert("RUSTC_WORKSPACE_WRAPPER".into(), shim);
+    }
 }
 
 /// Anchor public artifact paths in the checkout, while the target link puts
@@ -1036,7 +1059,7 @@ pub(super) fn was_explained(store: &Path) -> bool {
 /// Written immediately after the notice prints, so a build that fails later
 /// does not explain itself again.
 pub(super) fn mark_explained(store: &Path) {
-    if let Err(error) = crate::util::write_atomic(&store.join(NOTICE_STAMP), b"") {
+    if let Err(error) = crate::util::write_atomic_shared(&store.join(NOTICE_STAMP), b"") {
         // Worth one line at debug: the cost is a repeated notice, and a store
         // this cannot write to has larger problems than that.
         log::debug!("the first-run notice was not recorded: {error}");

@@ -316,7 +316,7 @@ impl LocalCas {
         };
         let parent = destination.parent().expect("CAS path has a parent");
         fs::create_dir_all(parent)?;
-        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        let mut temporary = crate::shared_tempfile_builder().tempfile_in(parent)?;
         write(&mut temporary)?;
         temporary.flush()?;
         if !digest.matches_file(temporary.path())? {
@@ -637,7 +637,7 @@ impl LocalActionCache {
             let temporary = if let Some(temporary) = pending.take() {
                 temporary
             } else {
-                let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+                let mut temporary = crate::shared_tempfile_builder().tempfile_in(parent)?;
                 temporary.write_all(&canonical_json(result)?)?;
                 temporary.flush()?;
                 temporary
