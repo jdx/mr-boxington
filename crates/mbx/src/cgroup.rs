@@ -272,20 +272,27 @@ fn visible_domains() -> Vec<Domain> {
         .unwrap_or_default();
     if domains.is_empty() {
         // Preserve detection in containers that hide proc membership or mounts.
-        return vec![
-            Domain {
-                mount: "/sys/fs/cgroup".into(),
-                current: "/sys/fs/cgroup".into(),
-                v2: true,
-            },
-            Domain {
-                mount: "/sys/fs/cgroup/memory".into(),
-                current: "/sys/fs/cgroup/memory".into(),
-                v2: false,
-            },
-        ];
+        return fallback_domains(Path::new("/sys/fs/cgroup"));
     }
     domains
+}
+
+fn fallback_domains(root: &Path) -> Vec<Domain> {
+    [(root.to_path_buf(), true), (root.join("memory"), false)]
+        .into_iter()
+        // These are optional conventional mount locations, not paths learned
+        // from proc. An absent hierarchy is not incomplete lease placement.
+        // Other failures remain candidates so permission errors stay unknown.
+        .filter(|(path, _)| {
+            !std::fs::metadata(path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        })
+        .map(|(path, v2)| Domain {
+            mount: path.clone(),
+            current: path,
+            v2,
+        })
+        .collect()
 }
 
 fn domains(groups: &str, mounts: &str) -> Vec<Domain> {
@@ -809,8 +816,8 @@ mod tests {
         let missing_v1 = root.path().join("v1/memory");
         let first_paths = vec![first.clone(), missing_v1.clone()];
         let second_paths = vec![second.clone(), missing_v1];
-        // Conventional-path fallback can include a missing v1 mount on a
-        // v2-only host. Neither lease can publish a complete placement...
+        // A path discovered from proc may disappear or become inaccessible.
+        // Such a lease cannot publish a complete placement...
         assert!(identify_directories(first_paths.clone()).is_empty());
         assert!(identify_directories(second_paths.clone()).is_empty());
         // ...but readable v2 probes still belong to distinct cgroups and
@@ -826,6 +833,25 @@ mod tests {
             vec![(second.clone(), identity(&second).unwrap())]
         );
         assert_ne!(first_readable[0].1, second_readable[0].1);
+    }
+
+    #[test]
+    fn a_v2_only_fallback_keeps_its_lease_placement() {
+        let root = tempfile::tempdir().unwrap();
+        write_memory(root.path(), "1000", 700, 100, true);
+        let fallback = fallback_domains(root.path());
+        assert_eq!(fallback.len(), 1, "no v1 hierarchy exists");
+        assert!(fallback[0].v2);
+        assert_eq!(snapshot(&fallback).headroom, Some(400));
+        let placed =
+            identify_directories(fallback.into_iter().map(|domain| domain.current).collect());
+        assert_eq!(
+            placed,
+            vec![(root.path().to_path_buf(), identity(root.path()).unwrap())]
+        );
+        // An existing conventional v1 hierarchy remains a candidate too.
+        std::fs::create_dir(root.path().join("memory")).unwrap();
+        assert_eq!(fallback_domains(root.path()).len(), 2);
     }
 
     #[test]
