@@ -250,6 +250,9 @@ pub(crate) fn compile(
         initial_invocation.target(),
     );
     portable.build_script_inputs = build_script_inputs;
+    if instruments_coverage(arguments) {
+        portable.key_workspace_to_checkout(session::share_workspace_root_requested());
+    }
     portable.map_external_native_paths(&initial_invocation, &working_dir);
     let mut arguments = portable.applied_to(arguments);
     // Include the flag in both parsing/key construction and execution. This
@@ -1764,6 +1767,42 @@ fn mbx_incremental_unsafe_reason(arguments: &[OsString]) -> Option<&'static str>
     let multiple_codegen_units = codegen_units.as_deref() != Some("1");
     (optimized && lto.is_none() && multiple_codegen_units)
         .then_some("optimized compile with local ThinLTO")
+}
+
+/// Whether the effective code-generation options turn on coverage
+/// instrumentation. The last occurrence wins, as it does in rustc.
+fn instruments_coverage(arguments: &[OsString]) -> bool {
+    let arguments = profile_arguments(arguments);
+    let mut enabled = false;
+    let mut index = 0;
+    while index < arguments.len() {
+        let Some(argument) = arguments[index].to_str() else {
+            index += 1;
+            continue;
+        };
+        let option = match argument {
+            "-C" | "--codegen" => {
+                index += 1;
+                arguments.get(index).and_then(|value| value.to_str())
+            }
+            _ => argument
+                .strip_prefix("-C")
+                .filter(|value| !value.is_empty())
+                .or_else(|| argument.strip_prefix("--codegen=")),
+        };
+        if let Some(option) = option
+            && let Some(value) = option.strip_prefix("instrument-coverage")
+        {
+            enabled = match value.strip_prefix('=') {
+                None if value.is_empty() => true,
+                Some("off" | "no" | "n" | "false" | "0") => false,
+                Some(_) => true,
+                None => enabled,
+            };
+        }
+        index += 1;
+    }
+    enabled
 }
 
 /// The incremental flag for a workspace library that mbx cannot cache.
@@ -4139,6 +4178,30 @@ impl Portable {
         flag.push("=");
         flag.push(format!("${{{}}}", mapping.placeholder));
         self.arguments.push(flag);
+    }
+
+    /// Give the workspace root a placeholder that names this checkout.
+    ///
+    /// Coverage instrumentation writes the absolute source path into the
+    /// coverage mapping, and `llvm-cov` reads that path back to find the
+    /// source. An artifact restored into another checkout would name the
+    /// first checkout's files, so each checkout keeps its own. With
+    /// `share_workspace_root` the paths are remapped to the placeholder
+    /// instead, and the shared key is correct.
+    fn key_workspace_to_checkout(&mut self, workspace_root_shared: bool) {
+        if workspace_root_shared {
+            return;
+        }
+        let Some(mapping) = self
+            .mappings
+            .iter_mut()
+            .find(|mapping| mapping.placeholder == "workspace")
+        else {
+            return;
+        };
+        let digest = CacheDigest::blake3(mapping.root.as_os_str().as_encoded_bytes());
+        mapping.placeholder = format!("workspace_{}", digest.hash);
+        self.mappings = PathMapping::ordered(&self.mappings);
     }
 
     fn applied_to(&self, arguments: &[OsString]) -> Vec<OsString> {

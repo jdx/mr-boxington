@@ -521,6 +521,13 @@ source paths under the workspace are recorded as the placeholder in debug
 information, `file!()`, and panic locations, which is why the setting is off
 by default.
 
+Builds with `-C instrument-coverage` (for example `cargo llvm-cov`) are the
+exception. The coverage mapping records absolute source paths that `llvm-cov`
+reads back, so a restored artifact would report another checkout's files. Each
+checkout therefore compiles its own workspace crates for a coverage build.
+With `share_workspace_root` on, the paths are remapped to a placeholder and the
+crates share again.
+
 <span id="collection-is-approximate"></span>
 For eviction order and what the action-store budget covers, see
 [Collection is approximate](/managed-targets#collection-is-approximate).
