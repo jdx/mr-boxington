@@ -102,31 +102,47 @@ fn inherited_cpu_limits(groups: &str, mounts: &str) -> Option<u64> {
 }
 
 fn inherited_cpuset_cpus(domains: &[Domain]) -> Option<u64> {
-    domains
-        .iter()
-        .flat_map(|domain| {
-            domain
-                .current
-                .ancestors()
-                .skip(1)
-                .take_while(|path| path.starts_with(&domain.mount))
-                .filter_map(|directory| {
-                    // Effective sets include inherited restrictions and offline
-                    // CPUs. Older v1 mounts only expose the configured set;
-                    // empty configured sets inherit from the next ancestor.
-                    let effective = if domain.v2 {
-                        "cpuset.cpus.effective"
-                    } else {
-                        "cpuset.effective_cpus"
-                    };
-                    [effective, "cpuset.cpus"].into_iter().find_map(|name| {
-                        std::fs::read_to_string(directory.join(name))
-                            .ok()
-                            .and_then(|text| cpuset_size(&text))
-                    })
-                })
-        })
-        .min()
+    domains.iter().filter_map(inherited_cpuset).min()
+}
+
+fn inherited_cpuset(domain: &Domain) -> Option<u64> {
+    let read_set = |directory: &Path, name: &str| {
+        std::fs::read_to_string(directory.join(name))
+            .ok()
+            .and_then(|text| cpuset_size(&text))
+    };
+    if domain.v2
+        && std::fs::read_to_string(domain.current.join("cpuset.cpus.partition"))
+            .is_ok_and(|text| matches!(text.trim(), "root" | "isolated"))
+    {
+        // A valid leaf partition's CPUs have been removed from its parents'
+        // effective sets. Its own restriction stays with its local ceiling.
+        return None;
+    }
+    let mut configured: Option<u64> = None;
+    for directory in domain
+        .current
+        .ancestors()
+        .skip(1)
+        .take_while(|path| path.starts_with(&domain.mount))
+    {
+        let effective = if domain.v2 {
+            "cpuset.cpus.effective"
+        } else {
+            "cpuset.effective_cpus"
+        };
+        if let Some(cpus) = read_set(directory, effective) {
+            // The nearest effective set already includes inherited limits.
+            // Higher ancestors can exclude CPUs delegated to this partition.
+            return Some(configured.map_or(cpus, |limit| limit.min(cpus)));
+        }
+        // Older v1 mounts only expose configured sets. Empty sets inherit
+        // from the next ancestor; keep every non-empty configured restriction.
+        if let Some(cpus) = read_set(directory, "cpuset.cpus") {
+            configured = Some(configured.map_or(cpus, |limit| limit.min(cpus)));
+        }
+    }
+    configured
 }
 
 /// Kernel CPU lists contain ordered, disjoint CPU numbers or inclusive ranges.
@@ -460,6 +476,44 @@ mod tests {
             std::fs::write(mount.join("slice/cpuset.cpus"), "\n").unwrap();
             assert_eq!(inherited_cpuset_cpus(&domains), Some(32), "empty inherits");
         }
+    }
+
+    #[test]
+    fn v2_partitions_do_not_inherit_the_parents_remaining_cpus() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path();
+        let partition = mount.join("partition");
+        let build = partition.join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(mount.join("cpuset.cpus.effective"), "0\n").unwrap();
+        std::fs::write(partition.join("cpuset.cpus.effective"), "1-7\n").unwrap();
+        std::fs::write(build.join("cpuset.cpus.effective"), "1\n").unwrap();
+        let mounts = format!("1 0 0:1 / {} rw - cgroup2 cgroup rw", mount.display());
+        for state in ["root", "isolated"] {
+            std::fs::write(partition.join("cpuset.cpus.partition"), state).unwrap();
+            assert_eq!(
+                inherited_cpu_limits("0::/partition/build\n", &mounts),
+                Some(7),
+                "the partition's seven CPUs are absent from its parent's effective set"
+            );
+            assert_eq!(
+                inherited_cpu_limits("0::/partition\n", &mounts),
+                None,
+                "the leaf partition's own restriction stays local"
+            );
+        }
+        std::fs::write(
+            partition.join("cpuset.cpus.partition"),
+            "root invalid (no cpu)",
+        )
+        .unwrap();
+        assert_eq!(inherited_cpu_limits("0::/partition\n", &mounts), Some(1));
+        std::fs::write(mount.join("cpu.max"), "200000 100000\n").unwrap();
+        assert_eq!(
+            inherited_cpu_limits("0::/partition/build\n", &mounts),
+            Some(2),
+            "quotas still inherit across partitions"
+        );
     }
 
     #[test]
