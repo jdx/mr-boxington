@@ -554,9 +554,9 @@ pub fn memory_total_bytes() -> Option<u64> {
     None
 }
 
-/// A moment read from two clocks, so that neither alone can misorder two
-/// events: the wall clock can step backward, and the boot clock can be
-/// offset per container by a time namespace.
+/// A moment read from two clocks. Together they detect clock steps during
+/// cache aging, but cannot prove ordering across time namespaces: the wall
+/// clock may step backward while the boot clock has a per-namespace offset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Stamp {
     pub wall_ms: u64,
@@ -573,7 +573,8 @@ impl Stamp {
         }
     }
 
-    /// Whether this moment came before `later` by both clocks.
+    /// Whether this moment is numerically earlier than `later` by both clocks.
+    /// This does not establish event ordering across time namespaces.
     pub fn before(&self, later: &Stamp) -> bool {
         self.wall_ms < later.wall_ms && self.boot_ms < later.boot_ms
     }

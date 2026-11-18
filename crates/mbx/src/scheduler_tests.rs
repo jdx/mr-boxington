@@ -1308,6 +1308,32 @@ fn the_available_memory_gate_waits_only_for_compilations_holding_the_short_memor
 }
 
 #[test]
+fn an_incompletely_identified_lease_gates_available_memory_in_every_container() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut unidentified = pool_at(directory.path(), 64, 100);
+    // Failed cgroup metadata collection produces no IDs, never a partial list.
+    unidentified.memory_cgroups = &[];
+    let compiler = unidentified.try_admit(1, None).unwrap().unwrap();
+    let lease: Lease = serde_json::from_slice(&std::fs::read(&compiler.path).unwrap()).unwrap();
+    assert!(lease.cgroups.is_none());
+
+    let mut short = pool_at(directory.path(), 64, 100);
+    short.memory_cgroups = cgroups(&["0:30"]);
+    short.available_memory = || {
+        Some(crate::util::Available {
+            bytes: 0,
+            limits: vec![crate::util::Limit {
+                cgroup: Some("0:30".into()),
+                bytes: 0,
+            }],
+        })
+    };
+    assert!(short.try_admit(1, Some(100)).unwrap().is_none());
+    drop(compiler);
+    assert!(short.try_admit(1, Some(100)).unwrap().is_some());
+}
+
+#[test]
 fn an_oversized_idle_grant_spaces_the_next_pools_admission() {
     let directory = tempfile::tempdir().unwrap();
     let mut low = pool_at(directory.path(), 4, 100);

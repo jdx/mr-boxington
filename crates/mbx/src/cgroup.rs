@@ -68,15 +68,20 @@ pub(crate) fn identities() -> &'static [String] {
     IDENTITIES.get_or_init(|| directories().iter().map(|(_, id)| id.clone()).collect())
 }
 
-/// `memory_directories` paired with their identities, for those that have one.
+/// Every visible directory paired with its identity, or empty if any lookup fails.
 fn directories() -> &'static [(PathBuf, String)] {
     static DIRECTORIES: std::sync::OnceLock<Vec<(PathBuf, String)>> = std::sync::OnceLock::new();
-    DIRECTORIES.get_or_init(|| {
-        memory_directories()
-            .into_iter()
-            .filter_map(|path| identity(&path).map(|id| (path, id)))
-            .collect()
-    })
+    DIRECTORIES.get_or_init(|| identify_directories(memory_directories()))
+}
+
+fn identify_directories(paths: Vec<PathBuf>) -> Vec<(PathBuf, String)> {
+    // A partial list could name only ancestors outside a short subtree,
+    // hiding a compiler inside it. Empty identities become an unplaced lease.
+    paths
+        .into_iter()
+        .map(|path| identity(&path).map(|id| (path, id)))
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default()
 }
 
 pub(crate) fn identity(path: &Path) -> Option<String> {
@@ -87,7 +92,7 @@ pub(crate) fn identity(path: &Path) -> Option<String> {
 /// Pool subdirectory holding the latest walk of each short cgroup, shared by
 /// every process using the pool.
 const SUBTREES_DIR: &str = "subtrees";
-/// How long one walk of a cgroup's subtree is reused for leases older than it.
+/// How long one walk of a cgroup's subtree is reused for already checked IDs.
 const SUBTREE_REFRESH_MS: u64 = 1_000;
 
 /// One walk of a cgroup's subtree, timed so that processes can share it.
@@ -130,15 +135,16 @@ fn boot_id() -> &'static str {
 ///
 /// Only a complete walk known to have begun after the cgroups existed can
 /// show they are outside `scope`. A walk made here for this lease is: the
-/// lease was read before it began. A walk shared by another process is when
-/// both the wall clock and the boot clock place it after the lease was
-/// written, or when it was made for these cgroups itself. Anything less --
+/// lease was read before it began. A shared walk can rule the lease out only
+/// if every ID was already checked: clock offsets in time namespaces and a
+/// wall-clock step can make a newer lease appear older by both clocks.
+/// Anything less --
 /// a scope this process cannot find, a subtree it cannot fully read, a
 /// record of unknown age -- counts as inside.
 ///
 /// Every waiter asks this on each poll, so one walk is shared through the
 /// pool rather than repeated in each process: a cgroup is walked at most
-/// once a second, and again only for a lease newer than the last walk.
+/// once a second, and again only for IDs not yet checked by a recent walk.
 pub(crate) fn contains(
     pool: &Path,
     scope: &str,
@@ -148,24 +154,17 @@ pub(crate) fn contains(
     if cgroups.iter().any(|id| id == scope) {
         return true;
     }
-    let Some(((path, _), written)) = directories()
+    let Some((path, _)) = directories()
         .iter()
         .find(|(_, id)| id == scope)
-        .zip(written)
+        .filter(|_| written.is_some())
     else {
         return true;
     };
-    contains_at(pool, scope, path, cgroups, written, Stamp::now())
+    contains_at(pool, scope, path, cgroups, Stamp::now())
 }
 
-fn contains_at(
-    pool: &Path,
-    scope: &str,
-    path: &Path,
-    cgroups: &[String],
-    written: Stamp,
-    now: Stamp,
-) -> bool {
+fn contains_at(pool: &Path, scope: &str, path: &Path, cgroups: &[String], now: Stamp) -> bool {
     let found = |walk: &Walk| {
         walk.members
             .as_ref()
@@ -185,7 +184,7 @@ fn contains_at(
         // One shared ancestor (or a shared v2 group on a hybrid host)
         // cannot vouch for other groups created since the walk.
         let vouched = cgroups.iter().all(|id| walk.vouched.contains_key(id));
-        if fresh && (found(walk) || vouched || written.before(&walk.began)) {
+        if fresh && (found(walk) || vouched) {
             return found(walk);
         }
     } else {
@@ -221,15 +220,10 @@ fn contains_at(
 fn subtree(path: &Path) -> Option<BTreeSet<String>> {
     let mut members = BTreeSet::new();
     let mut pending = vec![path.to_path_buf()];
-    // A cgroup removed during the walk takes its descendants with it, so it
-    // hides nothing; any other failure might.
-    let gone = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
+    // A vanished path may have been renamed with live descendants (v1),
+    // rather than deleted. Any failed lookup leaves the walk incomplete.
     while let Some(directory) = pending.pop() {
-        let entries = match std::fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(error) if gone(&error) => continue,
-            Err(_) => return None,
-        };
+        let entries = std::fs::read_dir(&directory).ok()?;
         for entry in entries {
             let entry = entry.ok()?;
             // Every cgroup holds dozens of control files. The entry's own
@@ -238,11 +232,7 @@ fn subtree(path: &Path) -> Option<BTreeSet<String>> {
             if !entry.file_type().ok()?.is_dir() {
                 continue;
             }
-            let metadata = match entry.metadata() {
-                Ok(metadata) => metadata,
-                Err(error) if gone(&error) => continue,
-                Err(_) => return None,
-            };
+            let metadata = entry.metadata().ok()?;
             members.insert(format!("{}:{}", metadata.dev(), metadata.ino()));
             pending.push(entry.path());
         }
@@ -662,14 +652,11 @@ mod tests {
         let nested = scope.join("nested");
         std::fs::create_dir(&nested).unwrap();
         let cgroups = [shared_id, identity(&nested).unwrap()];
-        // Also exercise clocks that cannot prove the lease predates the walk.
-        let ahead = stamp(now.wall_ms, now.boot_ms + 3_600_000);
         assert!(contains_at(
             pool.path(),
             &scope_id,
             &scope,
             &cgroups,
-            ahead,
             stamp(10_001, 10_001)
         ));
         let refreshed: Walk = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
@@ -685,7 +672,6 @@ mod tests {
             &scope_id,
             &scope,
             &outside,
-            ahead,
             stamp(10_002, 10_002)
         ));
         let cached = std::fs::read(&file).unwrap();
@@ -694,7 +680,6 @@ mod tests {
             &scope_id,
             &scope,
             &outside,
-            ahead,
             stamp(10_003, 10_003)
         ));
         assert_eq!(std::fs::read(&file).unwrap(), cached);
@@ -738,14 +723,14 @@ mod tests {
         let old = Some(stamp(0, 0));
         assert!(!contains(pool.path(), scope, &["0:0".into()], old));
         // Another process's fresh walk is believed as it is, both in what
-        // it found and, for leases older than it, in what it did not.
+        // it found and, for IDs it already checked, in what it did not.
         let file = pool.path().join(SUBTREES_DIR).join(format!("{scope}.json"));
         let now = Stamp::now();
         let shared = Walk {
             began: stamp(now.wall_ms - 500, now.boot_ms - 500),
             boot: boot_id().to_owned(),
             members: Some(BTreeSet::from(["0:5".to_string()])),
-            vouched: BTreeMap::new(),
+            vouched: BTreeMap::from([("0:0".to_string(), now)]),
         };
         let write = |walk: &Walk| std::fs::write(&file, serde_json::to_vec(walk).unwrap()).unwrap();
         write(&shared);
@@ -760,20 +745,101 @@ mod tests {
         });
         assert!(!contains(pool.path(), scope, &["0:5".into()], old));
         assert_ne!(read().members, shared.members, "walked again");
-        // A lease newer than the walk gets a walk of its own, which other
+        // An ID not yet checked gets a walk of its own, which other
         // waiters then reuse for it.
         write(&shared);
         let newer = Some(stamp(shared.began.wall_ms + 1, shared.began.boot_ms + 1));
         std::thread::sleep(std::time::Duration::from_millis(2));
-        assert!(!contains(pool.path(), scope, &["0:0".into()], newer));
+        assert!(!contains(pool.path(), scope, &["0:7".into()], newer));
         let again = read().began;
         assert_ne!(again, shared.began, "walked again");
-        assert!(!contains(pool.path(), scope, &["0:0".into()], newer));
+        assert!(!contains(pool.path(), scope, &["0:7".into()], newer));
         assert_eq!(read().began, again, "not walked a third time");
         // A lease from the walk's own millisecond gets a walk of its own.
         std::thread::sleep(std::time::Duration::from_millis(2));
         assert!(!contains(pool.path(), scope, &["0:1".into()], Some(again)));
         assert_ne!(read().began, again, "walked for the same-instant lease");
+    }
+
+    #[test]
+    fn incomplete_identities_never_publish_only_readable_ancestors() {
+        let mount = tempfile::tempdir().unwrap();
+        let restricted = mount.path().join("restricted");
+        let worker = restricted.join("limited/worker");
+        std::fs::create_dir_all(&worker).unwrap();
+        let paths = vec![
+            worker.clone(),
+            restricted.clone(),
+            mount.path().to_path_buf(),
+        ];
+        assert_eq!(identify_directories(paths.clone()).len(), 3);
+        std::fs::remove_dir(&worker).unwrap();
+        // Ancestors remain readable, but publishing only their IDs would
+        // let another waiter wrongly exclude this compiler from limited.
+        assert!(identify_directories(paths).is_empty());
+    }
+
+    #[test]
+    fn clock_offsets_cannot_vouch_for_a_new_nested_cgroup() {
+        let pool = tempfile::tempdir().unwrap();
+        let scope = tempfile::tempdir().unwrap();
+        let scope_id = identity(scope.path()).unwrap();
+        let file = pool
+            .path()
+            .join(SUBTREES_DIR)
+            .join(format!("{scope_id}.json"));
+        let walk = Walk {
+            began: stamp(1_000_000, 10_000),
+            boot: boot_id().to_owned(),
+            members: subtree(scope.path()),
+            vouched: BTreeMap::new(),
+        };
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, serde_json::to_vec(&walk).unwrap()).unwrap();
+        let nested = scope.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let cgroups = [identity(&nested).unwrap()];
+        // A backward wall step plus a negative time-namespace boot offset
+        // makes a newer lease appear older on both clocks.
+        let written = stamp(999_910, 9_010);
+        assert!(written.before(&walk.began));
+        let now = stamp(1_000_050, 10_150);
+        assert_eq!(walk.began.until(&now), Some(150));
+        assert!(contains_at(
+            pool.path(),
+            &scope_id,
+            scope.path(),
+            &cgroups,
+            now
+        ));
+        let refreshed: Walk = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert!(refreshed.vouched.contains_key(&cgroups[0]));
+    }
+
+    #[test]
+    fn a_renamed_scope_cannot_exclude_its_live_descendants() {
+        let tree = tempfile::tempdir().unwrap();
+        let pool = tempfile::tempdir().unwrap();
+        let scope = tree.path().join("scope");
+        let nested = scope.join("container/worker");
+        std::fs::create_dir_all(&nested).unwrap();
+        let scope_id = identity(&scope).unwrap();
+        let cgroups = [identity(&nested).unwrap()];
+        assert!(subtree(&scope).unwrap().contains(&cgroups[0]));
+        std::fs::rename(&scope, tree.path().join("renamed")).unwrap();
+        assert!(subtree(&scope).is_none());
+        assert!(contains_at(
+            pool.path(),
+            &scope_id,
+            &scope,
+            &cgroups,
+            stamp(10_000, 10_000)
+        ));
+        // The descendant still exists under the renamed path, with its ID.
+        assert_eq!(
+            identity(&tree.path().join("renamed/container/worker")),
+            Some(cgroups[0].clone())
+        );
     }
 
     #[test]
