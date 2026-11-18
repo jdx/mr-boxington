@@ -158,12 +158,12 @@ impl HoldThroughSignals {
         Self { previous }
     }
 
-    fn set() -> libc::sigset_t {
+    fn set_of(signals: impl Iterator<Item = libc::c_int>) -> libc::sigset_t {
         // SAFETY: builds a signal set in zeroed storage.
         unsafe {
             let mut set: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&mut set);
-            for signal in Self::SIGNALS {
+            for signal in signals {
                 libc::sigaddset(&mut set, signal);
             }
             set
@@ -190,7 +190,9 @@ impl HoldThroughSignals {
     fn refuse_start_if_signalled(&self, command: &mut Command) {
         use std::os::unix::process::CommandExt as _;
         let previous = self.previous.clone();
-        let set = Self::set();
+        // Only signals the guard took over. One that was inherited as ignored
+        // can still queue while blocked, and is not a cancellation.
+        let set = Self::set_of(previous.iter().map(|(signal, _)| *signal));
         // SAFETY: the closure runs between fork and exec and only calls
         // async-signal-safe functions on data it already owns.
         unsafe {
@@ -200,11 +202,13 @@ impl HoldThroughSignals {
                 let mut pending: libc::sigset_t = std::mem::zeroed();
                 libc::sigpending(&mut pending);
                 let arrived = RECEIVED_SIGNAL.load(std::sync::atomic::Ordering::SeqCst) != 0
-                    || Self::SIGNALS
-                        .into_iter()
-                        .any(|signal| libc::sigismember(&pending, signal) == 1);
+                    || previous
+                        .iter()
+                        .any(|(signal, _)| libc::sigismember(&pending, *signal) == 1);
                 if arrived {
-                    return Err(std::io::ErrorKind::Interrupted.into());
+                    // A raw OS error, because only that number crosses back to the
+                    // parent; a bare error kind would arrive as EINVAL.
+                    return Err(std::io::Error::from_raw_os_error(libc::EINTR));
                 }
                 for (signal, old) in &previous {
                     libc::sigaction(*signal, old, std::ptr::null_mut());
