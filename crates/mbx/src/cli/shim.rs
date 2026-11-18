@@ -188,10 +188,17 @@ fn record_cargo_selection(
     let cargo = cargo_identity(real_cargo);
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let directory = std::env::current_dir().ok().map(PathBuf::into_os_string);
-    if let Some(note) = read_loop_notes().into_iter().find(|note| {
-        note.cargo == cargo && note.arguments == arguments && note.directory == directory
-    }) {
-        eyre::bail!("{}", note.message);
+    let notes = read_loop_notes();
+    if !notes.is_empty() {
+        let environment = loop_environment()?;
+        if let Some(note) = notes.into_iter().find(|note| {
+            note.cargo == cargo
+                && note.arguments == arguments
+                && note.directory == directory
+                && note.environment == environment
+        }) {
+            eyre::bail!("{}", note.message);
+        }
     }
     let depth = std::env::var(CARGO_SHIM_DEPTH_ENV).ok();
     let chain = std::env::var_os(CARGO_SHIM_CHAIN_ENV);
@@ -241,7 +248,30 @@ struct LoopNote {
     cargo: OsString,
     arguments: Vec<OsString>,
     directory: Option<OsString>,
+    environment: String,
     message: String,
+}
+
+fn loop_environment() -> Result<String> {
+    // Cargo configuration and wrapper routing can depend on arbitrary env
+    // variables. Hash the values rather than recording secrets in the note.
+    // Tracking counters and shell bookkeeping cannot distinguish a recovery.
+    let mut variables = std::env::vars_os()
+        .filter(|(name, _)| {
+            ![
+                CARGO_SHIM_DEPTH_ENV,
+                CARGO_SHIM_CHAIN_ENV,
+                CARGO_SHIM_NOTE_ENV,
+                "SHLVL",
+                "OLDPWD",
+                "_",
+            ]
+            .iter()
+            .any(|key| name.eq_ignore_ascii_case(OsStr::new(key)))
+        })
+        .collect::<Vec<_>>();
+    variables.sort_unstable();
+    Ok(mbx_cache_core::CacheDigest::blake3(&serde_json::to_vec(&variables)?).hash)
 }
 
 fn cargo_identity(cargo: &OsStr) -> OsString {
@@ -269,6 +299,9 @@ fn read_loop_notes() -> Vec<LoopNote> {
 
 fn leave_loop_note(cargo: &OsStr, message: &str) {
     let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV) else {
+        return;
+    };
+    let Ok(environment) = loop_environment() else {
         return;
     };
     if let Some(parent) = Path::new(&path).parent() {
@@ -302,6 +335,7 @@ fn leave_loop_note(cargo: &OsStr, message: &str) {
             cargo: cargo_identity(cargo),
             arguments: std::env::args_os().skip(1).collect(),
             directory: std::env::current_dir().ok().map(PathBuf::into_os_string),
+            environment,
             message: message.to_owned(),
         })
     {

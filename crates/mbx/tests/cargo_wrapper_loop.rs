@@ -485,3 +485,27 @@ fn wrapper_can_retry_the_same_command_in_a_different_checkout() {
         "{output}"
     );
 }
+
+#[test]
+fn wrapper_can_retry_the_same_command_with_a_different_environment() {
+    let root = tempfile::tempdir().unwrap();
+    let mbx_path = env!("CARGO_BIN_EXE_mbx");
+    let real = std::env::var_os("CARGO").unwrap();
+    let wrapper = fixture(
+        root.path(),
+        &format!(
+            "#!/bin/sh\nif [ -n \"$MBX_TEST_ROUTE_REAL\" ]; then exec '{}' \"$@\"; fi\nif [ -n \"$MBX_TEST_RECURSIVE_BRANCH\" ]; then exec '{mbx_path}' \"$@\"; fi\nMBX_TEST_RECURSIVE_BRANCH=1 '{mbx_path}' \"$@\" >/dev/null 2>&1\nMBX_TEST_ROUTE_REAL=1 exec '{mbx_path}' \"$@\"\n",
+            Path::new(&real).display()
+        ),
+    );
+    let mut command = mbx(root.path(), &wrapper);
+    command.env_remove("MBX_CARGO_SHIM_MODE").args([
+        "metadata",
+        "--no-deps",
+        "--format-version",
+        "1",
+    ]);
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
+    assert!(success, "{output}");
+    assert!(output.contains("workspace_root"), "{output}");
+}
