@@ -44,13 +44,76 @@ while :; do sleep 0.05; done
         command
     }
 
-    /// Kills every process left in a group, including a worker and command that
-    /// outlive the invoker, so a failed assertion cannot leave them looping.
-    struct Group(i32);
+    /// A child in its own process group. Dropping it kills every process left
+    /// in the group, including a worker and command that outlive the invoker,
+    /// and reaps the invoker, so a failed assertion leaves nothing running.
+    struct Group(Child);
+
+    impl Group {
+        fn spawn(command: &mut Command) -> Self {
+            Self(command.process_group(0).spawn().unwrap())
+        }
+
+        fn signal(&self, signal: i32) {
+            unsafe { libc::kill(-(self.0.id() as i32), signal) };
+        }
+    }
 
     impl Drop for Group {
         fn drop(&mut self) {
-            unsafe { libc::kill(-self.0, libc::SIGKILL) };
+            self.signal(libc::SIGKILL);
+            let _ = self.0.wait();
+        }
+    }
+
+    impl std::ops::Deref for Group {
+        type Target = Child;
+        fn deref(&self) -> &Child {
+            &self.0
+        }
+    }
+
+    impl std::ops::DerefMut for Group {
+        fn deref_mut(&mut self) -> &mut Child {
+            &mut self.0
+        }
+    }
+
+    /// The scheduler touches `priority-wait` after a failed admission attempt,
+    /// which is the evidence that a reservation reached the capacity wait.
+    fn stamps(root: &Path) -> Vec<std::path::PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![root.join("cache")];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.file_name().is_some_and(|name| name == "priority-wait") {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    }
+
+    fn clear_stamps(root: &Path) {
+        for stamp in stamps(root) {
+            let _ = fs::remove_file(stamp);
+        }
+    }
+
+    fn wait_for_queue(root: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while stamps(root).is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "the reservation never reached the capacity wait"
+            );
+            thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -73,38 +136,37 @@ while :; do sleep 0.05; done
             }
             if Instant::now() >= deadline {
                 let _ = child.kill();
+                let _ = child.wait();
                 panic!("child did not exit");
             }
             thread::sleep(Duration::from_millis(20));
         }
     }
 
-    /// Whether a second whole-budget reservation is admitted within a moment.
+    /// Whether a second whole-budget reservation is admitted. `false` means it
+    /// was seen waiting for capacity, not merely that it was slow to start.
     fn probe_admitted(root: &Path) -> bool {
         let marker = root.join("probe");
         let _ = fs::remove_file(&marker);
-        let mut probe = mbx(root)
-            .args(["reserve", "--cpus", "2", "--", "touch"])
-            .arg(&marker)
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        let _group = Group(probe.id() as i32);
-        let deadline = Instant::now() + Duration::from_millis(1500);
-        let mut admitted = false;
+        clear_stamps(root);
+        let _probe = Group::spawn(
+            mbx(root)
+                .args(["reserve", "--cpus", "2", "--", "touch"])
+                .arg(&marker),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             if marker.exists() {
-                admitted = true;
-                break;
+                return true;
             }
-            thread::sleep(Duration::from_millis(20));
+            if !stamps(root).is_empty() {
+                // Queued. Give a wrongly released lease time to admit it.
+                thread::sleep(Duration::from_millis(500));
+                return marker.exists();
+            }
+            thread::sleep(Duration::from_millis(10));
         }
-        if !admitted {
-            // Still queued behind the lease; do not leave it waiting.
-            drop(_group);
-        }
-        let _ = probe.wait();
-        admitted
+        panic!("the probe neither ran nor reached the capacity wait");
     }
 
     #[test]
@@ -112,16 +174,14 @@ while :; do sleep 0.05; done
         for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM] {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path();
-            let mut job = mbx(root)
-                .args(["reserve", "--cpus", "2", "--", "sh", "-c", SLOW_STOP, "sh"])
-                .arg(root)
-                .process_group(0)
-                .spawn()
-                .unwrap();
-            let _group = Group(job.id() as i32);
+            let mut job = Group::spawn(
+                mbx(root)
+                    .args(["reserve", "--cpus", "2", "--", "sh", "-c", SLOW_STOP, "sh"])
+                    .arg(root),
+            );
             wait_for(&root.join("ready"));
 
-            unsafe { libc::kill(-(job.id() as i32), signal) };
+            job.signal(signal);
             let status = wait_child(&mut job);
             assert_eq!(
                 status.signal(),
@@ -187,30 +247,26 @@ while :; do sleep 0.05; done
     fn a_signal_while_waiting_for_capacity_ends_at_once_without_running() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let mut holder = mbx(root)
-            .args(["reserve", "--cpus", "2", "--", "sh", "-c", SLOW_STOP, "sh"])
-            .arg(root)
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        let _holder_group = Group(holder.id() as i32);
+        let holder = Group::spawn(
+            mbx(root)
+                .args(["reserve", "--cpus", "2", "--", "sh", "-c", SLOW_STOP, "sh"])
+                .arg(root),
+        );
         wait_for(&root.join("ready"));
 
-        let mut waiter = mbx(root)
-            .args(["reserve", "--cpus", "2", "--", "touch"])
-            .arg(root.join("ran"))
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        let _waiter_group = Group(waiter.id() as i32);
-        thread::sleep(Duration::from_millis(500));
-        unsafe { libc::kill(-(waiter.id() as i32), libc::SIGTERM) };
+        clear_stamps(root);
+        let mut waiter = Group::spawn(
+            mbx(root)
+                .args(["reserve", "--cpus", "2", "--", "touch"])
+                .arg(root.join("ran")),
+        );
+        wait_for_queue(root);
+        waiter.signal(libc::SIGTERM);
         let status = wait_child(&mut waiter);
         assert_eq!(status.signal(), Some(libc::SIGTERM), "got {status}");
         // The waiter's own worker must be gone too, or it would run the
         // command once the holder lets go.
-        unsafe { libc::kill(-(holder.id() as i32), libc::SIGKILL) };
-        let _ = holder.wait();
+        drop(holder);
         thread::sleep(Duration::from_millis(500));
         assert!(!root.join("ran").exists());
     }

@@ -56,11 +56,7 @@ fn run_direct(config: &Config, args: ReserveArgs) -> Result<ExitCode> {
     // reaches this worker as well as the command. The command handles it
     // itself, so the worker only has to outlive it; dying first would release
     // the lease while the command is still shutting down.
-    let mut guard = HoldThroughSignals::install();
-    // The signals stay blocked from here until the command exists, so one that
-    // arrives during startup is held pending instead of falling in the gap
-    // between the check and the spawn.
-    guard.block();
+    let guard = HoldThroughSignals::install();
     if let Some(signal) = guard.pending() {
         // Signalled after admission and before the command exists: there is
         // nothing to wait for, so end the way the signal would have.
@@ -68,19 +64,20 @@ fn run_direct(config: &Config, args: ReserveArgs) -> Result<ExitCode> {
         guard.end_by(signal);
     }
     let mut command = external_command(program, arguments, args.cpus);
-    guard.unblock_in_child(&mut command);
-    let status = command
-        .spawn()
-        .map_err(eyre::Report::from)
-        .and_then(|mut child| {
-            // A signal that stayed pending reached this worker, and may have
-            // reached the group before the command existed. Give the command
-            // the signal itself; a repeat of one it already got is harmless.
-            guard.forward_pending(child.id());
-            guard.unblock();
-            child.wait().map_err(eyre::Report::from)
-        })
-        .wrap_err_with(|| format!("failed to run {program}"));
+    // A signal during startup reaches the new process too, so it checks for one
+    // itself before exec and refuses to start the command.
+    guard.refuse_start_if_signalled(&mut command);
+    let status = match command.spawn() {
+        Ok(mut child) => child.wait().map_err(eyre::Report::from),
+        Err(error) => match guard.pending() {
+            Some(signal) if error.kind() == std::io::ErrorKind::Interrupted => {
+                drop(permit);
+                guard.end_by(signal);
+            }
+            _ => Err(eyre::Report::from(error)),
+        },
+    }
+    .wrap_err_with(|| format!("failed to run {program}"));
     drop(guard);
     drop(permit);
     pool.observe_reservation(admission, status.as_ref().ok());
@@ -115,15 +112,13 @@ pub(super) fn external_command(program: &str, arguments: &[String], cpus: Option
 ///
 /// The handler only records the signal. It is a handler and not `SIG_IGN`
 /// because exec resets handlers, so the command keeps default dispositions,
-/// and the signals are blocked only until the command exists, where it gets
-/// the mask the worker started with, because a blocked mask would be inherited. A signal
+/// and nothing is blocked in the worker, because a blocked mask would be
+/// inherited. A signal
 /// that was already ignored (`nohup`, a background job's INT) is left alone so
 /// it stays ignored in the command too.
 #[cfg(unix)]
 struct HoldThroughSignals {
     previous: Vec<(libc::c_int, libc::sigaction)>,
-    /// The mask in force before [`Self::block`], restored in the command.
-    original_mask: Option<libc::sigset_t>,
 }
 
 #[cfg(unix)]
@@ -160,10 +155,7 @@ impl HoldThroughSignals {
                 }
             }
         }
-        Self {
-            previous,
-            original_mask: None,
-        }
+        Self { previous }
     }
 
     fn set() -> libc::sigset_t {
@@ -178,68 +170,48 @@ impl HoldThroughSignals {
         }
     }
 
-    /// Hold the signals pending until [`Self::unblock`], so none is lost
-    /// between the last check and the command's creation.
-    fn block(&mut self) {
-        let set = Self::set();
-        // SAFETY: blocks the signals and saves the previous mask.
-        unsafe {
-            let mut old: libc::sigset_t = std::mem::zeroed();
-            if libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut old) == 0 {
-                self.original_mask = Some(old);
-            }
-        }
-    }
-
-    /// Give the command the mask the worker started with, not the blocked one.
-    fn unblock_in_child(&self, command: &mut Command) {
-        use std::os::unix::process::CommandExt as _;
-        if let Some(mask) = self.original_mask {
-            // SAFETY: pthread_sigmask is async-signal-safe and the closure
-            // allocates nothing.
-            unsafe {
-                command.pre_exec(move || {
-                    libc::pthread_sigmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut());
-                    Ok(())
-                });
-            }
-        }
-    }
-
-    fn unblock(&mut self) {
-        if let Some(mask) = self.original_mask.take() {
-            // SAFETY: restores the mask block saved.
-            unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut()) };
-        }
-    }
-
-    /// A signal recorded by the handler, or held pending while blocked.
+    /// A signal the handler has recorded.
     fn pending(&self) -> Option<libc::c_int> {
         match RECEIVED_SIGNAL.load(std::sync::atomic::Ordering::SeqCst) {
-            0 => self.blocked_pending().into_iter().next(),
+            0 => None,
             signal => Some(signal),
         }
     }
 
-    fn blocked_pending(&self) -> Vec<libc::c_int> {
-        // SAFETY: reads the calling thread's pending set into zeroed storage.
+    /// Make the new process, between fork and exec, check for a signal that
+    /// arrived while it was being created and fail the launch if there was one.
+    ///
+    /// A group signal sent after the fork reaches the new process, which still
+    /// has the recording handler. It blocks the signals, looks at both what the
+    /// handler recorded and what is pending, and only then puts back the
+    /// original dispositions and mask, so a signal that lands afterwards takes
+    /// the command's own default action. The worker never replays a signal, so
+    /// the command cannot receive one twice.
+    fn refuse_start_if_signalled(&self, command: &mut Command) {
+        use std::os::unix::process::CommandExt as _;
+        let previous = self.previous.clone();
+        let set = Self::set();
+        // SAFETY: the closure runs between fork and exec and only calls
+        // async-signal-safe functions on data it already owns.
         unsafe {
-            let mut set: libc::sigset_t = std::mem::zeroed();
-            if libc::sigpending(&mut set) != 0 {
-                return Vec::new();
-            }
-            Self::SIGNALS
-                .into_iter()
-                .filter(|signal| libc::sigismember(&set, *signal) == 1)
-                .collect()
-        }
-    }
-
-    /// Send the command any signal that arrived while it was being created.
-    fn forward_pending(&self, child: u32) {
-        for signal in self.blocked_pending() {
-            // SAFETY: signals the command this worker just started.
-            unsafe { libc::kill(child as libc::pid_t, signal) };
+            command.pre_exec(move || {
+                let mut original: libc::sigset_t = std::mem::zeroed();
+                libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut original);
+                let mut pending: libc::sigset_t = std::mem::zeroed();
+                libc::sigpending(&mut pending);
+                let arrived = RECEIVED_SIGNAL.load(std::sync::atomic::Ordering::SeqCst) != 0
+                    || Self::SIGNALS
+                        .into_iter()
+                        .any(|signal| libc::sigismember(&pending, signal) == 1);
+                if arrived {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                for (signal, old) in &previous {
+                    libc::sigaction(*signal, old, std::ptr::null_mut());
+                }
+                libc::pthread_sigmask(libc::SIG_SETMASK, &original, std::ptr::null_mut());
+                Ok(())
+            });
         }
     }
 
@@ -253,7 +225,6 @@ impl HoldThroughSignals {
     /// End the process by `signal` with its default action.
     fn end_by(mut self, signal: libc::c_int) -> ! {
         self.restore();
-        self.original_mask = None;
         // SAFETY: resets one signal to its default and raises it. Unblocking
         // covers a signal that was blocked when mbx started.
         unsafe {
@@ -284,13 +255,7 @@ impl HoldThroughSignals {
         Self
     }
 
-    fn block(&mut self) {}
-
-    fn unblock_in_child(&self, _command: &mut Command) {}
-
-    fn unblock(&mut self) {}
-
-    fn forward_pending(&self, _child: u32) {}
+    fn refuse_start_if_signalled(&self, _command: &mut Command) {}
 
     fn pending(&self) -> Option<i32> {
         None
