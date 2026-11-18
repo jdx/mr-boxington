@@ -3837,11 +3837,16 @@ fn build_script_shim_does_not_redirty_its_compilation() {
     // Cargo 1.102 stopped reading a dependency's age from its rlib and reads
     // the unit's fingerprint timestamp instead. Bump that too so the
     // dependency is newer under either rule.
-    for stamp in find_files(&project.path().join("target/debug"), |path| {
+    // Match only components below the target directory, so a `helper`
+    // directory in the temporary path cannot select unrelated units.
+    let target = project.path().join("target/debug");
+    for stamp in find_files(&target, |path| {
         file_name_is(path, |name| name.ends_with(".timestamp"))
-            && path.components().any(|part| {
-                let part = part.as_os_str().to_string_lossy();
-                part == "helper" || part.starts_with("helper-")
+            && path.strip_prefix(&target).is_ok_and(|relative| {
+                relative.components().any(|part| {
+                    let part = part.as_os_str().to_string_lossy();
+                    part == "helper" || part.starts_with("helper-")
+                })
             })
     }) {
         filetime::set_file_mtime(&stamp, newer).unwrap();
