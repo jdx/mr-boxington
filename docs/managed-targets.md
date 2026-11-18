@@ -343,7 +343,9 @@ link without mbx is protected while Cargo holds its build lock.
 Ctrl-C stops the whole process group, so it ends the command and its lease
 together.
 
-A target directory is used when a build uses it, and also when a program runs
+A target directory is used when a build starts and again when the mbx command
+ends, even if the build fails. For `cargo run`, the command ends when the
+program exits. A target directory is also used when a program runs
 one of the executables or loads one of the libraries at the top of a profile,
 such as `target/debug/app` or `target/x86_64-unknown-linux-gnu/release/app`.
 This covers a program that runs often but is rebuilt rarely, such as one a hook

@@ -6803,7 +6803,7 @@ mod target_views {
         let output = mbx_command()
             .arg("gc")
             .env("MBX_CACHE_DIR", store)
-            .env("MBX_TARGET_MAX_AGE", "1s")
+            .env("MBX_TARGET_MAX_AGE", "1d")
             .output()
             .expect("mbx gc should run");
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -6819,7 +6819,7 @@ mod target_views {
     /// Start `arguments` under mbx in `project`, whose program prints
     /// `ready` and then waits on standard input, and check that `mbx gc`
     /// keeps the managed target directory while the program runs and
-    /// removes it once the command has exited.
+    /// refreshes its record once the command has exited.
     ///
     /// Once Cargo has finished compiling, the target directory is still in
     /// use: `cargo run` executes the program from it, and `cargo test`
@@ -6938,6 +6938,21 @@ mod target_views {
             child_stderr()
         );
 
+        let refreshed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        assert!(
+            refreshed["updated_secs"].as_u64().unwrap() > 1,
+            "the command must refresh the record when it ends: {refreshed}"
+        );
+        let (gc_stdout, gc_stderr) = gc_expired_targets(store);
+        assert!(
+            view.is_dir(),
+            "gc should keep the target directory the command just finished using:\ngc stdout: {gc_stdout}\ngc stderr: {gc_stderr}"
+        );
+
+        // Once that final use expires, the lease must no longer prevent collection.
+        std::fs::write(&record, serde_json::to_vec(&fields).unwrap()).unwrap();
+        backdate_runs(&view);
         let (gc_stdout, gc_stderr) = gc_expired_targets(store);
         assert!(
             !view.exists(),
@@ -7008,6 +7023,40 @@ mod target_views {
             project.path(),
             store.path(),
             &["test", "--offline", "--config", "build.rustc-wrapper='env'"],
+        );
+    }
+
+    #[test]
+    fn gc_refreshes_a_child_target_after_a_delegated_cargo_test() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+        std::fs::write(
+            project.path().join("src/lib.rs"),
+            format!("#[test]\nfn waits_for_its_caller() {WAIT_FOR_STDIN}\n"),
+        )
+        .unwrap();
+        build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("place.json"),
+            &[("MBX_TARGET_VIEWS", "1")],
+        );
+
+        // Cargo owns the wrapper and the child output directory, while the
+        // view containing that directory must be refreshed when it exits.
+        assert_gc_waits_for_in(
+            project.path(),
+            store.path(),
+            &[
+                "test",
+                "--offline",
+                "--target-dir",
+                "target/rust-analyzer",
+                "--config",
+                "build.rustc-wrapper='env'",
+            ],
         );
     }
 
