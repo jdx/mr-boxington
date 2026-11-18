@@ -312,7 +312,9 @@ resource reserves zero of that resource. The command waits until both amounts
 fit, then a dedicated worker
 holds it until the external command exits. Killing the invoking `mbx reserve`
 process alone does not release capacity while that worker still waits for the
-command; a crashed worker does release its lease through the operating system.
+command. The worker also stays alive through HUP, INT, QUIT and TERM, so ^C, a
+hangup, or a signal sent to the whole process group does not release capacity
+until the command itself has exited; a crashed worker does release its lease through the operating system.
 The command must wait for work it launches: detached background processes can
 outlive the reservation and are not covered after the command exits.
 `--memory` is measured against `scheduler.memory`; omit it when memory

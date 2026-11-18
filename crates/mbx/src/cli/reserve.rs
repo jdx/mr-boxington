@@ -52,11 +52,23 @@ fn run_direct(config: &Config, args: ReserveArgs) -> Result<ExitCode> {
     };
     let (permit, admission) =
         pool.reserve_observed(args.cpus, args.memory.map(|memory| memory.as_u64()))?;
+    // A terminal's ^C or hangup, or a signal sent to the whole process group,
+    // reaches this worker as well as the command. The command handles it
+    // itself, so the worker only has to outlive it; dying first would release
+    // the lease while the command is still shutting down.
+    let guard = HoldThroughSignals::install();
+    if let Some(signal) = guard.pending() {
+        // Signalled after admission and before the command exists: there is
+        // nothing to wait for, so end the way the signal would have.
+        drop(permit);
+        guard.end_by(signal);
+    }
     let status = external_command(program, arguments)
         // Nested mbx work is covered by this reservation. Letting its compiler
         // shims take new permits would deadlock when this lease fills the pool.
         .status()
         .wrap_err_with(|| format!("failed to run {program}"));
+    drop(guard);
     drop(permit);
     pool.observe_reservation(admission, status.as_ref().ok());
     let status = status?;
@@ -76,4 +88,110 @@ pub(super) fn external_command(program: &str, arguments: &[String]) -> Command {
         // command even when this external command launches it in the background.
         .env_remove("MBX_RESERVE_WORKER");
     command
+}
+
+/// Keeps the worker alive through HUP, INT, QUIT and TERM while the command
+/// runs, so the lease it holds lasts until the command has exited.
+///
+/// The handler only records the signal. It is a handler and not `SIG_IGN`
+/// because exec resets handlers, so the command keeps default dispositions,
+/// and nothing is blocked because a signal mask would be inherited. A signal
+/// that was already ignored (`nohup`, a background job's INT) is left alone so
+/// it stays ignored in the command too.
+#[cfg(unix)]
+struct HoldThroughSignals {
+    previous: Vec<(libc::c_int, libc::sigaction)>,
+}
+
+#[cfg(unix)]
+static RECEIVED_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+#[cfg(unix)]
+extern "C" fn record_signal(signal: libc::c_int) {
+    RECEIVED_SIGNAL.store(signal, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+impl HoldThroughSignals {
+    const SIGNALS: [libc::c_int; 4] = [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM];
+
+    fn install() -> Self {
+        RECEIVED_SIGNAL.store(0, std::sync::atomic::Ordering::SeqCst);
+        let mut previous = Vec::new();
+        for signal in Self::SIGNALS {
+            // SAFETY: plain sigaction calls on zeroed structs; the handler
+            // only stores to an atomic, which is async-signal-safe.
+            unsafe {
+                let mut old: libc::sigaction = std::mem::zeroed();
+                if libc::sigaction(signal, std::ptr::null(), &mut old) != 0
+                    || old.sa_sigaction == libc::SIG_IGN
+                {
+                    continue;
+                }
+                let mut new: libc::sigaction = std::mem::zeroed();
+                new.sa_sigaction =
+                    record_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+                libc::sigemptyset(&mut new.sa_mask);
+                if libc::sigaction(signal, &new, std::ptr::null_mut()) == 0 {
+                    previous.push((signal, old));
+                }
+            }
+        }
+        Self { previous }
+    }
+
+    fn pending(&self) -> Option<libc::c_int> {
+        match RECEIVED_SIGNAL.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => None,
+            signal => Some(signal),
+        }
+    }
+
+    fn restore(&mut self) {
+        for (signal, old) in self.previous.drain(..) {
+            // SAFETY: reinstalls the disposition install replaced.
+            unsafe { libc::sigaction(signal, &old, std::ptr::null_mut()) };
+        }
+    }
+
+    /// End the process by `signal` with its default action.
+    fn end_by(mut self, signal: libc::c_int) -> ! {
+        self.restore();
+        // SAFETY: resets one signal to its default and raises it. Unblocking
+        // covers a signal that was blocked when mbx started.
+        unsafe {
+            libc::signal(signal, libc::SIG_DFL);
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, signal);
+            libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+            libc::raise(signal);
+        }
+        std::process::exit(128 + signal)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for HoldThroughSignals {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
+#[cfg(not(unix))]
+struct HoldThroughSignals;
+
+#[cfg(not(unix))]
+impl HoldThroughSignals {
+    fn install() -> Self {
+        Self
+    }
+
+    fn pending(&self) -> Option<i32> {
+        None
+    }
+
+    fn end_by(self, _signal: i32) -> ! {
+        unreachable!("no signal is ever pending")
+    }
 }
