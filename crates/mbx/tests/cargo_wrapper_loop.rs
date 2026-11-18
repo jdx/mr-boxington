@@ -61,8 +61,8 @@ fn track_loop_note(wrapper: &Path, root: &Path) {
         script.replacen(
             "#!/bin/sh\n",
             &format!(
-                "#!/bin/sh\nprintf '%s' \"$MBX_CARGO_SHIM_NOTE\" > '{}'\n",
-                root.join("note-path").display()
+                "#!/bin/sh\numask 022\nprintf '%s' \"$MBX_CARGO_SHIM_NOTE\" > '{}'\nif [ -e \"$MBX_CARGO_SHIM_NOTE\" ]; then ls -l \"$MBX_CARGO_SHIM_NOTE\" > '{}'; fi\n",
+                root.join("note-path").display(), root.join("note-mode").display()
             ),
             1,
         ),
@@ -228,6 +228,9 @@ fn explicit_wrapper_loops_report_the_loop() {
             "{output}"
         );
         assert_loop_note_removed(root.path());
+        if !prefix.is_empty() {
+            assert!(read(&root.path().join("note-mode")).starts_with("-rw-------"));
+        }
         if change_dir {
             assert!(
                 !nested.join("cache").exists(),
@@ -435,7 +438,7 @@ fn a_failed_branch_does_not_reject_a_different_sibling_command() {
     let wrapper = fixture(
         root.path(),
         &format!(
-            "#!/bin/sh\ncase \" $* \" in *\" pkgid \"*) exec '{}' \"$@\";; esac\nif [ -n \"$MBX_TEST_RECURSIVE_BRANCH\" ]; then exec '{mbx_path}' \"$@\"; fi\nMBX_TEST_RECURSIVE_BRANCH=1 '{mbx_path}' \"$@\" >/dev/null 2>&1\nCARGO=\"$0\" '{mbx_path}' pkgid >/dev/null || exit 97\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\ncase \" $* \" in *\" locate-project \"*) exec '{}' \"$@\";; esac\nif [ -n \"$MBX_TEST_RECURSIVE_BRANCH\" ]; then exec '{mbx_path}' \"$@\"; fi\nMBX_TEST_RECURSIVE_BRANCH=1 '{mbx_path}' \"$@\" >/dev/null 2>&1\nCARGO=\"$0\" '{mbx_path}' locate-project >/dev/null || exit 97\nexec '{}' \"$@\"\n",
             Path::new(&real).display(),
             Path::new(&real).display()
         ),
@@ -450,4 +453,35 @@ fn a_failed_branch_does_not_reject_a_different_sibling_command() {
     let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
     assert!(success, "{output}");
     assert!(output.contains("workspace_root"), "{output}");
+}
+
+#[test]
+fn wrapper_can_retry_the_same_command_in_a_different_checkout() {
+    let root = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    fixture(other.path(), "#!/bin/sh\nexit 0\n");
+    let mbx_path = env!("CARGO_BIN_EXE_mbx");
+    let real = std::env::var_os("CARGO").unwrap();
+    let wrapper = fixture(
+        root.path(),
+        &format!(
+            "#!/bin/sh\nif [ \"$PWD\" = '{}' ]; then exec '{}' \"$@\"; fi\nif [ -n \"$MBX_TEST_RECURSIVE_BRANCH\" ]; then exec '{mbx_path}' \"$@\"; fi\nMBX_TEST_RECURSIVE_BRANCH=1 '{mbx_path}' \"$@\" >/dev/null 2>&1\ncd '{}' || exit 98\nCARGO=\"$0\" exec '{mbx_path}' \"$@\"\n",
+            other.path().display(),
+            Path::new(&real).display(),
+            other.path().display()
+        ),
+    );
+    let mut command = mbx(root.path(), &wrapper);
+    command.env_remove("MBX_CARGO_SHIM_MODE").args([
+        "metadata",
+        "--no-deps",
+        "--format-version",
+        "1",
+    ]);
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
+    assert!(success, "{output}");
+    assert!(
+        output.contains(&other.path().display().to_string()),
+        "{output}"
+    );
 }

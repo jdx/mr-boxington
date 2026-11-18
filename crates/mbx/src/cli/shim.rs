@@ -187,10 +187,10 @@ fn record_cargo_selection(
     let owns_note = std::env::var_os(CARGO_SHIM_NOTE_ENV).is_none();
     let cargo = cargo_identity(real_cargo);
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if let Some(note) = read_loop_notes()
-        .into_iter()
-        .find(|note| note.cargo == cargo && note.arguments == arguments)
-    {
+    let directory = std::env::current_dir().ok().map(PathBuf::into_os_string);
+    if let Some(note) = read_loop_notes().into_iter().find(|note| {
+        note.cargo == cargo && note.arguments == arguments && note.directory == directory
+    }) {
         eyre::bail!("{}", note.message);
     }
     let depth = std::env::var(CARGO_SHIM_DEPTH_ENV).ok();
@@ -240,6 +240,7 @@ fn loop_note_path() -> PathBuf {
 struct LoopNote {
     cargo: OsString,
     arguments: Vec<OsString>,
+    directory: Option<OsString>,
     message: String,
 }
 
@@ -275,10 +276,14 @@ fn leave_loop_note(cargo: &OsStr, message: &str) {
     }
     // Remember each failed invocation separately. A metadata probe and a
     // command listing may both loop; neither should restart its failed tree.
-    let created = std::fs::OpenOptions::new()
-        .append(true)
-        .create_new(true)
-        .open(&path);
+    let mut options = std::fs::OpenOptions::new();
+    options.append(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let created = options.open(&path);
     let file = match created {
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let mut options = std::fs::OpenOptions::new();
@@ -296,6 +301,7 @@ fn leave_loop_note(cargo: &OsStr, message: &str) {
         && let Ok(mut bytes) = serde_json::to_vec(&LoopNote {
             cargo: cargo_identity(cargo),
             arguments: std::env::args_os().skip(1).collect(),
+            directory: std::env::current_dir().ok().map(PathBuf::into_os_string),
             message: message.to_owned(),
         })
     {
