@@ -219,9 +219,9 @@ fn explicit_wrapper_loops_report_the_loop() {
         assert!(!success, "{output}");
         assert!(!cutoff.exists(), "fixture cutoff reached: {output}");
         let calls: usize = read(&entries).trim().parse().unwrap();
-        // At most twelve nested selections, each allowed one bounded listing
-        // attempt to recognize a wrapper that recovered directly with Cargo.
-        assert!(calls <= 24, "wrapper launched {calls} times: {output}");
+        // At most twelve nested selections, each allowed the normal trimmed
+        // probe and listing to recognize legitimate wrapper recovery.
+        assert!(calls <= 36, "wrapper launched {calls} times: {output}");
         assert!(output.contains("re-entered its Cargo shim"), "{output}");
         assert!(
             !output.contains("fixture stopped unguarded recursion"),
@@ -324,7 +324,7 @@ fn direct_cargo_fallback_can_run_external_commands_without_a_manifest() {
     let wrapper = fixture(
         root.path(),
         &format!(
-            "#!/bin/sh\nfor arg do if [ \"$arg\" = probe ]; then exec '{}' \"$@\"; fi; done\nfor arg do if [ \"$arg\" = helper ]; then CARGO=\"$0\" exec '{mbx_path}' metadata --no-deps --format-version 1; fi; done\nif [ -n \"$MBX_TEST_RECURSIVE_BRANCH\" ]; then exec '{mbx_path}' \"$@\"; fi\nMBX_TEST_RECURSIVE_BRANCH=1 '{mbx_path}' \"$@\" && exit 0\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\nfor arg do if [ \"$arg\" = probe ]; then exec '{}' \"$@\"; fi; done\ncase \" $* \" in *\" not-the-workspace.toml \"*) exec '{mbx_path}' \"$@\";; esac\nfor arg do if [ \"$arg\" = helper ]; then CARGO=\"$0\" exec '{mbx_path}' metadata --no-deps --format-version 1; fi; done\nif [ -n \"$MBX_TEST_RECURSIVE_BRANCH\" ]; then exec '{mbx_path}' \"$@\"; fi\nMBX_TEST_RECURSIVE_BRANCH=1 '{mbx_path}' \"$@\" && exit 0\nexec '{}' \"$@\"\n",
             Path::new(&real).display(),
             Path::new(&real).display()
         ),
@@ -409,5 +409,45 @@ fn direct_cargo_fallback_can_run_external_commands_without_a_manifest() {
         success,
         "successful metadata left a stale loop note: {output}"
     );
+    assert!(output.contains("workspace_root"), "{output}");
+}
+
+#[test]
+fn translated_wrapper_failure_keeps_the_loop_diagnosis() {
+    let root = tempfile::tempdir().unwrap();
+    let mbx_path = env!("CARGO_BIN_EXE_mbx");
+    let wrapper = fixture(
+        root.path(),
+        &format!("#!/bin/sh\nMBX_CARGO_SHIM_MODE=1 '{mbx_path}' \"$@\" >/dev/null 2>&1\nexit 2\n"),
+    );
+    let mut command = mbx(root.path(), &wrapper);
+    command.arg("build");
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
+    assert!(!success, "{output}");
+    assert!(output.contains("re-entered its Cargo shim"), "{output}");
+}
+
+#[test]
+fn a_failed_branch_does_not_reject_a_different_sibling_command() {
+    let root = tempfile::tempdir().unwrap();
+    let mbx_path = env!("CARGO_BIN_EXE_mbx");
+    let real = std::env::var_os("CARGO").unwrap();
+    let wrapper = fixture(
+        root.path(),
+        &format!(
+            "#!/bin/sh\ncase \" $* \" in *\" pkgid \"*) exec '{}' \"$@\";; esac\nif [ -n \"$MBX_TEST_RECURSIVE_BRANCH\" ]; then exec '{mbx_path}' \"$@\"; fi\nMBX_TEST_RECURSIVE_BRANCH=1 '{mbx_path}' \"$@\" >/dev/null 2>&1\nCARGO=\"$0\" '{mbx_path}' pkgid >/dev/null || exit 97\nexec '{}' \"$@\"\n",
+            Path::new(&real).display(),
+            Path::new(&real).display()
+        ),
+    );
+    let mut command = mbx(root.path(), &wrapper);
+    command.env_remove("MBX_CARGO_SHIM_MODE").args([
+        "metadata",
+        "--no-deps",
+        "--format-version",
+        "1",
+    ]);
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
+    assert!(success, "{output}");
     assert!(output.contains("workspace_root"), "{output}");
 }

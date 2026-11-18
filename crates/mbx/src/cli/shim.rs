@@ -181,17 +181,17 @@ fn record_cargo_selection(
     configured: Option<&OsStr>,
 ) -> Result<CargoSelection> {
     // A wrapper may recover from a failed branch by selecting real Cargo.
-    // Clear the abandoned diagnosis when its selected executable changes, but
-    // keep the cumulative depth: alternating fallbacks must remain bounded.
-    // Reusing the same Cargo must still stop promptly.
+    // Only the same executable and arguments repeat the failed invocation.
+    // Different metadata flags or helper commands may legitimately recover;
+    // all entries still share the cumulative depth limit.
     let owns_note = std::env::var_os(CARGO_SHIM_NOTE_ENV).is_none();
-    if let Some(note) = read_loop_note() {
-        if note.cargo == cargo_identity(real_cargo) {
-            eyre::bail!("{}", note.message);
-        }
-        if let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV) {
-            let _ = std::fs::remove_file(path);
-        }
+    let cargo = cargo_identity(real_cargo);
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if let Some(note) = read_loop_notes()
+        .into_iter()
+        .find(|note| note.cargo == cargo && note.arguments == arguments)
+    {
+        eyre::bail!("{}", note.message);
     }
     let depth = std::env::var(CARGO_SHIM_DEPTH_ENV).ok();
     let chain = std::env::var_os(CARGO_SHIM_CHAIN_ENV);
@@ -239,6 +239,7 @@ fn loop_note_path() -> PathBuf {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct LoopNote {
     cargo: OsString,
+    arguments: Vec<OsString>,
     message: String,
 }
 
@@ -250,8 +251,19 @@ fn cargo_identity(cargo: &OsStr) -> OsString {
 }
 
 fn read_loop_note() -> Option<LoopNote> {
-    let path = std::env::var_os(CARGO_SHIM_NOTE_ENV)?;
-    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    read_loop_notes().into_iter().next()
+}
+
+fn read_loop_notes() -> Vec<LoopNote> {
+    let Some(bytes) =
+        std::env::var_os(CARGO_SHIM_NOTE_ENV).and_then(|path| std::fs::read(path).ok())
+    else {
+        return Vec::new();
+    };
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice(line).ok())
+        .collect()
 }
 
 fn leave_loop_note(cargo: &OsStr, message: &str) {
@@ -261,19 +273,34 @@ fn leave_loop_note(cargo: &OsStr, message: &str) {
     if let Some(parent) = Path::new(&path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // `create_new` neither follows a planted link nor replaces a note.
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .write(true)
+    // Remember each failed invocation separately. A metadata probe and a
+    // command listing may both loop; neither should restart its failed tree.
+    let created = std::fs::OpenOptions::new()
+        .append(true)
         .create_new(true)
-        .open(path)
+        .open(&path);
+    let file = match created {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let mut options = std::fs::OpenOptions::new();
+            options.append(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NOFOLLOW);
+            }
+            options.open(&path)
+        }
+        other => other,
+    };
+    if let Ok(mut file) = file
+        && let Ok(mut bytes) = serde_json::to_vec(&LoopNote {
+            cargo: cargo_identity(cargo),
+            arguments: std::env::args_os().skip(1).collect(),
+            message: message.to_owned(),
+        })
     {
-        let _ = serde_json::to_writer(
-            &mut file,
-            &LoopNote {
-                cargo: cargo_identity(cargo),
-                message: message.to_owned(),
-            },
-        );
+        bytes.push(b'\n');
+        let _ = std::io::Write::write_all(&mut file, &bytes);
     }
 }
 
@@ -288,20 +315,6 @@ pub(super) fn clear_loop_note() {
     if let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV) {
         let _ = std::fs::remove_file(path);
     }
-}
-
-pub(super) fn retry_metadata(failure: &mbx_cache_cargo::ProbeFailure) -> bool {
-    // Our guard exits with 1. Real Cargo's metadata errors (for example an
-    // external command's own --manifest-path) can still need the normal
-    // argument-trimming retry after a wrapper falls back to Cargo.
-    if matches!(failure, mbx_cache_cargo::ProbeFailure::Exit { status, .. }
-        if status.code() == Some(1))
-        && read_loop_note().is_some()
-    {
-        return false;
-    }
-    clear_loop_note();
-    true
 }
 
 /// The depth and chain to export, given those this shim inherited.
