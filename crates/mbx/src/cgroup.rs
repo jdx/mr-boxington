@@ -155,10 +155,17 @@ pub(crate) fn contains(
     else {
         return true;
     };
-    contains_at(pool, scope, path, cgroups, written)
+    contains_at(pool, scope, path, cgroups, written, Stamp::now())
 }
 
-fn contains_at(pool: &Path, scope: &str, path: &Path, cgroups: &[String], written: Stamp) -> bool {
+fn contains_at(
+    pool: &Path,
+    scope: &str,
+    path: &Path,
+    cgroups: &[String],
+    written: Stamp,
+    now: Stamp,
+) -> bool {
     let found = |walk: &Walk| {
         walk.members
             .as_ref()
@@ -166,7 +173,6 @@ fn contains_at(pool: &Path, scope: &str, path: &Path, cgroups: &[String], writte
     };
     let directory = pool.join(SUBTREES_DIR);
     let file = directory.join(format!("{scope}.json"));
-    let now = Stamp::now();
     let cached = std::fs::read(&file)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Walk>(&bytes).ok());
@@ -640,7 +646,7 @@ mod tests {
             .path()
             .join(SUBTREES_DIR)
             .join(format!("{scope_id}.json"));
-        let now = Stamp::now();
+        let now = stamp(10_000, 10_000);
         let walk = Walk {
             began: now,
             boot: boot_id().to_owned(),
@@ -658,19 +664,29 @@ mod tests {
         let cgroups = [shared_id, identity(&nested).unwrap()];
         // Also exercise clocks that cannot prove the lease predates the walk.
         let ahead = stamp(now.wall_ms, now.boot_ms + 3_600_000);
-        assert!(contains_at(pool.path(), &scope_id, &scope, &cgroups, ahead));
+        assert!(contains_at(
+            pool.path(),
+            &scope_id,
+            &scope,
+            &cgroups,
+            ahead,
+            stamp(10_001, 10_001)
+        ));
         let refreshed: Walk = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         assert!(cgroups.iter().all(|id| refreshed.vouched.contains_key(id)));
 
         // Once every ID is vouched for, subsequent polls reuse that walk
-        // even if the lease's clocks remain unorderable.
+        // even if the lease's clocks remain unorderable. The controlled
+        // clock keeps the cache fresh regardless of test pauses, and each
+        // call has a distinct stamp so a rescan would change the file.
         let outside = [cgroups[0].clone(), "0:0".into()];
         assert!(!contains_at(
             pool.path(),
             &scope_id,
             &scope,
             &outside,
-            ahead
+            ahead,
+            stamp(10_002, 10_002)
         ));
         let cached = std::fs::read(&file).unwrap();
         assert!(!contains_at(
@@ -678,7 +694,8 @@ mod tests {
             &scope_id,
             &scope,
             &outside,
-            ahead
+            ahead,
+            stamp(10_003, 10_003)
         ));
         assert_eq!(std::fs::read(&file).unwrap(), cached);
     }
