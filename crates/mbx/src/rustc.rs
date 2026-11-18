@@ -251,7 +251,7 @@ pub(crate) fn compile(
     );
     portable.build_script_inputs = build_script_inputs;
     if instruments_coverage(arguments) {
-        portable.key_workspace_to_checkout();
+        portable.key_workspace_to_checkout(session::share_workspace_root_requested());
     }
     portable.map_external_native_paths(&initial_invocation, &working_dir);
     let mut arguments = portable.applied_to(arguments);
@@ -4188,8 +4188,8 @@ impl Portable {
     /// first checkout's files, so each checkout keeps its own. With
     /// `share_workspace_root` the paths are remapped to the placeholder
     /// instead, and the shared key is correct.
-    fn key_workspace_to_checkout(&mut self) {
-        if session::share_workspace_root_requested() {
+    fn key_workspace_to_checkout(&mut self, workspace_root_shared: bool) {
+        if workspace_root_shared {
             return;
         }
         let Some(mapping) = self

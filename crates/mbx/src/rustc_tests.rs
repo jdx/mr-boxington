@@ -2378,7 +2378,7 @@ fn a_non_utf8_workspace_root_is_keyed_to_its_checkout() {
             arguments: Vec::new(),
             build_script_inputs: None,
         };
-        portable.key_workspace_to_checkout();
+        portable.key_workspace_to_checkout(false);
         portable.mappings.remove(0).placeholder
     };
     let first = key(b"/work/\xff-a");
