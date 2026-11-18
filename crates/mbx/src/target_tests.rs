@@ -1040,6 +1040,23 @@ fn a_build_writing_through_an_existing_link_keeps_its_view_alive() {
 }
 
 #[test]
+fn a_child_target_directory_refreshes_its_owning_view() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    let child = workspace.join("target/rust-analyzer");
+    std::fs::create_dir_all(&child).unwrap();
+    age_view(&config.target.root, &workspace, 1);
+
+    touch_managed(&config, &workspace, &child);
+
+    let record = view_record_path(&config.target.root, &workspace);
+    let record: ViewRecord = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    assert!(record.updated_secs > 1, "the owning view was refreshed");
+}
+
+#[test]
 fn a_target_directory_outside_the_managed_root_is_not_touched() {
     let directory = tempfile::tempdir().unwrap();
     let config = test_config(directory.path(), true);
