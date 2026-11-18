@@ -1795,7 +1795,7 @@ fn instruments_coverage(arguments: &[OsString]) -> bool {
         {
             enabled = match value.strip_prefix('=') {
                 None if value.is_empty() => true,
-                Some("off" | "no" | "n" | "false") => false,
+                Some("off" | "no" | "n" | "false" | "0") => false,
                 Some(_) => true,
                 None => enabled,
             };
@@ -4199,10 +4199,8 @@ impl Portable {
         else {
             return;
         };
-        let Some(root) = mapping.root.to_str() else {
-            return;
-        };
-        mapping.placeholder = format!("workspace_{}", CacheDigest::blake3(root.as_bytes()).hash);
+        let digest = CacheDigest::blake3(mapping.root.as_os_str().as_encoded_bytes());
+        mapping.placeholder = format!("workspace_{}", digest.hash);
         self.mappings = PathMapping::ordered(&self.mappings);
     }
 

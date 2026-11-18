@@ -2346,3 +2346,42 @@ fn private_incremental_state_is_named_under_a_new_generation() {
         current_incremental_generation(&CacheDigest::blake3(b"another invocation"))
     );
 }
+
+#[test]
+fn coverage_instrumentation_follows_the_last_codegen_option() {
+    let coverage = |flags: &[&str]| {
+        let arguments: Vec<OsString> = flags.iter().map(OsString::from).collect();
+        instruments_coverage(&arguments)
+    };
+    assert!(coverage(&["-Cinstrument-coverage"]));
+    assert!(coverage(&["-C", "instrument-coverage=all"]));
+    assert!(!coverage(&["--crate-name", "demo"]));
+    for off in ["off", "no", "n", "false", "0"] {
+        let disabled = format!("-Cinstrument-coverage={off}");
+        assert!(
+            !coverage(&["-Cinstrument-coverage", &disabled]),
+            "{off} should disable coverage"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_workspace_root_is_keyed_to_its_checkout() {
+    use std::os::unix::ffi::OsStrExt;
+    let key = |name: &[u8]| {
+        let mut portable = Portable {
+            mappings: vec![PathMapping::new(
+                PathBuf::from(OsStr::from_bytes(name)),
+                "workspace",
+            )],
+            arguments: Vec::new(),
+            build_script_inputs: None,
+        };
+        portable.key_workspace_to_checkout();
+        portable.mappings.remove(0).placeholder
+    };
+    let first = key(b"/work/\xff-a");
+    assert_ne!(first, "workspace");
+    assert_ne!(first, key(b"/work/\xff-b"));
+}
