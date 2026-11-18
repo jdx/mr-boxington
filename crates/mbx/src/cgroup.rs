@@ -65,13 +65,32 @@ pub(crate) fn memory_directories() -> Vec<PathBuf> {
 /// compiles.
 pub(crate) fn identities() -> &'static [String] {
     static IDENTITIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    IDENTITIES.get_or_init(|| directories().iter().map(|(_, id)| id.clone()).collect())
+    IDENTITIES.get_or_init(|| {
+        identify_directories(memory_directories())
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect()
+    })
 }
 
-/// Every visible directory paired with its identity, or empty if any lookup fails.
+/// Identities of readable probe directories. Unlike lease placement, pressure
+/// state must still distinguish the cgroups whose probes can be read when
+/// another directory is missing (for example, the v1 fallback on a v2 host).
+pub(crate) fn pressure_identities() -> Vec<String> {
+    directories().iter().map(|(_, id)| id.clone()).collect()
+}
+
+/// Every directory that can be identified, for local probes and scope lookup.
 fn directories() -> &'static [(PathBuf, String)] {
     static DIRECTORIES: std::sync::OnceLock<Vec<(PathBuf, String)>> = std::sync::OnceLock::new();
-    DIRECTORIES.get_or_init(|| identify_directories(memory_directories()))
+    DIRECTORIES.get_or_init(|| readable_directories(memory_directories()))
+}
+
+fn readable_directories(paths: Vec<PathBuf>) -> Vec<(PathBuf, String)> {
+    paths
+        .into_iter()
+        .filter_map(|path| identity(&path).map(|id| (path, id)))
+        .collect()
 }
 
 fn identify_directories(paths: Vec<PathBuf>) -> Vec<(PathBuf, String)> {
@@ -122,10 +141,11 @@ fn boot_id() -> &'static str {
     })
 }
 
-/// Whether a process sitting in `cgroups` is charged to the cgroup `scope`,
-/// one of this process's own memory cgroups. `written` is when the process
-/// recorded its cgroups, if known. Called under the registrar lock of
-/// `pool`, which also guards the walks shared there.
+/// Whether any compilation represented by `cgroups` is charged to `scope`,
+/// one of this process's own memory cgroups. The list may combine several
+/// leases read before this call. `written` must be absent if any lease's
+/// timestamp is unknown; its value is not used to establish ordering.
+/// Called under the registrar lock of `pool`, which also guards shared walks.
 ///
 /// Finding `scope` in the list is not enough. A process sees only the cgroups
 /// its namespace shows, so a compilation in a container nested below `scope`
@@ -777,6 +797,35 @@ mod tests {
         // Ancestors remain readable, but publishing only their IDs would
         // let another waiter wrongly exclude this compiler from limited.
         assert!(identify_directories(paths).is_empty());
+    }
+
+    #[test]
+    fn incomplete_lease_identities_preserve_readable_pressure_domains() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("v2/first");
+        let second = root.path().join("v2/second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let missing_v1 = root.path().join("v1/memory");
+        let first_paths = vec![first.clone(), missing_v1.clone()];
+        let second_paths = vec![second.clone(), missing_v1];
+        // Conventional-path fallback can include a missing v1 mount on a
+        // v2-only host. Neither lease can publish a complete placement...
+        assert!(identify_directories(first_paths.clone()).is_empty());
+        assert!(identify_directories(second_paths.clone()).is_empty());
+        // ...but readable v2 probes still belong to distinct cgroups and
+        // must not share the host pressure state or each other's state.
+        let first_readable = readable_directories(first_paths);
+        let second_readable = readable_directories(second_paths);
+        assert_eq!(
+            first_readable,
+            vec![(first.clone(), identity(&first).unwrap())]
+        );
+        assert_eq!(
+            second_readable,
+            vec![(second.clone(), identity(&second).unwrap())]
+        );
+        assert_ne!(first_readable[0].1, second_readable[0].1);
     }
 
     #[test]

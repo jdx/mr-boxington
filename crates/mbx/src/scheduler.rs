@@ -782,15 +782,33 @@ fn holds_short_memory(
     short: Option<&[String]>,
     contains: CgroupContains,
 ) -> bool {
-    live.iter().any(|lease| match (short, &lease.cgroups) {
-        (Some(scopes), Some(cgroups)) => scopes
-            .iter()
-            .any(|scope| contains(pool, scope, cgroups, lease.written)),
-        _ => true,
-    })
+    let Some(first) = live.first() else {
+        return false;
+    };
+    let Some(scopes) = short else {
+        return true;
+    };
+    if live
+        .iter()
+        .any(|lease| lease.cgroups.is_none() || lease.written.is_none())
+    {
+        return true;
+    }
+    // All leases were read under the registrar lock before any walk begins.
+    // Check their IDs together so one walk can vouch for the whole batch,
+    // rather than walking once for each unrelated container's lease.
+    let cgroups: Vec<_> = live
+        .iter()
+        .filter_map(|lease| lease.cgroups.as_ref())
+        .flatten()
+        .cloned()
+        .collect();
+    scopes
+        .iter()
+        .any(|scope| contains(pool, scope, &cgroups, first.written))
 }
 
-/// Whether a process that recorded `cgroups` at a time is charged to a scope.
+/// Whether any compilation represented by `cgroups` is charged to a scope.
 type CgroupContains = fn(&Path, &str, &[String], Option<crate::util::Stamp>) -> bool;
 
 /// See `cgroup::contains`. Without cgroups, nothing can be ruled out.

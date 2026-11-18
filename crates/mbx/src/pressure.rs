@@ -92,7 +92,7 @@ pub(crate) fn domain() -> &'static str {
         #[cfg(target_os = "linux")]
         {
             use sha2::Digest;
-            let identities = crate::cgroup::identities();
+            let identities = crate::cgroup::pressure_identities();
             if !identities.is_empty() {
                 let mut hasher = sha2::Sha256::new();
                 for identity in identities {
