@@ -1371,8 +1371,8 @@ fn symlink_dir(source: &Path, link: &Path) -> std::io::Result<()> {
 /// eventually delete outputs somebody was still building against.
 ///
 /// Only an existing record is refreshed. A directory that is not the managed
-/// view for this workspace gets nothing, so a checkout that has genuinely gone
-/// back to its own `target/` still expires on schedule.
+/// view for this workspace or a child of it gets nothing. A checkout that has
+/// genuinely gone back to its own `target/` still expires on schedule.
 pub fn touch_managed(config: &Config, workspace_root: &Path, target_dir: &Path) {
     let record_path = view_record_path(&config.target.root, workspace_root);
     if !record_path.exists() {
@@ -1387,7 +1387,7 @@ pub fn touch_managed(config: &Config, workspace_root: &Path, target_dir: &Path) 
     ) else {
         return;
     };
-    if written != expected {
+    if !written.starts_with(&expected) {
         return;
     }
     if let Err(error) = record_view(&config.target.root, workspace_root) {

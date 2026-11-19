@@ -243,7 +243,7 @@ fn cargo_with_settings_bypass_log_and_roots(
         }
         // A link an earlier placement left still sends Cargo into the view, so
         // collection must wait for this command as it does for a managed one.
-        let _view_lease = target::is_recorded(&config.target.root, &roots.workspace_root)
+        let view_lease = target::is_recorded(&config.target.root, &roots.workspace_root)
             .then(
                 || match target::ViewLease::acquire(&config.target.root, &roots.workspace_root) {
                     Ok(lease) => Some(lease),
@@ -257,7 +257,11 @@ fn cargo_with_settings_bypass_log_and_roots(
             )
             .flatten();
         // `arguments` carries any install scratch directory checked above.
-        return super::launch::plain_launch(&cargo, arguments, rustc.as_deref());
+        let outcome = super::launch::plain_launch(&cargo, arguments, rustc.as_deref());
+        if view_lease.is_some() {
+            target::touch_managed(config, &roots.workspace_root, &roots.target_dir);
+        }
+        return outcome;
     };
     let existing_target = manage_existing_target(config, &roots, arguments)?;
     let default_target = roots.workspace_root.join("target");
@@ -683,9 +687,11 @@ fn cargo_with_settings_bypass_log_and_roots(
         }
         other => other,
     };
-    // Released before the sweep is scheduled, so the collector this command
-    // starts does not find the view in use by this very command, and so
-    // ordinary policy applies to the view as soon as the command is over.
+    // Finishing a command counts as using its target, even if Cargo failed.
+    // Refresh while collection is still excluded, then release before the sweep.
+    if view_lease.is_some() {
+        target::touch_managed(config, &roots.workspace_root, &placement.touch_path);
+    }
     drop(view_lease);
     account_session(config, settings, session_outcome, removed_target_bytes)
 }
