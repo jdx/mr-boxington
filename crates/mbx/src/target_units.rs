@@ -193,13 +193,14 @@ impl WriteTimes {
     }
 }
 
-fn output_directories(profile: &Path) -> [PathBuf; 5] {
+fn output_directories(profile: &Path) -> [PathBuf; 6] {
     [
         profile.to_path_buf(),
         profile.join("deps"),
         profile.join("build"),
         profile.join(".fingerprint"),
         profile.join("incremental"),
+        profile.join("examples"),
     ]
 }
 
