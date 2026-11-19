@@ -34,7 +34,7 @@ fn unit(directory: &Path, files: &[&str], age: Duration) {
 fn prune(view: &Path, max_age: Duration, now: SystemTime, dry_run: bool) -> UnitOutcome {
     let mut ledger = Ledger::default();
     ledger.measure(view, &HashSet::new());
-    super::prune(view, max_age, now, dry_run, &mut ledger)
+    super::prune(&profiles(view), max_age, now, dry_run, &mut ledger)
 }
 
 fn profile(view: &Path) -> PathBuf {
@@ -296,7 +296,7 @@ fn a_unit_linked_from_outside_the_view_frees_nothing_on_disk() {
     ledger.measure(view.path(), &HashSet::new());
     let before = ledger.total();
 
-    let outcome = super::prune(view.path(), 30 * DAY, now(), false, &mut ledger);
+    let outcome = super::prune(&profiles(view.path()), 30 * DAY, now(), false, &mut ledger);
 
     let linked = std::fs::metadata(&object).unwrap().len();
     assert_eq!(outcome.removed_units, 1);
@@ -326,7 +326,7 @@ fn a_unit_removal_that_fails_partway_credits_only_what_went() {
     ledger.measure(view.path(), &HashSet::new());
     let before = ledger.total();
 
-    let outcome = super::prune(view.path(), 30 * DAY, now(), false, &mut ledger);
+    let outcome = super::prune(&profiles(view.path()), 30 * DAY, now(), false, &mut ledger);
 
     let survivors = std::fs::read_dir(&profile)
         .unwrap()
@@ -358,4 +358,116 @@ fn a_unit_removal_that_fails_partway_credits_only_what_went() {
         crate::disk_usage::tree_bytes(view.path()),
         "what survived is still counted"
     );
+}
+
+#[test]
+fn pruning_does_not_refresh_directory_write_times() {
+    for old_layout in [false, true] {
+        let view = tempfile::tempdir().unwrap();
+        let profile = profile(view.path());
+        if old_layout {
+            unit(
+                &profile.join(".fingerprint/widget-0123456789abcdef"),
+                &["lib-widget"],
+                40 * DAY,
+            );
+            unit(&profile.join("deps"), &["libwidget.rlib"], 40 * DAY);
+        } else {
+            unit(
+                &profile.join("build/widget/0123456789abcdef"),
+                NEW_UNIT,
+                40 * DAY,
+            );
+        }
+        // A previous interrupted removal changes the profile too, even if
+        // no ordinary units remain to prune on this pass.
+        unit(
+            &profile.join(format!("{REMOVAL_PREFIX}old")),
+            &["leftover"],
+            40 * DAY,
+        );
+        let time = FileTime::from_system_time(now() - 2 * DAY);
+        for path in output_directories(&profile) {
+            if path.is_dir() {
+                filetime::set_file_mtime(&path, time).unwrap();
+            }
+        }
+        let written = last_write(view.path()).unwrap();
+        let outcome = prune(view.path(), 30 * DAY, now(), false);
+        assert_eq!(outcome.removed_units, 1);
+        assert_eq!(last_write(view.path()), Some(written));
+        assert!(!profile.join("build/widget").exists());
+        assert!(!profile.join("deps").exists());
+        assert!(!profile.join(".fingerprint").exists());
+        assert!(!profile.join(format!("{REMOVAL_PREFIX}old")).exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn preserving_write_times_does_not_follow_output_symlinks() {
+    let view = tempfile::tempdir().unwrap();
+    let profile = profile(view.path());
+    let outside = tempfile::tempdir().unwrap();
+    let before = FileTime::from_unix_time(100, 0);
+    let after = FileTime::from_unix_time(200, 0);
+    for replace_directory in [false, true] {
+        let output = profile.join("build");
+        if replace_directory {
+            std::fs::create_dir(&output).unwrap();
+        } else {
+            std::os::unix::fs::symlink(outside.path(), &output).unwrap();
+        }
+        filetime::set_file_mtime(outside.path(), before).unwrap();
+        let preserved = PreserveWrites::new(&profile);
+        if replace_directory {
+            std::fs::remove_dir(&output).unwrap();
+            std::os::unix::fs::symlink(outside.path(), &output).unwrap();
+        }
+        filetime::set_file_mtime(outside.path(), after).unwrap();
+        drop(preserved);
+        assert_eq!(
+            FileTime::from_last_modification_time(&std::fs::metadata(outside.path()).unwrap()),
+            after
+        );
+        std::fs::remove_file(&output).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn writes_through_an_output_symlink_do_not_count_as_view_activity() {
+    let view = tempfile::tempdir().unwrap();
+    let profile = profile(view.path());
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), profile.join("incremental")).unwrap();
+    let old = FileTime::from_unix_time(100, 0);
+    filetime::set_file_mtime(&profile, old).unwrap();
+    filetime::set_file_mtime(outside.path(), FileTime::from_unix_time(200, 0)).unwrap();
+    let before = WriteTimes::read(view.path());
+    assert_eq!(
+        before.latest(),
+        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(100))
+    );
+    filetime::set_file_mtime(outside.path(), FileTime::from_unix_time(300, 0)).unwrap();
+    let after = WriteTimes::read(view.path());
+    assert!(!after.changed_since(&before));
+    assert_eq!(after.latest(), before.latest());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_noop_prune_does_not_change_directory_ctime() {
+    use std::os::unix::fs::MetadataExt as _;
+    let view = tempfile::tempdir().unwrap();
+    let profile = profile(view.path());
+    let metadata = std::fs::metadata(&profile).unwrap();
+    let before = (metadata.ctime(), metadata.ctime_nsec());
+    // Cross the coarse kernel-clock tick too, so the old unconditional
+    // timestamp write would be visible in ctime.
+    std::thread::sleep(Duration::from_millis(20));
+    let outcome = prune(view.path(), 30 * DAY, now(), false);
+    assert_eq!(outcome.removed_units, 0);
+    let metadata = std::fs::metadata(&profile).unwrap();
+    assert_eq!((metadata.ctime(), metadata.ctime_nsec()), before);
 }

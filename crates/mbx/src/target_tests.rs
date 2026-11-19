@@ -875,7 +875,7 @@ fn target_budget_collects_oldest_live_view_first() {
     assert_eq!(outcome.removed_live_views, 1);
     assert_eq!(outcome.removed_bytes, 5);
     assert_eq!(outcome.remaining_bytes, 10);
-    assert!(!old.exists());
+    assert!(!has_outputs(&old));
     assert!(new.exists());
 }
 
@@ -907,6 +907,10 @@ fn dry_run_leaves_selected_target_views_in_place() {
 
     assert_eq!(outcome.removed_live_views, 1);
     assert!(old.join("artifact").exists());
+    assert_eq!(
+        std::fs::read_link(old_workspace.join("target")).unwrap(),
+        old
+    );
     assert!(view_record_path(&config.target.root, &old_workspace).exists());
 }
 
@@ -914,6 +918,9 @@ fn dry_run_leaves_selected_target_views_in_place() {
 fn age_view(root: &Path, workspace_root: &Path, updated_secs: u64) {
     let path = view_record_path(root, workspace_root);
     let mut record: ViewRecord = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    // Backdate Cargo's directory activity too: an old record alone no
+    // longer means an unused view.
+    date_profile_writes(&view_dir(root, workspace_root), updated_secs);
     record.updated_secs = updated_secs;
     std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
 }
@@ -933,7 +940,7 @@ fn a_budget_smaller_than_one_target_directory_collects_it() {
 
     assert_eq!(outcome.removed_views, 1);
     assert_eq!(outcome.remaining_bytes, 0);
-    assert!(!managed.exists());
+    assert!(!has_outputs(&managed));
 }
 
 #[test]
@@ -965,8 +972,8 @@ fn an_over_budget_sweep_collects_even_the_most_recently_used_view() {
     let outcome = collect(&config.target.root, Some(10), None, false).unwrap();
 
     assert_eq!(outcome.removed_live_views, 2);
-    assert!(!old.exists(), "the older view is collected");
-    assert!(!new.exists(), "the newest inactive view is collected");
+    assert!(!has_outputs(&old), "the older view is collected");
+    assert!(!has_outputs(&new), "the newest inactive view is collected");
 }
 
 #[test]
@@ -1009,7 +1016,7 @@ fn an_abandoned_checkout_is_collected_even_as_the_newest_view() {
     let outcome = collect(&config.target.root, Some(10), None, false).unwrap();
 
     assert_eq!(outcome.removed_stale_views, 1);
-    assert!(!managed.exists());
+    assert!(!has_outputs(&managed));
 }
 
 #[test]
@@ -1173,6 +1180,7 @@ fn a_view_a_build_is_compiling_in_is_kept() {
     std::fs::create_dir_all(old.join("debug")).unwrap();
     let mut cargo = fslock::LockFile::open(&old.join("debug/.cargo-lock")).unwrap();
     assert!(cargo.try_lock().unwrap());
+    date_profile_writes(&old, 1);
 
     let outcome = collect(&config.target.root, Some(10), None, false).unwrap();
 
@@ -1188,7 +1196,7 @@ fn a_view_a_build_is_compiling_in_is_kept() {
     let outcome = collect(&config.target.root, Some(10), None, false).unwrap();
 
     assert_eq!(outcome.removed_live_views, 1);
-    assert!(!old.exists());
+    assert!(!has_outputs(&old));
 }
 
 #[test]
@@ -1228,6 +1236,8 @@ fn a_view_claimed_since_the_selection_is_kept() {
         RunningPrograms::Spare,
         false,
         now_secs(),
+        |_| {},
+        |_| {},
         move || {
             let mut record: ViewRecord =
                 serde_json::from_slice(&std::fs::read(&refreshed).unwrap()).unwrap();
@@ -1281,6 +1291,8 @@ fn a_checkout_recreated_since_the_selection_is_kept() {
         RunningPrograms::Spare,
         false,
         now_secs(),
+        |_| {},
+        |_| {},
         move || {
             // The clone's build: Cargo holds its lock in the same view.
             std::fs::create_dir_all(rebuilt.join("debug")).unwrap();
@@ -1307,6 +1319,7 @@ fn a_view_refreshed_within_the_last_seconds_is_kept() {
     let config = test_config(directory.path(), true);
     let workspace = checkout(directory.path(), "fresh");
     let view = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    std::fs::write(view.join("artifact"), b"fresh").unwrap();
     let record_path = view_record_path(&config.target.root, &workspace);
     let mut record: ViewRecord =
         serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
@@ -1325,6 +1338,8 @@ fn a_view_refreshed_within_the_last_seconds_is_kept() {
         RunningPrograms::Spare,
         false,
         now,
+        |_| {},
+        |_| {},
         || {},
         |_| {},
         || {},
@@ -1363,6 +1378,8 @@ fn a_record_rewritten_during_the_removal_is_kept() {
         RunningPrograms::Spare,
         false,
         now_secs(),
+        |_| {},
+        |_| {},
         || {},
         |_| {},
         move || {
@@ -1469,7 +1486,7 @@ fn a_kept_most_recent_target_does_not_spare_an_older_one() {
 
     assert_eq!(outcome.removed_views, 3);
     assert_eq!(outcome.remaining_bytes, 1);
-    assert!(!oldest.1.exists() && !agent.1.exists() && !human.1.exists());
+    assert!(!has_outputs(&oldest.1) && !has_outputs(&agent.1) && !has_outputs(&human.1));
     assert!(newest.1.exists());
 }
 
@@ -1513,7 +1530,10 @@ fn over_budget_takes_evict_first_targets_before_older_ones_and_never_kept_ones()
     .unwrap();
 
     assert_eq!(outcome.removed_views, 1);
-    assert!(!agent.1.exists(), "evict-first goes before an older target");
+    assert!(
+        !has_outputs(&agent.1),
+        "evict-first goes before an older target"
+    );
     assert!(human.1.exists());
     assert!(kept.1.exists());
     assert!(newest.1.exists());
@@ -1529,9 +1549,9 @@ fn over_budget_takes_evict_first_targets_before_older_ones_and_never_kept_ones()
     )
     .unwrap();
     assert_eq!(outcome.removed_views, 2);
-    assert!(!human.1.exists());
+    assert!(!has_outputs(&human.1));
     assert!(kept.1.exists(), "a kept target is never collected for size");
-    assert!(!newest.1.exists());
+    assert!(!has_outputs(&newest.1));
 }
 
 #[test]
@@ -1555,9 +1575,9 @@ fn the_most_recent_target_is_collected_when_it_is_evict_first() {
     .unwrap();
 
     assert_eq!(outcome.removed_views, 4);
-    assert!(!agent.1.exists());
-    assert!(!human.1.exists());
-    assert!(!newest.1.exists());
+    assert!(!has_outputs(&agent.1));
+    assert!(!has_outputs(&human.1));
+    assert!(!has_outputs(&newest.1));
 }
 
 #[test]
@@ -1585,7 +1605,7 @@ fn a_kept_target_outlives_its_age_but_not_its_checkout() {
     assert_eq!(outcome.removed_views, 3, "every other target has expired");
     assert!(kept.1.exists());
     assert!(unit.exists(), "nor are a kept target's units pruned");
-    assert!(!agent.1.exists() && !human.1.exists() && !newest.1.exists());
+    assert!(!has_outputs(&agent.1) && !has_outputs(&human.1) && !has_outputs(&newest.1));
 
     std::fs::remove_dir_all(&kept.0).unwrap();
     let outcome = collect_by(
@@ -1689,7 +1709,7 @@ fn views_sharing_a_seeded_link_count_it_once() {
     assert_eq!(outcome.released_bytes, 5);
     assert_eq!(outcome.deleted_files, 2);
     assert_eq!(outcome.remaining_bytes, 110);
-    assert!(!first.exists());
+    assert!(!has_outputs(&first));
 
     let outcome = collect(&config.target.root, Some(0), None, false).unwrap();
     assert_eq!(outcome.removed_bytes, 110, "the last link takes the file");
@@ -1739,7 +1759,7 @@ fn a_view_linked_to_the_store_is_removed_without_releasing_the_link() {
         "the store still holds the object"
     );
     assert_eq!(outcome.deleted_files, 2);
-    assert!(!view.exists());
+    assert!(!has_outputs(&view));
     assert!(object.exists());
 }
 
@@ -1849,6 +1869,8 @@ fn a_file_written_after_the_measure_is_not_credited() {
         RunningPrograms::Spare,
         false,
         now_secs(),
+        |_| {},
+        |_| {},
         || {},
         |reserved| {
             if reserved == stale {
@@ -1859,7 +1881,7 @@ fn a_file_written_after_the_measure_is_not_credited() {
     )
     .unwrap();
 
-    assert!(!stale.exists());
+    assert!(!has_outputs(&stale));
     assert!(kept.exists());
     assert_eq!(outcome.removed_views, 1);
     assert_eq!(outcome.removed_bytes, 5);
@@ -1975,7 +1997,7 @@ fn a_program_run_from_a_target_since_its_build_counts_as_use() {
 
     assert_eq!(outcome.removed_live_views, 1);
     assert!(program.exists(), "the target whose program ran is kept");
-    assert!(!built.exists(), "the one only built goes first");
+    assert!(!has_outputs(&built), "the one only built goes first");
 
     let outcome = collect(
         &config.target.root,
@@ -2019,7 +2041,7 @@ fn reading_a_file_that_is_not_a_program_is_not_use() {
     .unwrap();
 
     assert_eq!(outcome.removed_live_views, 1);
-    assert!(!view.exists());
+    assert!(!has_outputs(&view));
 }
 
 #[test]
@@ -2108,5 +2130,367 @@ fn a_run_of_a_program_shared_with_other_targets_is_not_use() {
     .unwrap();
 
     assert_eq!(outcome.removed_live_views, 1);
+    assert!(!has_outputs(&view));
+}
+
+/// Timestamp/link fixtures contain no running programs. Avoid repeatedly
+/// walking the real host process table while exercising their GC policy.
+fn collect_inactive(
+    root: &Path,
+    max_bytes: Option<u64>,
+    max_age: Option<Duration>,
+    dry_run: bool,
+) -> Result<CollectionOutcome> {
+    collect_by(
+        root,
+        max_bytes,
+        max_age,
+        &Precedence::default(),
+        RunningPrograms::Ignore,
+        dry_run,
+    )
+}
+
+fn date_profile_writes(view: &Path, secs: u64) {
+    for profile in [
+        "debug",
+        "release",
+        "x86_64-unknown-linux-gnu/debug",
+        "rust-analyzer/host/debug",
+        "rust-analyzer",
+        "rust-analyzer/debug",
+    ] {
+        for child in ["", "deps", "build", ".fingerprint", "incremental"] {
+            let path = view.join(profile).join(child);
+            if !path.is_dir() {
+                continue;
+            }
+            filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(secs as i64, 0))
+                .unwrap();
+        }
+    }
+}
+
+#[test]
+fn plain_cargo_directory_writes_count_for_age_and_budget() {
+    for profile in [
+        "debug",
+        "x86_64-unknown-linux-gnu/debug",
+        "rust-analyzer/host/debug",
+        "rust-analyzer/debug",
+    ] {
+        for child in ["", "deps", "build", ".fingerprint", "incremental"] {
+            let directory = tempfile::tempdir().unwrap();
+            let config = test_config(directory.path(), true);
+            let workspace = checkout(directory.path(), "written");
+            let view = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+            if profile == "rust-analyzer/debug" {
+                std::fs::create_dir(view.join("rust-analyzer")).unwrap();
+                std::fs::write(view.join("rust-analyzer/.cargo-lock"), b"").unwrap();
+            }
+            let profile = view.join(profile);
+            std::fs::create_dir_all(&profile).unwrap();
+            std::fs::write(profile.join(".cargo-lock"), b"").unwrap();
+            for name in ["deps", "build", ".fingerprint", "incremental"] {
+                std::fs::create_dir(profile.join(name)).unwrap();
+            }
+            age_view(&config.target.root, &workspace, 1);
+            // Create through the workspace link, as plain Cargo does. Only
+            // the immediate parent directory's mtime changes.
+            let relative = profile.strip_prefix(&view).unwrap();
+            std::fs::write(
+                workspace
+                    .join("target")
+                    .join(relative)
+                    .join(child)
+                    .join("output"),
+                b"written",
+            )
+            .unwrap();
+            let outcome = collect_inactive(
+                &config.target.root,
+                None,
+                Some(Duration::from_secs(60)),
+                false,
+            )
+            .unwrap();
+            assert_eq!(outcome.removed_views, 0, "{profile:?}/{child}");
+            assert!(profile.join(child).join("output").exists());
+
+            let other_workspace = checkout(directory.path(), "unwritten");
+            let other = place(
+                &config,
+                &other_workspace,
+                &other_workspace.join("target"),
+                false,
+            )
+            .unwrap();
+            std::fs::write(other.join("artifact"), b"older").unwrap();
+            age_view(&config.target.root, &other_workspace, 2);
+            let bytes = tree_bytes(&view);
+            let outcome = collect_inactive(&config.target.root, Some(bytes), None, false).unwrap();
+            assert_eq!(outcome.removed_views, 1);
+            assert!(view.exists());
+            assert!(std::fs::read_dir(&other).unwrap().next().is_none());
+
+            age_view(&config.target.root, &workspace, 1);
+            let outcome = collect_inactive(
+                &config.target.root,
+                None,
+                Some(Duration::from_secs(60)),
+                false,
+            )
+            .unwrap();
+            assert_eq!(outcome.removed_views, 1);
+            assert!(std::fs::read_dir(&view).unwrap().next().is_none());
+            assert!(workspace.join("target").is_dir());
+        }
+    }
+}
+
+#[test]
+fn plain_cargo_writes_after_selection_keep_a_recorded_view() {
+    for budget in [false, true] {
+        for existing_profile in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let config = test_config(directory.path(), true);
+            let workspace = checkout(directory.path(), "project");
+            let target = workspace.join("target");
+            let view = place(&config, &workspace, &target, false).unwrap();
+            std::fs::write(view.join("artifact"), b"old").unwrap();
+            if existing_profile {
+                std::fs::create_dir_all(view.join("debug/deps")).unwrap();
+                std::fs::write(view.join("debug/.cargo-lock"), b"").unwrap();
+            }
+            age_view(&config.target.root, &workspace, 1);
+            let future = UNIX_EPOCH + Duration::new(now_secs() + 60, 1);
+            if budget && existing_profile {
+                filetime::set_file_mtime(
+                    view.join("debug/deps"),
+                    filetime::FileTime::from_system_time(future),
+                )
+                .unwrap();
+            }
+            let record = std::fs::read(view.with_extension("json")).unwrap();
+            let outcome = collect_with(
+                &config.target.root,
+                budget.then_some(0),
+                (!budget).then_some(Duration::from_secs(60)),
+                &Precedence::default(),
+                RunningPrograms::Ignore,
+                false,
+                now_secs(),
+                |_| {},
+                |_| {},
+                || {},
+                |_| {
+                    // A plain Cargo build completes after selection: it has
+                    // no view lease and releases its Cargo lock before the
+                    // collector checks. Its JSON record stays unchanged.
+                    std::fs::create_dir_all(target.join("debug/deps")).unwrap();
+                    let mut lock =
+                        fslock::LockFile::open(&target.join("debug/.cargo-lock")).unwrap();
+                    assert!(lock.try_lock().unwrap());
+                    std::fs::write(target.join("debug/deps/new-output"), b"new").unwrap();
+                    if budget && existing_profile {
+                        filetime::set_file_mtime(
+                            target.join("debug/deps"),
+                            filetime::FileTime::from_system_time(
+                                future + Duration::from_millis(100),
+                            ),
+                        )
+                        .unwrap();
+                    }
+                    drop(lock);
+                },
+                || {},
+            )
+            .unwrap();
+            assert_eq!(outcome.removed_views, 0);
+            assert_eq!(outcome.kept_active_views, 1);
+            assert!(target.join("debug/deps/new-output").exists());
+            assert_eq!(std::fs::read(view.with_extension("json")).unwrap(), record);
+        }
+    }
+}
+
+#[test]
+fn plain_cargo_writes_while_acquiring_locks_are_not_absorbed_by_pruning() {
+    for prune_first in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let config = test_config(directory.path(), true);
+        let workspace = checkout(directory.path(), "project");
+        let target = workspace.join("target");
+        let view = place(&config, &workspace, &target, false).unwrap();
+        std::fs::create_dir_all(view.join("debug/deps")).unwrap();
+        std::fs::write(view.join("debug/.cargo-lock"), b"").unwrap();
+        std::fs::write(view.join("artifact"), b"old").unwrap();
+        // A recent record permits unit pruning. Otherwise the hook fires
+        // only at retirement, testing a build finishing during lock probing.
+        age_view(
+            &config.target.root,
+            &workspace,
+            if prune_first { now_secs() - 30 } else { 1 },
+        );
+        let future = UNIX_EPOCH + Duration::from_secs(now_secs() + 600);
+        // This directory hides normal-clock writes from a maximum-only
+        // comparison. Size pressure can still select the future-dated view.
+        std::fs::create_dir(view.join("debug/incremental")).unwrap();
+        filetime::set_file_mtime(
+            view.join("debug/incremental"),
+            filetime::FileTime::from_system_time(future),
+        )
+        .unwrap();
+        let mut calls = 0;
+        let outcome = collect_with(
+            &config.target.root,
+            Some(0),
+            Some(Duration::from_secs(60)),
+            &Precedence::default(),
+            RunningPrograms::Ignore,
+            false,
+            now_secs(),
+            |_| {
+                calls += 1;
+                if calls == 1 {
+                    let mut lock =
+                        fslock::LockFile::open(&target.join("debug/.cargo-lock")).unwrap();
+                    assert!(lock.try_lock().unwrap());
+                    std::fs::write(target.join("debug/deps/new-output"), b"new").unwrap();
+                    std::fs::create_dir_all(target.join("debug/.fingerprint/fresh")).unwrap();
+                    std::fs::write(target.join("debug/.fingerprint/fresh/lib-project"), b"hash")
+                        .unwrap();
+                    drop(lock);
+                }
+            },
+            |_| {},
+            || {},
+            |_| {},
+            || {},
+        )
+        .unwrap();
+        assert_eq!(outcome.removed_views, 0);
+        assert_eq!(outcome.kept_active_views, 1);
+        assert!(target.join("debug/deps/new-output").exists());
+        if prune_first
+            && crate::target_units::access_times_tracked(&views_root(&config.target.root))
+        {
+            assert_eq!(calls, 2, "build activity survived the pruning snapshot");
+        }
+    }
+}
+
+#[test]
+fn a_new_profile_after_the_pruning_snapshot_keeps_the_view() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    if !crate::target_units::access_times_tracked(&views_root(&config.target.root)) {
+        return; // Unit pruning is disabled on this filesystem.
+    }
+    let workspace = checkout(directory.path(), "project");
+    let target = workspace.join("target");
+    let view = place(&config, &workspace, &target, false).unwrap();
+    std::fs::create_dir(view.join("debug")).unwrap();
+    std::fs::write(view.join("debug/.cargo-lock"), b"").unwrap();
+    std::fs::write(view.join("artifact"), b"old").unwrap();
+    age_view(&config.target.root, &workspace, now_secs() - 30);
+    let outcome = collect_with(
+        &config.target.root,
+        Some(0),
+        Some(Duration::from_secs(60)),
+        &Precedence::default(),
+        RunningPrograms::Ignore,
+        false,
+        now_secs(),
+        |_| {},
+        |_| {
+            // Cargo's earlier lock scan covered debug only. A complete plain
+            // Cargo build now creates a profile the scan never locked.
+            std::fs::create_dir_all(target.join("release/deps")).unwrap();
+            std::fs::create_dir_all(target.join("release/.fingerprint/fresh")).unwrap();
+            let mut lock = fslock::LockFile::open(&target.join("release/.cargo-lock")).unwrap();
+            assert!(lock.try_lock().unwrap());
+            std::fs::write(target.join("release/deps/output"), b"new").unwrap();
+            std::fs::write(
+                target.join("release/.fingerprint/fresh/lib-project"),
+                b"hash",
+            )
+            .unwrap();
+            // These units look stale to pruning, but their new profile was
+            // not in the acquired lock set and must be left untouched.
+            let old = filetime::FileTime::from_system_time(
+                SystemTime::now() - Duration::from_secs(40 * 24 * 60 * 60),
+            );
+            filetime::set_file_times(
+                target.join("release/.fingerprint/fresh/lib-project"),
+                old,
+                old,
+            )
+            .unwrap();
+            filetime::set_file_times(target.join("release/.fingerprint/fresh"), old, old).unwrap();
+            drop(lock);
+        },
+        || {},
+        |_| {},
+        || {},
+    )
+    .unwrap();
+    assert_eq!(outcome.removed_units, 0, "unlocked profiles are not pruned");
+    assert_eq!(outcome.removed_views, 0);
+    assert_eq!(outcome.kept_active_views, 1);
+    assert!(target.join("release/deps/output").exists());
+}
+
+#[test]
+fn collected_targets_leave_stable_reusable_placeholders() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let workspace = checkout(directory.path(), "project");
+    let target = workspace.join("target");
+    let view = place(&config, &workspace, &target, false).unwrap();
+    std::fs::write(view.join("old"), b"old").unwrap();
+    age_view(&config.target.root, &workspace, 1);
+    let collect = || {
+        collect_inactive(
+            &config.target.root,
+            None,
+            Some(Duration::from_secs(60)),
+            false,
+        )
+        .unwrap()
+    };
+    assert_eq!(collect().removed_views, 1);
+    assert!(target.is_dir());
+    assert!(std::fs::read_dir(&view).unwrap().next().is_none());
+    let modified = std::fs::metadata(&view).unwrap().modified().unwrap();
+    for _ in 0..2 {
+        let outcome = collect();
+        assert_eq!(outcome.removed_views, 0);
+        assert_eq!(outcome.remaining_views, 0);
+        assert_eq!(
+            std::fs::metadata(&view).unwrap().modified().unwrap(),
+            modified
+        );
+    }
+    std::fs::create_dir_all(target.join("debug/deps")).unwrap();
+    std::fs::write(target.join("debug/.cargo-lock"), b"").unwrap();
+    std::fs::write(target.join("debug/deps/new"), b"new").unwrap();
+    assert_eq!(collect().removed_views, 0);
+    assert_eq!(
+        std::fs::read(target.join("debug/deps/new")).unwrap(),
+        b"new"
+    );
+    age_view(&config.target.root, &workspace, 1);
+    assert_eq!(collect().removed_views, 1);
+    std::fs::remove_dir_all(&workspace).unwrap();
+    assert_eq!(collect().removed_views, 1);
     assert!(!view.exists());
+}
+
+// Collection may leave an empty placeholder; old outputs must be gone.
+fn has_outputs(path: &std::path::Path) -> bool {
+    if path.is_file() {
+        return true;
+    }
+    std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some())
 }
