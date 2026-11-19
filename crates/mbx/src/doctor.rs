@@ -688,21 +688,19 @@ fn cargo_on_path(path: &OsStr) -> Option<PathBuf> {
 }
 
 fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = path.metadata() else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+    path.metadata()
+        .is_ok_and(|metadata| metadata.is_file() && has_execute_bit(&metadata))
+}
+
+#[cfg(unix)]
+fn has_execute_bit(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn has_execute_bit(_metadata: &std::fs::Metadata) -> bool {
+    true
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
