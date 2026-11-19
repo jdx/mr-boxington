@@ -689,6 +689,7 @@ fn collect_with(
     // least recently.
     let mut trees: Vec<(String, PathBuf, u64, Option<Duration>)> = Vec::new();
     let mut lease_dirs = Vec::new();
+    let mut identities = std::collections::BTreeMap::new();
     let mut staging_bytes = 0_u64;
     for entry in entries {
         // An entry that cannot be read is still on the disk. It is kept and
@@ -718,6 +719,15 @@ fn collect_with(
             }
         };
         if !is_dir {
+            if let Some(digest) = name
+                .strip_suffix(".identity")
+                .filter(|name| is_digest_name(name))
+            {
+                identities.insert(
+                    digest.to_owned(),
+                    std::fs::symlink_metadata(&path).map_or(0, |metadata| metadata.len()),
+                );
+            }
             continue;
         }
         if name.starts_with(STAGING_PREFIX) {
@@ -749,10 +759,33 @@ fn collect_with(
         trees.push((name, path, 0, age));
     }
     trees.sort_by_key(|tree| std::cmp::Reverse(tree.3));
-    let mut remaining_bytes = staging_bytes;
+    let mut remaining_bytes = identities
+        .values()
+        .fold(staging_bytes, |bytes, size| bytes.saturating_add(*size));
     for tree in &mut trees {
-        tree.2 = tree_bytes(&tree.1);
-        remaining_bytes = remaining_bytes.saturating_add(tree.2);
+        let contents = tree_bytes(&tree.1);
+        tree.2 = contents.saturating_add(identities.remove(&tree.0).unwrap_or(0));
+        remaining_bytes = remaining_bytes.saturating_add(contents);
+    }
+    // A failed publication or an older collector can leave only a record,
+    // without a lease directory. Count and collect it independently. Taking
+    // the registrar prevents a publisher from acquiring its lease between
+    // the absence check and deletion; an active publisher keeps its record.
+    for (digest, bytes) in identities {
+        if dry_run && max_bytes.is_none() && max_age.is_none() {
+            continue;
+        }
+        let _registrar = registrar(root)?;
+        if root.join(&digest).exists() || leased(root, &digest, !dry_run).unwrap_or(true) {
+            continue;
+        }
+        let projecting = dry_run && (max_bytes.is_some() || max_age.is_some());
+        if projecting
+            || (!dry_run && std::fs::remove_file(identity_path(&root.join(&digest))).is_ok())
+        {
+            remaining_bytes = remaining_bytes.saturating_sub(bytes);
+            outcome.removed_bytes = outcome.removed_bytes.saturating_add(bytes);
+        }
     }
     let mut kept = trees.len() as u64;
     for (name, path, bytes, age) in &trees {
@@ -770,6 +803,7 @@ fn collect_with(
         if leased(root, name, !dry_run).unwrap_or(true) {
             continue;
         }
+        let mut leftover = 0_u64;
         let tree = if !dry_run {
             let tree = match RetiredTree::retire(path) {
                 Ok(tree) => tree,
@@ -782,7 +816,12 @@ fn collect_with(
                 }
             };
             let _ = std::fs::remove_file(marker_path(root, name));
-            let _ = std::fs::remove_file(identity_path(path));
+            let identity = identity_path(path);
+            if std::fs::remove_file(&identity).is_err() {
+                // Measure before releasing the registrar: a new publisher
+                // may write a different record once the tree is detached.
+                leftover = std::fs::metadata(identity).map_or(0, |metadata| metadata.len());
+            }
             let _ = std::fs::remove_dir_all(leases_dir(root, name));
             let _ = std::fs::remove_file(publish_lock_path(root, name));
             tree
@@ -790,7 +829,6 @@ fn collect_with(
             None
         };
         drop(_registrar);
-        let mut leftover = 0_u64;
         if let Some(tree) = tree {
             on_retired();
             let path = tree.path().to_path_buf();
@@ -799,7 +837,7 @@ fn collect_with(
                     "could not remove retired generated sources {}: {error}",
                     path.display()
                 );
-                leftover = tree_bytes(&path);
+                leftover = leftover.saturating_add(tree_bytes(&path));
             }
         }
         kept -= 1;
