@@ -950,7 +950,10 @@ fn orphaned_identities_are_counted_and_collected_without_a_lease_directory() {
     assert!(!leases_dir(&root, &digest).exists());
     assert_eq!(stats(&root).unwrap().remaining_bytes, 6);
     assert!(record.exists(), "stats must only measure");
-    lease(&root, &digest).unwrap();
+    let lease_path = leases_dir(&root, &digest).join("publisher.lease");
+    std::fs::create_dir_all(lease_path.parent().unwrap()).unwrap();
+    let mut publisher = mbx_cache_core::open_shared_lock(&lease_path).unwrap();
+    publisher.lock().unwrap();
     assert_eq!(
         collect(&root, Some(0), None, false)
             .unwrap()
@@ -958,7 +961,9 @@ fn orphaned_identities_are_counted_and_collected_without_a_lease_directory() {
         6
     );
     assert!(record.exists(), "an active publisher keeps its record");
-    release(&root, &digest);
+    drop(publisher);
+    std::fs::remove_file(lease_path).unwrap();
+    std::fs::remove_dir(leases_dir(&root, &digest)).unwrap();
     assert!(!leases_dir(&root, &digest).exists());
     let preview = collect(&root, Some(0), None, true).unwrap();
     assert_eq!(preview.removed_bytes, 6);
@@ -992,4 +997,51 @@ fn orphan_records_are_swept_before_budgeting_live_trees() {
     );
     assert!(stable.exists());
     assert!(!orphan.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_identity_falls_back_without_waiting_for_a_writer() {
+    use std::os::unix::{ffi::OsStrExt as _, fs::FileTypeExt as _};
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("out-dirs");
+    let real = directory.path().join("real");
+    write_tree(&real, &[("generated.rs", b"generated")]);
+    let stable = stabilize(&real, &root).unwrap().unwrap();
+    let record = identity_path(&stable);
+    std::fs::remove_file(&record).unwrap();
+    let name = std::ffi::CString::new(record.as_os_str().as_bytes()).unwrap();
+    // SAFETY: name is a live NUL-terminated path; mkfifo only creates that entry.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let (sent, received) = std::sync::mpsc::channel();
+    let held_root = root.clone();
+    let validating = std::thread::spawn(move || {
+        sent.send(stabilize(&real, &held_root)).unwrap();
+    });
+    let result = received.recv_timeout(Duration::from_secs(2));
+    if matches!(result, Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+        // Unblock a broken reader before failing, so the regression cannot
+        // leave a test thread hanging in open/read forever.
+        drop(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&record)
+                .unwrap(),
+        );
+    }
+    validating.join().unwrap();
+    assert_eq!(
+        result
+            .expect("identity validation blocked on a FIFO")
+            .unwrap(),
+        None
+    );
+    assert!(stable.is_dir());
+    assert!(
+        std::fs::symlink_metadata(record)
+            .unwrap()
+            .file_type()
+            .is_fifo()
+    );
+    release_all_under(&root);
 }

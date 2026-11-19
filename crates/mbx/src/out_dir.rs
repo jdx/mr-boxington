@@ -294,7 +294,13 @@ fn identity(manifest: &[u8], root: &Path, files: &[(PathBuf, bool)]) -> Result<V
 /// Hash every file, including same-size edits, and enumerate the entire tree
 /// so extra entries cannot silently change generated code's behavior.
 fn validate_tree(stable: &Path, expected: &[u8]) -> Result<bool> {
-    let recorded = match std::fs::read(identity_path(stable)) {
+    let record = identity_path(stable);
+    match std::fs::symlink_metadata(&record) {
+        Ok(metadata) if !metadata.is_file() => return Ok(false),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
+    let recorded = match std::fs::read(record) {
         Ok(recorded) => Some(recorded),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
@@ -859,7 +865,9 @@ fn collect_with(
                 continue;
             }
             let _registrar = registrar(root)?;
-            if !leased(root, &digest, true).unwrap_or(true) {
+            // A publisher may have completed and exited after the check
+            // above. Recheck under the registrar before removing its record.
+            if !root.join(&digest).is_dir() && !leased(root, &digest, true).unwrap_or(true) {
                 let _ = std::fs::remove_dir_all(leases_dir(root, &digest));
                 let _ = std::fs::remove_file(publish_lock_path(root, &digest));
                 let _ = std::fs::remove_file(identity_path(&root.join(&digest)));
