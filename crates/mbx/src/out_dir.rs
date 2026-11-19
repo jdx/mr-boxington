@@ -252,22 +252,85 @@ pub(crate) fn stabilize(real: &Path, root: &Path) -> Result<Option<PathBuf>> {
     // publication is complete: the existence check and the copy sit under
     // the same lock, so a second process either finds the finished,
     // protected tree or waits for it.
-    let published = (|| -> Result<()> {
+    let published = (|| -> Result<bool> {
         let mut publishing = mbx_cache_core::open_shared_lock(&publish_lock_path(root, &digest))?;
         publishing.lock()?;
-        if !stable.is_dir() {
-            materialize(real, root, &stable, &manifest, &files, &directories)?;
+        if stable.exists() {
+            // Never repair in place: another compiler may hold a lease on
+            // this exact path. A damaged tree stays for collection.
+            return Ok(validate_tree(&stable, &manifest).unwrap_or(false));
         }
-        Ok(())
+        materialize(real, root, &stable, &manifest, &files, &directories)?;
+        Ok(true)
     })();
-    if let Err(error) = published {
-        // Nothing was published, so nothing needs the lease; a lease left
-        // behind here would name a tree that never existed.
+    if !matches!(published, Ok(true)) {
+        // This compilation will use Cargo's tree. Other readers keep their
+        // own leases; neither failure nor fallback touches the shared tree.
         release(root, &digest);
-        return Err(error);
+        return published.map(|_| None);
     }
     stamp_use(root, &digest);
     Ok(Some(stable))
+}
+
+/// Kept beside the tree so generated file names have no reserved entries.
+fn identity_path(tree: &Path) -> PathBuf {
+    tree.with_extension("identity")
+}
+
+/// The manifest retains the existing key format (paths, types, executable
+/// bits and content digests); lengths are recorded separately in walk order.
+fn identity(manifest: &[u8], root: &Path, files: &[(PathBuf, bool)]) -> Result<Vec<u8>> {
+    let sizes = files
+        .iter()
+        .map(|(path, _)| std::fs::symlink_metadata(root.join(path)).map(|m| m.len()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    Ok(serde_json::to_vec(&(
+        std::str::from_utf8(manifest)?,
+        sizes,
+    ))?)
+}
+
+/// Hash every file, including same-size edits, and enumerate the entire tree
+/// so extra entries cannot silently change generated code's behavior.
+fn validate_tree(stable: &Path, expected: &[u8]) -> Result<bool> {
+    let recorded = match std::fs::read(identity_path(stable)) {
+        Ok(recorded) => Some(recorded),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let mut manifest = Vec::new();
+    let mut files = Vec::new();
+    if std::fs::symlink_metadata(stable)?.file_type().is_symlink()
+        || !describe_tree(
+            stable,
+            Path::new(""),
+            &mut manifest,
+            &mut files,
+            &mut Vec::new(),
+        )?
+        || manifest != expected
+    {
+        return Ok(false);
+    }
+    let actual = identity(&manifest, stable, &files)?;
+    if let Some(recorded) = recorded {
+        return Ok(actual == recorded);
+    }
+    // Adopt a legacy tree only after checking every byte against the real
+    // output's manifest. Only the sidecar changes, under the publish lock;
+    // compilers already reading the tree keep the same paths and contents.
+    write_identity(stable, &actual)?;
+    Ok(true)
+}
+
+fn write_identity(stable: &Path, identity: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+    let mut record =
+        mbx_cache_core::shared_tempfile_builder().tempfile_in(stable.parent().unwrap())?;
+    record.write_all(identity)?;
+    record.persist(identity_path(stable))?;
+    Ok(())
 }
 
 fn publish_lock_path(root: &Path, digest: &str) -> PathBuf {
@@ -482,6 +545,15 @@ fn materialize(
     if !matches!(described, Ok(true)) || copied_manifest != manifest {
         let _ = remove_tree(&staging);
         eyre::bail!("the build-script output changed while it was being copied");
+    }
+    // Publish the identity atomically before exposing the tree. Readers use
+    // the publication lock; a crash here leaves an unused sidecar, never a
+    // tree that can be mistaken for a validated publication.
+    let recorded =
+        identity(manifest, &staging, files).and_then(|record| write_identity(stable, &record));
+    if let Err(error) = recorded {
+        let _ = remove_tree(&staging);
+        return Err(error);
     }
     match std::fs::rename(&staging, stable) {
         // The top directory last, and after the move: macOS will not rename
@@ -710,6 +782,7 @@ fn collect_with(
                 }
             };
             let _ = std::fs::remove_file(marker_path(root, name));
+            let _ = std::fs::remove_file(identity_path(path));
             let _ = std::fs::remove_dir_all(leases_dir(root, name));
             let _ = std::fs::remove_file(publish_lock_path(root, name));
             tree
@@ -751,6 +824,7 @@ fn collect_with(
             if !leased(root, &digest, true).unwrap_or(true) {
                 let _ = std::fs::remove_dir_all(leases_dir(root, &digest));
                 let _ = std::fs::remove_file(publish_lock_path(root, &digest));
+                let _ = std::fs::remove_file(identity_path(&root.join(&digest)));
             }
         }
     }

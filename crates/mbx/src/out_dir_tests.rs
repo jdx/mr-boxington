@@ -755,3 +755,154 @@ fn a_backslash_in_a_unix_root_is_not_a_separator() {
         b"see /work/out/x\n"
     );
 }
+
+#[test]
+fn damaged_or_legacy_trees_fall_back_without_touching_a_leased_tree() {
+    for damage in [
+        "missing",
+        "truncated",
+        "same-size",
+        "extra",
+        "legacy-damaged",
+        "type",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("out-dirs");
+        let real = directory.path().join("real");
+        write_tree(&real, &[("generated.rs", b"pub const VALUE: u32 = 7;\n")]);
+        let stable = stabilize(&real, &root).unwrap().unwrap();
+        let digest = stable.file_name().unwrap().to_str().unwrap();
+        // An independent reader keeps a lease, even when this shim falls back.
+        let held_path = leases_dir(&root, digest).join("other-reader.lease");
+        let mut reader = mbx_cache_core::open_shared_lock(&held_path).unwrap();
+        reader.lock().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&stable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let file = stable.join("generated.rs");
+        #[cfg(windows)]
+        {
+            let mut permissions = std::fs::metadata(&file).unwrap().permissions();
+            permissions.set_readonly(false);
+            std::fs::set_permissions(&file, permissions).unwrap();
+        }
+        match damage {
+            "missing" => std::fs::remove_file(&file).unwrap(),
+            "truncated" | "same-size" => {
+                // Remove and recreate instead of writing through read-only permissions.
+                std::fs::remove_file(&file).unwrap();
+                let contents: &[u8] = if damage == "truncated" {
+                    b""
+                } else {
+                    b"pub const VALUE: u32 = 9;\n"
+                };
+                std::fs::write(&file, contents).unwrap();
+            }
+            "extra" => std::fs::write(stable.join("unexpected"), b"extra").unwrap(),
+            "legacy-damaged" => {
+                std::fs::remove_file(identity_path(&stable)).unwrap();
+                std::fs::remove_file(&file).unwrap();
+            }
+            "type" => {
+                std::fs::remove_file(&file).unwrap();
+                std::fs::create_dir(&file).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = tree_bytes(&stable);
+        let other_root = root.clone();
+        let other_real = real.clone();
+        let result = std::thread::spawn(move || stabilize(&other_real, &other_root))
+            .join()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result, None, "{damage}");
+        assert!(stable.is_dir(), "must not replace or retire {damage}");
+        assert_eq!(tree_bytes(&stable), before, "must not repair {damage}");
+        assert!(leased(&root, digest, false).unwrap());
+        assert_eq!(
+            collect(&root, None, Some(Duration::ZERO), false)
+                .unwrap()
+                .removed_directories,
+            0
+        );
+        drop(reader);
+        release_all_under(&root);
+        assert_eq!(
+            collect(&root, None, Some(Duration::ZERO), false)
+                .unwrap()
+                .removed_directories,
+            1
+        );
+        assert!(!identity_path(&stable).exists());
+        let fresh = stabilize(&real, &root).unwrap().unwrap();
+        assert_eq!(fresh, stable);
+        assert_eq!(
+            std::fs::read(fresh.join("generated.rs")).unwrap(),
+            b"pub const VALUE: u32 = 7;\n"
+        );
+        release_all_under(&root);
+    }
+}
+
+/// Run explicitly with MBX_TEST_OUT_DIR_BENCH pointing at a real generated tree.
+#[test]
+#[ignore]
+fn measure_out_dir_validation() {
+    let real = PathBuf::from(std::env::var_os("MBX_TEST_OUT_DIR_BENCH").expect("benchmark tree"));
+    let cache = tempfile::tempdir().unwrap();
+    let stable = stabilize(&real, cache.path()).unwrap().unwrap();
+    let mut manifest = Vec::new();
+    let mut files = Vec::new();
+    let mut directories = Vec::new();
+    assert!(
+        describe_tree(
+            &real,
+            Path::new(""),
+            &mut manifest,
+            &mut files,
+            &mut directories
+        )
+        .unwrap()
+    );
+    let started = std::time::Instant::now();
+    for _ in 0..100 {
+        assert!(validate_tree(&stable, &manifest).unwrap());
+    }
+    eprintln!(
+        "{}: {} files, {} directories, {} bytes; full validation mean {:?}",
+        real.display(),
+        files.len(),
+        directories.len(),
+        tree_bytes(&real),
+        started.elapsed() / 100
+    );
+    release_all_under(cache.path());
+}
+
+#[test]
+fn a_valid_legacy_tree_is_verified_and_adopted_without_changing_paths() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("out-dirs");
+    let real = directory.path().join("real");
+    write_tree(&real, &[("generated.rs", b"pub const VALUE: u32 = 7;\n")]);
+    let stable = stabilize(&real, &root).unwrap().unwrap();
+    let recorded = std::fs::read(identity_path(&stable)).unwrap();
+    std::fs::remove_file(identity_path(&stable)).unwrap();
+    let modified = std::fs::metadata(stable.join("generated.rs"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(stabilize(&real, &root).unwrap(), Some(stable.clone()));
+    assert_eq!(std::fs::read(identity_path(&stable)).unwrap(), recorded);
+    assert_eq!(
+        std::fs::metadata(stable.join("generated.rs"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        modified
+    );
+    release_all_under(&root);
+}

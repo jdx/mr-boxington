@@ -449,6 +449,15 @@ path as `OUT_DIR`. The digest covers the directory layout, file names,
 contents, and executable bits. Matching output trees therefore use the same
 path and can reuse the compilation when its other inputs also match.
 
+Before reusing a copy, mbx checks its complete file list, entry types, sizes,
+executable bits, and content hashes against an identity recorded at publication.
+Missing, extra, truncated, and changed files disable sharing for that compilation:
+rustc reads Cargo's original output instead. The damaged copy is left untouched
+until normal collection can remove it without disturbing active compilers.
+Copies created by older mbx versions are fully checked against the build script's
+output on first use. Matching trees receive an identity record without changing
+their contents or paths, preserving sharing after an upgrade.
+
 The literal `OUT_DIR` value remains part of the key. Code that stores the path
 or derives a value from it sees the same value in both checkouts.
 
