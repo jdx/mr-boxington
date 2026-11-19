@@ -440,7 +440,7 @@ fn retire_with_placeholder(
         && error.kind() != std::io::ErrorKind::AlreadyExists
     {
         log::warn!(
-            "could not create target placeholder {}: {error}; continuing collection; the target link will dangle until the next mbx build recreates it",
+            "could not create target placeholder {}: {error}; continuing collection and retrying once the old outputs are gone",
             directory.display()
         );
     }
@@ -2017,6 +2017,19 @@ fn collect_with(
             // disk until then stays in what remains.
             let removal = crate::disk_usage::remove_measured_tree(&aside, &mut ledger, &files);
             outcome.credit_views(&removal);
+            // A full disk can refuse the placeholder until the old outputs
+            // are gone. Try once more now that they are; a directory that
+            // appeared meanwhile is left as it is.
+            if placeholder && !directory.exists() {
+                match std::fs::create_dir(&directory) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => log::debug!(
+                        "could not create target placeholder {} after collection: {error}",
+                        directory.display()
+                    ),
+                }
+            }
         }
     }
     outcome.remaining_bytes = ledger.total();
