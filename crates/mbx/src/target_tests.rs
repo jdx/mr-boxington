@@ -2496,3 +2496,30 @@ fn has_outputs(path: &std::path::Path) -> bool {
     }
     std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some())
 }
+
+#[test]
+fn a_failed_placeholder_restores_the_old_view() {
+    let root = tempfile::tempdir().unwrap();
+    let view = root.path().join("view");
+    std::fs::create_dir(&view).unwrap();
+    std::fs::write(view.join("artifact"), b"keep").unwrap();
+    let error = retire_with_placeholder(&view, true, |_| {
+        Err(std::io::Error::from(std::io::ErrorKind::StorageFull))
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+    assert_eq!(std::fs::read(view.join("artifact")).unwrap(), b"keep");
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn a_view_removed_by_clean_is_not_recreated() {
+    let root = tempfile::tempdir().unwrap();
+    let view = root.path().join("cleaned");
+    let error = retire_with_placeholder(&view, true, |_| {
+        panic!("a missing view must not allocate a placeholder")
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert!(!view.exists());
+}

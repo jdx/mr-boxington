@@ -427,6 +427,29 @@ fn retire_view(directory: &Path) -> std::io::Result<PathBuf> {
     Ok(aside)
 }
 
+// A live checkout must keep a usable target path. If replacement allocation
+// fails (including ENOSPC), restore the old tree rather than deleting it.
+fn retire_with_placeholder(
+    directory: &Path,
+    placeholder: bool,
+    create: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<PathBuf> {
+    let aside = retire_view(directory)?;
+    if placeholder
+        && let Err(error) = create(directory)
+        && error.kind() != std::io::ErrorKind::AlreadyExists
+    {
+        if let Err(restore) = std::fs::rename(&aside, directory) {
+            log::warn!(
+                "could not restore target {} after placeholder failure: {restore}",
+                directory.display()
+            );
+        }
+        return Err(error);
+    }
+    Ok(aside)
+}
+
 /// Remove the `target` link in a checkout when it points at that checkout's
 /// own managed view and the view is gone.
 ///
@@ -1917,7 +1940,10 @@ fn collect_with(
         let aside = if dry_run {
             Ok(None)
         } else {
-            retire_view(&directory).map(Some)
+            retire_with_placeholder(&directory, live && !untracked, |path| {
+                std::fs::create_dir(path)
+            })
+            .map(Some)
         };
         let aside = match aside {
             Ok(aside) => {
@@ -1958,19 +1984,7 @@ fn collect_with(
                 continue;
             }
         };
-        let placeholder = !dry_run && live && !untracked;
-        if placeholder {
-            // Never rename or remove the replacement path. Plain Cargo can
-            // win this mkdir race; its directory and writes then stay intact.
-            if let Err(error) = std::fs::create_dir(&directory)
-                && error.kind() != std::io::ErrorKind::AlreadyExists
-            {
-                log::warn!(
-                    "could not leave target placeholder {}: {error}",
-                    directory.display()
-                );
-            }
-        }
+        let placeholder = !dry_run && live && !untracked && aside.is_some();
         if !dry_run {
             after_removal();
         }

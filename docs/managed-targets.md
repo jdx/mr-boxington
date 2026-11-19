@@ -354,8 +354,9 @@ not prevent eviction when the size budget requires it.
 
 After collecting a view whose checkout still exists, GC leaves an empty
 directory at the same path. It never changes the checkout's `target` link.
-The empty placeholder is stable across sweeps and is not counted as a live
-view. Its ownership record stays until its checkout disappears; if plain Cargo
+If allocation of the placeholder fails, collection restores the old view
+instead of deleting its outputs. The empty placeholder is stable across
+sweeps and is not counted as a live view. Its ownership record stays until its checkout disappears; if plain Cargo
 writes into it, those writes count as use like any other view. Abandoning the
 checkout allows collection to remove the placeholder.
 
