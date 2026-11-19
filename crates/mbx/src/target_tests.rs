@@ -2498,18 +2498,22 @@ fn has_outputs(path: &std::path::Path) -> bool {
 }
 
 #[test]
-fn a_failed_placeholder_restores_the_old_view() {
-    let root = tempfile::tempdir().unwrap();
-    let view = root.path().join("view");
-    std::fs::create_dir(&view).unwrap();
-    std::fs::write(view.join("artifact"), b"keep").unwrap();
-    let error = retire_with_placeholder(&view, true, |_| {
-        Err(std::io::Error::from(std::io::ErrorKind::StorageFull))
-    })
-    .unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
-    assert_eq!(std::fs::read(view.join("artifact")).unwrap(), b"keep");
-    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+fn a_failed_placeholder_still_allows_reclaiming_the_old_view() {
+    for kind in [
+        std::io::ErrorKind::StorageFull,
+        std::io::ErrorKind::PermissionDenied,
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let view = root.path().join("view");
+        std::fs::create_dir(&view).unwrap();
+        std::fs::write(view.join("artifact"), b"reclaim").unwrap();
+        let aside =
+            retire_with_placeholder(&view, true, |_| Err(std::io::Error::from(kind))).unwrap();
+        assert!(!view.exists());
+        assert_eq!(std::fs::read(aside.join("artifact")).unwrap(), b"reclaim");
+        std::fs::remove_dir_all(aside).unwrap();
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
 }
 
 #[test]
@@ -2522,4 +2526,24 @@ fn a_view_removed_by_clean_is_not_recreated() {
     .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     assert!(!view.exists());
+}
+
+#[test]
+fn plain_cargo_doc_writes_keep_an_old_view() {
+    let root = tempfile::tempdir().unwrap();
+    let config = test_config(root.path(), true);
+    let workspace = checkout(root.path(), "docs");
+    let view = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    std::fs::create_dir(view.join("doc")).unwrap();
+    age_view(&config.target.root, &workspace, 1);
+    std::fs::write(workspace.join("target/doc/index.html"), b"docs").unwrap();
+    let outcome = collect_inactive(
+        &config.target.root,
+        None,
+        Some(Duration::from_secs(60)),
+        false,
+    )
+    .unwrap();
+    assert_eq!(outcome.removed_views, 0);
+    assert_eq!(std::fs::read(view.join("doc/index.html")).unwrap(), b"docs");
 }

@@ -148,7 +148,7 @@ pub(crate) fn last_run(view: &Path) -> Option<SystemTime> {
 }
 
 /// Latest directory write in Cargo's profiles and their immediate output
-/// directories. This counts plain Cargo builds, which do not refresh mbx's
+/// directories, plus the view’s top-level doc directory. This counts plain Cargo builds, which do not refresh mbx's
 /// view record, without walking the outputs or relying on access times.
 #[cfg(test)]
 pub(crate) fn last_write(view: &Path) -> Option<SystemTime> {
@@ -162,10 +162,16 @@ pub(crate) struct WriteTimes(std::collections::HashMap<PathBuf, SystemTime>);
 
 impl WriteTimes {
     pub(crate) fn read(view: &Path) -> Self {
+        if !std::fs::symlink_metadata(view)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        {
+            return Self::default();
+        }
         Self(
             profiles(view)
                 .into_iter()
                 .flat_map(|profile| output_directories(&profile))
+                .chain(std::iter::once(view.join("doc")))
                 .filter_map(|directory| {
                     let metadata = std::fs::symlink_metadata(&directory).ok()?;
                     metadata

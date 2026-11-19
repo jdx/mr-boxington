@@ -347,15 +347,16 @@ A target directory is used when a build starts and again when the mbx command
 ends, even if the build fails. For `cargo run`, the command ends when the
 program exits. Writes by plain Cargo through an existing `target` link count as use too.
 Collection samples profile directory modification times and their immediate
-`deps/`, `build/`, `.fingerprint/`, and `incremental/` directories for both age
+`deps/`, `build/`, `.fingerprint/`, and `incremental/` directories, plus the
+top-level `doc/` directory, for both age
 expiry and size ranking. In-place overwrites and deeper output additions can
 leave these times unchanged. Plain Cargo has no mbx lease; recent writes do
 not prevent eviction when the size budget requires it.
 
 After collecting a view whose checkout still exists, GC leaves an empty
 directory at the same path. It never changes the checkout's `target` link.
-If allocation of the placeholder fails, collection restores the old view
-instead of deleting its outputs. The empty placeholder is stable across
+If allocation of the placeholder fails, collection logs a warning and still
+frees the old outputs. The next mbx build recreates the missing directory. The empty placeholder is stable across
 sweeps and is not counted as a live view. Its ownership record stays until its checkout disappears; if plain Cargo
 writes into it, those writes count as use like any other view. Abandoning the
 checkout allows collection to remove the placeholder.

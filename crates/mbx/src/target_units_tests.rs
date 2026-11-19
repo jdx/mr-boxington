@@ -471,3 +471,19 @@ fn a_noop_prune_does_not_change_directory_ctime() {
     let metadata = std::fs::metadata(&profile).unwrap();
     assert_eq!((metadata.ctime(), metadata.ctime_nsec()), before);
 }
+
+#[test]
+fn top_level_doc_writes_are_activity_without_a_locked_profile() {
+    let view = tempfile::tempdir().unwrap();
+    let doc = view.path().join("doc");
+    std::fs::create_dir(&doc).unwrap();
+    filetime::set_file_mtime(&doc, FileTime::from_unix_time(100, 0)).unwrap();
+    let before = WriteTimes::read(view.path());
+    filetime::set_file_mtime(&doc, FileTime::from_unix_time(200, 0)).unwrap();
+    let after = WriteTimes::read(view.path());
+    assert!(after.changed_since(&before));
+    assert_eq!(
+        after.latest(),
+        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(200))
+    );
+}

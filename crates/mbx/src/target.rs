@@ -427,8 +427,8 @@ fn retire_view(directory: &Path) -> std::io::Result<PathBuf> {
     Ok(aside)
 }
 
-// A live checkout must keep a usable target path. If replacement allocation
-// fails (including ENOSPC), restore the old tree rather than deleting it.
+// Try to keep a usable target path, but never sacrifice reclamation when
+// replacement allocation fails: the next mbx build can recreate the directory.
 fn retire_with_placeholder(
     directory: &Path,
     placeholder: bool,
@@ -439,13 +439,10 @@ fn retire_with_placeholder(
         && let Err(error) = create(directory)
         && error.kind() != std::io::ErrorKind::AlreadyExists
     {
-        if let Err(restore) = std::fs::rename(&aside, directory) {
-            log::warn!(
-                "could not restore target {} after placeholder failure: {restore}",
-                directory.display()
-            );
-        }
-        return Err(error);
+        log::warn!(
+            "could not create target placeholder {}: {error}; continuing collection; the target link will dangle until the next mbx build recreates it",
+            directory.display()
+        );
     }
     Ok(aside)
 }
