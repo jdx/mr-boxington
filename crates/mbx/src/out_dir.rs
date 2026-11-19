@@ -294,14 +294,40 @@ fn identity(manifest: &[u8], root: &Path, files: &[(PathBuf, bool)]) -> Result<V
 /// Hash every file, including same-size edits, and enumerate the entire tree
 /// so extra entries cannot silently change generated code's behavior.
 fn validate_tree(stable: &Path, expected: &[u8]) -> Result<bool> {
+    use std::io::Read as _;
+    // JSON escapes take at most six bytes per manifest byte. Each manifest
+    // entry can add at most one u64 length (20 digits plus a comma).
+    let max_record = expected
+        .len()
+        .saturating_mul(6)
+        .saturating_add(
+            expected
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count()
+                .saturating_mul(21),
+        )
+        .saturating_add(8);
     let record = identity_path(stable);
     match std::fs::symlink_metadata(&record) {
-        Ok(metadata) if !metadata.is_file() => return Ok(false),
+        Ok(metadata) if !metadata.is_file() || metadata.len() > max_record as u64 => {
+            return Ok(false);
+        }
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
         _ => {}
     }
-    let recorded = match std::fs::read(record) {
-        Ok(recorded) => Some(recorded),
+    let recorded = match std::fs::File::open(record) {
+        Ok(file) => {
+            // Bound the read as well as the stat: a regular file can grow
+            // between the two, and its own length must not size an allocation.
+            let mut recorded = Vec::new();
+            file.take((max_record as u64).saturating_add(1))
+                .read_to_end(&mut recorded)?;
+            if recorded.len() > max_record {
+                return Ok(false);
+            }
+            Some(recorded)
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };

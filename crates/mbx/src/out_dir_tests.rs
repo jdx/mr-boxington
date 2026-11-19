@@ -1045,3 +1045,63 @@ fn a_fifo_identity_falls_back_without_waiting_for_a_writer() {
     );
     release_all_under(&root);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_oversized_identity_falls_back_without_allocating_its_length() {
+    use std::os::unix::process::CommandExt as _;
+    const CHILD_ENV: &str = "MBX_TEST_OVERSIZED_IDENTITY";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "out_dir::tests::an_oversized_identity_falls_back_without_allocating_its_length",
+                "--exact",
+                "--test-threads=1",
+            ])
+            .env(CHILD_ENV, "1");
+        // SAFETY: the child only calls setrlimit before exec, without taking
+        // locks or allocating. The limit protects the host if validation regresses.
+        unsafe {
+            child.pre_exec(|| {
+                let limit = libc::rlimit {
+                    rlim_cur: 512 * 1024 * 1024,
+                    rlim_max: 512 * 1024 * 1024,
+                };
+                if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let output = child.output().unwrap();
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed"),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("out-dirs");
+    let real = directory.path().join("real");
+    write_tree(&real, &[("generated.rs", b"generated")]);
+    let stable = stabilize(&real, &root).unwrap().unwrap();
+    let record = identity_path(&stable);
+    // Sparse: large logical length without consuming the same disk space.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&record)
+        .unwrap()
+        .set_len(2 * 1024 * 1024 * 1024)
+        .unwrap();
+    assert_eq!(stabilize(&real, &root).unwrap(), None);
+    assert!(stable.is_dir());
+    assert_eq!(
+        std::fs::metadata(record).unwrap().len(),
+        2 * 1024 * 1024 * 1024
+    );
+    release_all_under(&root);
+}
