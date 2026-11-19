@@ -258,7 +258,7 @@ pub(crate) fn stabilize(real: &Path, root: &Path) -> Result<Option<PathBuf>> {
         if stable.exists() {
             // Never repair in place: another compiler may hold a lease on
             // this exact path. A damaged tree stays for collection.
-            return Ok(validate_tree(&stable, &manifest).unwrap_or(false));
+            return Ok(validate_tree(&stable, real, &manifest).unwrap_or(false));
         }
         materialize(real, root, &stable, &manifest, &files, &directories)?;
         Ok(true)
@@ -293,7 +293,7 @@ fn identity(manifest: &[u8], root: &Path, files: &[(PathBuf, bool)]) -> Result<V
 
 /// Hash every file, including same-size edits, and enumerate the entire tree
 /// so extra entries cannot silently change generated code's behavior.
-fn validate_tree(stable: &Path, expected: &[u8]) -> Result<bool> {
+fn validate_tree(stable: &Path, real: &Path, expected: &[u8]) -> Result<bool> {
     use std::io::Read as _;
     // JSON escapes take at most six bytes per manifest byte. Each manifest
     // entry can add at most one u64 length (20 digits plus a comma).
@@ -316,8 +316,12 @@ fn validate_tree(stable: &Path, expected: &[u8]) -> Result<bool> {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
         _ => {}
     }
-    let recorded = match std::fs::File::open(record) {
+    let recorded = match open_identity(&record) {
         Ok(file) => {
+            let metadata = file.metadata()?;
+            if !metadata.is_file() || metadata.len() > max_record as u64 {
+                return Ok(false);
+            }
             // Bound the read as well as the stat: a regular file can grow
             // between the two, and its own length must not size an allocation.
             let mut recorded = Vec::new();
@@ -334,6 +338,7 @@ fn validate_tree(stable: &Path, expected: &[u8]) -> Result<bool> {
     let mut manifest = Vec::new();
     let mut files = Vec::new();
     if std::fs::symlink_metadata(stable)?.file_type().is_symlink()
+        || !same_layout(real, stable)?
         || !describe_tree(
             stable,
             Path::new(""),
@@ -354,6 +359,55 @@ fn validate_tree(stable: &Path, expected: &[u8]) -> Result<bool> {
     // compilers already reading the tree keep the same paths and contents.
     write_identity(stable, &actual)?;
     Ok(true)
+}
+
+/// Metadata mismatches must not make us hash arbitrarily large damaged files.
+/// Compare against Cargo's tree, which was already hashed for `expected`.
+fn same_layout(real: &Path, stable: &Path) -> std::io::Result<bool> {
+    fn entries(path: &Path, limit: usize) -> std::io::Result<Vec<std::fs::DirEntry>> {
+        let mut entries = std::fs::read_dir(path)?
+            .take(limit)
+            .collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        Ok(entries)
+    }
+    let expected = entries(real, usize::MAX)?;
+    // One extra entry suffices to reject an arbitrarily wide damaged tree.
+    let actual = entries(stable, expected.len().saturating_add(1))?;
+    if expected.len() != actual.len() {
+        return Ok(false);
+    }
+    for (expected, actual) in expected.iter().zip(&actual) {
+        if expected.file_name() != actual.file_name() {
+            return Ok(false);
+        }
+        let left = std::fs::symlink_metadata(expected.path())?;
+        let right = std::fs::symlink_metadata(actual.path())?;
+        if left.file_type() != right.file_type() {
+            return Ok(false);
+        }
+        if left.is_dir() {
+            if !same_layout(&expected.path(), &actual.path())? {
+                return Ok(false);
+            }
+        } else if left.len() != right.len() || is_executable(&left) != is_executable(&right) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn open_identity(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // The entry can change after lstat. Opening a FIFO must not wait for
+        // a writer; validate the opened handle's type before reading it.
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    options.open(path)
 }
 
 fn write_identity(stable: &Path, identity: &[u8]) -> Result<()> {

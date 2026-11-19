@@ -9635,6 +9635,7 @@ fn damaged_shared_out_dir_falls_back_in_a_second_checkout() {
         #[cfg(windows)]
         {
             let mut permissions = std::fs::metadata(generated).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
             permissions.set_readonly(false);
             std::fs::set_permissions(generated, permissions).unwrap();
         }

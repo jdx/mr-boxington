@@ -788,6 +788,7 @@ fn damaged_or_legacy_trees_fall_back_without_touching_a_leased_tree() {
         #[cfg(windows)]
         {
             let mut permissions = std::fs::metadata(&file).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
             permissions.set_readonly(false);
             std::fs::set_permissions(&file, permissions).unwrap();
         }
@@ -872,7 +873,7 @@ fn measure_out_dir_validation() {
     );
     let started = std::time::Instant::now();
     for _ in 0..100 {
-        assert!(validate_tree(&stable, &manifest).unwrap());
+        assert!(validate_tree(&stable, &real, &manifest).unwrap());
     }
     eprintln!(
         "{}: {} files, {} directories, {} bytes; full validation mean {:?}",
@@ -1002,7 +1003,10 @@ fn orphan_records_are_swept_before_budgeting_live_trees() {
 #[cfg(unix)]
 #[test]
 fn a_fifo_identity_falls_back_without_waiting_for_a_writer() {
-    use std::os::unix::{ffi::OsStrExt as _, fs::FileTypeExt as _};
+    use std::os::unix::{
+        ffi::OsStrExt as _,
+        fs::{FileTypeExt as _, OpenOptionsExt as _},
+    };
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("out-dirs");
     let real = directory.path().join("real");
@@ -1015,7 +1019,12 @@ fn a_fifo_identity_falls_back_without_waiting_for_a_writer() {
     assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
     let (sent, received) = std::sync::mpsc::channel();
     let held_root = root.clone();
+    let held_record = record.clone();
     let validating = std::thread::spawn(move || {
+        // Exercise the open itself, modeling replacement after the path stat.
+        let opened = open_identity(&held_record).unwrap();
+        assert!(opened.metadata().unwrap().file_type().is_fifo());
+        drop(opened);
         sent.send(stabilize(&real, &held_root)).unwrap();
     });
     let result = received.recv_timeout(Duration::from_secs(2));
@@ -1024,7 +1033,9 @@ fn a_fifo_identity_falls_back_without_waiting_for_a_writer() {
         // leave a test thread hanging in open/read forever.
         drop(
             std::fs::OpenOptions::new()
+                .read(true)
                 .write(true)
+                .custom_flags(libc::O_NONBLOCK)
                 .open(&record)
                 .unwrap(),
         );
@@ -1103,5 +1114,55 @@ fn an_oversized_identity_falls_back_without_allocating_its_length() {
         std::fs::metadata(record).unwrap().len(),
         2 * 1024 * 1024 * 1024
     );
+    release_all_under(&root);
+}
+
+#[test]
+fn oversized_shared_files_are_rejected_before_content_hashing() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("out-dirs");
+    let real = directory.path().join("real");
+    write_tree(&real, &[("generated.rs", b"generated")]);
+    let stable = stabilize(&real, &root).unwrap().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&stable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let extra = stable.join("extra");
+    std::fs::File::create(&extra)
+        .unwrap()
+        .set_len(64 * 1024 * 1024)
+        .unwrap();
+    assert!(
+        !same_layout(&real, &stable).unwrap(),
+        "extra paths fail metadata validation"
+    );
+    assert_eq!(stabilize(&real, &root).unwrap(), None);
+    std::fs::remove_file(extra).unwrap();
+    let grown = stable.join("generated.rs");
+    #[cfg(windows)]
+    {
+        let mut permissions = std::fs::metadata(&grown).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&grown, permissions).unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&grown, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(grown)
+        .unwrap()
+        .set_len(64 * 1024 * 1024)
+        .unwrap();
+    assert!(
+        !same_layout(&real, &stable).unwrap(),
+        "length changes fail metadata validation"
+    );
+    assert_eq!(stabilize(&real, &root).unwrap(), None);
     release_all_under(&root);
 }
