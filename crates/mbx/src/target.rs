@@ -1398,10 +1398,19 @@ pub fn touch_managed(config: &Config, workspace_root: &Path, target_dir: &Path) 
     }
 }
 
+fn is_placeholder(root: &Path, workspace: &Path, directory: &Path) -> bool {
+    crate::store::checkout_is_live_on(root, workspace)
+        && std::fs::read_dir(directory).is_ok_and(|mut entries| entries.next().is_none())
+}
+
 /// Summarize the managed target directories under `root`.
 pub fn stats(root: &Path) -> Result<ViewStats> {
     let mut directories = views(root)?
         .into_iter()
+        .filter(|(record_path, directory)| {
+            !read_view_record(record_path)
+                .is_some_and(|record| is_placeholder(root, &record.workspace_root, directory))
+        })
         .map(|(_, directory)| directory)
         .collect::<Vec<_>>();
     let untracked = untracked_views(root)?;
@@ -1573,9 +1582,7 @@ fn collect_with(
         };
         // A recorded empty directory is a stable placeholder, not a live
         // view. Keep its ownership record so abandonment can collect it.
-        if crate::store::checkout_is_live_on(root, &record.workspace_root)
-            && std::fs::read_dir(&directory).is_ok_and(|mut entries| entries.next().is_none())
-        {
+        if is_placeholder(root, &record.workspace_root, &directory) {
             total_views -= 1;
             continue;
         }
@@ -1900,11 +1907,13 @@ fn collect_with(
                 continue;
             }
         }
-        // Retire by rename while holding the exclusive view reservation and
-        // the acquired Cargo locks. For a live checkout, mkdir a replacement
-        // before releasing either hold. Delete only the renamed tree later;
-        // never delete the original path, even if plain Cargo created it first.
-        // Windows can refuse renaming open files, in which case keep the view.
+        // Retire and mkdir the replacement under the exclusive reservation.
+        // Keep Cargo locks through this on Unix. Windows forbids renaming a
+        // directory with open files: close our own handles immediately before
+        // the rename, which still refuses a concurrent Cargo writer's handles.
+        // Delete only the renamed tree, never the replacement path.
+        #[cfg(windows)]
+        drop(retirement_locks.take());
         let aside = if dry_run {
             Ok(None)
         } else {

@@ -56,7 +56,7 @@ fn places_the_default_target_directory_under_the_managed_root() {
         managed,
         "the workspace should still have a target directory to reach"
     );
-    assert_eq!(stats(&config.target.root).unwrap().views, 1);
+    assert_eq!(stats(&config.target.root).unwrap().views, 0);
 }
 
 #[test]
@@ -122,7 +122,7 @@ fn placing_a_target_directory_twice_reaches_the_same_one() {
     let second = place(&config, &workspace, &workspace.join("target"), false).unwrap();
 
     assert_eq!(first, second);
-    assert_eq!(stats(&config.target.root).unwrap().views, 1);
+    assert_eq!(stats(&config.target.root).unwrap().views, 0);
 }
 
 #[test]
@@ -450,7 +450,7 @@ fn a_successful_migration_removes_old_outputs_after_placement() {
     assert!(!target.join("artifact").exists());
     assert_eq!(outcome.removed_bytes, Some(10));
     assert!(elsewhere.join("not-cleaned").is_file());
-    assert_eq!(stats(&config.target.root).unwrap().views, 1);
+    assert_eq!(stats(&config.target.root).unwrap().views, 0);
 }
 
 #[test]
@@ -2467,6 +2467,7 @@ fn collected_targets_leave_stable_reusable_placeholders() {
         let outcome = collect();
         assert_eq!(outcome.removed_views, 0);
         assert_eq!(outcome.remaining_views, 0);
+        assert_eq!(stats(&config.target.root).unwrap().views, 0);
         assert_eq!(
             std::fs::metadata(&view).unwrap().modified().unwrap(),
             modified
@@ -2476,6 +2477,7 @@ fn collected_targets_leave_stable_reusable_placeholders() {
     std::fs::write(target.join("debug/.cargo-lock"), b"").unwrap();
     std::fs::write(target.join("debug/deps/new"), b"new").unwrap();
     assert_eq!(collect().removed_views, 0);
+    assert_eq!(stats(&config.target.root).unwrap().views, 1);
     assert_eq!(
         std::fs::read(target.join("debug/deps/new")).unwrap(),
         b"new"
