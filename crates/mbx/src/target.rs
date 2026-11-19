@@ -1438,18 +1438,21 @@ pub fn touch_managed(config: &Config, workspace_root: &Path, target_dir: &Path) 
 fn is_placeholder(root: &Path, workspace: &Path, directory: &Path) -> bool {
     // Emptiness first: it is local, while checking the checkout can touch a
     // slow network mount.
+    is_empty_dir(directory) && crate::store::checkout_is_live_on(root, workspace)
+}
+
+fn is_empty_dir(directory: &Path) -> bool {
     std::fs::read_dir(directory).is_ok_and(|mut entries| entries.next().is_none())
-        && crate::store::checkout_is_live_on(root, workspace)
 }
 
 /// Summarize the managed target directories under `root`.
 pub fn stats(root: &Path) -> Result<ViewStats> {
     let mut directories = views(root)?
         .into_iter()
-        .filter(|(record_path, directory)| {
-            !read_view_record(record_path)
-                .is_some_and(|record| is_placeholder(root, &record.workspace_root, directory))
-        })
+        // An empty recorded directory holds nothing to count, whether it is
+        // a placeholder or not; telling which would mean reaching the
+        // checkout, which can sit on a slow mount.
+        .filter(|(_, directory)| !is_empty_dir(directory))
         .map(|(_, directory)| directory)
         .collect::<Vec<_>>();
     let untracked = untracked_views(root)?;
