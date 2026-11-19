@@ -447,6 +447,23 @@ fn retire_with_placeholder(
     Ok(aside)
 }
 
+// Reacquire ownership after deletion: a concurrent clean may have removed
+// the record while the old outputs were being reclaimed.
+fn retry_placeholder(directory: &Path, record_path: &Path) {
+    if read_view_record(record_path).is_some()
+        && let Some(_reservation) = try_reserve_view(directory)
+        && read_view_record(record_path).is_some()
+        && !directory.exists()
+        && let Err(error) = std::fs::create_dir(directory)
+        && error.kind() != std::io::ErrorKind::AlreadyExists
+    {
+        log::debug!(
+            "could not create target placeholder {} after collection: {error}",
+            directory.display()
+        );
+    }
+}
+
 /// Remove the `target` link in a checkout when it points at that checkout's
 /// own managed view and the view is gone.
 ///
@@ -1705,7 +1722,14 @@ fn collect_with(
             // So does one only its programs' runs keep: no build has read its
             // fingerprints, so every unit looks unused, a library the program
             // loads from `deps/` or `build/` included.
-            if expired(*built, *standing) {
+            // A plain Cargo build writes without refreshing the record, but it
+            // read the fingerprints all the same.
+            let wrote = written
+                .0
+                .latest()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |since| since.as_secs().min(now));
+            if expired((*built).max(wrote), *standing) {
                 continue;
             }
             // A program run from `target/` by hand takes no lease, but its
@@ -1934,11 +1958,14 @@ fn collect_with(
         // Delete only the renamed tree, never the replacement path.
         #[cfg(windows)]
         drop(retirement_locks.take());
+        let mut placeholder_failed = false;
         let aside = if dry_run {
             Ok(None)
         } else {
             retire_with_placeholder(&directory, live && !untracked, |path| {
-                std::fs::create_dir(path)
+                let created = std::fs::create_dir(path);
+                placeholder_failed = created.is_err();
+                created
             })
             .map(Some)
         };
@@ -2018,17 +2045,11 @@ fn collect_with(
             let removal = crate::disk_usage::remove_measured_tree(&aside, &mut ledger, &files);
             outcome.credit_views(&removal);
             // A full disk can refuse the placeholder until the old outputs
-            // are gone. Try once more now that they are; a directory that
-            // appeared meanwhile is left as it is.
-            if placeholder && !directory.exists() {
-                match std::fs::create_dir(&directory) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                    Err(error) => log::debug!(
-                        "could not create target placeholder {} after collection: {error}",
-                        directory.display()
-                    ),
-                }
+            // are gone. Try once more now that they are, but only under a
+            // fresh reservation and while the record still names this
+            // checkout: `mbx clean` may have removed both meanwhile.
+            if placeholder && placeholder_failed {
+                retry_placeholder(&directory, &record_path);
             }
         }
     }

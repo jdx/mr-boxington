@@ -2194,7 +2194,13 @@ fn plain_cargo_directory_writes_count_for_age_and_budget() {
             for name in ["deps", "build", ".fingerprint", "incremental"] {
                 std::fs::create_dir(profile.join(name)).unwrap();
             }
+            // A real build also uses its fingerprints. Keep these current
+            // without changing any of the sampled parent-directory times.
+            let fingerprint = profile.join(".fingerprint/current/lib-current");
+            std::fs::create_dir_all(fingerprint.parent().unwrap()).unwrap();
+            std::fs::write(&fingerprint, b"current").unwrap();
             age_view(&config.target.root, &workspace, 1);
+            filetime::set_file_atime(&fingerprint, filetime::FileTime::now()).unwrap();
             // Create through the workspace link, as plain Cargo does. Only
             // the immediate parent directory's mtime changes.
             let relative = profile.strip_prefix(&view).unwrap();
@@ -2476,6 +2482,12 @@ fn collected_targets_leave_stable_reusable_placeholders() {
     std::fs::create_dir_all(target.join("debug/deps")).unwrap();
     std::fs::write(target.join("debug/.cargo-lock"), b"").unwrap();
     std::fs::write(target.join("debug/deps/new"), b"new").unwrap();
+    std::fs::create_dir_all(target.join("debug/.fingerprint/current")).unwrap();
+    std::fs::write(
+        target.join("debug/.fingerprint/current/lib-current"),
+        b"hash",
+    )
+    .unwrap();
     assert_eq!(collect().removed_views, 0);
     assert_eq!(stats(&config.target.root).unwrap().views, 1);
     assert_eq!(
@@ -2546,4 +2558,65 @@ fn plain_cargo_doc_writes_keep_an_old_view() {
     .unwrap();
     assert_eq!(outcome.removed_views, 0);
     assert_eq!(std::fs::read(view.join("doc/index.html")).unwrap(), b"docs");
+}
+
+#[test]
+fn placeholder_retry_respects_a_record_removed_by_clean() {
+    for cleaned in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let config = test_config(root.path(), true);
+        let workspace = checkout(root.path(), "retry");
+        let view = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+        let record = view_record_path(&config.target.root, &workspace);
+        let aside = retire_view(&view).unwrap();
+        std::fs::remove_dir_all(aside).unwrap();
+        if cleaned {
+            std::fs::remove_file(&record).unwrap();
+        }
+        retry_placeholder(&view, &record);
+        assert_eq!(view.is_dir(), !cleaned);
+    }
+}
+
+#[test]
+fn plain_cargo_writes_allow_pruning_with_an_expired_record() {
+    let root = tempfile::tempdir().unwrap();
+    let config = test_config(root.path(), true);
+    let workspace = checkout(root.path(), "pruning");
+    let view = place(&config, &workspace, &workspace.join("target"), false).unwrap();
+    if !crate::target_units::access_times_tracked(&view) {
+        return;
+    }
+    let profile = view.join("debug");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::write(profile.join(".cargo-lock"), b"").unwrap();
+    let stale = profile.join("build/widget/0000000000000001");
+    let fresh = profile.join("build/widget/0000000000000002");
+    for unit in [&stale, &fresh] {
+        std::fs::create_dir_all(unit.join("fingerprint")).unwrap();
+        std::fs::write(unit.join("fingerprint/lib-widget"), b"hash").unwrap();
+        std::fs::write(unit.join("output"), b"artifact").unwrap();
+    }
+    let old = filetime::FileTime::from_unix_time(1, 0);
+    filetime::set_file_times(stale.join("fingerprint/lib-widget"), old, old).unwrap();
+    filetime::set_file_times(stale.join("fingerprint"), old, old).unwrap();
+    age_view(&config.target.root, &workspace, 1);
+    std::fs::write(profile.join("build/plain-cargo-output"), b"written").unwrap();
+    let outcome = collect_inactive(
+        &config.target.root,
+        None,
+        Some(Duration::from_secs(60)),
+        false,
+    )
+    .unwrap();
+    assert_eq!(outcome.removed_views, 0);
+    assert_eq!(outcome.removed_units, 1);
+    assert!(!stale.exists());
+    assert!(fresh.join("output").is_file());
+    assert_eq!(
+        read_view_record(&view_record_path(&config.target.root, &workspace))
+            .unwrap()
+            .updated_secs,
+        1
+    );
 }
