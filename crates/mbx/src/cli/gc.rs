@@ -656,7 +656,11 @@ pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool
             outcome.removed_views,
             ByteSize::b(outcome.removed_bytes).display().iec(),
             checkouts(outcome.removed_stale_views, "is gone", "are gone"),
-            checkouts(outcome.removed_live_views, "still exists", "still exist"),
+            checkouts(
+                outcome.removed_live_views,
+                "may still exist",
+                "may still exist"
+            ),
             ByteSize::b(outcome.remaining_bytes).display().iec(),
         ));
     } else {
@@ -1107,7 +1111,7 @@ pub(super) fn run_automatic(config: &Config, retention: &RetentionSettings) -> R
     // Appended: a report nobody has printed yet is not this sweep's to
     // replace, and the next build says both.
     let report = format!(
-        "{FINISHED_PREFIX}{}\n{}\n",
+        "{FINISHED_PREFIX}{}\n{}\n{END_MARKER}\n",
         utc_timestamp(),
         sweep.lines.join("\n")
     );
@@ -1143,8 +1147,8 @@ pub(super) fn take_sweep_report(store: &Path) -> Vec<String> {
     }
     let report = std::fs::read_to_string(&claimed).unwrap_or_default();
     let _ = std::fs::remove_file(&claimed);
-    // Each sweep's report starts with the time it finished; reports from
-    // older versions have no such line.
+    // Each sweep's report sits between a line with the time it finished and
+    // an end line; reports from older versions have neither.
     let mut source = "an earlier background collection".to_owned();
     report
         .lines()
@@ -1153,12 +1157,18 @@ pub(super) fn take_sweep_report(store: &Path) -> Vec<String> {
                 source = format!("an earlier background collection (finished {time})");
                 return None;
             }
+            // An older version may append an undated report after this one.
+            if line == END_MARKER {
+                source = "an earlier background collection".to_owned();
+                return None;
+            }
             (!line.trim().is_empty()).then(|| format!("{source}: {line}"))
         })
         .collect()
 }
 
 const FINISHED_PREFIX: &str = "# finished ";
+const END_MARKER: &str = "# end";
 
 fn utc_timestamp() -> String {
     jiff::Timestamp::now()

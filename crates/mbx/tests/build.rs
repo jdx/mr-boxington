@@ -5933,7 +5933,8 @@ fn a_build_sweeps_the_store_to_its_budget() {
     );
 
     assert!(
-        stderr.contains("mbx[gc]: evicted"),
+        stderr.contains("mbx[gc]: an earlier background collection (finished ")
+            && stderr.contains("): evicted"),
         "the next build should say what the sweep evicted: {stderr}"
     );
     assert!(

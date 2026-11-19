@@ -108,8 +108,9 @@ fn sweep_reports_accumulate_until_a_build_says_them() {
     let directory = tempfile::tempdir().unwrap();
     let store = directory.path();
     for report in [
-        "# finished 2026-11-19 07:12 UTC\nfirst\n",
-        "# finished 2026-11-19 07:40 UTC\nsecond\n",
+        "# finished 2026-11-19 07:12 UTC\nfirst\n# end\n",
+        "older\n",
+        "# finished 2026-11-19 07:40 UTC\nsecond\n# end\n",
     ] {
         std::fs::create_dir_all(store.join("gc/v1")).unwrap();
         std::fs::OpenOptions::new()
@@ -124,6 +125,7 @@ fn sweep_reports_accumulate_until_a_build_says_them() {
         take_sweep_report(store),
         [
             "an earlier background collection (finished 2026-11-19 07:12 UTC): first",
+            "an earlier background collection: older",
             "an earlier background collection (finished 2026-11-19 07:40 UTC): second",
         ]
     );
@@ -738,7 +740,7 @@ fn target_report_carries_what_eviction_released_on_disk() {
     assert_eq!(
         target_removals(&initial, false),
         [
-            "removed 1 target directories (2.0 KiB logical, 0 whose checkouts are gone and 0 whose checkouts still exist); 4.0 KiB logical remain, 1.0 KiB released on disk"
+            "removed 1 target directories (2.0 KiB logical, 0 whose checkouts are gone and 0 whose checkouts may still exist); 4.0 KiB logical remain, 1.0 KiB released on disk"
         ]
     );
     assert_eq!(
@@ -937,7 +939,7 @@ fn the_released_figure_sits_beside_the_total_when_several_removals_print() {
     assert_eq!(
         target_removals(&outcome, false),
         [
-            "removed 1 target directories (2.0 KiB logical, 0 whose checkouts are gone and 0 whose checkouts still exist, 1 kept because it may be in use); 4.0 KiB logical remain",
+            "removed 1 target directories (2.0 KiB logical, 0 whose checkouts are gone and 0 whose checkouts may still exist, 1 kept because it may be in use); 4.0 KiB logical remain",
             "removed 3 unused build units from live target directories (1.0 KiB logical)",
             "1.0 KiB of the 3.0 KiB logical removed was released on disk",
         ]
