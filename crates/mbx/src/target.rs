@@ -1436,8 +1436,10 @@ pub fn touch_managed(config: &Config, workspace_root: &Path, target_dir: &Path) 
 }
 
 fn is_placeholder(root: &Path, workspace: &Path, directory: &Path) -> bool {
-    crate::store::checkout_is_live_on(root, workspace)
-        && std::fs::read_dir(directory).is_ok_and(|mut entries| entries.next().is_none())
+    // Emptiness first: it is local, while checking the checkout can touch a
+    // slow network mount.
+    std::fs::read_dir(directory).is_ok_and(|mut entries| entries.next().is_none())
+        && crate::store::checkout_is_live_on(root, workspace)
 }
 
 /// Summarize the managed target directories under `root`.
