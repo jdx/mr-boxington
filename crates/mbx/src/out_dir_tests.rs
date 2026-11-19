@@ -825,6 +825,12 @@ fn damaged_or_legacy_trees_fall_back_without_touching_a_leased_tree() {
         assert_eq!(result, None, "{damage}");
         assert!(stable.is_dir(), "must not replace or retire {damage}");
         assert_eq!(tree_bytes(&stable), before, "must not repair {damage}");
+        if damage == "same-size" {
+            assert_eq!(
+                std::fs::read(&file).unwrap(),
+                b"pub const VALUE: u32 = 9;\n"
+            );
+        }
         assert!(leased(&root, digest, false).unwrap());
         assert_eq!(
             collect(&root, None, Some(Duration::ZERO), false)
@@ -1028,19 +1034,22 @@ fn a_fifo_identity_falls_back_without_waiting_for_a_writer() {
         sent.send(stabilize(&real, &held_root)).unwrap();
     });
     let result = received.recv_timeout(Duration::from_secs(2));
-    if matches!(result, Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
-        // Unblock a broken reader before failing, so the regression cannot
-        // leave a test thread hanging in open/read forever.
-        drop(
+    let rescue = if matches!(result, Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+        // Keep a writer available until the worker exits, even if a loaded
+        // runner delays a broken blocking open until after this timeout.
+        Some(
             std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .custom_flags(libc::O_NONBLOCK)
                 .open(&record)
                 .unwrap(),
-        );
-    }
+        )
+    } else {
+        None
+    };
     validating.join().unwrap();
+    drop(rescue);
     assert_eq!(
         result
             .expect("identity validation blocked on a FIFO")
@@ -1165,4 +1174,62 @@ fn oversized_shared_files_are_rejected_before_content_hashing() {
     );
     assert_eq!(stabilize(&real, &root).unwrap(), None);
     release_all_under(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dangling_digest_symlink_falls_back_without_replacing_its_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("out-dirs");
+    let real = directory.path().join("real");
+    write_tree(&real, &[("generated.rs", b"generated")]);
+    let stable = stabilize(&real, &root).unwrap().unwrap();
+    let record = identity_path(&stable);
+    let original = b"existing identity must not be replaced".to_vec();
+    std::fs::write(&record, &original).unwrap();
+    remove_tree(&stable).unwrap();
+    std::os::unix::fs::symlink(directory.path().join("missing"), &stable).unwrap();
+    assert_eq!(stabilize(&real, &root).unwrap(), None);
+    assert!(
+        std::fs::symlink_metadata(&stable)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read(record).unwrap(), original);
+    release_all_under(&root);
+}
+
+#[test]
+fn an_orphan_skipped_while_leased_waits_for_the_next_accounted_sweep() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("out-dirs");
+    let real = directory.path().join("real");
+    write_tree(&real, &[("generated.rs", b"generated")]);
+    stabilize(&real, &root).unwrap().unwrap();
+    release_all_under(&root);
+    let digest = "f".repeat(64);
+    let record = identity_path(&root.join(&digest));
+    std::fs::write(&record, b"orphan").unwrap();
+    let lease_path = leases_dir(&root, &digest).join("publisher.lease");
+    std::fs::create_dir_all(lease_path.parent().unwrap()).unwrap();
+    let mut lock = mbx_cache_core::open_shared_lock(&lease_path).unwrap();
+    lock.lock().unwrap();
+    let mut publisher = Some(lock);
+    let outcome = collect_with(&root, Some(0), None, false, retired::sweep, || {
+        // The first sweep saw a publisher; it exits before lease cleanup.
+        drop(publisher.take());
+    })
+    .unwrap();
+    assert!(publisher.is_none());
+    assert!(
+        record.exists(),
+        "lease cleanup must not delete accounted records"
+    );
+    assert_eq!(outcome.remaining_bytes, 6);
+    assert_eq!(stats(&root).unwrap().remaining_bytes, 6);
+    let next = collect(&root, None, None, false).unwrap();
+    assert_eq!(next.removed_bytes, 6);
+    assert_eq!(next.remaining_bytes, 0);
+    assert!(!record.exists());
 }

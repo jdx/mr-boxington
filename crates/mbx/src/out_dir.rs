@@ -255,13 +255,19 @@ pub(crate) fn stabilize(real: &Path, root: &Path) -> Result<Option<PathBuf>> {
     let published = (|| -> Result<bool> {
         let mut publishing = mbx_cache_core::open_shared_lock(&publish_lock_path(root, &digest))?;
         publishing.lock()?;
-        if stable.exists() {
-            // Never repair in place: another compiler may hold a lease on
-            // this exact path. A damaged tree stays for collection.
-            return Ok(validate_tree(&stable, real, &manifest).unwrap_or(false));
+        match std::fs::symlink_metadata(&stable) {
+            Ok(metadata) if !metadata.is_dir() => Ok(false),
+            Ok(_) => {
+                // Never repair in place: another compiler may hold a lease on
+                // this exact path. A damaged tree stays for collection.
+                Ok(validate_tree(&stable, real, &manifest).unwrap_or(false))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                materialize(real, root, &stable, &manifest, &files, &directories)?;
+                Ok(true)
+            }
+            Err(error) => Err(error.into()),
         }
-        materialize(real, root, &stable, &manifest, &files, &directories)?;
-        Ok(true)
     })();
     if !matches!(published, Ok(true)) {
         // This compilation will use Cargo's tree. Other readers keep their
@@ -946,11 +952,11 @@ fn collect_with(
             }
             let _registrar = registrar(root)?;
             // A publisher may have completed and exited after the check
-            // above. Recheck under the registrar before removing its record.
+            // above. Recheck under the registrar before removing its locks.
+            // Identity deletion belongs to the earlier, byte-accounted sweep.
             if !root.join(&digest).is_dir() && !leased(root, &digest, true).unwrap_or(true) {
                 let _ = std::fs::remove_dir_all(leases_dir(root, &digest));
                 let _ = std::fs::remove_file(publish_lock_path(root, &digest));
-                let _ = std::fs::remove_file(identity_path(&root.join(&digest)));
             }
         }
     }
