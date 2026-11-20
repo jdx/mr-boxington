@@ -320,7 +320,7 @@ pub fn run() -> Result<ExitCode> {
             unreachable!("settings were handled before configuration loading")
         }
         Commands::Explain(args) => {
-            shim::prepare_explicit_cargo()?;
+            let _selection = shim::prepare_explicit_cargo()?;
             explain::run(&config, &settings, args, toolchain)
         }
         Commands::Analyze(args) => analyze::run(&config, args),
@@ -352,13 +352,13 @@ pub fn run() -> Result<ExitCode> {
         ),
         Commands::Stats(args) => stats::run(&config, args, settings.savings),
         Commands::Prefetch(args) => {
-            shim::prepare_explicit_cargo()?;
+            let _selection = shim::prepare_explicit_cargo()?;
             prefetch::run(&config, settings.events_max_size, &args.cargo_args)
         }
         Commands::Exec(args) => exec::run(&config, &settings, &args),
         Commands::Reserve(args) => reserve::run(&config, args),
         Commands::Cargo(arguments) => {
-            shim::prepare_explicit_cargo()?;
+            let _selection = shim::prepare_explicit_cargo()?;
             cargo::run(&config, &settings, &with_toolchain(toolchain, arguments))
         }
     }

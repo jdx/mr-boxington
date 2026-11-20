@@ -141,7 +141,7 @@ fn cargo_with_settings_bypass_log_and_roots(
                     &cargo,
                     &os_arguments,
                     target_dir_env.as_deref(),
-                ) {
+                )? {
                     super::shim::FailedProbe::Roots(roots) => *roots,
                     super::shim::FailedProbe::Passthrough => {
                         return run_cargo(&cargo, arguments, BTreeMap::new());
@@ -1609,6 +1609,9 @@ pub(super) fn cargo_roots_reported(
         &working_dir,
         target_dir_env.map(std::ffi::OsStr::to_os_string),
     )?;
+    // A wrapper can recover from a failed recursive branch by executing real
+    // Cargo directly. Its successful metadata supersedes that branch's note.
+    super::shim::clear_loop_note();
     Ok(Roots {
         workspace_members,
         workspace_root: resolved.workspace_root,

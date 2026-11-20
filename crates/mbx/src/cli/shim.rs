@@ -11,14 +11,27 @@ const CARGO_SHIM_MODE_ENV: &str = "MBX_CARGO_SHIM_MODE";
 const CARGO_SHIM_PATH_ENV: &str = "MBX_CARGO_SHIM_PATH";
 pub(super) const CARGO_SHIM_DEPTH_ENV: &str = "MBX_CARGO_SHIM_DEPTH";
 pub(super) const CARGO_SHIM_CHAIN_ENV: &str = "MBX_CARGO_SHIM_CHAIN";
-/// Build scripts and Cargo subcommands legitimately reach the shim again, so a
+/// Build scripts and Cargo subcommands legitimately reach mbx again, so a
 /// repeat is not proof of a cycle. A real wrapper loop never stops, so a depth
 /// far beyond any plausible nesting is.
 const MAX_CARGO_SHIM_DEPTH: usize = 12;
-const CARGO_SHIM_NOTE_ENV: &str = "MBX_CARGO_SHIM_NOTE";
-/// Whether this process chose the loop note path, and so removes the note.
-static OWNS_LOOP_NOTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+const MAX_CARGO_LOOP_RETRIES: usize = 128;
+pub(super) const CARGO_SHIM_NOTE_ENV: &str = "MBX_CARGO_SHIM_NOTE";
 static PATH_BEFORE_SHIM_EXCLUSION: OnceLock<OsString> = OnceLock::new();
+
+/// Only the outermost Cargo selection owns the diagnostic note. Keep it until
+/// that command finishes so failed probes cannot restart a known wrapper loop.
+pub(super) struct CargoSelection {
+    note: Option<PathBuf>,
+}
+
+impl Drop for CargoSelection {
+    fn drop(&mut self) {
+        if let Some(path) = &self.note {
+            remove_loop_note(path);
+        }
+    }
+}
 
 /// Whether this process was installed under Cargo's name by `mbx setup`.
 pub fn is_cargo_shim() -> bool {
@@ -50,17 +63,6 @@ fn is_cargo_shim_path(path: &OsStr) -> bool {
 
 /// Run an invocation received through the persistent Cargo shim.
 pub fn run_cargo_shim() -> Result<ExitCode> {
-    let result = run_cargo_shim_inner();
-    // Passthrough and early exits never read the note a loop may have left.
-    if OWNS_LOOP_NOTE.load(std::sync::atomic::Ordering::Relaxed)
-        && let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV)
-    {
-        let _ = std::fs::remove_file(path);
-    }
-    result
-}
-
-fn run_cargo_shim_inner() -> Result<ExitCode> {
     let reported_shim = std::env::var_os(CARGO_SHIM_PATH_ENV)
         .map(PathBuf::from)
         .or_else(|| {
@@ -104,7 +106,7 @@ fn run_cargo_shim_inner() -> Result<ExitCode> {
         blaze_shim = Some(shim);
         real_cargo
     };
-    record_cargo_selection(&real_cargo, configured_cargo.as_deref())?;
+    let _selection = record_cargo_selection(&real_cargo, configured_cargo.as_deref())?;
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     if mbx_disabled() {
         return run_real_cargo(&real_cargo, &arguments);
@@ -152,16 +154,13 @@ fn run_cargo_shim_inner() -> Result<ExitCode> {
         target_dir_env.as_deref(),
     ) {
         Ok(roots) => roots,
-        Err(reason) => match failed_probe(&real_cargo, &arguments, target_dir_env.as_deref()) {
+        Err(reason) => match failed_probe(&real_cargo, &arguments, target_dir_env.as_deref())? {
             FailedProbe::Roots(roots) => *roots,
             FailedProbe::Passthrough => return run_real_cargo(&real_cargo, &arguments),
             FailedProbe::Reject(retry_reason) => {
                 let reason = retry_reason.unwrap_or(reason);
-                let hint = take_loop_note()
-                    .map(|hint| format!(" ({hint})"))
-                    .unwrap_or_default();
                 eyre::bail!(
-                    "could not verify Cargo build storage: metadata probing failed{hint}; run cargo metadata --no-deps --format-version 1 with the same manifest and configuration options to diagnose it: {reason}"
+                    "could not verify Cargo build storage: metadata probing failed; run cargo metadata --no-deps --format-version 1 with the same manifest and configuration options to diagnose it: {reason}"
                 )
             }
         },
@@ -175,11 +174,25 @@ fn run_cargo_shim_inner() -> Result<ExitCode> {
     super::cargo::run_with_roots(&config, &settings, &string_arguments, roots)
 }
 
-/// Fail promptly when the "real" Cargo this shim selected leads back into an
-/// mbx shim, as a custom wrapper script that execs mbx does. Each shim entry
+/// Fail promptly when the "real" Cargo mbx selected leads back into mbx,
+/// as a custom wrapper script that execs mbx does. Each Cargo entry
 /// exports its depth and the Cargo it selected so the next one can see them.
-fn record_cargo_selection(real_cargo: &OsStr, configured: Option<&OsStr>) -> Result<()> {
+fn record_cargo_selection(
+    real_cargo: &OsStr,
+    configured: Option<&OsStr>,
+) -> Result<CargoSelection> {
+    let owns_note = std::env::var_os(CARGO_SHIM_NOTE_ENV).is_none();
     let depth = std::env::var(CARGO_SHIM_DEPTH_ENV).ok();
+    let inherited_depth = depth
+        .as_deref()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    if inherited_depth > 0 {
+        // Establish writable shared state before another Cargo child can run.
+        // Its budget activates only once a depth limit is actually reached.
+        charge_loop_retry(inherited_depth >= MAX_CARGO_SHIM_DEPTH)
+            .wrap_err("could not maintain Cargo recursion guard state")?;
+    }
     let chain = std::env::var_os(CARGO_SHIM_CHAIN_ENV);
     let (depth, chain) =
         match next_cargo_selection(depth.as_deref(), chain.as_deref(), real_cargo, configured) {
@@ -195,20 +208,38 @@ fn record_cargo_selection(real_cargo: &OsStr, configured: Option<&OsStr>) -> Res
     if let Some(chain) = chain {
         unsafe { std::env::set_var(CARGO_SHIM_CHAIN_ENV, chain) };
     }
-    if std::env::var_os(CARGO_SHIM_NOTE_ENV).is_none() {
-        unsafe { std::env::set_var(CARGO_SHIM_NOTE_ENV, loop_note_path()) };
-        OWNS_LOOP_NOTE.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-    Ok(())
+    let note = owns_note.then(|| {
+        let path = loop_note_path();
+        unsafe { std::env::set_var(CARGO_SHIM_NOTE_ENV, &path) };
+        path
+    });
+    Ok(CargoSelection { note })
 }
 
 /// Where a re-entered shim leaves its diagnosis for the outermost one. The
 /// roots probe discards its child's stderr, and asking a rejected Cargo to run
 /// again just to read the answer would launch it when nothing was verified.
 fn loop_note_path() -> PathBuf {
-    mbx_cache_cargo::cache_root()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(format!("cargo-shim-loop-{}", std::process::id()))
+    // Passthrough commands must not touch configured cache storage, which may
+    // be unavailable. The note is ephemeral coordination between children.
+    let root = std::env::temp_dir();
+    // A wrapper may change directories before re-entering mbx.
+    let root = std::path::absolute(&root).unwrap_or_else(|_| std::env::temp_dir());
+    root
+        // Containers sharing the cache can have identical process IDs. The
+        // inherited random name identifies this selection tree across them.
+        .join(format!(
+            "cargo-shim-loop-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ))
+}
+
+fn read_loop_note() -> Option<String> {
+    let path = std::env::var_os(CARGO_SHIM_NOTE_ENV)?;
+    std::fs::read_to_string(path)
+        .ok()
+        .filter(|note| note.contains("re-entered its Cargo shim"))
 }
 
 fn leave_loop_note(message: &str) {
@@ -218,25 +249,106 @@ fn leave_loop_note(message: &str) {
     if let Some(parent) = Path::new(&path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // `create_new` neither follows a planted link nor replaces a note.
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    if let Ok(mut file) = options.open(&path) {
         let _ = std::io::Write::write_all(&mut file, message.as_bytes());
     }
 }
 
-fn take_loop_note() -> Option<String> {
-    let path = PathBuf::from(std::env::var_os(CARGO_SHIM_NOTE_ENV)?);
-    let note = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-    note.and_then(|note| {
-        note.lines()
-            .find(|line| line.contains("re-entered its Cargo shim"))
-            .map(|line| line.trim().to_string())
-    })
+pub(super) fn reject_known_cargo_loop() -> Result<()> {
+    if let Some(note) = read_loop_note() {
+        eyre::bail!("{note}");
+    }
+    Ok(())
+}
+
+pub(super) fn clear_loop_note() {
+    if let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV) {
+        // A recovered probe supersedes its diagnosis, but cannot reset the
+        // invocation tree's retry budget. Only the outer owner removes that.
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn retry_counter_path(note: &Path) -> PathBuf {
+    let mut path = note.as_os_str().to_owned();
+    path.push(".retries");
+    PathBuf::from(path)
+}
+
+fn remove_loop_note(note: &Path) {
+    let _ = std::fs::remove_file(note);
+    let _ = std::fs::remove_file(retry_counter_path(note));
+}
+
+/// Nested entries verify shared state is writable. Once a loop is detected,
+/// the counter bounds siblings even when a wrapper changes PATH every time.
+fn charge_loop_retry(activate: bool) -> Result<()> {
+    use std::io::{Read, Seek, Write};
+    let Some(note) = std::env::var_os(CARGO_SHIM_NOTE_ENV) else {
+        return Ok(());
+    };
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(retry_counter_path(Path::new(&note)))?;
+    file.lock()?;
+    let mut bytes = [0; 8];
+    let state = match file.metadata()?.len() {
+        0 => 0,
+        8 => {
+            file.read_exact(&mut bytes)?;
+            u64::from_le_bytes(bytes)
+        }
+        _ => eyre::bail!("invalid Cargo recursion guard state"),
+    };
+    let active = activate || state & (1 << 63) != 0;
+    let count = (state & !(1 << 63)) as usize;
+    if count >= MAX_CARGO_LOOP_RETRIES {
+        let diagnosis = read_loop_note().unwrap_or_default();
+        eyre::bail!(
+            "mbx re-entered its Cargo shim too many times: stopped after {count} retries in a failed invocation tree. {diagnosis}"
+        );
+    }
+    file.rewind()?;
+    // Always rewrite the fixed-size state, including inactive state, so an
+    // unwritable/full temporary filesystem fails before spawning a child.
+    let state = if active {
+        (1 << 63) | (count + 1) as u64
+    } else {
+        0
+    };
+    file.write_all(&state.to_le_bytes())?;
+    Ok(())
+}
+
+/// The Cargo paths inherited from earlier selections in this invocation tree.
+fn cargo_chain(chain: Option<&OsStr>) -> Vec<PathBuf> {
+    let Some(chain) = chain else {
+        return Vec::new();
+    };
+    if let Some(value) = chain.to_str()
+        && let Ok(paths) = serde_json::from_str::<Vec<OsString>>(value)
+    {
+        return paths.into_iter().map(PathBuf::from).collect();
+    }
+    // Accept diagnostic history from an older launcher in the same tree.
+    chain
+        .to_string_lossy()
+        .split('\n')
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .collect()
 }
 
 /// The depth and chain to export, given those this shim inherited.
@@ -249,18 +361,7 @@ fn next_cargo_selection(
     let depth = depth
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
-    // Diagnostic history, not a search path: a Cargo path may contain the PATH
-    // separator, so entries are newline-separated and kept as display text.
-    let mut selected = chain
-        .map(|chain| {
-            chain
-                .to_string_lossy()
-                .split('\n')
-                .filter(|path| !path.is_empty())
-                .map(PathBuf::from)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let mut selected = cargo_chain(chain);
     selected.push(PathBuf::from(real_cargo));
     if depth >= MAX_CARGO_SHIM_DEPTH {
         let source = if configured == Some(real_cargo) {
@@ -278,11 +379,14 @@ fn next_cargo_selection(
             Path::new(real_cargo).display()
         );
     }
-    let chain = selected
-        .iter()
-        .map(|path| path.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("\n");
+    // OsString serialization preserves non-UTF-8 bytes and newline-containing
+    // paths, while the error above still presents a human-readable chain.
+    let chain = serde_json::to_string(
+        &selected
+            .iter()
+            .map(|path| path.as_os_str())
+            .collect::<Vec<_>>(),
+    )?;
     Ok((depth + 1, Some(OsString::from(chain))))
 }
 
@@ -451,7 +555,7 @@ pub(super) fn failed_probe(
     cargo: &OsStr,
     arguments: &[OsString],
     target_dir_env: Option<&OsStr>,
-) -> FailedProbe {
+) -> Result<FailedProbe> {
     // An alias can name a manifest that the command line does not, so expand
     // it before reading the invocation: `i = "install --path /project"`
     // compiles a local package from a directory that has none of its own.
@@ -465,16 +569,20 @@ pub(super) fn failed_probe(
         && resolved.arguments != arguments
         && let Ok(expanded) = super::strings(&resolved.arguments)
     {
+        // A different manifest gives this probe a distinct invocation key.
+        // Preserve failures from earlier probes so recovery cannot restart
+        // their loops; the cumulative depth limit still applies.
         match super::cargo::cargo_roots_reported(cargo, &expanded, target_dir_env) {
-            Ok(roots) => return FailedProbe::Roots(Box::new(roots)),
+            Ok(roots) => return Ok(FailedProbe::Roots(Box::new(roots))),
             Err(reason) => retry_reason = Some(reason),
         }
     }
     if metadata_failure_passthrough(invocation.as_ref()) {
         note_uncached_passthrough(invocation.as_ref());
-        return FailedProbe::Passthrough;
+        return Ok(FailedProbe::Passthrough);
     }
-    FailedProbe::Reject(retry_reason)
+    reject_known_cargo_loop()?;
+    Ok(FailedProbe::Reject(retry_reason))
 }
 
 /// Say that a command is running without a cache session. An external
@@ -550,9 +658,18 @@ fn same_path(left: &Path, right: &Path) -> bool {
     }
 }
 
+/// Explicit commands need the same recursion guard as shim entries: a custom
+/// Cargo wrapper on PATH or in CARGO can exec `mbx` without entering shim mode.
+pub(super) fn prepare_explicit_cargo() -> Result<CargoSelection> {
+    let configured = std::env::var_os("CARGO");
+    prepare_explicit_cargo_environment()?;
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    record_cargo_selection(&cargo, configured.as_deref())
+}
+
 /// Keep explicit `mbx build`-style commands from rediscovering a persistent
 /// Cargo shim or mise command wrapper on PATH.
-pub(super) fn prepare_explicit_cargo() -> Result<()> {
+fn prepare_explicit_cargo_environment() -> Result<()> {
     let standalone_shim = super::setup_install_dir()
         .map(|directory| directory.join(if cfg!(windows) { "cargo.exe" } else { "cargo" }))
         .filter(|shim| shim.is_file());
@@ -783,6 +900,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn independent_selections_with_the_same_pid_have_distinct_loop_notes() {
+        assert_ne!(loop_note_path(), loop_note_path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cargo_chain_preserves_non_utf8_paths() {
+        use std::os::unix::ffi::OsStringExt;
+        let cargo = OsString::from_vec(b"/tool-\xff/cargo".to_vec());
+        let (_, chain) = next_cargo_selection(None, None, &cargo, None).unwrap();
+        assert_eq!(cargo_chain(chain.as_deref()), vec![PathBuf::from(cargo)]);
+    }
+
+    #[test]
     fn repeated_cargo_shim_entry_fails_with_the_selected_cargo() {
         let cargo = OsStr::new("/usr/local/bin/cargo");
         let error = next_cargo_selection(
@@ -799,7 +930,10 @@ mod tests {
         let (depth, chain) =
             next_cargo_selection(Some("2"), None, OsStr::new("/usr/bin/cargo"), None).unwrap();
         assert_eq!(depth, 3);
-        assert_eq!(chain.as_deref(), Some(OsStr::new("/usr/bin/cargo")));
+        assert_eq!(
+            cargo_chain(chain.as_deref()),
+            vec![PathBuf::from("/usr/bin/cargo")]
+        );
     }
 
     #[test]
