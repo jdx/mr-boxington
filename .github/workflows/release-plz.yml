@@ -183,7 +183,7 @@ jobs:
 
       # MISE_LOCKED prevents a future `latest` from silently replacing the
       # reviewed Communiqué build. Bump it deliberately with `mise lock`.
-      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
         with:
           install_args: communique
           cache: false
@@ -248,7 +248,7 @@ jobs:
           cache: rust
 
       - name: Install documentation tools
-        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
 
       # Builds `mbx` at the version currently on `main`. The release branch
       # differs only in version numbers and changelogs, so the render below
