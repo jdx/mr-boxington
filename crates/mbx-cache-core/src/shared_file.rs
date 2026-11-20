@@ -42,6 +42,45 @@ pub fn open_shared_lock(path: &Path) -> std::io::Result<fslock::LockFile> {
     fslock::LockFile::open(path)
 }
 
+/// Clone `from` to `to` where the filesystem can, and copy it where it cannot.
+///
+/// `reflink_copy::reflink_or_copy` gives up instead of copying when the clone
+/// fails with a permission error, and an unprivileged LXC container on ext4
+/// answers `FICLONE` with `EPERM` where bare ext4 says it is unsupported. Every
+/// clone failure here falls back to a copy except a missing source and an
+/// existing destination, which a copy would not fix or would overwrite. A
+/// genuine permission problem still surfaces, as the copy's own error.
+pub fn clone_or_copy(from: &Path, to: &Path) -> std::io::Result<()> {
+    // Clone from an opened handle, not a path: `reflink_copy::reflink` reports
+    // every failure of a source that is not itself a regular file (a symlink to
+    // one, or a missing path) as `InvalidInput`, which would hide an existing
+    // destination and let the copy overwrite it.
+    let source = std::fs::File::open(from)?;
+    clone_or_copy_with(from, to, |_, to| {
+        reflink_copy::reflink_file_to_path(&source, to)
+    })
+}
+
+fn clone_or_copy_with(
+    from: &Path,
+    to: &Path,
+    clone: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    match clone(from, to) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::AlreadyExists
+            ) =>
+        {
+            Err(error)
+        }
+        // `fs::copy` truncates whatever a failed clone left at `to`.
+        Err(_) => std::fs::copy(from, to).map(drop),
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::{open_shared_lock, shared_tempfile_builder};
@@ -72,5 +111,95 @@ mod tests {
         let lock = directory.path().join("a.lock");
         drop(open_shared_lock(&lock).unwrap());
         assert_eq!(mode(&lock), mode(&plain));
+    }
+}
+
+#[cfg(test)]
+mod clone_tests {
+    use super::clone_or_copy_with;
+    use std::io::{Error, ErrorKind};
+    use std::path::Path;
+
+    /// What an unprivileged LXC container on ext4 answers `FICLONE` with.
+    fn refused() -> Error {
+        Error::from(ErrorKind::PermissionDenied)
+    }
+
+    #[test]
+    fn a_refused_clone_falls_back_to_a_copy() {
+        let directory = tempfile::tempdir().unwrap();
+        let from = directory.path().join("from");
+        let to = directory.path().join("to");
+        std::fs::write(&from, b"cached bytes").unwrap();
+        // A failed clone may leave an empty destination behind.
+        clone_or_copy_with(&from, &to, |_, to: &Path| {
+            std::fs::write(to, b"")?;
+            Err(refused())
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"cached bytes");
+    }
+
+    #[test]
+    fn a_missing_source_is_not_found() {
+        let directory = tempfile::tempdir().unwrap();
+        let to = directory.path().join("to");
+        let error = super::clone_or_copy(&directory.path().join("missing"), &to).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::NotFound);
+        assert!(!to.exists());
+    }
+
+    #[test]
+    fn an_existing_destination_is_not_overwritten() {
+        let directory = tempfile::tempdir().unwrap();
+        let from = directory.path().join("from");
+        let to = directory.path().join("to");
+        std::fs::write(&from, b"cached bytes").unwrap();
+        std::fs::write(&to, b"keep").unwrap();
+        let error = clone_or_copy_with(&from, &to, |_, _| {
+            Err(Error::from(ErrorKind::AlreadyExists))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&to).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn a_failed_copy_reports_the_copy_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let from = directory.path().join("from");
+        std::fs::write(&from, b"cached bytes").unwrap();
+        let to = directory.path().join("no-such-directory/to");
+        let error = clone_or_copy_with(&from, &to, |_, _| Err(refused())).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::NotFound);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_real_clone_keeps_an_existing_destination_behind_a_symlinked_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let from = directory.path().join("from");
+        let link = directory.path().join("link");
+        let to = directory.path().join("to");
+        std::fs::write(&from, b"cached bytes").unwrap();
+        std::os::unix::fs::symlink(&from, &link).unwrap();
+        std::fs::write(&to, b"keep").unwrap();
+        let error = super::clone_or_copy(&link, &to).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&to).unwrap(), b"keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copied_executable_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        let from = directory.path().join("from");
+        let to = directory.path().join("to");
+        std::fs::write(&from, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&from, std::fs::Permissions::from_mode(0o755)).unwrap();
+        clone_or_copy_with(&from, &to, |_, _| Err(refused())).unwrap();
+        let mode = std::fs::metadata(&to).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
     }
 }
