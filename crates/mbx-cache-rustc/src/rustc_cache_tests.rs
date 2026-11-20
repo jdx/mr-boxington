@@ -3550,3 +3550,72 @@ fn malformed_diagnostic_width_stays_keyed() {
         assert_ne!(piped.digest, width_action_with(None, &[], extra).digest);
     }
 }
+
+fn rpath_link(rpath: &str) -> Result<RustcInvocation, BypassReason> {
+    RustcInvocation::parse_with(
+        &args(&[
+            "--crate-name=widget",
+            "--crate-type=bin",
+            "--emit=dep-info,link",
+            "--out-dir=target/debug/deps",
+            &format!("-Clink-arg=-Wl,-rpath,{rpath}"),
+            "src/main.rs",
+        ]),
+        ParseOptions::caching_native_links(true),
+    )
+}
+
+/// ld64 only records an rpath as an `LC_RPATH` load command, so an absolute
+/// directory is modeled on a native macOS link, with its text in the key.
+/// Everywhere else the argument stays unmodeled, because GNU ld searches it.
+#[test]
+fn an_absolute_rpath_is_modeled_only_for_native_macos_links() {
+    let parsed = rpath_link("/opt/lib/widget-1.0");
+    if cfg!(target_os = "macos") {
+        let RustcAction { bytes, .. } = parsed
+            .unwrap()
+            .action_linked_by(context(&[("src/main.rs", "source")]), Some(test_linker()))
+            .unwrap();
+        let json = String::from_utf8(bytes).unwrap();
+        assert!(
+            json.contains(r#""--codegen=link-arg=-Wl,-rpath,/opt/lib/widget-1.0""#),
+            "the directory must enter the key as written: {json}"
+        );
+    } else {
+        assert_eq!(
+            parsed.err(),
+            Some(BypassReason::UnmodeledLinkArgument(
+                "link-arg=-Wl,-rpath".into()
+            )),
+        );
+    }
+}
+
+/// Relative and `@`-prefixed entries resolve against something the key does
+/// not hold, and a comma means more than one linker option in one argument.
+#[test]
+fn other_rpath_spellings_stay_unmodeled() {
+    for rpath in ["lib", "@loader_path/lib", "/opt/a,-rpath,/opt/b", ""] {
+        assert_eq!(
+            rpath_link(rpath).err(),
+            Some(BypassReason::UnmodeledLinkArgument(format!(
+                "link-arg=-Wl,-rpath,{rpath}"
+            ))),
+            "{rpath:?}"
+        );
+    }
+}
+
+/// Where nothing links, the argument is inert on every host.
+#[test]
+fn an_rpath_is_inert_where_nothing_links() {
+    let library = args(&[
+        "--crate-name=widget",
+        "--crate-type=lib",
+        "--emit=dep-info,metadata,link",
+        "--out-dir=target/debug/deps",
+        "-Clink-arg=-Wl,-rpath,/opt/lib",
+        "src/lib.rs",
+    ]);
+    assert!(RustcInvocation::parse(&library).is_ok());
+}
