@@ -252,22 +252,177 @@ pub(crate) fn stabilize(real: &Path, root: &Path) -> Result<Option<PathBuf>> {
     // publication is complete: the existence check and the copy sit under
     // the same lock, so a second process either finds the finished,
     // protected tree or waits for it.
-    let published = (|| -> Result<()> {
+    let published = (|| -> Result<bool> {
         let mut publishing = mbx_cache_core::open_shared_lock(&publish_lock_path(root, &digest))?;
         publishing.lock()?;
-        if !stable.is_dir() {
-            materialize(real, root, &stable, &manifest, &files, &directories)?;
+        match std::fs::symlink_metadata(&stable) {
+            Ok(metadata) if !metadata.is_dir() => Ok(false),
+            Ok(_) => {
+                // Never repair in place: another compiler may hold a lease on
+                // this exact path. A damaged tree stays for collection.
+                Ok(validate_tree(&stable, real, &manifest).unwrap_or(false))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                materialize(real, root, &stable, &manifest, &files, &directories)?;
+                Ok(true)
+            }
+            Err(error) => Err(error.into()),
         }
-        Ok(())
     })();
-    if let Err(error) = published {
-        // Nothing was published, so nothing needs the lease; a lease left
-        // behind here would name a tree that never existed.
+    if !matches!(published, Ok(true)) {
+        // This compilation will use Cargo's tree. Other readers keep their
+        // own leases; neither failure nor fallback touches the shared tree.
         release(root, &digest);
-        return Err(error);
+        return published.map(|_| None);
     }
     stamp_use(root, &digest);
     Ok(Some(stable))
+}
+
+/// Kept beside the tree so generated file names have no reserved entries.
+fn identity_path(tree: &Path) -> PathBuf {
+    tree.with_extension("identity")
+}
+
+/// The manifest retains the existing key format (paths, types, executable
+/// bits and content digests); lengths are recorded separately in walk order.
+fn identity(manifest: &[u8], root: &Path, files: &[(PathBuf, bool)]) -> Result<Vec<u8>> {
+    let sizes = files
+        .iter()
+        .map(|(path, _)| std::fs::symlink_metadata(root.join(path)).map(|m| m.len()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    Ok(serde_json::to_vec(&(
+        std::str::from_utf8(manifest)?,
+        sizes,
+    ))?)
+}
+
+/// Hash every file, including same-size edits, and enumerate the entire tree
+/// so extra entries cannot silently change generated code's behavior.
+fn validate_tree(stable: &Path, real: &Path, expected: &[u8]) -> Result<bool> {
+    use std::io::Read as _;
+    // JSON escapes take at most six bytes per manifest byte. Each manifest
+    // entry can add at most one u64 length (20 digits plus a comma).
+    let max_record = expected
+        .len()
+        .saturating_mul(6)
+        .saturating_add(
+            expected
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count()
+                .saturating_mul(21),
+        )
+        .saturating_add(8);
+    let record = identity_path(stable);
+    match std::fs::symlink_metadata(&record) {
+        Ok(metadata) if !metadata.is_file() || metadata.len() > max_record as u64 => {
+            return Ok(false);
+        }
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
+    let recorded = match open_identity(&record) {
+        Ok(file) => {
+            let metadata = file.metadata()?;
+            if !metadata.is_file() || metadata.len() > max_record as u64 {
+                return Ok(false);
+            }
+            // Bound the read as well as the stat: a regular file can grow
+            // between the two, and its own length must not size an allocation.
+            let mut recorded = Vec::new();
+            file.take((max_record as u64).saturating_add(1))
+                .read_to_end(&mut recorded)?;
+            if recorded.len() > max_record {
+                return Ok(false);
+            }
+            Some(recorded)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let mut manifest = Vec::new();
+    let mut files = Vec::new();
+    if std::fs::symlink_metadata(stable)?.file_type().is_symlink()
+        || !same_layout(real, stable)?
+        || !describe_tree(
+            stable,
+            Path::new(""),
+            &mut manifest,
+            &mut files,
+            &mut Vec::new(),
+        )?
+        || manifest != expected
+    {
+        return Ok(false);
+    }
+    let actual = identity(&manifest, stable, &files)?;
+    if let Some(recorded) = recorded {
+        return Ok(actual == recorded);
+    }
+    // Adopt a legacy tree only after checking every byte against the real
+    // output's manifest. Only the sidecar changes, under the publish lock;
+    // compilers already reading the tree keep the same paths and contents.
+    write_identity(stable, &actual)?;
+    Ok(true)
+}
+
+/// Metadata mismatches must not make us hash arbitrarily large damaged files.
+/// Compare against Cargo's tree, which was already hashed for `expected`.
+fn same_layout(real: &Path, stable: &Path) -> std::io::Result<bool> {
+    fn entries(path: &Path, limit: usize) -> std::io::Result<Vec<std::fs::DirEntry>> {
+        let mut entries = std::fs::read_dir(path)?
+            .take(limit)
+            .collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        Ok(entries)
+    }
+    let expected = entries(real, usize::MAX)?;
+    // One extra entry suffices to reject an arbitrarily wide damaged tree.
+    let actual = entries(stable, expected.len().saturating_add(1))?;
+    if expected.len() != actual.len() {
+        return Ok(false);
+    }
+    for (expected, actual) in expected.iter().zip(&actual) {
+        if expected.file_name() != actual.file_name() {
+            return Ok(false);
+        }
+        let left = std::fs::symlink_metadata(expected.path())?;
+        let right = std::fs::symlink_metadata(actual.path())?;
+        if left.file_type() != right.file_type() {
+            return Ok(false);
+        }
+        if left.is_dir() {
+            if !same_layout(&expected.path(), &actual.path())? {
+                return Ok(false);
+            }
+        } else if left.len() != right.len() || is_executable(&left) != is_executable(&right) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn open_identity(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // The entry can change after lstat. Opening a FIFO must not wait for
+        // a writer; validate the opened handle's type before reading it.
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
+
+fn write_identity(stable: &Path, identity: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+    let mut record =
+        mbx_cache_core::shared_tempfile_builder().tempfile_in(stable.parent().unwrap())?;
+    record.write_all(identity)?;
+    record.persist(identity_path(stable))?;
+    Ok(())
 }
 
 fn publish_lock_path(root: &Path, digest: &str) -> PathBuf {
@@ -483,6 +638,15 @@ fn materialize(
         let _ = remove_tree(&staging);
         eyre::bail!("the build-script output changed while it was being copied");
     }
+    // Publish the identity atomically before exposing the tree. Readers use
+    // the publication lock; a crash here leaves an unused sidecar, never a
+    // tree that can be mistaken for a validated publication.
+    let recorded =
+        identity(manifest, &staging, files).and_then(|record| write_identity(stable, &record));
+    if let Err(error) = recorded {
+        let _ = remove_tree(&staging);
+        return Err(error);
+    }
     match std::fs::rename(&staging, stable) {
         // The top directory last, and after the move: macOS will not rename
         // a directory it cannot write, since the move rewrites its parent
@@ -617,6 +781,7 @@ fn collect_with(
     // least recently.
     let mut trees: Vec<(String, PathBuf, u64, Option<Duration>)> = Vec::new();
     let mut lease_dirs = Vec::new();
+    let mut identities = std::collections::BTreeMap::new();
     let mut staging_bytes = 0_u64;
     for entry in entries {
         // An entry that cannot be read is still on the disk. It is kept and
@@ -646,6 +811,15 @@ fn collect_with(
             }
         };
         if !is_dir {
+            if let Some(digest) = name
+                .strip_suffix(".identity")
+                .filter(|name| is_digest_name(name))
+            {
+                identities.insert(
+                    digest.to_owned(),
+                    std::fs::symlink_metadata(&path).map_or(0, |metadata| metadata.len()),
+                );
+            }
             continue;
         }
         if name.starts_with(STAGING_PREFIX) {
@@ -677,10 +851,33 @@ fn collect_with(
         trees.push((name, path, 0, age));
     }
     trees.sort_by_key(|tree| std::cmp::Reverse(tree.3));
-    let mut remaining_bytes = staging_bytes;
+    let mut remaining_bytes = identities
+        .values()
+        .fold(staging_bytes, |bytes, size| bytes.saturating_add(*size));
     for tree in &mut trees {
-        tree.2 = tree_bytes(&tree.1);
-        remaining_bytes = remaining_bytes.saturating_add(tree.2);
+        let contents = tree_bytes(&tree.1);
+        tree.2 = contents.saturating_add(identities.remove(&tree.0).unwrap_or(0));
+        remaining_bytes = remaining_bytes.saturating_add(contents);
+    }
+    // A failed publication or an older collector can leave only a record,
+    // without a lease directory. Count and collect it independently. Taking
+    // the registrar prevents a publisher from acquiring its lease between
+    // the absence check and deletion; an active publisher keeps its record.
+    for (digest, bytes) in identities {
+        if dry_run && max_bytes.is_none() && max_age.is_none() {
+            continue;
+        }
+        let _registrar = registrar(root)?;
+        if root.join(&digest).exists() || leased(root, &digest, !dry_run).unwrap_or(true) {
+            continue;
+        }
+        let projecting = dry_run && (max_bytes.is_some() || max_age.is_some());
+        if projecting
+            || (!dry_run && std::fs::remove_file(identity_path(&root.join(&digest))).is_ok())
+        {
+            remaining_bytes = remaining_bytes.saturating_sub(bytes);
+            outcome.removed_bytes = outcome.removed_bytes.saturating_add(bytes);
+        }
     }
     let mut kept = trees.len() as u64;
     for (name, path, bytes, age) in &trees {
@@ -698,6 +895,7 @@ fn collect_with(
         if leased(root, name, !dry_run).unwrap_or(true) {
             continue;
         }
+        let mut leftover = 0_u64;
         let tree = if !dry_run {
             let tree = match RetiredTree::retire(path) {
                 Ok(tree) => tree,
@@ -710,6 +908,12 @@ fn collect_with(
                 }
             };
             let _ = std::fs::remove_file(marker_path(root, name));
+            let identity = identity_path(path);
+            if std::fs::remove_file(&identity).is_err() {
+                // Measure before releasing the registrar: a new publisher
+                // may write a different record once the tree is detached.
+                leftover = std::fs::metadata(identity).map_or(0, |metadata| metadata.len());
+            }
             let _ = std::fs::remove_dir_all(leases_dir(root, name));
             let _ = std::fs::remove_file(publish_lock_path(root, name));
             tree
@@ -717,7 +921,6 @@ fn collect_with(
             None
         };
         drop(_registrar);
-        let mut leftover = 0_u64;
         if let Some(tree) = tree {
             on_retired();
             let path = tree.path().to_path_buf();
@@ -726,7 +929,7 @@ fn collect_with(
                     "could not remove retired generated sources {}: {error}",
                     path.display()
                 );
-                leftover = tree_bytes(&path);
+                leftover = leftover.saturating_add(tree_bytes(&path));
             }
         }
         kept -= 1;
@@ -748,7 +951,10 @@ fn collect_with(
                 continue;
             }
             let _registrar = registrar(root)?;
-            if !leased(root, &digest, true).unwrap_or(true) {
+            // A publisher may have completed and exited after the check
+            // above. Recheck under the registrar before removing its locks.
+            // Identity deletion belongs to the earlier, byte-accounted sweep.
+            if !root.join(&digest).is_dir() && !leased(root, &digest, true).unwrap_or(true) {
                 let _ = std::fs::remove_dir_all(leases_dir(root, &digest));
                 let _ = std::fs::remove_file(publish_lock_path(root, &digest));
             }
