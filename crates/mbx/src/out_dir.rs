@@ -593,7 +593,7 @@ fn materialize(
         for (file, executable) in files {
             let source = real.join(file);
             let destination = staging.join(file);
-            reflink_copy::reflink_or_copy(&source, &destination)
+            mbx_cache_core::clone_or_copy(&source, &destination)
                 .wrap_err_with(|| format!("failed to copy {}", source.display()))?;
             // Cargo compares every file in a unit's dep-info with the time it
             // started the unit, and this copy is made after that, while rustc
