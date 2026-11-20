@@ -5,6 +5,9 @@ yanked = "deny"
 confidence-threshold = 0.8
 allow = [
   "Apache-2.0",
+  # zstd-sys 2.1.3 declares "BSD-3-Clause AND BSD-2-Clause". Permissive, OSI
+  # approved, and FSF Free/Libre, like the rest of this list.
+  "BSD-2-Clause",
   "BSD-3-Clause",
   "CDLA-Permissive-2.0",
   "ISC",
