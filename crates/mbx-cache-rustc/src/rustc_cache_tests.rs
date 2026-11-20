@@ -3574,7 +3574,7 @@ fn an_absolute_rpath_is_modeled_only_for_native_macos_links() {
     if cfg!(target_os = "macos") {
         let RustcAction { bytes, .. } = parsed
             .unwrap()
-            .action(context(&[("src/main.rs", "source")]))
+            .action_linked_by(context(&[("src/main.rs", "source")]), Some(test_linker()))
             .unwrap();
         let json = String::from_utf8(bytes).unwrap();
         assert!(
