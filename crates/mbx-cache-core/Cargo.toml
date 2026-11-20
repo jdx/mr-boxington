@@ -26,7 +26,7 @@ log = "0.4"
 memchr = "2"
 mbx-cache-protocol = { path = "../mbx-cache-protocol", version = "0.5.23" }
 rand = "0.10"
-reflink-copy = "0.1"
+reflink-copy = "0.1.32"
 async-compression = { version = "0.4", default-features = false, features = [
   "tokio",
   "zstd",
