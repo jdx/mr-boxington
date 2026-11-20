@@ -263,6 +263,164 @@ pub(crate) fn memory() -> Memory {
     snapshot(&visible_domains())
 }
 
+/// The lowest memory limit on a visible ancestor of this process's cgroup,
+/// not counting the process's own cgroup.
+///
+/// Sibling cgroups can share an ancestor's limit, so a scheduler pool they
+/// share must stay within it. A limit on the process's own cgroup, as a
+/// container runtime sets one, belongs to that cgroup alone.
+pub(crate) fn inherited_memory_limit() -> Option<u64> {
+    inherited_limit(&visible_domains())
+}
+
+fn inherited_limit(domains: &[Domain]) -> Option<u64> {
+    domains
+        .iter()
+        .flat_map(|domain| {
+            domain
+                .current
+                .ancestors()
+                .skip(1)
+                .take_while(|path| path.starts_with(&domain.mount))
+                .filter_map(|directory| read_limit(directory, domain.v2))
+        })
+        .min()
+}
+
+/// The lowest CPU quota or cpuset size on a visible ancestor of this process's
+/// cgroup, in whole CPUs, not counting the process's own cgroup.
+///
+/// For the reason [`inherited_memory_limit`] gives: siblings share a parent's
+/// quota or cpuset, while a container's own restriction belongs to it alone.
+pub(crate) fn inherited_cpu_limit() -> Option<u64> {
+    let (Ok(groups), Ok(mounts)) = (
+        std::fs::read_to_string("/proc/self/cgroup"),
+        std::fs::read_to_string("/proc/self/mountinfo"),
+    ) else {
+        return None;
+    };
+    inherited_cpu_limits(&groups, &mounts)
+}
+
+fn inherited_cpu_limits(groups: &str, mounts: &str) -> Option<u64> {
+    let quotas = inherited_cpus(&domains_for(groups, mounts, "cpu"));
+    let cpusets = inherited_cpuset_cpus(&domains_for(groups, mounts, "cpuset"));
+    quotas.into_iter().chain(cpusets).min()
+}
+
+fn inherited_cpuset_cpus(domains: &[Domain]) -> Option<u64> {
+    domains.iter().filter_map(inherited_cpuset).min()
+}
+
+fn inherited_cpuset(domain: &Domain) -> Option<u64> {
+    let read_set = |directory: &Path, name: &str| {
+        std::fs::read_to_string(directory.join(name))
+            .ok()
+            .and_then(|text| cpuset_size(&text))
+    };
+    if domain.v2
+        && std::fs::read_to_string(domain.current.join("cpuset.cpus.partition"))
+            .is_ok_and(|text| matches!(text.trim(), "root" | "isolated"))
+    {
+        // A valid leaf partition's CPUs have been removed from its parents'
+        // effective sets. Its own restriction stays with its local ceiling.
+        return None;
+    }
+    let mut configured: Option<u64> = None;
+    for directory in domain
+        .current
+        .ancestors()
+        .skip(1)
+        .take_while(|path| path.starts_with(&domain.mount))
+    {
+        let effective = if domain.v2 {
+            "cpuset.cpus.effective"
+        } else {
+            "cpuset.effective_cpus"
+        };
+        if let Some(cpus) = read_set(directory, effective) {
+            // The nearest effective set already includes inherited limits.
+            // Higher ancestors can exclude CPUs delegated to this partition.
+            return Some(configured.map_or(cpus, |limit| limit.min(cpus)));
+        }
+        // Older v1 mounts only expose configured sets. Empty sets inherit
+        // from the next ancestor; keep every non-empty configured restriction.
+        if let Some(cpus) = read_set(directory, "cpuset.cpus") {
+            configured = Some(configured.map_or(cpus, |limit| limit.min(cpus)));
+        }
+    }
+    configured
+}
+
+/// Kernel CPU lists contain ordered, disjoint CPU numbers or inclusive ranges.
+fn cpuset_size(text: &str) -> Option<u64> {
+    let mut count = 0_u64;
+    let mut previous = None;
+    for entry in text.trim().split(',') {
+        let (start, end) = entry.split_once('-').unwrap_or((entry, entry));
+        let start = start.parse::<u32>().ok()?;
+        let end = end.parse::<u32>().ok()?;
+        if end < start || previous.is_some_and(|previous| start <= previous) {
+            return None;
+        }
+        count += u64::from(end) - u64::from(start) + 1;
+        previous = Some(end);
+    }
+    Some(count)
+}
+
+fn inherited_cpus(domains: &[Domain]) -> Option<u64> {
+    domains
+        .iter()
+        .flat_map(|domain| {
+            domain
+                .current
+                .ancestors()
+                .skip(1)
+                .take_while(|path| path.starts_with(&domain.mount))
+                .filter_map(|directory| read_cpu_quota(directory, domain.v2))
+        })
+        .min()
+}
+
+/// A CPU quota as whole CPUs, rounded down as the standard library rounds a
+/// quota, and at least one: v2's `cpu.max`, or v1's `cpu.cfs_quota_us` over
+/// `cpu.cfs_period_us`. `max` and v1's `-1` are no quota.
+fn read_cpu_quota(directory: &Path, v2: bool) -> Option<u64> {
+    let read = |name: &str| std::fs::read_to_string(directory.join(name)).ok();
+    let (quota, period) = if v2 {
+        let text = read("cpu.max")?;
+        let mut fields = text.split_whitespace();
+        (
+            fields.next()?.parse::<u64>().ok()?,
+            fields.next()?.parse::<u64>().ok()?,
+        )
+    } else {
+        (
+            read("cpu.cfs_quota_us")?.trim().parse::<u64>().ok()?,
+            read("cpu.cfs_period_us")?.trim().parse::<u64>().ok()?,
+        )
+    };
+    (period > 0).then(|| (quota / period).max(1))
+}
+
+fn read_limit(directory: &Path, v2: bool) -> Option<u64> {
+    let name = if v2 {
+        "memory.max"
+    } else {
+        "memory.limit_in_bytes"
+    };
+    std::fs::read_to_string(directory.join(name))
+        .ok()
+        .and_then(|s| {
+            if s.trim() == "0" {
+                Some(0)
+            } else {
+                read_cgroup_text(&s)
+            }
+        })
+}
+
 fn visible_domains() -> Vec<Domain> {
     let domains = std::fs::read_to_string("/proc/self/cgroup")
         .ok()
@@ -295,6 +453,11 @@ fn fallback_domains(root: &Path) -> Vec<Domain> {
 }
 
 fn domains(groups: &str, mounts: &str) -> Vec<Domain> {
+    domains_for(groups, mounts, "memory")
+}
+
+/// The cgroup v2 hierarchy and the v1 hierarchy carrying `controller`.
+fn domains_for(groups: &str, mounts: &str, controller: &str) -> Vec<Domain> {
     let memberships: Vec<_> = groups
         .lines()
         .filter_map(|line| {
@@ -303,7 +466,7 @@ fn domains(groups: &str, mounts: &str) -> Vec<Domain> {
             let controllers = fields.next()?;
             let path = Path::new(fields.next()?);
             let v2 = controllers.is_empty();
-            (v2 || controllers.split(',').any(|name| name == "memory")).then_some((v2, path))
+            (v2 || controllers.split(',').any(|name| name == controller)).then_some((v2, path))
         })
         .collect();
     mounts
@@ -317,7 +480,7 @@ fn domains(groups: &str, mounts: &str) -> Vec<Domain> {
             let super_options = options.next()?;
             let v2 = match fs {
                 "cgroup2" => true,
-                "cgroup" if super_options.split(',').any(|name| name == "memory") => false,
+                "cgroup" if super_options.split(',').any(|name| name == controller) => false,
                 _ => return None,
             };
             let root = mount_path(fields.get(3)?)?;
@@ -370,29 +533,15 @@ fn snapshot(domains: &[Domain]) -> Memory {
             if !directory.starts_with(&domain.mount) {
                 break;
             }
-            let (limit_name, usage_name, reclaim_fields) = if domain.v2 {
-                (
-                    "memory.max",
-                    "memory.current",
-                    ["active_file", "inactive_file"],
-                )
+            let (usage_name, reclaim_fields) = if domain.v2 {
+                ("memory.current", ["active_file", "inactive_file"])
             } else {
                 (
-                    "memory.limit_in_bytes",
                     "memory.usage_in_bytes",
                     ["total_active_file", "total_inactive_file"],
                 )
             };
-            let Some(limit) = std::fs::read_to_string(directory.join(limit_name))
-                .ok()
-                .and_then(|s| {
-                    if s.trim() == "0" {
-                        Some(0)
-                    } else {
-                        read_cgroup_text(&s)
-                    }
-                })
-            else {
+            let Some(limit) = read_limit(directory, domain.v2) else {
                 continue;
             };
             let usage = std::fs::read_to_string(directory.join(usage_name))
@@ -480,6 +629,176 @@ mod tests {
         );
         write_memory(&mount.join("slice"), "1000", 1100, 0, true);
         assert_eq!(snapshot(&domains).headroom, Some(0));
+    }
+
+    #[test]
+    fn only_ancestor_limits_are_inherited() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path();
+        write_memory(mount, "max", 0, 0, true);
+        write_memory(&mount.join("slice"), "max", 0, 0, true);
+        write_memory(&mount.join("slice/build"), "800", 0, 0, true);
+        let mounts = format!("1 0 0:1 / {} rw - cgroup2 cgroup rw", mount.display());
+        let found = domains("0::/slice/build\n", &mounts);
+        assert_eq!(inherited_limit(&found), None, "the cgroup's own limit");
+        write_memory(&mount.join("slice"), "1000", 0, 0, true);
+        assert_eq!(
+            inherited_limit(&found),
+            Some(1000),
+            "a limit siblings share"
+        );
+        // A container's own cgroup is the root of what it can see.
+        let own = domains(
+            "0::/\n",
+            &format!(
+                "1 0 0:1 /slice/build {} rw - cgroup2 cgroup rw",
+                mount.join("slice/build").display()
+            ),
+        );
+        assert_eq!(inherited_limit(&own), None);
+    }
+
+    #[test]
+    fn only_ancestor_cpu_quotas_are_inherited() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path();
+        let build = mount.join("slice/build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(mount.join("slice/cpu.max"), "max 100000\n").unwrap();
+        std::fs::write(build.join("cpu.max"), "200000 100000\n").unwrap();
+        let mounts = format!("1 0 0:1 / {} rw - cgroup2 cgroup rw", mount.display());
+        let found = domains("0::/slice/build\n", &mounts);
+        assert_eq!(inherited_cpus(&found), None, "the cgroup's own quota");
+        std::fs::write(mount.join("slice/cpu.max"), "450000 100000\n").unwrap();
+        assert_eq!(inherited_cpus(&found), Some(4), "a quota siblings share");
+        std::fs::write(mount.join("slice/cpu.max"), "50000 100000\n").unwrap();
+        assert_eq!(inherited_cpus(&found), Some(1), "at least one CPU");
+    }
+
+    #[test]
+    fn parent_cpusets_cap_siblings_without_inheriting_the_leaf_set() {
+        for v2 in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let mount = temp.path();
+            let build = mount.join("slice/build");
+            std::fs::create_dir_all(&build).unwrap();
+            let (groups, mounts, effective) = if v2 {
+                (
+                    "0::/slice/build\n",
+                    format!("1 0 0:1 / {} rw - cgroup2 cgroup rw", mount.display()),
+                    "cpuset.cpus.effective",
+                )
+            } else {
+                (
+                    "3:cpuset:/slice/build\n",
+                    format!("1 0 0:1 / {} rw - cgroup cgroup rw,cpuset", mount.display()),
+                    "cpuset.effective_cpus",
+                )
+            };
+            std::fs::write(build.join(effective), "0\n").unwrap();
+            assert_eq!(
+                inherited_cpu_limits(groups, &mounts),
+                None,
+                "leaf stays local"
+            );
+            std::fs::write(mount.join(effective), "0-31\n").unwrap();
+            std::fs::write(mount.join("slice").join(effective), "0-3\n").unwrap();
+            assert_eq!(inherited_cpu_limits(groups, &mounts), Some(4));
+            if v2 {
+                std::fs::write(mount.join("slice/cpu.max"), "200000 100000\n").unwrap();
+                assert_eq!(
+                    inherited_cpu_limits(groups, &mounts),
+                    Some(2),
+                    "quota also applies"
+                );
+            }
+            std::fs::remove_file(mount.join("slice").join(effective)).unwrap();
+            std::fs::write(mount.join("slice/cpuset.cpus"), "0-2,8\n").unwrap();
+            let domains = domains_for(groups, &mounts, "cpuset");
+            assert_eq!(
+                inherited_cpuset_cpus(&domains),
+                Some(4),
+                "configured fallback"
+            );
+            std::fs::write(mount.join("slice/cpuset.cpus"), "\n").unwrap();
+            assert_eq!(inherited_cpuset_cpus(&domains), Some(32), "empty inherits");
+        }
+    }
+
+    #[test]
+    fn v2_partitions_do_not_inherit_the_parents_remaining_cpus() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path();
+        let partition = mount.join("partition");
+        let build = partition.join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(mount.join("cpuset.cpus.effective"), "0\n").unwrap();
+        std::fs::write(partition.join("cpuset.cpus.effective"), "1-7\n").unwrap();
+        std::fs::write(build.join("cpuset.cpus.effective"), "1\n").unwrap();
+        let mounts = format!("1 0 0:1 / {} rw - cgroup2 cgroup rw", mount.display());
+        for state in ["root", "isolated"] {
+            std::fs::write(partition.join("cpuset.cpus.partition"), state).unwrap();
+            assert_eq!(
+                inherited_cpu_limits("0::/partition/build\n", &mounts),
+                Some(7),
+                "the partition's seven CPUs are absent from its parent's effective set"
+            );
+            assert_eq!(
+                inherited_cpu_limits("0::/partition\n", &mounts),
+                None,
+                "the leaf partition's own restriction stays local"
+            );
+        }
+        std::fs::write(
+            partition.join("cpuset.cpus.partition"),
+            "root invalid (no cpu)",
+        )
+        .unwrap();
+        assert_eq!(inherited_cpu_limits("0::/partition\n", &mounts), Some(1));
+        std::fs::write(mount.join("cpu.max"), "200000 100000\n").unwrap();
+        assert_eq!(
+            inherited_cpu_limits("0::/partition/build\n", &mounts),
+            Some(2),
+            "quotas still inherit across partitions"
+        );
+    }
+
+    #[test]
+    fn cpuset_lists_count_ranges_and_reject_malformed_input() {
+        assert_eq!(cpuset_size("0-3,8,10-11\n"), Some(7));
+        assert_eq!(cpuset_size("3"), Some(1));
+        for text in ["", "3-1", "0-3,2", "1,1", "0-", "x", "0,,2"] {
+            assert_eq!(cpuset_size(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn v1_cpu_quotas_are_inherited_from_the_cpu_hierarchy() {
+        let temp = tempfile::tempdir().unwrap();
+        let mount = temp.path().join("cpu,cpuacct");
+        let build = mount.join("slice/build");
+        std::fs::create_dir_all(&build).unwrap();
+        for (directory, quota) in [(mount.join("slice"), "-1"), (build.clone(), "200000")] {
+            std::fs::write(directory.join("cpu.cfs_quota_us"), format!("{quota}\n")).unwrap();
+            std::fs::write(directory.join("cpu.cfs_period_us"), "100000\n").unwrap();
+        }
+        let mounts = format!(
+            "1 0 0:1 / {} rw - cgroup cgroup rw,cpu,cpuacct\n2 0 0:2 / /memory rw - cgroup cgroup rw,memory",
+            mount.display()
+        );
+        let groups = "4:memory:/slice/build\n3:cpu,cpuacct:/slice/build\n";
+        let found = domains_for(groups, &mounts, "cpu");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].current, build);
+        assert_eq!(inherited_cpus(&found), None, "no quota on the parent");
+        std::fs::write(mount.join("slice/cpu.cfs_quota_us"), "300000\n").unwrap();
+        assert_eq!(inherited_cpus(&found), Some(3));
+        assert!(
+            domains_for(groups, &mounts, "memory")
+                .iter()
+                .all(|domain| domain.mount != mount),
+            "the memory probes keep reading only the memory hierarchy"
+        );
     }
 
     #[test]

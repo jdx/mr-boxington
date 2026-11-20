@@ -329,7 +329,7 @@ retries = 3
 
 [scheduler]
 enabled = true
-cpus = 16                # default: logical CPUs
+cpus = 16                # default: the machine's logical CPUs
 reserve_cpus = 2         # default: 0
 memory = "24GiB"         # default: 85% of physical memory
 priority = "normal"      # or "low"
