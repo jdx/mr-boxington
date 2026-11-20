@@ -64,15 +64,15 @@ pub(crate) fn probe_access_times(directory: &Path) -> std::io::Result<bool> {
     Ok(std::fs::metadata(file.path())?.accessed()? > past + ACCESS_TIME_SLACK)
 }
 
-/// Remove the units in the target directory `view` that no build has used for
-/// `max_age`.
+/// Remove units in the supplied Cargo profiles that no build has used for
+/// `max_age`. The caller supplies exactly the profiles it locked.
 ///
-/// The caller holds Cargo's locks for `view`, so no build reads a unit while
+/// The caller holds Cargo's locks for these profiles, so no build reads a unit while
 /// it goes. A dry run reports what would be removed and touches nothing on
-/// disk. `ledger` holds the caller's measure of `view`; each file is released
+/// disk. `ledger` holds the caller's measure of the view; each file is released
 /// from it once it is gone, or as if gone in a dry run.
 pub(crate) fn prune(
-    view: &Path,
+    profiles: &[PathBuf],
     max_age: Duration,
     now: SystemTime,
     dry_run: bool,
@@ -82,13 +82,16 @@ pub(crate) fn prune(
     let Some(cutoff) = now.checked_sub(max_age.saturating_add(ACCESS_TIME_SLACK)) else {
         return outcome;
     };
-    for profile in profiles(view) {
+    for profile in profiles {
+        // Cargo's locks exclude builds while pruning. Preserve the directory
+        // mtimes so GC's own deletions do not count as a later build.
+        let _writes = (!dry_run).then(|| PreserveWrites::new(profile));
         // Counted, because the caller measured the view before this pass and
         // would otherwise weigh bytes already gone against the budget.
         outcome
             .removal
-            .add(remove_abandoned_removals(&profile, dry_run, ledger));
-        let (units, doomed) = unused(&profile, cutoff);
+            .add(remove_abandoned_removals(profile, dry_run, ledger));
+        let (units, doomed) = unused(profile, cutoff);
         if doomed.is_empty() {
             continue;
         }
@@ -101,7 +104,7 @@ pub(crate) fn prune(
             outcome.removed_units += units;
             continue;
         }
-        match remove(&profile, &doomed, ledger) {
+        match remove(profile, &doomed, ledger) {
             Ok((removal, gone)) => {
                 // Units count as removed once nothing of them is left; files
                 // count as they go.
@@ -129,7 +132,8 @@ pub(crate) fn prune(
 /// [`access_times_tracked`] holds.
 ///
 /// Outputs below the profile are left out: rustc reads `deps/` on every
-/// compile, and anything under it a build runs already holds a lease.
+/// compile. Commands run through mbx hold a lease while executing those
+/// outputs; plain Cargo's directory writes are tracked by [`WriteTimes`].
 pub(crate) fn last_run(view: &Path) -> Option<SystemTime> {
     profiles(view)
         .iter()
@@ -141,6 +145,139 @@ pub(crate) fn last_run(view: &Path) -> Option<SystemTime> {
                 .then(|| metadata.accessed().ok())?
         })
         .max()
+}
+
+/// Latest directory write in Cargo's profiles and their immediate output
+/// directories, plus the view’s top-level doc directory. This counts plain Cargo builds, which do not refresh mbx's
+/// view record, without walking the outputs or relying on access times.
+#[cfg(test)]
+pub(crate) fn last_write(view: &Path) -> Option<SystemTime> {
+    WriteTimes::read(view).latest()
+}
+
+/// Per-directory timestamps for the collector's race checks. Comparing only
+/// their maximum would hide writes behind another directory's future clock.
+#[derive(Default)]
+pub(crate) struct WriteTimes(std::collections::HashMap<PathBuf, SystemTime>);
+
+impl WriteTimes {
+    pub(crate) fn read(view: &Path) -> Self {
+        if !std::fs::symlink_metadata(view)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        {
+            return Self::default();
+        }
+        Self(
+            profiles(view)
+                .into_iter()
+                .flat_map(|profile| output_directories(&profile))
+                .chain(std::iter::once(view.join("doc")))
+                .filter_map(|directory| {
+                    let metadata = std::fs::symlink_metadata(&directory).ok()?;
+                    metadata
+                        .is_dir()
+                        .then(|| Some((directory, metadata.modified().ok()?)))?
+                })
+                .collect(),
+        )
+    }
+
+    pub(crate) fn latest(&self) -> Option<SystemTime> {
+        self.0.values().copied().max()
+    }
+
+    pub(crate) fn changed_since(&self, earlier: &Self) -> bool {
+        self.0
+            .iter()
+            .any(|(directory, time)| earlier.0.get(directory) != Some(time))
+    }
+}
+
+fn output_directories(profile: &Path) -> [PathBuf; 6] {
+    [
+        profile.to_path_buf(),
+        profile.join("deps"),
+        profile.join("build"),
+        profile.join(".fingerprint"),
+        profile.join("incremental"),
+        profile.join("examples"),
+    ]
+}
+
+/// Keep cleanup from changing the write-based use time. The caller holds
+/// Cargo's locks, so none of the writes restored here can belong to a build.
+struct PreserveWrites(Vec<(std::fs::File, PathBuf, SystemTime)>);
+
+impl PreserveWrites {
+    fn new(profile: &Path) -> Self {
+        Self(
+            // Cleanup changes these parents. deps/.fingerprint are removed
+            // whole, and incremental is never modified by pruning.
+            [profile.to_path_buf(), profile.join("build")]
+                .into_iter()
+                .filter_map(|path| {
+                    // Child links can belong to another checkout. Never open their
+                    // destinations for timestamp restoration.
+                    if !std::fs::symlink_metadata(&path).ok()?.is_dir() {
+                        return None;
+                    }
+                    #[cfg(unix)]
+                    let directory = {
+                        use std::os::unix::fs::OpenOptionsExt as _;
+                        std::fs::OpenOptions::new()
+                            .read(true)
+                            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+                            .open(&path)
+                    };
+                    #[cfg(windows)]
+                    let directory = {
+                        use std::os::windows::fs::OpenOptionsExt as _;
+                        use windows_sys::Win32::Storage::FileSystem::{
+                            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+                            FILE_READ_ATTRIBUTES, FILE_WRITE_ATTRIBUTES,
+                        };
+                        std::fs::OpenOptions::new()
+                            .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+                            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                            .open(&path)
+                    };
+                    #[cfg(not(any(unix, windows)))]
+                    let directory = std::fs::File::open(&path);
+                    let directory = directory.ok()?;
+                    let metadata = directory.metadata().ok()?;
+                    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                        return None;
+                    }
+                    Some((directory, path, metadata.modified().ok()?))
+                })
+                .collect(),
+        )
+    }
+}
+
+impl Drop for PreserveWrites {
+    fn drop(&mut self) {
+        for (directory, path, modified) in &self.0 {
+            // Use the opened directory, even if its pathname was removed or
+            // replaced with a link meanwhile. Never reopen through that link.
+            let result = directory
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .and_then(|current| {
+                    if current == *modified {
+                        Ok(())
+                    } else {
+                        directory.set_modified(*modified)
+                    }
+                });
+            if let Err(error) = result {
+                log::debug!(
+                    "could not preserve write time of {} after pruning: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
 }
 
 /// Whether Cargo's output at `path` is a program or a library a program
@@ -168,19 +305,34 @@ fn runnable(path: &Path, _metadata: &std::fs::Metadata) -> bool {
 /// up to three levels down. That covers `<profile>`, `<triple>/<profile>`,
 /// and an editor's `rust-analyzer/<triple>/<profile>`, the same depth the
 /// build-lock scan in [`crate::target`] looks.
-fn profiles(view: &Path) -> Vec<PathBuf> {
+pub(crate) fn profiles(view: &Path) -> Vec<PathBuf> {
+    // A symlink at the managed-view slot does not make its destination an
+    // owned view. Never read use times or prune profiles through that link.
+    if !std::fs::symlink_metadata(view)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+    {
+        return Vec::new();
+    }
     let mut profiles = Vec::new();
     let mut pending = subdirectories(view)
         .into_iter()
         .map(|directory| (directory, 1))
         .collect::<Vec<_>>();
     while let Some((directory, depth)) = pending.pop() {
-        if directory.join(".cargo-lock").is_file() {
-            profiles.push(directory);
-        } else if depth < 3 {
+        let is_profile = directory.join(".cargo-lock").is_file();
+        if is_profile {
+            profiles.push(directory.clone());
+        }
+        if depth < 3 {
             pending.extend(
                 subdirectories(&directory)
                     .into_iter()
+                    .filter(|child| {
+                        !is_profile
+                            || !crate::target::is_profile_output_dir(
+                                child.file_name().unwrap_or_default(),
+                            )
+                    })
                     .map(|child| (child, depth + 1)),
             );
         }

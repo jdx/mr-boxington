@@ -427,6 +427,43 @@ fn retire_view(directory: &Path) -> std::io::Result<PathBuf> {
     Ok(aside)
 }
 
+// Try to keep a usable target path, but never sacrifice reclamation when
+// replacement allocation fails: the next mbx build can recreate the directory.
+fn retire_with_placeholder(
+    directory: &Path,
+    placeholder: bool,
+    create: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<PathBuf> {
+    let aside = retire_view(directory)?;
+    if placeholder
+        && let Err(error) = create(directory)
+        && error.kind() != std::io::ErrorKind::AlreadyExists
+    {
+        log::warn!(
+            "could not create target placeholder {}: {error}; continuing collection and retrying once the old outputs are gone",
+            directory.display()
+        );
+    }
+    Ok(aside)
+}
+
+// Reacquire ownership after deletion: a concurrent clean may have removed
+// the record while the old outputs were being reclaimed.
+fn retry_placeholder(directory: &Path, record_path: &Path) {
+    if read_view_record(record_path).is_some()
+        && let Some(_reservation) = try_reserve_view(directory)
+        && read_view_record(record_path).is_some()
+        && !directory.exists()
+        && let Err(error) = std::fs::create_dir(directory)
+        && error.kind() != std::io::ErrorKind::AlreadyExists
+    {
+        log::debug!(
+            "could not create target placeholder {} after collection: {error}",
+            directory.display()
+        );
+    }
+}
+
 /// Remove the `target` link in a checkout when it points at that checkout's
 /// own managed view and the view is gone.
 ///
@@ -1076,7 +1113,7 @@ enum Link {
 #[derive(Default)]
 struct ReplacedViewLocks {
     /// Cargo's build locks in the old view.
-    _cargo: Vec<fslock::LockFile>,
+    _cargo: CargoLocks,
     /// The old view's lease, held exclusively.
     _reservation: Option<ViewLease>,
 }
@@ -1127,6 +1164,9 @@ fn lock_replaced_view(
     })
 }
 
+/// Acquired locks paired with the profiles they actually protect.
+type CargoLocks = Vec<(PathBuf, fslock::LockFile)>;
+
 /// Take every Cargo lock in a target directory, or report that one is held.
 ///
 /// `None` means a build is running there. The locks come back held for the
@@ -1140,7 +1180,7 @@ fn lock_replaced_view(
 /// the output directories Cargo fills a profile with hold thousands of entries
 /// and never a lock, so those are not entered. The same names above a lock
 /// are entered: a custom profile may be called `deps`.
-fn cargo_locks(directory: &Path) -> Result<Option<Vec<fslock::LockFile>>> {
+fn cargo_locks(directory: &Path) -> Result<Option<CargoLocks>> {
     let mut pending = vec![(directory.to_path_buf(), 0)];
     let mut locks = Vec::new();
     while let Some((directory, depth)) = pending.pop() {
@@ -1160,7 +1200,7 @@ fn cargo_locks(directory: &Path) -> Result<Option<Vec<fslock::LockFile>>> {
                 if !lock.try_lock()? {
                     return Ok(None);
                 }
-                locks.push(lock);
+                locks.push((directory.clone(), lock));
                 is_profile = true;
             } else if kind.is_dir() && depth < 3 {
                 children.push((entry.file_name(), entry.path()));
@@ -1178,7 +1218,7 @@ fn cargo_locks(directory: &Path) -> Result<Option<Vec<fslock::LockFile>>> {
 
 /// Whether a directory name is one Cargo creates inside a profile directory
 /// for outputs, beside the lock rather than above one.
-fn is_profile_output_dir(name: &std::ffi::OsStr) -> bool {
+pub(crate) fn is_profile_output_dir(name: &std::ffi::OsStr) -> bool {
     matches!(
         name.to_str(),
         Some("deps" | "build" | "incremental" | "examples" | ".fingerprint" | "doc")
@@ -1395,10 +1435,24 @@ pub fn touch_managed(config: &Config, workspace_root: &Path, target_dir: &Path) 
     }
 }
 
+fn is_placeholder(root: &Path, workspace: &Path, directory: &Path) -> bool {
+    // Emptiness first: it is local, while checking the checkout can touch a
+    // slow network mount.
+    is_empty_dir(directory) && crate::store::checkout_is_live_on(root, workspace)
+}
+
+fn is_empty_dir(directory: &Path) -> bool {
+    std::fs::read_dir(directory).is_ok_and(|mut entries| entries.next().is_none())
+}
+
 /// Summarize the managed target directories under `root`.
 pub fn stats(root: &Path) -> Result<ViewStats> {
     let mut directories = views(root)?
         .into_iter()
+        // An empty recorded directory holds nothing to count, whether it is
+        // a placeholder or not; telling which would mean reaching the
+        // checkout, which can sit on a slow mount.
+        .filter(|(_, directory)| !is_empty_dir(directory))
         .map(|(_, directory)| directory)
         .collect::<Vec<_>>();
     let untracked = untracked_views(root)?;
@@ -1500,6 +1554,8 @@ pub(crate) fn collect_by(
         programs,
         dry_run,
         now_secs(),
+        |_| {},
+        |_| {},
         || {},
         |_| {},
         || {},
@@ -1510,7 +1566,8 @@ pub(crate) fn collect_by(
 /// arrive: between selecting views and removing them, while a selected view is
 /// reserved but before it is checked for use, and between removing a directory
 /// and its record. `while_reserved` gets the view directory. Tests stand in for
-/// that build, and pass a fixed `now` so the ages they set up do not shift
+/// that build. `before_cargo_locks` also covers a plain build finishing as
+/// compilation locks are acquired. Tests pass a fixed `now` so ages do not shift
 /// while the sweep runs.
 #[allow(clippy::too_many_arguments)]
 fn collect_with(
@@ -1521,6 +1578,8 @@ fn collect_with(
     programs: RunningPrograms,
     dry_run: bool,
     now: u64,
+    mut before_cargo_locks: impl FnMut(&Path),
+    mut before_unit_pruning: impl FnMut(&Path),
     before_removal: impl FnOnce(),
     mut while_reserved: impl FnMut(&Path),
     mut after_removal: impl FnMut(),
@@ -1563,18 +1622,29 @@ fn collect_with(
             ledger.measure(&directory, &HashSet::new());
             continue;
         };
+        // A recorded empty directory is a stable placeholder, not a live
+        // view. Keep its ownership record so abandonment can collect it.
+        if is_placeholder(root, &record.workspace_root, &directory) {
+            total_views -= 1;
+            continue;
+        }
         let files = ledger.measure(&directory, &HashSet::new());
         let last_run = runs_tracked
             .then(|| crate::target_units::last_run(&directory))
             .flatten()
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map_or(0, |since| since.as_secs());
+        let written = crate::target_units::WriteTimes::read(&directory);
+        let last_write = written
+            .latest()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |since| since.as_secs().min(now));
         entries.push((
             record_path,
             directory,
             // When the target was last used, which is what age and the
             // budget's order go by.
-            record.updated_secs.max(last_run.min(now)),
+            record.updated_secs.max(last_run.min(now)).max(last_write),
             files,
             crate::store::checkout_is_live_on(root, &record.workspace_root),
             precedence.standing(&record.workspace_root),
@@ -1582,6 +1652,9 @@ fn collect_with(
             // during the removal apart.
             record.updated_secs,
             false,
+            // Keep the uncapped, subsecond timestamp for the reservation
+            // recheck: plain Cargo never refreshes the record.
+            (written, false),
         ));
     }
     // A directory whose record is gone names no checkout, so none can be
@@ -1616,6 +1689,7 @@ fn collect_with(
             // clock was read must still count as newer.
             seen,
             true,
+            (crate::target_units::WriteTimes::default(), false),
         ));
     }
     // A file a view still links stays counted there; a deletion that stops
@@ -1641,7 +1715,9 @@ fn collect_with(
         })
         && runs_tracked
     {
-        for (_, directory, updated, files, live, standing, built, untracked) in &mut entries {
+        for (_, directory, updated, files, live, standing, built, untracked, written) in
+            &mut entries
+        {
             // A kept target keeps what it holds: one built for a bisect or a
             // release and left alone is exactly one whose units look unused.
             // One without a record is taken whole or not at all.
@@ -1651,7 +1727,14 @@ fn collect_with(
             // So does one only its programs' runs keep: no build has read its
             // fingerprints, so every unit looks unused, a library the program
             // loads from `deps/` or `build/` included.
-            if expired(*built, *standing) {
+            // A plain Cargo build writes without refreshing the record, but it
+            // read the fingerprints all the same.
+            let wrote = written
+                .0
+                .latest()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |since| since.as_secs().min(now));
+            if expired((*built).max(wrote), *standing) {
                 continue;
             }
             // A program run from `target/` by hand takes no lease, but its
@@ -1678,7 +1761,10 @@ fn collect_with(
             };
             // Cargo's locks keep a build that starts meanwhile from reading a
             // fingerprint whose outputs are leaving.
-            let _locks = if dry_run {
+            if !dry_run {
+                before_cargo_locks(directory);
+            }
+            let locks = if dry_run {
                 None
             } else {
                 match cargo_locks(directory) {
@@ -1693,13 +1779,39 @@ fn collect_with(
                     }
                 }
             };
+            // Remember any completed plain Cargo build before pruning, even
+            // if the cleanup then removes its newest directory. Its activity
+            // must survive cleanup removing the directory that recorded it.
+            let activity = crate::target_units::WriteTimes::read(directory);
+            written.1 |= activity.changed_since(&written.0);
+            if let Some(time) = activity
+                .latest()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            {
+                *updated = (*updated).max(time.as_secs().min(now));
+            }
+            // Prune only profiles whose actual Cargo locks we acquired.
+            // A later profile is neither pruned nor timestamp-restored.
+            let profiles = crate::target_units::profiles(directory)
+                .into_iter()
+                .filter(|profile| {
+                    locks
+                        .as_ref()
+                        .is_none_or(|locks| locks.iter().any(|(locked, _)| locked == profile))
+                })
+                .collect::<Vec<_>>();
+            before_unit_pruning(directory);
             let units = crate::target_units::prune(
-                directory,
+                &profiles,
                 max_age,
                 UNIX_EPOCH + Duration::from_secs(now),
                 dry_run,
                 &mut ledger,
             );
+            // Keep the original snapshot: a new profile can appear while
+            // pruning, and its Cargo lock was not in the earlier lock scan.
+            // Existing-directory mtimes are restored by prune; removed paths
+            // do not count as new activity in the retirement comparison.
             // The view no longer holds what went, so removing it later must
             // not count those files again.
             files.forget(&units.removal);
@@ -1716,7 +1828,7 @@ fn collect_with(
     let mut projection = max_bytes.map(|_| ledger.clone());
     let mut remaining = ledger.total();
     let mut selected = HashSet::new();
-    for (record_path, _, updated, files, live, standing, _, _) in &entries {
+    for (record_path, _, updated, files, live, standing, _, _, _) in &entries {
         if !live || expired(*updated, *standing) {
             selected.insert(record_path.clone());
             if let Some(projection) = &mut projection {
@@ -1752,7 +1864,7 @@ fn collect_with(
     }
 
     before_removal();
-    for (record_path, directory, _, files, live, _, updated, untracked) in entries {
+    for (record_path, directory, _, files, live, _, updated, untracked, written) in entries {
         if !selected.contains(&record_path) {
             continue;
         }
@@ -1801,6 +1913,7 @@ fn collect_with(
             while_reserved(&directory);
             Some(reservation)
         };
+        let mut retirement_locks = None;
         if !dry_run {
             let claimed_since = read_view_record(&record_path)
                 .is_some_and(|record| recently_claimed(root, &record, updated, now));
@@ -1811,43 +1924,55 @@ fn collect_with(
             // and an age that cannot be read again is no age: next sweep.
             let changed_since =
                 untracked && newest_modification(&directory).is_none_or(|secs| secs > updated);
-            let in_use = match cargo_locks(&directory) {
-                Ok(locks) => locks.is_none(),
+            before_cargo_locks(&directory);
+            let (in_use, written_since) = match cargo_locks(&directory) {
+                Ok(Some(locks)) => {
+                    retirement_locks = Some(locks);
+                    // Directory mtimes are unaffected by opening Cargo's lock
+                    // files. Read them while the acquired locks exclude builds,
+                    // so a build completing during lock acquisition counts too.
+                    (
+                        false,
+                        !untracked
+                            && (written.1
+                                || crate::target_units::WriteTimes::read(&directory)
+                                    .changed_since(&written.0)),
+                    )
+                }
+                Ok(None) => (true, false),
                 Err(error) => {
                     log::warn!(
                         "could not tell whether {} is in use: {error}",
                         directory.display()
                     );
-                    true
+                    (true, false)
                 }
             };
             // A build that placed it meanwhile has written the record it
             // lacked, and is no longer an orphan to take.
             let recorded_since = untracked && record_path.exists();
-            if claimed_since || in_use || recorded_since || changed_since {
+            if claimed_since || in_use || recorded_since || changed_since || written_since {
                 outcome.kept_active_views += 1;
                 continue;
             }
         }
-        // Moved aside in one step, under the reservation, before its files
-        // go. The record goes under it too: a command that arrives meanwhile
-        // waits in its shared lock, and must find neither the directory nor a
-        // record when it gets through, or the record it then writes could be
-        // the one taken here, leaving its new directory invisible to every
-        // later collection. It waits for no longer than a rename and an
-        // unlink, then places a fresh view, the same as it would after the
-        // removal finished; the directory moved aside is not at any path it
-        // looks at, and its files are deleted after the release so that
-        // command does not wait for the deletion.
-        //
-        // Holding Cargo's lock instead would not keep a build out: unlinking
-        // the lock file frees it, and Cargo simply creates another. Windows
-        // refuses the rename while anything inside is open, which is the same
-        // answer.
+        // Retire and mkdir the replacement under the exclusive reservation.
+        // Keep Cargo locks through this on Unix. Windows forbids renaming a
+        // directory with open files: close our own handles immediately before
+        // the rename, which still refuses a concurrent Cargo writer's handles.
+        // Delete only the renamed tree, never the replacement path.
+        #[cfg(windows)]
+        drop(retirement_locks.take());
+        let mut placeholder_failed = false;
         let aside = if dry_run {
             Ok(None)
         } else {
-            retire_view(&directory).map(Some)
+            retire_with_placeholder(&directory, live && !untracked, |path| {
+                let created = std::fs::create_dir(path);
+                placeholder_failed = created.is_err();
+                created
+            })
+            .map(Some)
         };
         let aside = match aside {
             Ok(aside) => {
@@ -1888,6 +2013,7 @@ fn collect_with(
                 continue;
             }
         };
+        let placeholder = !dry_run && live && !untracked && aside.is_some();
         if !dry_run {
             after_removal();
         }
@@ -1904,6 +2030,7 @@ fn collect_with(
                 || directory.exists());
         if !dry_run
             && !superseded
+            && !placeholder
             && let Err(error) = std::fs::remove_file(&record_path)
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -1912,6 +2039,7 @@ fn collect_with(
                 record_path.display()
             );
         }
+        drop(retirement_locks);
         drop(reservation);
         if let Some(aside) = aside {
             // Each file is credited once it is gone. Should the deletion
@@ -1921,6 +2049,13 @@ fn collect_with(
             // disk until then stays in what remains.
             let removal = crate::disk_usage::remove_measured_tree(&aside, &mut ledger, &files);
             outcome.credit_views(&removal);
+            // A full disk can refuse the placeholder until the old outputs
+            // are gone. Try once more now that they are, but only under a
+            // fresh reservation and while the record still names this
+            // checkout: `mbx clean` may have removed both meanwhile.
+            if placeholder && placeholder_failed {
+                retry_placeholder(&directory, &record_path);
+            }
         }
     }
     outcome.remaining_bytes = ledger.total();
