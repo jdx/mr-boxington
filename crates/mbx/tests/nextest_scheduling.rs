@@ -614,7 +614,14 @@ pub fn observe(name: &str, heavy: bool) {
                 .env("MBX_SCHEDULER_CPUS", "8")
                 .env("MBX_SCHEDULER_MEMORY", "512MiB")
                 .env("MBX_TEST_WEIGHT_LOG", &history_log)
-                .args(["run", "--offline", "-E", &format!("test({name})")])
+                .args([
+                    "run",
+                    "--offline",
+                    "--test-threads",
+                    "8",
+                    "-E",
+                    &format!("test({name})"),
+                ])
                 .output()
                 .unwrap();
             assert!(selected.status.success(), "{}", output_text(&selected));
