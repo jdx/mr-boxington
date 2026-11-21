@@ -320,13 +320,30 @@ const RUN_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// Whether the command is `cargo nextest run`, which lists before it runs.
 fn is_nextest_run(arguments: &[String]) -> bool {
+    // Global options may precede the subcommand, and some take a separate
+    // value (`--profile ci run`), which must not be mistaken for it.
+    const VALUED: [&str; 6] = [
+        "--manifest-path",
+        "--config-file",
+        "--tool-config-file",
+        "--color",
+        "--profile",
+        "-P",
+    ];
     let mut arguments = arguments
         .iter()
-        .take_while(|argument| argument.as_str() != "--")
-        .skip_while(|argument| argument.as_str() != "nextest")
-        .skip(1)
-        .filter(|argument| !argument.starts_with('-'));
-    matches!(arguments.next().map(String::as_str), Some("run" | "r"))
+        .map(String::as_str)
+        .take_while(|argument| *argument != "--")
+        .skip_while(|argument| *argument != "nextest")
+        .skip(1);
+    while let Some(argument) = arguments.next() {
+        if VALUED.contains(&argument) {
+            arguments.next();
+        } else if !argument.starts_with('-') {
+            return matches!(argument, "run" | "r");
+        }
+    }
+    false
 }
 
 /// The number of tests nextest runs at once, when the command line or
@@ -768,6 +785,15 @@ mod tests {
             "--",
             "run"
         ])));
+        assert!(is_nextest_run(&strings(&[
+            "nextest",
+            "--profile",
+            "ci",
+            "--manifest-path",
+            "Cargo.toml",
+            "run"
+        ])));
+        assert!(!is_nextest_run(&strings(&["nextest", "--profile", "run"])));
         assert!(!is_nextest_run(&strings(&["nextest", "list"])));
         assert!(!is_nextest_run(&strings(&["nextest"])));
         assert!(!is_nextest_run(&strings(&["test"])));
