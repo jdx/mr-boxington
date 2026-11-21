@@ -5500,3 +5500,14 @@ fn a_compiler_beneath_a_permit_holder_does_not_ask_for_a_second_permit() {
     );
     drop(outer);
 }
+
+#[test]
+fn a_reserved_slice_ignores_a_waiting_normal_build() {
+    let directory = tempfile::tempdir().unwrap();
+    let low = low_pool_at(directory.path(), 8);
+    std::fs::write(directory.path().join(PRIORITY_WAIT_STAMP), b"").unwrap();
+    assert_eq!(low.reserved(), 2, "the machine pool yields to the waiter");
+
+    let slice = low.within_reservation(directory.path().join("run"), 4, None);
+    assert_eq!(slice.reserved(), 0, "a run's slice does not yield again");
+}

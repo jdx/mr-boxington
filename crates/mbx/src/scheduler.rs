@@ -2788,6 +2788,11 @@ impl Pool {
     }
 
     fn priority_wait_is_fresh(&self) -> bool {
+        // A run's own slice already paid for its capacity on the machine pool;
+        // yielding again inside it would only stall tests the run reserved for.
+        if self.scope.is_some() {
+            return false;
+        }
         std::fs::metadata(self.dir.join(PRIORITY_WAIT_STAMP))
             .and_then(|metadata| metadata.modified())
             .ok()
