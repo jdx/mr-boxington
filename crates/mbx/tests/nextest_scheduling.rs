@@ -891,7 +891,16 @@ pub fn observe(name: &str, heavy: bool) {
             .env("TEST_STARTED", &queued_started)
             .args(["run", "--offline", "-E", "test(quick)"]);
         let mut queued = LoggedChild::spawn(&mut queued, temp.path(), "queued-run");
-        // Longer than the profile's 1s period and its 2s kill.
+        // Start the clock once the run is actually waiting, then hold longer
+        // than the profile's 1s period and its 2s kill.
+        let waiting = Instant::now() + Duration::from_secs(15);
+        while !fs::read_to_string(&queued.stderr)
+            .unwrap_or_default()
+            .contains("before running tests")
+        {
+            assert!(Instant::now() < waiting, "the run never reported waiting");
+            thread::sleep(Duration::from_millis(50));
+        }
         thread::sleep(Duration::from_millis(3500));
         assert!(
             queued.child.try_wait().unwrap().is_none(),
