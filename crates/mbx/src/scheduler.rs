@@ -1622,6 +1622,10 @@ struct TestHistoryRecord {
 /// The machine-wide permit pool one process draws from.
 pub(crate) struct Pool {
     pub(crate) dir: PathBuf,
+    /// Where leases and waiters live when this pool is a slice of another,
+    /// such as the cores a nextest run reserved. History, ledgers and logs
+    /// stay in `dir`.
+    scope: Option<PathBuf>,
     capacity: u64,
     domain_capacity: u64,
     /// The original combined CPU/memory ceiling, written for old readers.
@@ -1956,6 +1960,7 @@ impl Pool {
         let local_memory = crate::util::memory_total_bytes();
         Self {
             dir,
+            scope: None,
             capacity: capacity.max(1),
             domain_capacity: local_ceiling(capacity, 0, local_cpus, None).cpu,
             legacy_domain_capacity: legacy_local_ceiling(
@@ -2167,6 +2172,43 @@ impl Pool {
             eyre::bail!("reserve needs --cpus, --memory, or both")
         }
         Ok(weight)
+    }
+
+    /// The cores, and memory when it is scheduled, to reserve for a nextest
+    /// run that starts `threads` tests at once from `binary`, whose busiest
+    /// recorded test sets how many cores each takes. Never more than the pool
+    /// holds, since a larger reservation would wait forever.
+    pub(crate) fn nextest_run_reservation(&self, binary: &str, threads: u64) -> (u64, Option<u64>) {
+        let path = test_history_path(&self.dir.join(TEST_HISTORY_DIR), binary);
+        let history = lookup_test_history(&path, binary, "");
+        let per_test = if history.header.count > 0 {
+            history.header.maximum.cores.unwrap_or(1).max(1)
+        } else {
+            1
+        };
+        let cpus = threads
+            .max(1)
+            .saturating_mul(per_test)
+            .min(self.capacity)
+            .max(1);
+        (
+            cpus,
+            (self.bytes_per_permit > 0).then(|| cpus.saturating_mul(self.bytes_per_permit)),
+        )
+    }
+
+    /// A pool of `cpus` permits drawn from this process's own reservation,
+    /// whose leases live under `scope` and so never count against the machine.
+    pub(crate) fn within_reservation(&self, scope: PathBuf, cpus: u64) -> Pool {
+        let mut pool = Pool::new(self.dir.clone(), cpus, self.bytes_per_permit, self.priority);
+        pool.scope = Some(scope);
+        pool.events = self.events;
+        pool.pressure = false;
+        pool
+    }
+
+    fn scope_dir(&self) -> &Path {
+        self.scope.as_deref().unwrap_or(&self.dir)
     }
 
     pub(crate) fn reserve(&self, cpus: Option<u64>, memory_bytes: Option<u64>) -> Result<Permit> {
@@ -2451,10 +2493,10 @@ impl Pool {
         demand: Option<&Demand>,
         events: &mut Vec<decisions::Event>,
     ) -> Result<Option<Permit>> {
-        let leases = self.dir.join(LEASES_DIR);
+        let leases = self.scope_dir().join(LEASES_DIR);
         std::fs::create_dir_all(&leases)
             .wrap_err_with(|| format!("failed to create {}", leases.display()))?;
-        let registrar_path = self.dir.join(POOL_LOCK);
+        let registrar_path = self.scope_dir().join(POOL_LOCK);
         let mut registrar = fslock::LockFile::open(&registrar_path)?;
         registrar.lock()?;
         let live = scan_leases(&leases)?;
@@ -2521,7 +2563,7 @@ impl Pool {
             });
             return Ok(None);
         }
-        let waiters = self.dir.join(WAITERS_DIR);
+        let waiters = self.scope_dir().join(WAITERS_DIR);
         std::fs::create_dir_all(&waiters)?;
         let waiting = scan_waiters_logged(&waiters, Some(self), events)?;
         let ticket = state.queued.as_ref().map_or(u64::MAX, |entry| entry.ticket);

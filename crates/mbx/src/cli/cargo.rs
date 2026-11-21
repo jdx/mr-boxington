@@ -666,6 +666,8 @@ fn cargo_with_settings_bypass_log_and_roots(
         };
         Ok((status, stats))
     });
+    // Tests are over; give back whatever a nextest run held for them.
+    drop(test_runner);
     // Finish the build session before the application takes over stderr, but
     // keep the automatic target sweep after it exits: collection must not
     // remove the executable Cargo just selected before we have started it.

@@ -25,6 +25,16 @@ const SHIM: &str = "mbx-test-runner";
 const MIN_CPU_SAMPLE: std::time::Duration = std::time::Duration::from_secs(1);
 /// The [`Overlay`] the shim reads back.
 const RUNNERS: &str = "MBX_TEST_RUNNERS";
+/// The directory a nextest run's shims use to reach the process that holds the
+/// run's reservation. Set only for `cargo nextest run`.
+const RUN_DIR: &str = "MBX_NEXTEST_RUN";
+/// Written by the first listing shim, naming the binary it is listing.
+const RUN_REQUEST: &str = "request";
+/// Written once the run holds its reservation: its tests need no permits.
+const RUN_GRANTED: &str = "granted";
+/// Written when the reservation could not be made: tests ask for permits one
+/// at a time instead.
+const RUN_DECLINED: &str = "declined";
 
 /// What the shim needs from the command that installed it.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -53,6 +63,8 @@ pub(super) struct TestRunner {
     runners: BTreeMap<String, Option<Runner>>,
     project: Option<String>,
     shim: PathBuf,
+    /// The nextest run's reservation, held until this value is dropped.
+    reservation: Option<RunReservation>,
 }
 
 impl TestRunner {
@@ -122,11 +134,13 @@ impl TestRunner {
             SHIM,
             crate::session::ShimLink::Tracking,
         )?;
+        let reservation = RunReservation::start(config, arguments, directory);
         Ok(Some(Self {
             keys,
             runners,
             project: repository_identity(workspace_root),
             shim,
+            reservation,
         }))
     }
 
@@ -155,8 +169,168 @@ impl TestRunner {
             project: self.project.clone(),
         };
         environment.insert(RUNNERS.into(), serde_json::to_string(&overlay)?);
+        if let Some(reservation) = &self.reservation {
+            environment.insert(
+                RUN_DIR.into(),
+                reservation.dir.to_string_lossy().into_owned(),
+            );
+        }
         Ok(())
     }
+}
+
+/// Cores held for one `cargo nextest run`, so its tests never wait for permits.
+///
+/// nextest starts a test's `slow-timeout` clock when it starts the runner, and
+/// nothing a runner does pauses it, so a test that waits for a permit can be
+/// timed out before it starts. nextest lists every test binary, untimed,
+/// before it runs any test. The first listing shim therefore asks this
+/// process, which holds the reservation for the rest of the run, and waits.
+/// Tests then run inside the reservation without asking for permits of their
+/// own.
+struct RunReservation {
+    dir: PathBuf,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl RunReservation {
+    /// `None` unless this is `cargo nextest run` with a pool to draw from.
+    fn start(config: &crate::config::Config, arguments: &[String], session: &Path) -> Option<Self> {
+        if !is_nextest_run(arguments) {
+            return None;
+        }
+        let pool = crate::scheduler::reservation_pool(config, config.scheduler.priority)?;
+        let dir = session.join("nextest-run");
+        std::fs::create_dir_all(&dir).ok()?;
+        let threads = nextest_test_threads(
+            arguments,
+            std::env::var("NEXTEST_TEST_THREADS").ok().as_deref(),
+        )
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism().map_or(1, |count| count.get() as u64)
+        });
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_dir = dir.clone();
+        let thread_stop = stop.clone();
+        std::thread::Builder::new()
+            .name("mbx-nextest-reservation".into())
+            .spawn(move || hold_run_reservation(&pool, &thread_dir, threads, &thread_stop))
+            .ok()?;
+        Some(Self { dir, stop })
+    }
+}
+
+impl Drop for RunReservation {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn hold_run_reservation(
+    pool: &crate::scheduler::Pool,
+    dir: &Path,
+    threads: u64,
+    stop: &std::sync::atomic::AtomicBool,
+) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let binary = loop {
+        if stop.load(SeqCst) {
+            return;
+        }
+        if let Ok(binary) = std::fs::read_to_string(dir.join(RUN_REQUEST)) {
+            break binary;
+        }
+        std::thread::sleep(RUN_POLL);
+    };
+    let (weight, memory) = pool.nextest_run_reservation(&binary, threads);
+    let (admitted, wait) = std::sync::mpsc::channel::<()>();
+    let notice = std::thread::spawn(move || {
+        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = wait.recv_timeout(WAIT_NOTICE) {
+            eprintln!(
+                "mbx: waiting for machine-wide scheduler capacity before running tests; nextest does not time this wait"
+            );
+        }
+    });
+    let permit = pool.reserve(Some(weight), memory);
+    drop(admitted);
+    let _ = notice.join();
+    let outcome = match &permit {
+        Ok(_) if !stop.load(SeqCst) => RUN_GRANTED,
+        _ => RUN_DECLINED,
+    };
+    if let Err(error) = &permit {
+        log::debug!("nextest tests will ask for permits one at a time: {error:#}");
+    }
+    let staged = dir.join(format!("{outcome}.tmp"));
+    if std::fs::write(&staged, weight.to_string()).is_ok() {
+        let _ = std::fs::rename(&staged, dir.join(outcome));
+    }
+    if outcome == RUN_GRANTED {
+        while !stop.load(SeqCst) {
+            std::thread::sleep(RUN_POLL);
+        }
+    }
+    drop(permit);
+}
+
+/// Wait, while nextest lists tests and times nothing, until the run's
+/// reservation is made. Returns at once when there is nobody to ask.
+fn await_run_reservation(dir: &Path, binary: &str) {
+    let staged = dir.join(format!("{RUN_REQUEST}.{}", std::process::id()));
+    if std::fs::write(&staged, binary).is_err()
+        || std::fs::rename(&staged, dir.join(RUN_REQUEST)).is_err()
+    {
+        return;
+    }
+    // The directory goes with the command's session, so a missing one means
+    // nobody is left to answer.
+    while dir.is_dir() && !dir.join(RUN_GRANTED).exists() && !dir.join(RUN_DECLINED).exists() {
+        std::thread::sleep(RUN_POLL);
+    }
+}
+
+/// The cores the run reserved, once it holds them.
+fn reserved_cores(dir: &Path) -> Option<u64> {
+    std::fs::read_to_string(dir.join(RUN_GRANTED))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+const RUN_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Whether the command is `cargo nextest run`, which lists before it runs.
+fn is_nextest_run(arguments: &[String]) -> bool {
+    let mut arguments = arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--")
+        .skip_while(|argument| argument.as_str() != "nextest")
+        .skip(1)
+        .filter(|argument| !argument.starts_with('-'));
+    matches!(arguments.next().map(String::as_str), Some("run" | "r"))
+}
+
+/// The number of tests nextest runs at once, when the command line or
+/// environment says. Its own default, one per CPU, is left to the caller.
+fn nextest_test_threads(arguments: &[String], environment: Option<&str>) -> Option<u64> {
+    let mut stated = None;
+    let mut arguments = arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--")
+        .map(String::as_str);
+    while let Some(argument) = arguments.next() {
+        let value = match argument {
+            "--test-threads" | "-j" => arguments.next(),
+            _ => argument
+                .strip_prefix("--test-threads=")
+                .or_else(|| argument.strip_prefix("-j").filter(|rest| !rest.is_empty())),
+        };
+        if let Some(value) = value {
+            stated = value.parse().ok();
+        }
+    }
+    stated.or_else(|| environment?.parse().ok())
 }
 
 /// Whether a Cargo command line runs test binaries mbx can wrap.
@@ -262,14 +436,37 @@ pub fn dispatch() -> Option<ExitCode> {
             .map_or(suite_demand, |(binary, test)| {
                 Some(crate::scheduler::Demand::nextest(binary, test))
             });
+        // nextest does not time a listing, so the wait for the run's
+        // reservation belongs here rather than in a test's own clock.
+        let run_dir = std::env::var_os(RUN_DIR).map(PathBuf::from);
+        if nextest_phase.as_deref() == Some("list")
+            && let Some(dir) = &run_dir
+            && let Some(binary) = nextest_binary(
+                std::env::var("NEXTEST_BINARY_ID").ok().as_deref(),
+                overlay.project.as_deref(),
+                package.as_deref(),
+                Path::new(&executable),
+            )
+        {
+            await_run_reservation(dir, &binary);
+        }
+        // A test the run's reservation pays for draws from it instead of the
+        // machine, and waits only for the run's own other tests.
+        let reserved = run_dir
+            .as_deref()
+            .filter(|_| nextest_identity.is_some())
+            .and_then(|dir| Some((dir.join("pool"), reserved_cores(dir)?)));
         // Listing a suite starts no tests and costs nothing worth waiting for.
         let permit = demand
             .as_ref()
             .filter(|_| !lists_tests(&rest) && nextest_phase.as_deref() != Some("list"))
             .and_then(|demand| {
                 let pool = crate::scheduler::pool()?;
-                let permit = if nextest_identity.is_some() {
-                    admit_nextest(pool, demand)
+                let permit = if let Some((scope, cores)) = reserved {
+                    let slice = pool.within_reservation(scope, cores);
+                    admit_nextest(&slice, demand, "this run's reserved scheduler capacity")
+                } else if nextest_identity.is_some() {
+                    admit_nextest(pool, demand, "machine-wide scheduler capacity")
                 } else {
                     pool.admit(demand)
                 }?;
@@ -440,15 +637,29 @@ fn nextest_test_identity(input: NextestIdentityInput<'_>) -> Option<(String, Str
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
         .or_else(|| exact_test_name(input.arguments))?;
-    let binary = input
-        .binary_id
-        .filter(|id| !id.is_empty())
-        .map(|id| ledger_name(input.project, None, id))
-        .or_else(|| {
-            let name = test_binary_name(input.executable)?;
-            Some(ledger_name(input.project, input.package, &name))
-        })?;
+    let binary = nextest_binary(
+        input.binary_id,
+        input.project,
+        input.package,
+        input.executable,
+    )?;
     Some((binary, test))
+}
+
+/// What a nextest test binary's history is remembered under.
+fn nextest_binary(
+    binary_id: Option<&str>,
+    project: Option<&str>,
+    package: Option<&str>,
+    executable: &Path,
+) -> Option<String> {
+    binary_id
+        .filter(|id| !id.is_empty())
+        .map(|id| ledger_name(project, None, id))
+        .or_else(|| {
+            let name = test_binary_name(executable)?;
+            Some(ledger_name(project, package, &name))
+        })
 }
 
 fn exact_test_name(arguments: &[OsString]) -> Option<String> {
@@ -472,9 +683,10 @@ const WAIT_NOTICE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Admit one nextest test, saying so on stderr when it has to wait.
 ///
-/// nextest starts a test's slow-timeout and terminate-after clocks when it
-/// starts this shim, so the wait for permits counts as test time, and nothing
-/// a runner can do pauses those clocks. nextest captures the test's stderr
+/// This is the fallback for a run without a reservation (see
+/// [`RunReservation`]): nextest starts a test's slow-timeout and
+/// terminate-after clocks when it starts this shim, so the wait for permits
+/// counts as test time, and nothing a runner can do pauses those clocks. nextest captures the test's stderr
 /// and shows it beside a SLOW, TIMEOUT or failure report, so a test killed
 /// while it was still queued says so instead of looking like it hung. The
 /// notice is printed while the wait is still going, because the kill
@@ -482,13 +694,15 @@ const WAIT_NOTICE: std::time::Duration = std::time::Duration::from_secs(1);
 fn admit_nextest(
     pool: &crate::scheduler::Pool,
     demand: &crate::scheduler::Demand,
+    capacity: &str,
 ) -> Option<crate::scheduler::Permit> {
+    let capacity = capacity.to_owned();
     let (admitted, wait) = std::sync::mpsc::channel::<()>();
     let notice = std::thread::spawn(move || {
         // Admission ends the wait by dropping the sender, which disconnects.
         if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = wait.recv_timeout(WAIT_NOTICE) {
             eprintln!(
-                "mbx: waiting for machine-wide scheduler capacity before starting this test; nextest counts this wait toward its slow-timeout"
+                "mbx: waiting for {capacity} before starting this test; nextest counts this wait toward its slow-timeout"
             );
         }
     });
@@ -516,6 +730,65 @@ mod tests {
 
     fn os(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn only_nextest_run_holds_a_reservation() {
+        assert!(is_nextest_run(&strings(&["nextest", "run"])));
+        assert!(is_nextest_run(&strings(&[
+            "nextest",
+            "r",
+            "--no-fail-fast"
+        ])));
+        assert!(is_nextest_run(&strings(&[
+            "--color", "always", "nextest", "run"
+        ])));
+        assert!(is_nextest_run(&strings(&[
+            "nextest",
+            "--verbose",
+            "run",
+            "--",
+            "run"
+        ])));
+        assert!(!is_nextest_run(&strings(&["nextest", "list"])));
+        assert!(!is_nextest_run(&strings(&["nextest"])));
+        assert!(!is_nextest_run(&strings(&["test"])));
+        assert!(!is_nextest_run(&strings(&["nextest", "list", "--", "run"])));
+    }
+
+    #[test]
+    fn nextest_test_threads_reads_flags_then_environment() {
+        assert_eq!(
+            nextest_test_threads(&strings(&["nextest", "run"]), None),
+            None
+        );
+        assert_eq!(
+            nextest_test_threads(&strings(&["nextest", "run", "--test-threads", "4"]), None),
+            Some(4)
+        );
+        assert_eq!(
+            nextest_test_threads(&strings(&["nextest", "run", "--test-threads=3"]), Some("8")),
+            Some(3)
+        );
+        assert_eq!(
+            nextest_test_threads(&strings(&["nextest", "run", "-j", "2"]), None),
+            Some(2)
+        );
+        assert_eq!(
+            nextest_test_threads(&strings(&["nextest", "run", "-j6"]), None),
+            Some(6)
+        );
+        assert_eq!(
+            nextest_test_threads(&strings(&["nextest", "run"]), Some("5")),
+            Some(5)
+        );
+        assert_eq!(
+            nextest_test_threads(
+                &strings(&["nextest", "run", "--", "--test-threads", "9"]),
+                None
+            ),
+            None
+        );
     }
 
     #[test]
