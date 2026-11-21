@@ -421,6 +421,32 @@ fn a_target_triple_the_donor_built_is_seeded_too() {
 }
 
 #[test]
+fn a_nested_target_directory_in_the_donor_is_not_mirrored() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    unit(&from.path().join("debug"), "serde", "0123456789abcdef");
+    // `cargo build --target-dir target/nested`: Cargo tags the directory it
+    // creates, which a target triple directory never carries.
+    let nested = from.path().join("nested");
+    unit(&nested.join("debug"), "serde", "fedcba9876543210");
+    std::fs::write(
+        nested.join("CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55",
+    )
+    .unwrap();
+
+    let outcome = seed(
+        to.path(),
+        &[PathBuf::from("debug")],
+        &registry(),
+        &[donor(from.path())],
+    );
+
+    assert_eq!(outcome.units, 1);
+    assert!(!to.path().join("nested").exists());
+}
+
+#[test]
 fn a_lane_is_seeded_from_the_same_lane_in_the_donor() {
     let from = tempfile::tempdir().unwrap();
     let to = tempfile::tempdir().unwrap();
