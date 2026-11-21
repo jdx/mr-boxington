@@ -239,8 +239,8 @@ mod unix {
         cache.join("scheduler/leases")
     }
 
-    fn lease_files(cache: &Path) -> Vec<PathBuf> {
-        fs::read_dir(lease_dir(cache))
+    fn lease_files(directory: &Path) -> Vec<PathBuf> {
+        fs::read_dir(directory)
             .map(|entries| {
                 entries
                     .flatten()
@@ -256,7 +256,11 @@ mod unix {
     }
 
     fn locked_lease_files(cache: &Path) -> Vec<PathBuf> {
-        lease_files(cache)
+        locked_files_in(&lease_dir(cache))
+    }
+
+    fn locked_files_in(directory: &Path) -> Vec<PathBuf> {
+        lease_files(directory)
             .into_iter()
             .filter(|path| {
                 let Ok(file) = File::open(path) else {
@@ -840,6 +844,9 @@ pub fn observe(name: &str, heavy: bool) {
 }
 #[test] fn signal_hold() {
     let marker = std::env::var_os("TEST_STARTED").unwrap();
+    let mut run = marker.clone();
+    run.push(".run");
+    std::fs::write(run, std::env::var("MBX_NEXTEST_RUN").unwrap()).unwrap();
     std::fs::write(marker, std::process::id().to_string()).unwrap();
     loop { std::thread::sleep(std::time::Duration::from_secs(1)); }
 }
@@ -920,7 +927,16 @@ pub fn observe(name: &str, heavy: bool) {
         signal.process_group(0);
         let mut signal = signal.spawn().unwrap();
         wait_for(&signal_started, Duration::from_secs(5));
-        let active_leases = locked_lease_files(&cache);
+        // The run holds one machine lease; the test's own is drawn from it.
+        assert_eq!(
+            locked_lease_files(&cache).len(),
+            1,
+            "expected one machine lease for the run"
+        );
+        let run_pool =
+            PathBuf::from(fs::read_to_string(signal_started.with_extension("run")).unwrap())
+                .join("pool/leases");
+        let active_leases = locked_files_in(&run_pool);
         assert_eq!(active_leases.len(), 1, "expected one active test lease");
         let test_runner = active_leases[0]
             .file_name()
@@ -956,8 +972,10 @@ pub fn observe(name: &str, heavy: bool) {
         while Instant::now() < lease_deadline && !all_leases_are_lockable(&cache) {
             thread::sleep(Duration::from_millis(25));
         }
-        let leases_clear_after_signal = all_leases_are_lockable(&cache);
-        let live_after_signal = locked_lease_files(&cache);
+        let leases_clear_after_signal =
+            all_leases_are_lockable(&cache) && locked_files_in(&run_pool).is_empty();
+        let mut live_after_signal = locked_lease_files(&cache);
+        live_after_signal.extend(locked_files_in(&run_pool));
 
         // If cancellation failed, terminate the isolated fixture groups after
         // saving the state the regression assertion needs to report.

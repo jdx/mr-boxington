@@ -2175,33 +2175,62 @@ impl Pool {
     }
 
     /// The cores, and memory when it is scheduled, to reserve for a nextest
-    /// run that starts `threads` tests at once from `binary`, whose busiest
-    /// recorded test sets how many cores each takes. Never more than the pool
-    /// holds, since a larger reservation would wait forever.
+    /// run that starts `threads` tests at once from `binary`. Each test is
+    /// sized by the busiest recorded test of the binary, or one core and two
+    /// memory shares when nothing is recorded, as an unmeasured test is
+    /// charged. Never more than the pool holds, since a larger reservation
+    /// would wait forever.
     pub(crate) fn nextest_run_reservation(&self, binary: &str, threads: u64) -> (u64, Option<u64>) {
         let path = test_history_path(&self.dir.join(TEST_HISTORY_DIR), binary);
         let history = lookup_test_history(&path, binary, "");
-        let per_test = if history.header.count > 0 {
-            history.header.maximum.cores.unwrap_or(1).max(1)
-        } else {
-            1
-        };
-        let cpus = threads
-            .max(1)
-            .saturating_mul(per_test)
-            .min(self.capacity)
+        let recorded = (history.header.count > 0).then_some(history.header.maximum);
+        let threads = threads.max(1);
+        let cores = recorded
+            .and_then(|measurement| measurement.cores)
+            .unwrap_or(1)
             .max(1);
-        (
-            cpus,
-            (self.bytes_per_permit > 0).then(|| cpus.saturating_mul(self.bytes_per_permit)),
-        )
+        let cpus = threads.saturating_mul(cores).min(self.capacity).max(1);
+        let memory = (self.bytes_per_permit > 0).then(|| {
+            let shares = recorded
+                .and_then(|measurement| measurement.peak)
+                .map_or(2, |peak| peak.div_ceil(self.bytes_per_permit).max(1));
+            let ceiling = if self.memory_capacity > 0 {
+                self.memory_capacity
+            } else {
+                self.capacity.saturating_mul(self.bytes_per_permit)
+            };
+            threads
+                .saturating_mul(shares)
+                .saturating_mul(self.bytes_per_permit)
+                .min(ceiling)
+        });
+        (cpus, memory)
     }
 
-    /// A pool of `cpus` permits drawn from this process's own reservation,
-    /// whose leases live under `scope` and so never count against the machine.
-    pub(crate) fn within_reservation(&self, scope: PathBuf, cpus: u64) -> Pool {
-        let mut pool = Pool::new(self.dir.clone(), cpus, self.bytes_per_permit, self.priority);
+    /// A pool drawn from this process's own reservation of `cpus` cores and
+    /// `memory` bytes, whose leases live under `scope` and so never count
+    /// against the machine.
+    pub(crate) fn within_reservation(
+        &self,
+        scope: PathBuf,
+        cpus: u64,
+        memory: Option<u64>,
+    ) -> Pool {
+        let permits = match memory {
+            Some(memory) if self.bytes_per_permit > 0 => {
+                cpus.max(memory.div_ceil(self.bytes_per_permit))
+            }
+            _ => cpus,
+        };
+        let mut pool = Pool::new(
+            self.dir.clone(),
+            permits,
+            self.bytes_per_permit,
+            self.priority,
+        );
         pool.scope = Some(scope);
+        pool.domain_capacity = cpus.min(pool.capacity);
+        pool.set_memory_capacity(memory.unwrap_or(0));
         pool.events = self.events;
         pool.pressure = false;
         pool

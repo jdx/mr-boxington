@@ -35,6 +35,8 @@ const RUN_GRANTED: &str = "granted";
 /// Written when the reservation could not be made: tests ask for permits one
 /// at a time instead.
 const RUN_DECLINED: &str = "declined";
+/// Locked by the process that answers requests, for as long as it can.
+const RUN_ALIVE: &str = "alive.lock";
 
 /// What the shim needs from the command that installed it.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -209,12 +211,19 @@ impl RunReservation {
         .unwrap_or_else(|| {
             std::thread::available_parallelism().map_or(1, |count| count.get() as u64)
         });
+        // Held for as long as the thread can still answer, so a shim waiting
+        // for it can tell when no answer is coming.
+        let mut alive = fslock::LockFile::open(&dir.join(RUN_ALIVE)).ok()?;
+        alive.lock().ok()?;
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let thread_dir = dir.clone();
         let thread_stop = stop.clone();
         std::thread::Builder::new()
             .name("mbx-nextest-reservation".into())
-            .spawn(move || hold_run_reservation(&pool, &thread_dir, threads, &thread_stop))
+            .spawn(move || {
+                hold_run_reservation(&pool, &thread_dir, threads, &thread_stop);
+                drop(alive);
+            })
             .ok()?;
         Some(Self { dir, stop })
     }
@@ -262,10 +271,13 @@ fn hold_run_reservation(
         log::debug!("nextest tests will ask for permits one at a time: {error:#}");
     }
     let staged = dir.join(format!("{outcome}.tmp"));
-    if std::fs::write(&staged, weight.to_string()).is_ok() {
-        let _ = std::fs::rename(&staged, dir.join(outcome));
-    }
-    if outcome == RUN_GRANTED {
+    let answer = format!("{} {}", weight, memory.unwrap_or(0));
+    let published = std::fs::write(&staged, answer).is_ok()
+        && std::fs::rename(&staged, dir.join(outcome)).is_ok();
+    // Nobody can be told about a reservation they will not use, so give it
+    // back rather than hold it until the command ends. A shim still waiting
+    // sees the lock go and runs its tests unreserved.
+    if outcome == RUN_GRANTED && published {
         while !stop.load(SeqCst) {
             std::thread::sleep(RUN_POLL);
         }
@@ -282,20 +294,26 @@ fn await_run_reservation(dir: &Path, binary: &str) {
     {
         return;
     }
-    // The directory goes with the command's session, so a missing one means
-    // nobody is left to answer.
+    // The directory goes with the command's session, and the lock with the
+    // thread that answers, so either gone means nobody is left to answer.
+    let Ok(mut alive) = fslock::LockFile::open(&dir.join(RUN_ALIVE)) else {
+        return;
+    };
     while dir.is_dir() && !dir.join(RUN_GRANTED).exists() && !dir.join(RUN_DECLINED).exists() {
+        if alive.try_lock().unwrap_or(true) {
+            return;
+        }
         std::thread::sleep(RUN_POLL);
     }
 }
 
-/// The cores the run reserved, once it holds them.
-fn reserved_cores(dir: &Path) -> Option<u64> {
-    std::fs::read_to_string(dir.join(RUN_GRANTED))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+/// The cores and memory the run reserved, once it holds them.
+fn reserved_capacity(dir: &Path) -> Option<(u64, Option<u64>)> {
+    let answer = std::fs::read_to_string(dir.join(RUN_GRANTED)).ok()?;
+    let mut fields = answer.split_whitespace();
+    let cores = fields.next()?.parse().ok()?;
+    let memory: u64 = fields.next()?.parse().ok()?;
+    Some((cores, (memory > 0).then_some(memory)))
 }
 
 const RUN_POLL: std::time::Duration = std::time::Duration::from_millis(20);
@@ -455,15 +473,15 @@ pub fn dispatch() -> Option<ExitCode> {
         let reserved = run_dir
             .as_deref()
             .filter(|_| nextest_identity.is_some())
-            .and_then(|dir| Some((dir.join("pool"), reserved_cores(dir)?)));
+            .and_then(|dir| Some((dir.join("pool"), reserved_capacity(dir)?)));
         // Listing a suite starts no tests and costs nothing worth waiting for.
         let permit = demand
             .as_ref()
             .filter(|_| !lists_tests(&rest) && nextest_phase.as_deref() != Some("list"))
             .and_then(|demand| {
                 let pool = crate::scheduler::pool()?;
-                let permit = if let Some((scope, cores)) = reserved {
-                    let slice = pool.within_reservation(scope, cores);
+                let permit = if let Some((scope, (cores, memory))) = reserved {
+                    let slice = pool.within_reservation(scope, cores, memory);
                     admit_nextest(&slice, demand, "this run's reserved scheduler capacity")
                 } else if nextest_identity.is_some() {
                     admit_nextest(pool, demand, "machine-wide scheduler capacity")
