@@ -193,6 +193,7 @@ pub(crate) fn compile(
     arguments: &[OsString],
     wrapper_argument: Option<&OsStr>,
 ) -> Result<ExitCode> {
+    let cargo_arguments = arguments;
     let setup = crate::phase_timing::phase("key");
     let working_dir = std::env::current_dir()?;
     // The orchestrated session supplies the target root. A persistent wrapper
@@ -223,17 +224,19 @@ pub(crate) fn compile(
     let initial_invocation = RustcInvocation::parse_with(arguments, options)?;
     // Keep Cargo's original OUT_DIR: stabilization moves generated sources to
     // a content-addressed tree that has no Cargo-recorded build-script stdout.
+    let cargo_out_dir = std::env::var_os("OUT_DIR");
     let build_script_inputs = if session::is_cargo_build_script(initial_invocation.crate_name())
         && session::compiles_only_a_binary(scanned)
     {
         None
     } else {
-        std::env::var_os("OUT_DIR")
+        cargo_out_dir
+            .as_deref()
             .map(|out_dir| {
                 let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
                     .ok_or_else(|| eyre::eyre!("OUT_DIR has no CARGO_MANIFEST_DIR"))?;
                 crate::build_script::CompilationInputs::for_package(
-                    Path::new(&out_dir),
+                    Path::new(out_dir),
                     Path::new(&manifest_dir),
                 )
             })
@@ -242,7 +245,16 @@ pub(crate) fn compile(
     };
     // Before the key, remapping, or compiler reads OUT_DIR, decide which
     // generated tree this compilation will use.
-    crate::out_dir::stabilize_for(initial_invocation.source());
+    let retry_out_dir = crate::out_dir::stabilize_for(initial_invocation.source())
+        .filter(|_| {
+            // Proc macros can be re-exported by an ordinary rlib, as in
+            // Tauri. Requiring a direct dynamic-library extern misses them.
+            scanned.iter().any(|arg| {
+                arg.to_str()
+                    .is_some_and(|arg| arg == "--extern" || arg.starts_with("--extern="))
+            })
+        })
+        .and(cargo_out_dir);
     let initial_outputs = initial_invocation.outputs(&working_dir)?;
     let mut portable = Portable::detect(
         &working_dir,
@@ -681,7 +693,10 @@ pub(crate) fn compile(
             return Ok(ExitCode::FAILURE);
         }
     }
-    let forwarded = session::forward_compiler_notifications_requested();
+    // Keep speculative notifications and diagnostics away from Cargo until
+    // we know whether it needs a retry. A proc macro may need a writable
+    // OUT_DIR, but the shared snapshot must stay read-only.
+    let forwarded = retry_out_dir.is_none() && session::forward_compiler_notifications_requested();
     // An earlier hit may have linked these very paths to the store's objects,
     // which are read-only so that nothing rewrites them in place. rustc would
     // refuse them rather than overwrite them.
@@ -704,6 +719,52 @@ pub(crate) fn compile(
         run_compiler(&mut command, forwarded, eligible, &portable.mappings)
     })
     .wrap_err("failed to execute rustc")?;
+    if let Some(original) = retry_out_dir
+        && shared_out_dir_write_failed(&output)
+    {
+        let mut retry = compiler_command(rustc, wrapper_argument);
+        // None of the portable arguments, incremental state, or cache
+        // bookkeeping for the shared tree may be used for the retry. Keep
+        // rustc's generated files in Cargo's tree and never publish them.
+        retry
+            .args(cargo_arguments)
+            .current_dir(&working_dir)
+            .env("OUT_DIR", original);
+        if let Some(permit) = &permit {
+            permit.mark_held(&mut retry);
+        }
+        let retried = crate::phase_timing::measure("compiler", || {
+            run_compiler(&mut retry, false, eligible, &[])
+        });
+        drop(permit);
+        let final_output = match &retried {
+            Ok(result) if result.status.success() || result.status.code().is_none() => result,
+            // Preserve the primary diagnostic if writable OUT_DIR did not
+            // help. Do not expose speculative artifacts from either attempt.
+            _ => &output,
+        };
+        crate::scheduler::record_compiler_memory(&demand, &final_output.status);
+        session::record_compiler_invocation_with_metadata(
+            "bypass",
+            Some(invocation.crate_name()),
+            compiler_timer
+                .elapsed()
+                .as_nanos()
+                .try_into()
+                .unwrap_or(u64::MAX),
+            None,
+            Some(CompileMetadata {
+                unit_kind,
+                skip_reason: Some("shared-out-dir-write".into()),
+                ..Default::default()
+            }),
+        );
+        if let Some(objects) = objects.take() {
+            objects.remove_superseded(&final_output.status);
+        }
+        replay_output(final_output)?;
+        return Ok(exit_code(final_output.status));
+    }
     // Released before the outputs are read back and published: hashing and
     // storing cost I/O, not the CPU and memory the permit stands for.
     drop(permit);
@@ -1021,6 +1082,48 @@ pub(crate) fn compile(
         }
         Ok(exit_code(output.status))
     }
+}
+
+/// Do not rerun ordinary compiler errors or cancelled compilations. Most
+/// macros preserve the underlying filesystem error in their diagnostic; Tauri
+/// calls the same error a missing OUT_DIR, which we know was supplied.
+fn shared_out_dir_write_failed(output: &Output) -> bool {
+    if output.status.code() != Some(1) {
+        return false;
+    }
+    let mut write_error = false;
+    for line in output.stderr.split(|byte| *byte == b'\n') {
+        let Ok(diagnostic) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        if diagnostic["level"] != "error" {
+            continue;
+        }
+        let message = diagnostic["message"].as_str().unwrap_or_default();
+        if message.starts_with("aborting due to ") {
+            continue;
+        }
+        let from_macro = diagnostic["spans"]
+            .as_array()
+            .is_some_and(|spans| spans.iter().any(|span| !span["expansion"].is_null()));
+        let mentions_write_denial = [
+            "Permission denied",
+            "Access is denied",
+            "Read-only file system",
+        ]
+        .iter()
+        .any(|error| message.contains(error));
+        if diagnostic["code"].is_null()
+            && (message == "OUT_DIR env var is not set, do you have a build script?"
+                || (from_macro && mentions_write_denial))
+        {
+            write_error = true;
+        } else {
+            // A writable directory cannot fix a second, unrelated error.
+            return false;
+        }
+    }
+    write_error
 }
 
 /// Run the compiler and capture both of its streams, forwarding each line to
