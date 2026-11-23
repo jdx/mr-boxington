@@ -3,6 +3,9 @@
 //! Each test drives the real binary over a throwaway project with no
 //! dependencies, so nothing here needs the network.
 
+// filetime deprecates these for std::fs::set_times, which needs Rust 1.99; the MSRV is 1.91.
+#![allow(deprecated)]
+
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
