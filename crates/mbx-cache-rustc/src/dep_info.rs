@@ -1243,6 +1243,13 @@ mod tests {
         // source changes while it runs.
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&generated, "// generated\n").unwrap();
+        // Far beyond any fixed offset from the start time.
+        std::fs::File::options()
+            .write(true)
+            .open(&generated)
+            .unwrap()
+            .set_modified(SystemTime::now() + std::time::Duration::from_secs(30 * 86_400))
+            .unwrap();
         std::fs::write(&source, "pub fn library() {1}\n").unwrap();
         let dep_info = RustcDepInfo::parse(&format!(
             "output: {} {}\n",
