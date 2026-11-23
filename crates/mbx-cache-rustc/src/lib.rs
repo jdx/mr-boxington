@@ -384,6 +384,10 @@ enum Argument {
     /// link invokes. Modeled for native links only, where the linker identity
     /// probe resolves and pins the linker it names.
     FuseLd(String),
+    /// A `-Wl,-rpath,<absolute dir>` handed to ld64, which records the
+    /// directory as an `LC_RPATH` load command and never searches it while
+    /// linking. The text is therefore the whole input and is keyed as written.
+    Rpath(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1817,6 +1821,17 @@ impl<'a> Parser<'a> {
             self.parsed.push(Argument::InstallName(option.to_owned()));
             return Ok(());
         }
+        // An absolute rpath is only recorded in the output. Relative and
+        // `@`-prefixed entries, and several options in one argument, stay
+        // unmodeled text.
+        if name == "link-arg"
+            && let Some(directory) = value.strip_prefix("link-arg=-Wl,-rpath,")
+            && directory.starts_with('/')
+            && !directory.contains(',')
+        {
+            self.parsed.push(Argument::Rpath(directory.to_owned()));
+            return Ok(());
+        }
         // `-oso_prefix` names a checkout-specific path, so it is parsed
         // rather than keyed as text: the path normalizes like every other
         // path in the key, which is what lets two checkouts passing their own
@@ -2079,6 +2094,26 @@ impl<'a> Parser<'a> {
         {
             return Err(BypassReason::UnmodeledLinkArgument(
                 "link-arg=-Wl,-install_name".into(),
+            ));
+        }
+        // ld64 never searches an rpath directory while linking, so the
+        // argument is modeled only for a native macOS link. GNU ld searches
+        // it for a shared object's own dependencies, which the key cannot see.
+        if self
+            .parsed
+            .iter()
+            .any(|argument| matches!(argument, Argument::Rpath(_)))
+            && !(link_output == LinkOutput::Library
+                || cfg!(target_os = "macos")
+                    && matches!(
+                        link_output,
+                        LinkOutput::NativeExecutable
+                            | LinkOutput::NativeProcMacro
+                            | LinkOutput::NativeSharedLibrary
+                    ))
+        {
+            return Err(BypassReason::UnmodeledLinkArgument(
+                "link-arg=-Wl,-rpath".into(),
             ));
         }
         // `-fuse-ld` is modeled only for native links, where the linker
@@ -2623,6 +2658,8 @@ impl<'a> ActionBuilder<'a> {
                 if *trailing_slash { "/" } else { "" }
             )),
             Argument::FuseLd(selection) => Ok(format!("--codegen=link-arg=-fuse-ld={selection}")),
+            // Keyed as written: the directory is only recorded in the output.
+            Argument::Rpath(directory) => Ok(format!("--codegen=link-arg=-Wl,-rpath,{directory}")),
         }
     }
 

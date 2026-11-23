@@ -5933,7 +5933,8 @@ fn a_build_sweeps_the_store_to_its_budget() {
     );
 
     assert!(
-        stderr.contains("mbx[gc]: evicted"),
+        stderr.contains("mbx[gc]: an earlier background collection (finished ")
+            && stderr.contains("): evicted"),
         "the next build should say what the sweep evicted: {stderr}"
     );
     assert!(
@@ -9597,4 +9598,78 @@ fn retired_seed_setting_keeps_the_same_private_history() {
         1,
         "the retired setting must not change unit identity"
     );
+}
+
+/// A damaged shared tree must not poison a compilation in a new checkout.
+#[test]
+fn damaged_shared_out_dir_falls_back_in_a_second_checkout() {
+    for damage in ["missing", "truncated"] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path().join("store");
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        let settings = [
+            ("MBX_TARGET_VIEWS", "0"),
+            ("MBX_BUILD_SCRIPT_EXECUTION", "0"),
+        ];
+        for project in [&first, &second] {
+            write_generated_project(project, Generated::Include);
+            std::fs::write(project.join("src/main.rs"), "fn main() { assert_eq!(fixture::value(), 7); println!(\"{}\", fixture::value()); }\n").unwrap();
+        }
+        build_with(
+            &first,
+            &store,
+            &directory.path().join("first.json"),
+            &settings,
+        );
+        let shared = find_files(&store.join("out-dirs/v1"), |path| {
+            path.file_name().is_some_and(|name| name == "generated.rs")
+        });
+        assert_eq!(shared.len(), 1, "fixture must actually share OUT_DIR");
+        let generated = &shared[0];
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            generated.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        #[cfg(windows)]
+        {
+            let mut permissions = std::fs::metadata(generated).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            std::fs::set_permissions(generated, permissions).unwrap();
+        }
+        std::fs::remove_file(generated).unwrap();
+        if damage == "truncated" {
+            std::fs::write(generated, "pub const VALUE: u32 = 0;").unwrap();
+        }
+        build_with(
+            &second,
+            &store,
+            &directory.path().join("second.json"),
+            &settings,
+        );
+        let output = Command::new(
+            second
+                .join("target/debug")
+                .join(format!("fixture{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .output()
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"7\n");
+        if damage == "missing" {
+            assert!(!generated.exists(), "leave damaged shared tree untouched");
+        } else {
+            assert_eq!(
+                std::fs::read_to_string(generated).unwrap(),
+                "pub const VALUE: u32 = 0;"
+            );
+        }
+    }
 }

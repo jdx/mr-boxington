@@ -5688,3 +5688,14 @@ fn a_reserve_comes_off_the_processs_own_cpus_as_well_as_the_pool() {
     assert!(env.contains(&(SCHED_BUILD_SLOTS_ENV.into(), "1".into())));
     assert!(env.contains(&(SCHED_SLOT_BYTES_ENV.into(), memory.to_string())));
 }
+
+#[test]
+fn a_reserved_slice_ignores_a_waiting_normal_build() {
+    let directory = tempfile::tempdir().unwrap();
+    let low = low_pool_at(directory.path(), 8);
+    std::fs::write(directory.path().join(PRIORITY_WAIT_STAMP), b"").unwrap();
+    assert_eq!(low.reserved(), 2, "the machine pool yields to the waiter");
+
+    let slice = low.within_reservation(directory.path().join("run"), 4, None);
+    assert_eq!(slice.reserved(), 0, "a run's slice does not yield again");
+}

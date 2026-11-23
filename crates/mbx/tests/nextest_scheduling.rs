@@ -239,8 +239,8 @@ mod unix {
         cache.join("scheduler/leases")
     }
 
-    fn lease_files(cache: &Path) -> Vec<PathBuf> {
-        fs::read_dir(lease_dir(cache))
+    fn lease_files(directory: &Path) -> Vec<PathBuf> {
+        fs::read_dir(directory)
             .map(|entries| {
                 entries
                     .flatten()
@@ -256,7 +256,11 @@ mod unix {
     }
 
     fn locked_lease_files(cache: &Path) -> Vec<PathBuf> {
-        lease_files(cache)
+        locked_files_in(&lease_dir(cache))
+    }
+
+    fn locked_files_in(directory: &Path) -> Vec<PathBuf> {
+        lease_files(directory)
             .into_iter()
             .filter(|path| {
                 let Ok(file) = File::open(path) else {
@@ -502,8 +506,13 @@ pub fn observe(name: &str, heavy: bool) {
     assert_eq!(std::env::var("MBX_SCHED_DIR").unwrap(), "");
     assert_eq!(std::env::var("MBX_CONTROL_CHILD").unwrap(), "1");
     let cache = std::path::PathBuf::from(std::env::var_os("MBX_CACHE_DIR").unwrap());
-    let leases = std::fs::read_dir(cache.join("scheduler/leases")).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-    assert_eq!(leases.len(), 1, "only this test should hold a lease: {leases:?}");
+    // The run holds one reservation on the machine; this test's own lease
+    // is drawn from it.
+    let machine = std::fs::read_dir(cache.join("scheduler/leases")).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(machine.len(), 1, "only the run's reservation should hold a machine lease: {machine:?}");
+    let run = std::path::PathBuf::from(std::env::var_os("MBX_NEXTEST_RUN").unwrap());
+    let leases = std::fs::read_dir(run.join("pool/leases")).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(leases.len(), 1, "only this test should hold a lease in the run: {leases:?}");
     let lease = std::fs::read_to_string(leases[0].path()).unwrap();
     let weight = lease.split("\"weight\":").nth(1).unwrap().split(|ch: char| !ch.is_ascii_digit()).next().unwrap();
     let mut file = OpenOptions::new().create(true).append(true).open(std::env::var_os("MBX_TEST_WEIGHT_LOG").unwrap()).unwrap();
@@ -605,7 +614,14 @@ pub fn observe(name: &str, heavy: bool) {
                 .env("MBX_SCHEDULER_CPUS", "8")
                 .env("MBX_SCHEDULER_MEMORY", "512MiB")
                 .env("MBX_TEST_WEIGHT_LOG", &history_log)
-                .args(["run", "--offline", "-E", &format!("test({name})")])
+                .args([
+                    "run",
+                    "--offline",
+                    "--test-threads",
+                    "8",
+                    "-E",
+                    &format!("test({name})"),
+                ])
                 .output()
                 .unwrap();
             assert!(selected.status.success(), "{}", output_text(&selected));
@@ -830,8 +846,14 @@ pub fn observe(name: &str, heavy: bool) {
     if let Some(path) = std::env::var_os("TEST_STARTED") { std::fs::write(path, "started").unwrap(); }
     std::thread::sleep(std::time::Duration::from_secs(60));
 }
+#[test] fn quick() {
+    if let Some(path) = std::env::var_os("TEST_STARTED") { std::fs::write(path, "started").unwrap(); }
+}
 #[test] fn signal_hold() {
     let marker = std::env::var_os("TEST_STARTED").unwrap();
+    let mut run = marker.clone();
+    run.push(".run");
+    std::fs::write(run, std::env::var("MBX_NEXTEST_RUN").unwrap()).unwrap();
     std::fs::write(marker, std::process::id().to_string()).unwrap();
     loop { std::thread::sleep(std::time::Duration::from_secs(1)); }
 }
@@ -860,32 +882,50 @@ pub fn observe(name: &str, heavy: bool) {
         );
         assert_no_live_leases(&cache, "after nextest timeout");
 
+        // A full pool holds the run back while nextest lists, which nextest
+        // does not time, so a test is never timed out before it starts.
         let mut reservation = Reservation::start(temp.path(), &cache, 2, "queued-reservation");
         let queued_started = temp.path().join("queued-started");
         let mut queued = nextest(&root, &cache);
         queued
             .env("TEST_STARTED", &queued_started)
-            .args(["run", "--offline", "-E", "test(hangs)"]);
-        let queued = LoggedChild::spawn(&mut queued, temp.path(), "queued-timeout");
-        let (status, output) = queued.wait(Duration::from_secs(8));
+            .args(["run", "--offline", "-E", "test(quick)"]);
+        let mut queued = LoggedChild::spawn(&mut queued, temp.path(), "queued-run");
+        // Start the clock once the run is actually waiting, then hold longer
+        // than the profile's 1s period and its 2s kill.
+        let waiting = Instant::now() + Duration::from_secs(15);
+        while !fs::read_to_string(&queued.stderr)
+            .unwrap_or_default()
+            .contains("before running tests")
+        {
+            assert!(Instant::now() < waiting, "the run never reported waiting");
+            thread::sleep(Duration::from_millis(50));
+        }
+        thread::sleep(Duration::from_millis(3500));
         assert!(
-            !status.success(),
-            "queued test unexpectedly passed: {output}"
+            queued.child.try_wait().unwrap().is_none(),
+            "the run did not wait for the full pool"
         );
         assert!(
             !queued_started.exists(),
             "queued test executed despite the full pool"
         );
+        reservation.release();
+        let (status, output) = queued.wait(Duration::from_secs(10));
         assert!(
-            output.contains("TIMEOUT"),
-            "missing queued timeout report:\n{output}"
+            status.success(),
+            "queued test failed once capacity returned:\n{output}"
         );
         assert!(
-            output.contains("waiting for machine-wide scheduler capacity"),
+            !output.contains("TIMEOUT") && !output.contains("SLOW"),
+            "the wait for capacity counted toward the test's clock:\n{output}"
+        );
+        assert!(
+            output.contains("before running tests"),
             "missing scheduler wait note:\n{output}"
         );
-        reservation.release();
-        assert_no_live_leases(&cache, "after queued timeout");
+        assert!(queued_started.exists(), "queued test never ran");
+        assert_no_live_leases(&cache, "after queued run");
 
         fs::write(
             root.join(".config/nextest.toml"),
@@ -903,7 +943,16 @@ pub fn observe(name: &str, heavy: bool) {
         signal.process_group(0);
         let mut signal = signal.spawn().unwrap();
         wait_for(&signal_started, Duration::from_secs(5));
-        let active_leases = locked_lease_files(&cache);
+        // The run holds one machine lease; the test's own is drawn from it.
+        assert_eq!(
+            locked_lease_files(&cache).len(),
+            1,
+            "expected one machine lease for the run"
+        );
+        let run_pool =
+            PathBuf::from(fs::read_to_string(signal_started.with_extension("run")).unwrap())
+                .join("pool/leases");
+        let active_leases = locked_files_in(&run_pool);
         assert_eq!(active_leases.len(), 1, "expected one active test lease");
         let test_runner = active_leases[0]
             .file_name()
@@ -939,8 +988,10 @@ pub fn observe(name: &str, heavy: bool) {
         while Instant::now() < lease_deadline && !all_leases_are_lockable(&cache) {
             thread::sleep(Duration::from_millis(25));
         }
-        let leases_clear_after_signal = all_leases_are_lockable(&cache);
-        let live_after_signal = locked_lease_files(&cache);
+        let leases_clear_after_signal =
+            all_leases_are_lockable(&cache) && locked_files_in(&run_pool).is_empty();
+        let mut live_after_signal = locked_lease_files(&cache);
+        live_after_signal.extend(locked_files_in(&run_pool));
 
         // If cancellation failed, terminate the isolated fixture groups after
         // saving the state the regression assertion needs to report.

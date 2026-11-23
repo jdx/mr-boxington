@@ -168,6 +168,11 @@ pub(crate) fn seed(
         candidates.extend(
             subdirectories(&donor_lane)
                 .into_iter()
+                // A directory Cargo tagged is a target directory of its own,
+                // such as one made by `--target-dir target/nested`, not a
+                // target triple. Seeding it would create it untagged, and
+                // `cargo clean --target-dir` refuses such a directory.
+                .filter(|directory| !directory.join("CACHEDIR.TAG").exists())
                 .filter_map(|triple| Some(Path::new(triple.file_name()?).join(host)))
                 .filter(|candidate| candidate != host),
         );
