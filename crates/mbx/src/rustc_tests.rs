@@ -2385,3 +2385,17 @@ fn a_non_utf8_workspace_root_is_keyed_to_its_checkout() {
     assert_ne!(first, "workspace");
     assert_ne!(first, key(b"/work/\xff-b"));
 }
+
+/// A unit that may be retried still announces its metadata to Cargo at once,
+/// but holds diagnostics until it knows no retry follows.
+#[test]
+fn deferred_forwarding_releases_only_artifact_notifications() {
+    let mut sink = Sink::default();
+    let input = b"{\"message\":\"boom\",\"level\":\"error\"}\n{\"artifact\":\"/t/libx.rmeta\",\"emit\":\"metadata\"}\n";
+    let captured = forward_stream_deferring(&input[..], &mut sink, &[], true).unwrap();
+    assert_eq!(captured, input);
+    assert_eq!(
+        sink.bytes(),
+        b"{\"artifact\":\"/t/libx.rmeta\",\"emit\":\"metadata\"}\n"
+    );
+}

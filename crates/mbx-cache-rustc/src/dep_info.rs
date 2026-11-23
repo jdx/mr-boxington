@@ -306,6 +306,24 @@ impl DiscoveredInputs {
         started_at: SystemTime,
         before: &BTreeMap<PathBuf, FileSnapshot>,
     ) -> Result<(), BypassReason> {
+        self.verify_snapshots(Some(started_at), before)
+    }
+
+    /// Like [`Self::verify_not_modified_since_with_snapshots`], but judging
+    /// only the inputs that have a snapshot. Use it when the compiler may
+    /// legitimately write other inputs, such as generated files, while it runs.
+    pub fn verify_snapshots_unchanged(
+        &self,
+        before: &BTreeMap<PathBuf, FileSnapshot>,
+    ) -> Result<(), BypassReason> {
+        self.verify_snapshots(None, before)
+    }
+
+    fn verify_snapshots(
+        &self,
+        started_at: Option<SystemTime>,
+        before: &BTreeMap<PathBuf, FileSnapshot>,
+    ) -> Result<(), BypassReason> {
         // A metadata-only change keeps the result, so it must not hide a
         // content change to a later input.
         let mut metadata_changed = None;
@@ -335,6 +353,9 @@ impl DiscoveredInputs {
                     input.path.clone(),
                 ));
             }
+            let Some(started_at) = started_at else {
+                continue;
+            };
             let metadata =
                 std::fs::metadata(&input.path).map_err(|error| BypassReason::InputRead {
                     path: input.path.clone(),
@@ -1196,6 +1217,51 @@ mod tests {
                 SystemTime::now() + std::time::Duration::from_secs(60),
                 &before,
             ),
+            Err(BypassReason::InputModifiedDuringCompilation(source))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_only_check_compares_sources_after_a_generated_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("lib.rs");
+        let generated = directory.path().join("a_generated.rs");
+        std::fs::write(&source, "pub fn library() {0}\n").unwrap();
+        let invocation = RustcInvocation::parse(&[
+            "--crate-name=widget".into(),
+            "--crate-type=lib".into(),
+            "--emit=dep-info,metadata".into(),
+            source.clone().into_os_string(),
+        ])
+        .unwrap();
+        let before = BTreeMap::from([(
+            source.clone(),
+            FileSnapshot::capture(&source).unwrap().unwrap(),
+        )]);
+        // The compiler writes a generated input that sorts first, then the
+        // source changes while it runs.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&generated, "// generated\n").unwrap();
+        // Far beyond any fixed offset from the start time.
+        std::fs::File::options()
+            .write(true)
+            .open(&generated)
+            .unwrap()
+            .set_modified(SystemTime::now() + std::time::Duration::from_secs(30 * 86_400))
+            .unwrap();
+        std::fs::write(&source, "pub fn library() {1}\n").unwrap();
+        let dep_info = RustcDepInfo::parse(&format!(
+            "output: {} {}\n",
+            generated.display(),
+            source.display()
+        ))
+        .unwrap();
+        let discovered = invocation
+            .discover_inputs(&dep_info, directory.path())
+            .unwrap();
+        assert_eq!(
+            discovered.verify_snapshots_unchanged(&before),
             Err(BypassReason::InputModifiedDuringCompilation(source))
         );
     }

@@ -477,9 +477,13 @@ or derives a value from it sees the same value in both checkouts.
 ### Compatibility and cleanup
 
 For eligible compilations, `env!("OUT_DIR")` names the cached copy. Its files
-and directories are marked read-only; code that needs to modify generated
-output during compilation should disable sharing. Build scripts still write
-their output to the directory Cargo gives them before mbx makes the copy.
+and directories are marked read-only. When a procedural macro reports a
+write-permission error (or Tauri's equivalent missing-`OUT_DIR` error), mbx
+retries with Cargo's writable directory without storing that compilation in
+the cache. If it still fails, mbx shows the original diagnostic. Disable
+sharing for code that needs to write generated output but reports a different
+error. Build scripts still write to the directory Cargo gives them before mbx
+makes the copy.
 
 `mbx cache stats` reports these copies as **generated source trees**. Automatic
 collection and `mbx gc` remove copies according to `target.max_age`, based on

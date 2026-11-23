@@ -193,6 +193,7 @@ pub(crate) fn compile(
     arguments: &[OsString],
     wrapper_argument: Option<&OsStr>,
 ) -> Result<ExitCode> {
+    let cargo_arguments = arguments;
     let setup = crate::phase_timing::phase("key");
     let working_dir = std::env::current_dir()?;
     // The orchestrated session supplies the target root. A persistent wrapper
@@ -223,17 +224,19 @@ pub(crate) fn compile(
     let initial_invocation = RustcInvocation::parse_with(arguments, options)?;
     // Keep Cargo's original OUT_DIR: stabilization moves generated sources to
     // a content-addressed tree that has no Cargo-recorded build-script stdout.
+    let cargo_out_dir = std::env::var_os("OUT_DIR");
     let build_script_inputs = if session::is_cargo_build_script(initial_invocation.crate_name())
         && session::compiles_only_a_binary(scanned)
     {
         None
     } else {
-        std::env::var_os("OUT_DIR")
+        cargo_out_dir
+            .as_deref()
             .map(|out_dir| {
                 let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
                     .ok_or_else(|| eyre::eyre!("OUT_DIR has no CARGO_MANIFEST_DIR"))?;
                 crate::build_script::CompilationInputs::for_package(
-                    Path::new(&out_dir),
+                    Path::new(out_dir),
                     Path::new(&manifest_dir),
                 )
             })
@@ -242,7 +245,16 @@ pub(crate) fn compile(
     };
     // Before the key, remapping, or compiler reads OUT_DIR, decide which
     // generated tree this compilation will use.
-    crate::out_dir::stabilize_for(initial_invocation.source());
+    let retry_out_dir = crate::out_dir::stabilize_for(initial_invocation.source())
+        .filter(|_| {
+            // Proc macros can be re-exported by an ordinary rlib, as in
+            // Tauri. Requiring a direct dynamic-library extern misses them.
+            scanned.iter().any(|arg| {
+                arg.to_str()
+                    .is_some_and(|arg| arg == "--extern" || arg.starts_with("--extern="))
+            })
+        })
+        .and(cargo_out_dir);
     let initial_outputs = initial_invocation.outputs(&working_dir)?;
     let mut portable = Portable::detect(
         &working_dir,
@@ -681,7 +693,15 @@ pub(crate) fn compile(
             return Ok(ExitCode::FAILURE);
         }
     }
+    // Keep speculative notifications and diagnostics away from Cargo until
+    // we know whether it needs a retry. A proc macro may need a writable
+    // OUT_DIR, but the shared snapshot must stay read-only. Artifact
+    // notifications still go out live so dependents can start against the
+    // .rmeta: rustc prints one only after expansion, which is where a macro's
+    // write fails, so a unit that may need a retry never announces metadata
+    // it is about to replace.
     let forwarded = session::forward_compiler_notifications_requested();
+    let deferred = forwarded && retry_out_dir.is_some();
     // An earlier hit may have linked these very paths to the store's objects,
     // which are read-only so that nothing rewrites them in place. rustc would
     // refuse them rather than overwrite them.
@@ -701,9 +721,97 @@ pub(crate) fn compile(
     let eligible =
         wrapper_argument.is_none() && !invocation.crate_name().starts_with("build_script_");
     let output = crate::phase_timing::measure("compiler", || {
-        run_compiler(&mut command, forwarded, eligible, &portable.mappings)
+        run_compiler_with(
+            &mut command,
+            forwarded,
+            deferred,
+            eligible,
+            &portable.mappings,
+        )
     })
     .wrap_err("failed to execute rustc")?;
+    let retry_out_dir = retry_out_dir.filter(|_| shared_out_dir_write_failed(&output));
+    if deferred && retry_out_dir.is_none() {
+        // No retry: release the diagnostics held back, so that from here on
+        // the output counts as forwarded like any other.
+        let _ = replay_unforwarded(&output);
+    }
+    if let Some(original) = retry_out_dir {
+        // The first attempt's snapshot would blame the retry for an edit made
+        // while that attempt ran, which the retry already compiled.
+        let retry_snapshots = crate::util::snapshot_compiler_inputs(
+            required_inputs.iter().map(PathBuf::as_path),
+            Some(&source),
+        );
+        let mut retry = compiler_command(rustc, wrapper_argument);
+        // None of the portable arguments, incremental state, or cache
+        // bookkeeping for the shared tree may be used for the retry. Keep
+        // rustc's generated files in Cargo's tree and never publish them.
+        retry
+            .args(cargo_arguments)
+            .current_dir(&working_dir)
+            .env("OUT_DIR", original);
+        if let Some(permit) = &permit {
+            permit.mark_held(&mut retry);
+        }
+        let retried = crate::phase_timing::measure("compiler", || {
+            run_compiler(&mut retry, false, eligible, &[])
+        });
+        drop(permit);
+        let final_output = match &retried {
+            Ok(result) if result.status.success() || result.status.code().is_none() => result,
+            // Preserve the primary diagnostic if writable OUT_DIR did not
+            // help. Do not expose speculative artifacts from either attempt.
+            _ => &output,
+        };
+        crate::scheduler::record_compiler_memory(&demand, &final_output.status);
+        session::record_compiler_invocation_with_metadata(
+            "bypass",
+            Some(invocation.crate_name()),
+            compiler_timer
+                .elapsed()
+                .as_nanos()
+                .try_into()
+                .unwrap_or(u64::MAX),
+            None,
+            Some(CompileMetadata {
+                unit_kind,
+                skip_reason: Some("shared-out-dir-write".into()),
+                ..Default::default()
+            }),
+        );
+        if let Some(objects) = objects.take() {
+            objects.remove_superseded(&final_output.status);
+        }
+        // A source edited while the retry ran would leave an artifact that
+        // mixes versions. Reject it as the primary path does; any other
+        // validation error is not evidence of a change and is ignored.
+        if final_output.status.success()
+            && let Err(error) = validate_snapshotted_inputs(
+                &invocation,
+                &outputs,
+                &working_dir,
+                &portable,
+                &retry_snapshots,
+            )
+            && discard_modified_compiler_result(&outputs, &retry_snapshots, &error)
+        {
+            return Ok(ExitCode::FAILURE);
+        }
+        if deferred && std::ptr::eq(final_output, &output) {
+            replay_unforwarded(final_output)?;
+        } else {
+            replay_output(final_output)?;
+        }
+        // The retry compiled in place, so its outputs are the unit's real
+        // ones: keep the dep-info Cargo may empty before the next compile and
+        // check the disk like any other compilation.
+        if learned_enabled && final_output.status.success() {
+            save_dep_info(&compilation, &outputs);
+        }
+        session::check_low_disk_after_compile();
+        return Ok(exit_code(final_output.status));
+    }
     // Released before the outputs are read back and published: hashing and
     // storing cost I/O, not the CPU and memory the permit stands for.
     drop(permit);
@@ -1023,6 +1131,79 @@ pub(crate) fn compile(
     }
 }
 
+/// Do not rerun ordinary compiler errors or cancelled compilations. Most
+/// macros preserve the underlying filesystem error in their diagnostic; Tauri
+/// calls the same error a missing OUT_DIR, which we know was supplied.
+fn shared_out_dir_write_failed(output: &Output) -> bool {
+    if output.status.code() != Some(1) {
+        return false;
+    }
+    for line in output.stderr.split(|byte| *byte == b'\n') {
+        let Ok(diagnostic) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        if diagnostic["level"] != "error" {
+            continue;
+        }
+        let message = diagnostic["message"].as_str().unwrap_or_default();
+        if !diagnostic["code"].is_null() {
+            continue;
+        }
+        let from_macro = diagnostic["spans"]
+            .as_array()
+            .is_some_and(|spans| spans.iter().any(|span| !span["expansion"].is_null()));
+        let mentions_write_denial = [
+            "Permission denied",
+            "Access is denied",
+            "Read-only file system",
+        ]
+        .iter()
+        .any(|error| message.contains(error));
+        let macro_panicked = matches!(
+            message,
+            "proc macro panicked" | "proc-macro derive panicked" | "custom attribute panicked"
+        );
+        if message == "OUT_DIR env var is not set, do you have a build script?"
+            || (from_macro && mentions_write_denial)
+            || (macro_panicked
+                && diagnostic["children"].as_array().is_some_and(|children| {
+                    children.iter().any(|child| {
+                        child["level"] == "help"
+                            && child["message"]
+                                .as_str()
+                                .and_then(|message| message.strip_prefix("message: "))
+                                .is_some_and(panic_reports_write_denial)
+                    })
+                }))
+        {
+            // Other errors may be consequences of the macro not expanding.
+            // If the single retry still fails, Cargo sees the original output.
+            return true;
+        }
+    }
+    false
+}
+
+/// A panic may format a filesystem error with Display or with Debug (as
+/// Result::unwrap/expect do). Match the complete OS error at the end of the
+/// payload, not a permission-related phrase in an otherwise arbitrary panic.
+fn panic_reports_write_denial(payload: &str) -> bool {
+    [
+        "Permission denied (os error 13)",
+        "Read-only file system (os error 30)",
+        "Access is denied. (os error 5)",
+        r#"Os { code: 13, kind: PermissionDenied, message: "Permission denied" }"#,
+        r#"Os { code: 30, kind: ReadOnlyFilesystem, message: "Read-only file system" }"#,
+        r#"Os { code: 5, kind: PermissionDenied, message: "Access is denied." }"#,
+    ]
+    .iter()
+    .any(|error| {
+        payload
+            .strip_suffix(error)
+            .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with(": "))
+    })
+}
+
 /// Run the compiler and capture both of its streams, forwarding each line to
 /// the shim's own stream the moment it arrives when `forward` is set.
 ///
@@ -1045,6 +1226,19 @@ fn run_compiler(
     eligible: bool,
     mappings: &[PathMapping],
 ) -> std::io::Result<Output> {
+    run_compiler_with(command, forward, false, eligible, mappings)
+}
+
+/// [`run_compiler`] that, when `defer` is set, forwards only artifact
+/// notifications live and holds every other line for the caller to replay with
+/// [`replay_unforwarded`] once it knows no retry follows.
+fn run_compiler_with(
+    command: &mut Command,
+    forward: bool,
+    defer: bool,
+    eligible: bool,
+    mappings: &[PathMapping],
+) -> std::io::Result<Output> {
     if !forward {
         let mut output = crate::supervision::output(command, eligible)?;
         if !mappings.is_empty() {
@@ -1055,23 +1249,36 @@ fn run_compiler(
         return Ok(output);
     }
     let action = crate::supervision::prepare(command, eligible);
-    run_compiler_forwarding(
+    run_compiler_deferring(
         command,
         std::io::stdout(),
         std::io::stderr(),
         action,
         mappings,
+        defer,
     )
 }
 
 /// [`run_compiler`] with the forwarding destinations spelled out, so a test can
 /// see what would have reached Cargo.
+#[cfg(all(test, unix))]
 fn run_compiler_forwarding(
+    command: &mut Command,
+    stdout_sink: impl Write + Send + 'static,
+    stderr_sink: impl Write,
+    action: Option<crate::supervision::Action>,
+    mappings: &[PathMapping],
+) -> std::io::Result<Output> {
+    run_compiler_deferring(command, stdout_sink, stderr_sink, action, mappings, false)
+}
+
+fn run_compiler_deferring(
     command: &mut Command,
     stdout_sink: impl Write + Send + 'static,
     stderr_sink: impl Write,
     mut action: Option<crate::supervision::Action>,
     mappings: &[PathMapping],
+    defer: bool,
 ) -> std::io::Result<Output> {
     let mut child = command
         .stdin(Stdio::null())
@@ -1087,9 +1294,10 @@ fn run_compiler_forwarding(
     // read here; standard output is drained alongside so that neither pipe
     // can fill up and stall the compiler.
     let stdout_mappings = mappings.to_vec();
-    let stdout =
-        std::thread::spawn(move || forward_stream_mapped(stdout, stdout_sink, &stdout_mappings));
-    let stderr = forward_stream_mapped(stderr, stderr_sink, mappings);
+    let stdout = std::thread::spawn(move || {
+        forward_stream_deferring(stdout, stdout_sink, &stdout_mappings, defer)
+    });
+    let stderr = forward_stream_deferring(stderr, stderr_sink, mappings, defer);
     let status = child.wait()?;
     let stdout = stdout
         .join()
@@ -1144,10 +1352,22 @@ impl<'a> OutputPaths<'a> {
 
 /// [`forward_stream`] that rewrites placeholders in each line into real paths
 /// first, so what is forwarded and what is captured agree.
+#[cfg(test)]
 fn forward_stream_mapped(
+    source: impl Read,
+    sink: impl Write,
+    mappings: &[PathMapping],
+) -> std::io::Result<Vec<u8>> {
+    forward_stream_deferring(source, sink, mappings, false)
+}
+
+/// [`forward_stream_mapped`] that, when `defer` is set, forwards only artifact
+/// notifications and leaves every other line captured but unforwarded.
+fn forward_stream_deferring(
     source: impl Read,
     mut sink: impl Write,
     mappings: &[PathMapping],
+    defer: bool,
 ) -> std::io::Result<Vec<u8>> {
     let mut reader = BufReader::new(source);
     let mut captured = Vec::new();
@@ -1161,7 +1381,7 @@ fn forward_stream_mapped(
             break;
         }
         captured.extend_from_slice(&paths.denormalize(&line));
-        if forwarding {
+        if forwarding && (!defer || is_artifact_notification(&captured[start..])) {
             forwarding = sink
                 .write_all(&crate::out_dir::for_display(&captured[start..]))
                 .and_then(|()| sink.flush())
@@ -1219,6 +1439,43 @@ fn validate_compiler_inputs(
     compilation_started: SystemTime,
     input_snapshots: &std::io::Result<BTreeMap<PathBuf, FileSnapshot>>,
 ) -> Result<()> {
+    validate_inputs(
+        invocation,
+        outputs,
+        working_dir,
+        portable,
+        Some(compilation_started),
+        input_snapshots,
+    )
+}
+
+/// [`validate_compiler_inputs`] for a compilation that may write inputs of
+/// its own: only inputs with a pre-compile snapshot are judged.
+fn validate_snapshotted_inputs(
+    invocation: &RustcInvocation,
+    outputs: &RustcOutputs,
+    working_dir: &Path,
+    portable: &Portable,
+    input_snapshots: &std::io::Result<BTreeMap<PathBuf, FileSnapshot>>,
+) -> Result<()> {
+    validate_inputs(
+        invocation,
+        outputs,
+        working_dir,
+        portable,
+        None,
+        input_snapshots,
+    )
+}
+
+fn validate_inputs(
+    invocation: &RustcInvocation,
+    outputs: &RustcOutputs,
+    working_dir: &Path,
+    portable: &Portable,
+    compilation_started: Option<SystemTime>,
+    input_snapshots: &std::io::Result<BTreeMap<PathBuf, FileSnapshot>>,
+) -> Result<()> {
     let input_snapshots = input_snapshots
         .as_ref()
         .map_err(|error| eyre::eyre!(error.to_string()))?;
@@ -1229,7 +1486,12 @@ fn validate_compiler_inputs(
         &portable.mappings,
         session::file_digest_cache(),
     )?;
-    discovered.verify_not_modified_since_with_snapshots(compilation_started, input_snapshots)?;
+    match compilation_started {
+        Some(started) => {
+            discovered.verify_not_modified_since_with_snapshots(started, input_snapshots)?;
+        }
+        None => discovered.verify_snapshots_unchanged(input_snapshots)?,
+    }
     discovered.verify()?;
     Ok(())
 }
@@ -4416,6 +4678,27 @@ fn add_mapping(
 
 fn replay_output(output: &Output) -> Result<()> {
     replay_bytes(&output.stdout, &output.stderr)
+}
+
+/// A line of the JSON message stream that tells Cargo a crate's metadata or
+/// code is ready.
+fn is_artifact_notification(line: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(line)
+        .is_ok_and(|message| !message["artifact"].is_null() && !message["emit"].is_null())
+}
+
+/// Replay what [`run_compiler_with`] held back: all of standard output and the
+/// lines of standard error that are not artifact notifications, which already
+/// reached Cargo.
+fn replay_unforwarded(output: &Output) -> Result<()> {
+    let stderr: Vec<u8> = output
+        .stderr
+        .split_inclusive(|byte| *byte == b'\n')
+        .filter(|line| !is_artifact_notification(line))
+        .flatten()
+        .copied()
+        .collect();
+    replay_bytes(&output.stdout, &stderr)
 }
 
 fn publish_result<'a>(

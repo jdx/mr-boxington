@@ -5515,6 +5515,219 @@ fn a_compilation_that_reads_out_dir_shares_between_checkouts_with_the_same_gener
     }
 }
 
+/// Proc macros run inside rustc, rather than in the build script. In
+/// particular Tauri writes assets after Cargo's build script has finished.
+#[cfg(unix)]
+#[test]
+fn a_proc_macro_can_write_to_out_dir_with_sharing_enabled() {
+    let store = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    // Metadata-only compilation is cacheable even with mixed crate types.
+    // The linked mixed invocation normally bypasses the cache, and should
+    // continue to get a writable OUT_DIR without having to retry.
+    for (case, (action, mode, expected_diagnostic, writes_output)) in [
+        ("check", "io", None, true),
+        // The consuming crate must run again in a second checkout, not
+        // restore an artifact that would skip its write into Cargo's tree.
+        ("check", "io", None, true),
+        ("check", "tauri", None, true),
+        ("check", "panic", None, true),
+        ("check", "panic_follow_on", None, true),
+        ("check", "derive", None, true),
+        ("check", "attribute", None, true),
+        ("check", "io_follow_on", None, true),
+        (
+            "check",
+            "unrelated_panic",
+            Some("Permission denied would not explain this unrelated panic"),
+            false,
+        ),
+        ("build", "io", None, true),
+        ("test", "tauri", None, true),
+        ("clippy", "tauri", None, true),
+        (
+            "check",
+            "unrelated",
+            Some("primary unrelated failure"),
+            false,
+        ),
+        (
+            "check",
+            "retry_fails",
+            Some("primary shared OUT_DIR failure"),
+            true,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if action == "clippy"
+            && !Command::new(cargo())
+                .args(["clippy", "--version"])
+                .status()
+                .is_ok_and(|status| status.success())
+        {
+            continue;
+        }
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path();
+        std::fs::create_dir_all(path.join("src")).unwrap();
+        std::fs::create_dir_all(path.join("writer/src")).unwrap();
+        std::fs::create_dir_all(path.join("ui/src")).unwrap();
+        std::fs::write(
+            path.join("Cargo.toml"),
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+ui = { path = "ui" }
+"#,
+        )
+        .unwrap();
+        // The application sees only an ordinary rlib extern, as with Tauri.
+        std::fs::write(
+            path.join("ui/Cargo.toml"),
+            r#"[package]
+name = "ui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+writer = { path = "../writer" }
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("ui/src/lib.rs"),
+            "pub use writer::{WriteToOutDir, write_to_out_dir, write_to_out_dir_attr};\n",
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("writer/Cargo.toml"),
+            r#"[package]
+name = "writer"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("writer/src/lib.rs"),
+            r#"use proc_macro::TokenStream;
+
+fn write_output() -> std::io::Result<()> {
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(out.join("macro-output"), b"written by rustc")
+}
+
+#[proc_macro_derive(WriteToOutDir)]
+pub fn write_derive(_: TokenStream) -> TokenStream {
+    write_output().unwrap();
+    "pub struct Generated;".parse().unwrap()
+}
+
+#[proc_macro_attribute]
+pub fn write_to_out_dir_attr(_: TokenStream, item: TokenStream) -> TokenStream {
+    write_output().unwrap();
+    item
+}
+
+#[proc_macro]
+pub fn write_to_out_dir(input: TokenStream) -> TokenStream {
+    let mode = input.to_string();
+    let result = write_output();
+    let error = match (mode.as_str(), result) {
+        ("panic", Err(error)) => panic!("OUT_DIR write failed: {error}"),
+        ("panic_follow_on", write) => {
+            write.unwrap();
+            return "pub struct Generated;".parse().unwrap();
+        }
+        ("io_follow_on", Ok(())) => return "pub struct Generated;".parse().unwrap(),
+        ("unrelated_panic", _) => panic!("Permission denied would not explain this unrelated panic"),
+        ("unrelated", _) => "primary unrelated failure".to_owned(),
+        ("tauri", Err(_)) => "OUT_DIR env var is not set, do you have a build script?".to_owned(),
+        ("retry_fails", Err(error)) => format!("primary shared OUT_DIR failure: {error}"),
+        ("retry_fails", Ok(())) => "secondary retry failure".to_owned(),
+        (_, Err(error)) => error.to_string(),
+        (_, Ok(())) => return TokenStream::new(),
+    };
+    format!("compile_error!({error:?});").parse().unwrap()
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(path.join("build.rs"), "fn main() {}\n").unwrap();
+        let macro_use = match mode {
+            "derive" => "#[derive(ui::WriteToOutDir)] pub struct DeriveInput;\npub fn uses_generated(_: Generated) {}\n".to_owned(),
+            "attribute" => "#[ui::write_to_out_dir_attr] pub struct Generated;\npub fn uses_generated(_: Generated) {}\n".to_owned(),
+            "panic_follow_on" => format!("ui::write_to_out_dir!({mode});\npub fn uses_generated(_: Generated) {{}}\n"),
+            "io_follow_on" => format!("ui::write_to_out_dir!({mode});\npub use Generated as Wrapped;\n"),
+            _ => format!("ui::write_to_out_dir!({mode});\n"),
+        };
+        std::fs::write(
+            path.join("src/lib.rs"),
+            format!("pub const OUT: &str = env!(\"OUT_DIR\");\n{macro_use}"),
+        )
+        .unwrap();
+        generate_lockfile(path);
+        let result = isolated_cargo_command(
+            mbx_command(),
+            path,
+            store.path(),
+            &reports.path().join(format!("{case}-{action}-{mode}.json")),
+            &[action, "--offline"],
+            &[("MBX_SHARE_OUT_DIR", "1")],
+        )
+        .output()
+        .unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        if let Some(diagnostic) = expected_diagnostic {
+            assert!(!result.status.success(), "{action}/{mode}: {stderr}");
+            assert!(stderr.contains(diagnostic), "{action}/{mode}: {stderr}");
+            assert!(!stderr.contains("secondary retry failure"), "{stderr}");
+        } else {
+            assert!(result.status.success(), "{action}/{mode}: {stderr}");
+            assert!(!stderr.contains("Permission denied"), "{stderr}");
+            assert!(!stderr.contains("OUT_DIR env var is not set"), "{stderr}");
+        }
+        let outputs = find_files(&path.join("target"), |path| {
+            file_name_is(path, |name| name == "macro-output")
+        });
+        assert_eq!(
+            outputs.len(),
+            usize::from(writes_output),
+            "{action}/{mode}: {outputs:?}"
+        );
+        if let Some(output) = outputs.first() {
+            assert_eq!(std::fs::read(output).unwrap(), b"written by rustc");
+        }
+        let shared = store.path().join("out-dirs");
+        // The macro must never write into a shared tree. A sibling unit of
+        // the package may copy Cargo's OUT_DIR after the retry wrote to it,
+        // which publishes a read-only, content-addressed copy; a file the
+        // macro wrote itself would be writable.
+        if shared.is_dir() {
+            for copy in find_files(&shared, |path| {
+                file_name_is(path, |name| name == "macro-output")
+            }) {
+                assert!(
+                    std::fs::metadata(&copy).unwrap().permissions().readonly(),
+                    "{action}/{mode}: {} was written, not copied",
+                    copy.display()
+                );
+            }
+        }
+    }
+}
+
 /// A build script may declare a dependence on `OUT_DIR` itself, as the
 /// `build-rs` crate does. The shim swaps `OUT_DIR` for a stable copy while
 /// rustc runs, and the declaration must neither read as a changed input nor
