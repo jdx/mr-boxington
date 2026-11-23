@@ -377,8 +377,7 @@ fn materialize_references(
 
 fn restore_reference(root: &Path, reference: &FileReference, source: &Path) -> Result<()> {
     let destination = root.join(&reference.path);
-    let copied = reflink_copy::reflink_or_copy(source, &destination)?;
-    let _ = copied;
+    mbx_cache_core::clone_or_copy(source, &destination)?;
     set_file_metadata(
         &destination,
         reference.mode,

@@ -343,7 +343,9 @@ link without mbx is protected while Cargo holds its build lock.
 Ctrl-C stops the whole process group, so it ends the command and its lease
 together.
 
-A target directory is used when a build uses it, and also when a program runs
+A target directory is used when a build starts and again when the mbx command
+ends, even if the build fails. For `cargo run`, the command ends when the
+program exits. A target directory is also used when a program runs
 one of the executables or loads one of the libraries at the top of a profile,
 such as `target/debug/app` or `target/x86_64-unknown-linux-gnu/release/app`.
 This covers a program that runs often but is rebuilt rarely, such as one a hook
@@ -512,7 +514,7 @@ what was removed and why:
 
 ```text
 mbx[gc]: 3.1 GiB free on the disk holding /home/me/.cache/mbx, under the 25.0 GiB minimum; collecting private state and managed targets past their budgets, then shared cache objects if the cache disk is short
-mbx[gc]: removed 4 target directories (18.2 GiB logical, 0 abandoned and 4 live); 6.0 GiB logical remain
+mbx[gc]: removed 4 target directories (18.2 GiB logical, 0 whose checkouts are gone and 4 whose checkouts may still exist); 6.0 GiB logical remain
 mbx[gc]: evicted 12 shared cache objects and 3 action results below gc.max_size because the disk was under gc.min_free_size (2.0 GiB logical freed)
 ```
 
@@ -645,7 +647,7 @@ the target but stays on disk, so it counts as removed and not as released. The
 text report adds the released figure when it differs from the logical one:
 
 ```text
-mbx[gc]: removed 2 target directories (4.0 GiB logical, 1 abandoned and 1 live); 1.0 GiB logical remain, 1.5 GiB released on disk
+mbx[gc]: removed 2 target directories (4.0 GiB logical, 1 whose checkout is gone and 1 whose checkout may still exist); 1.0 GiB logical remain, 1.5 GiB released on disk
 ```
 
 When a collection also removes build units from live target directories, the

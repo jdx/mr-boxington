@@ -5933,7 +5933,8 @@ fn a_build_sweeps_the_store_to_its_budget() {
     );
 
     assert!(
-        stderr.contains("mbx[gc]: evicted"),
+        stderr.contains("mbx[gc]: an earlier background collection (finished ")
+            && stderr.contains("): evicted"),
         "the next build should say what the sweep evicted: {stderr}"
     );
     assert!(
@@ -6803,7 +6804,7 @@ mod target_views {
         let output = mbx_command()
             .arg("gc")
             .env("MBX_CACHE_DIR", store)
-            .env("MBX_TARGET_MAX_AGE", "1s")
+            .env("MBX_TARGET_MAX_AGE", "1d")
             .output()
             .expect("mbx gc should run");
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -6819,7 +6820,7 @@ mod target_views {
     /// Start `arguments` under mbx in `project`, whose program prints
     /// `ready` and then waits on standard input, and check that `mbx gc`
     /// keeps the managed target directory while the program runs and
-    /// removes it once the command has exited.
+    /// refreshes its record once the command has exited.
     ///
     /// Once Cargo has finished compiling, the target directory is still in
     /// use: `cargo run` executes the program from it, and `cargo test`
@@ -6938,6 +6939,21 @@ mod target_views {
             child_stderr()
         );
 
+        let refreshed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        assert!(
+            refreshed["updated_secs"].as_u64().unwrap() > 1,
+            "the command must refresh the record when it ends: {refreshed}"
+        );
+        let (gc_stdout, gc_stderr) = gc_expired_targets(store);
+        assert!(
+            view.is_dir(),
+            "gc should keep the target directory the command just finished using:\ngc stdout: {gc_stdout}\ngc stderr: {gc_stderr}"
+        );
+
+        // Once that final use expires, the lease must no longer prevent collection.
+        std::fs::write(&record, serde_json::to_vec(&fields).unwrap()).unwrap();
+        backdate_runs(&view);
         let (gc_stdout, gc_stderr) = gc_expired_targets(store);
         assert!(
             !view.exists(),
@@ -7008,6 +7024,40 @@ mod target_views {
             project.path(),
             store.path(),
             &["test", "--offline", "--config", "build.rustc-wrapper='env'"],
+        );
+    }
+
+    #[test]
+    fn gc_refreshes_a_child_target_after_a_delegated_cargo_test() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+        std::fs::write(
+            project.path().join("src/lib.rs"),
+            format!("#[test]\nfn waits_for_its_caller() {WAIT_FOR_STDIN}\n"),
+        )
+        .unwrap();
+        build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("place.json"),
+            &[("MBX_TARGET_VIEWS", "1")],
+        );
+
+        // Cargo owns the wrapper and the child output directory, while the
+        // view containing that directory must be refreshed when it exits.
+        assert_gc_waits_for_in(
+            project.path(),
+            store.path(),
+            &[
+                "test",
+                "--offline",
+                "--target-dir",
+                "target/rust-analyzer",
+                "--config",
+                "build.rustc-wrapper='env'",
+            ],
         );
     }
 
@@ -9548,4 +9598,78 @@ fn retired_seed_setting_keeps_the_same_private_history() {
         1,
         "the retired setting must not change unit identity"
     );
+}
+
+/// A damaged shared tree must not poison a compilation in a new checkout.
+#[test]
+fn damaged_shared_out_dir_falls_back_in_a_second_checkout() {
+    for damage in ["missing", "truncated"] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path().join("store");
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        let settings = [
+            ("MBX_TARGET_VIEWS", "0"),
+            ("MBX_BUILD_SCRIPT_EXECUTION", "0"),
+        ];
+        for project in [&first, &second] {
+            write_generated_project(project, Generated::Include);
+            std::fs::write(project.join("src/main.rs"), "fn main() { assert_eq!(fixture::value(), 7); println!(\"{}\", fixture::value()); }\n").unwrap();
+        }
+        build_with(
+            &first,
+            &store,
+            &directory.path().join("first.json"),
+            &settings,
+        );
+        let shared = find_files(&store.join("out-dirs/v1"), |path| {
+            path.file_name().is_some_and(|name| name == "generated.rs")
+        });
+        assert_eq!(shared.len(), 1, "fixture must actually share OUT_DIR");
+        let generated = &shared[0];
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            generated.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        #[cfg(windows)]
+        {
+            let mut permissions = std::fs::metadata(generated).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            std::fs::set_permissions(generated, permissions).unwrap();
+        }
+        std::fs::remove_file(generated).unwrap();
+        if damage == "truncated" {
+            std::fs::write(generated, "pub const VALUE: u32 = 0;").unwrap();
+        }
+        build_with(
+            &second,
+            &store,
+            &directory.path().join("second.json"),
+            &settings,
+        );
+        let output = Command::new(
+            second
+                .join("target/debug")
+                .join(format!("fixture{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .output()
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"7\n");
+        if damage == "missing" {
+            assert!(!generated.exists(), "leave damaged shared tree untouched");
+        } else {
+            assert_eq!(
+                std::fs::read_to_string(generated).unwrap(),
+                "pub const VALUE: u32 = 0;"
+            );
+        }
+    }
 }

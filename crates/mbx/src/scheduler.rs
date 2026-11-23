@@ -115,6 +115,8 @@ const SCHED_PRESSURE_ENV: &str = "MBX_SCHED_PRESSURE";
 /// The session's resolved events gate, including workspace overrides.
 const SCHED_EVENTS_ENV: &str = "MBX_SCHED_EVENTS";
 const SCHED_BUILD_ID_ENV: &str = "MBX_SCHED_BUILD_ID";
+/// Whether compiler supervision may move compilers into their own cgroups.
+const SCHED_SUSPEND_ENV: &str = "MBX_SCHED_SUSPEND";
 /// Names the build whose permit an ancestor compiler process already holds.
 /// A wrapper such as `cargo-llvm-cov` can run another `mbx-rustc` beneath the
 /// one that holds a permit; asking for a second permit there deadlocks once
@@ -207,6 +209,11 @@ const SLOW_WAIT_NOTICE: Duration = Duration::from_secs(60);
 /// already short, but a machine that stays short must not starve a build
 /// forever: past this deadline the permit arithmetic alone decides.
 const GATE_DEADLINE: Duration = Duration::from_secs(120);
+
+/// The lease this process was granted most recently in each pool; see
+/// `relocate_lease`.
+static LAST_GRANT: std::sync::Mutex<BTreeMap<PathBuf, PathBuf>> =
+    std::sync::Mutex::new(BTreeMap::new());
 
 /// Distinguishes leases created by one process, which may hold several.
 static LEASE_NONCE: AtomicU64 = AtomicU64::new(0);
@@ -449,8 +456,17 @@ struct Lease {
     build_id: Option<String>,
     #[serde(default)]
     domain: Option<String>,
+    /// The memory cgroups the holder sits in, named as in
+    /// `cgroup::identities`. `None` for older leases and holders whose
+    /// cgroups were not visible, which may sit anywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cgroups: Option<Vec<String>>,
     #[serde(default)]
     bytes_per_permit: u64,
+    /// When the holder recorded `cgroups`; `None` in leases from older
+    /// versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    written: Option<crate::util::Stamp>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -746,6 +762,65 @@ fn scope_used<'a>(leases: impl Iterator<Item = &'a Lease>) -> Resources {
             memory_bytes: used.memory_bytes.saturating_add(charge.memory_bytes),
         }
     })
+}
+
+/// Whether a live compilation holds memory that `short` says is short.
+///
+/// The memory gates wait only for compilations whose finishing would return
+/// that memory. When cgroups are short (`Some`), that means the compilations
+/// inside any of them: one in another container sharing the pool frees
+/// nothing here, and waiting for it would stall this container for as long as
+/// any other keeps compiling. When the host is short (`None`), every
+/// compilation uses that memory and all of them count. A lease that does not
+/// say where its holder sits counts too, as it might be anywhere.
+///
+/// So under lasting pressure each cgroup still runs one compilation at a time
+/// rather than none, and a host short of memory still runs one in the pool.
+fn holds_short_memory(
+    pool: &Path,
+    live: &[Lease],
+    short: Option<&[String]>,
+    contains: CgroupContains,
+) -> bool {
+    live.iter().any(|lease| match (short, &lease.cgroups) {
+        (Some(scopes), Some(cgroups)) => scopes
+            .iter()
+            .any(|scope| contains(pool, scope, cgroups, lease.written)),
+        _ => true,
+    })
+}
+
+/// Whether a process that recorded `cgroups` at a time is charged to a scope.
+type CgroupContains = fn(&Path, &str, &[String], Option<crate::util::Stamp>) -> bool;
+
+/// See `cgroup::contains`. Without cgroups, nothing can be ruled out.
+fn cgroup_contains(
+    pool: &Path,
+    scope: &str,
+    cgroups: &[String],
+    written: Option<crate::util::Stamp>,
+) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::cgroup::contains(pool, scope, cgroups, written)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pool, scope, cgroups, written);
+        true
+    }
+}
+
+/// The memory cgroups this process sits in; see `cgroup::identities`.
+fn memory_cgroups() -> &'static [String] {
+    #[cfg(target_os = "linux")]
+    {
+        crate::cgroup::identities()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        &[]
+    }
 }
 
 fn domain_used(live: &[Lease], domain: &str) -> Resources {
@@ -1547,6 +1622,10 @@ struct TestHistoryRecord {
 /// The machine-wide permit pool one process draws from.
 pub(crate) struct Pool {
     pub(crate) dir: PathBuf,
+    /// Where leases and waiters live when this pool is a slice of another,
+    /// such as the cores a nextest run reserved. History, ledgers and logs
+    /// stay in `dir`.
+    scope: Option<PathBuf>,
     capacity: u64,
     domain_capacity: u64,
     /// The original combined CPU/memory ceiling, written for old readers.
@@ -1564,12 +1643,19 @@ pub(crate) struct Pool {
     events: bool,
     priority: SchedulerPriority,
     /// Probe for currently available memory, injectable for tests.
-    available_memory: fn() -> Option<u64>,
+    available_memory: fn() -> Option<crate::util::Available>,
     pressure: bool,
     pressure_probe: fn() -> crate::pressure::Reading,
     /// The memory domain `pressure_probe` reads, injectable for tests. Pools
     /// in different containers share leases but not pressure state.
     pressure_domain: &'static str,
+    /// The memory cgroups this process sits in, recorded in its leases so
+    /// that a waiter can tell which compilations hold the memory it is short
+    /// of. Injectable for tests.
+    memory_cgroups: &'static [String],
+    /// Whether a lease's cgroups sit inside a short cgroup, injectable for
+    /// tests.
+    cgroup_contains: CgroupContains,
     clock: fn() -> u64,
     /// Source of the counter in lease names, injectable for tests.
     lease_nonce: fn() -> u64,
@@ -1605,6 +1691,8 @@ pub(crate) fn reservation_pool(config: &Config, priority: SchedulerPriority) -> 
         pool.set_memory_capacity(scheduler.memory_bytes.unwrap_or(0));
         pool.events = config.events;
         pool.pressure = scheduler.pressure;
+        // A reserved command runs where it is started; supervision moves
+        // only compilers.
         pool
     })
 }
@@ -1708,9 +1796,8 @@ pub(crate) fn session_environment_with_jobs(
             scheduler.priority.as_str().into(),
         ),
         (
-            "MBX_SCHED_SUSPEND".into(),
-            u8::from(scheduler.suspend && scheduler.pressure && scheduler.memory_bytes.is_some())
-                .to_string(),
+            SCHED_SUSPEND_ENV.into(),
+            u8::from(suspends(scheduler)).to_string(),
         ),
         (
             "MBX_SCHED_CGROUP_ROOT".into(),
@@ -1722,6 +1809,11 @@ pub(crate) fn session_environment_with_jobs(
         (SCHED_BUILD_ID_ENV.into(), crate::util::random_string(12)),
         (SCHED_BUILD_SLOTS_ENV.into(), build_permits.to_string()),
     ]
+}
+
+/// Whether compiler supervision is on; see `supervision::prepare`.
+fn suspends(scheduler: &crate::config::SchedulerSettings) -> bool {
+    scheduler.suspend && scheduler.pressure && scheduler.memory_bytes.is_some()
 }
 
 fn bytes_per_permit(memory_bytes: Option<u64>, cpus: u64) -> u64 {
@@ -1868,6 +1960,7 @@ impl Pool {
         let local_memory = crate::util::memory_total_bytes();
         Self {
             dir,
+            scope: None,
             capacity: capacity.max(1),
             domain_capacity: local_ceiling(capacity, 0, local_cpus, None).cpu,
             legacy_domain_capacity: legacy_local_ceiling(
@@ -1886,12 +1979,60 @@ impl Pool {
             bytes_per_permit,
             events: true,
             priority,
-            available_memory: crate::util::memory_available_bytes,
+            available_memory: crate::util::memory_available,
             pressure: true,
             pressure_probe: crate::pressure::probe,
             pressure_domain: crate::pressure::domain(),
+            memory_cgroups: memory_cgroups(),
+            cgroup_contains,
             clock: crate::pressure::now_ms,
             lease_nonce: next_lease_nonce,
+        }
+    }
+
+    /// Rewrite the lease this process was last granted to say its compiler
+    /// now sits in `cgroup`, after compiler supervision moved it there, or,
+    /// with `None` once that compiler is done, back where it was granted:
+    /// one permit can cover a retried compiler that runs unsupervised.
+    ///
+    /// A lease is written at admission, before supervision decides whether
+    /// the compiler moves, so it first names this process's own cgroups. A
+    /// moved compiler's memory is charged under `scheduler.cgroup_root`
+    /// instead, and a gate short of that memory has to find it there. Only
+    /// compiler wrappers are supervised, and each launches the compiler its
+    /// last grant admitted. Rewritten under the registrar lock, so no
+    /// admission reads a lease half-written; a lease that cannot be rewritten
+    /// keeps its old place. Only Linux supervision moves compilers.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn relocate_lease(&self, cgroup: Option<&str>) {
+        let Some(path) = LAST_GRANT
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&self.dir)
+            .cloned()
+        else {
+            return;
+        };
+        let Ok(mut registrar) = fslock::LockFile::open(&self.dir.join(POOL_LOCK)) else {
+            return;
+        };
+        if registrar.lock().is_err() {
+            return;
+        }
+        let Some(mut lease) = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Lease>(&bytes).ok())
+        else {
+            return;
+        };
+        lease.cgroups = match cgroup {
+            Some(cgroup) => Some(vec![cgroup.into()]),
+            None => (!self.memory_cgroups.is_empty()).then(|| self.memory_cgroups.to_vec()),
+        };
+        lease.written = Some(crate::util::Stamp::now());
+        if let Ok(record) = serde_json::to_vec(&lease) {
+            // Truncating and rewriting keeps the holder's lock on the file.
+            let _ = std::fs::write(&path, record);
         }
     }
 
@@ -2031,6 +2172,72 @@ impl Pool {
             eyre::bail!("reserve needs --cpus, --memory, or both")
         }
         Ok(weight)
+    }
+
+    /// The cores, and memory when it is scheduled, to reserve for a nextest
+    /// run that starts `threads` tests at once from `binary`. Each test is
+    /// sized by the busiest recorded test of the binary, or one core and two
+    /// memory shares when nothing is recorded, as an unmeasured test is
+    /// charged. Never more than the pool holds, since a larger reservation
+    /// would wait forever.
+    pub(crate) fn nextest_run_reservation(&self, binary: &str, threads: u64) -> (u64, Option<u64>) {
+        let path = test_history_path(&self.dir.join(TEST_HISTORY_DIR), binary);
+        let history = lookup_test_history(&path, binary, "");
+        let recorded = (history.header.count > 0).then_some(history.header.maximum);
+        let threads = threads.max(1);
+        let cores = recorded
+            .and_then(|measurement| measurement.cores)
+            .unwrap_or(1)
+            .max(1);
+        let cpus = threads.saturating_mul(cores).min(self.capacity).max(1);
+        let memory = (self.bytes_per_permit > 0).then(|| {
+            let shares = recorded
+                .and_then(|measurement| measurement.peak)
+                .map_or(2, |peak| peak.div_ceil(self.bytes_per_permit).max(1));
+            let ceiling = if self.memory_capacity > 0 {
+                self.memory_capacity
+            } else {
+                self.capacity.saturating_mul(self.bytes_per_permit)
+            };
+            threads
+                .saturating_mul(shares)
+                .saturating_mul(self.bytes_per_permit)
+                .min(ceiling)
+        });
+        (cpus, memory)
+    }
+
+    /// A pool drawn from this process's own reservation of `cpus` cores and
+    /// `memory` bytes, whose leases live under `scope` and so never count
+    /// against the machine.
+    pub(crate) fn within_reservation(
+        &self,
+        scope: PathBuf,
+        cpus: u64,
+        memory: Option<u64>,
+    ) -> Pool {
+        let permits = match memory {
+            Some(memory) if self.bytes_per_permit > 0 => {
+                cpus.max(memory.div_ceil(self.bytes_per_permit))
+            }
+            _ => cpus,
+        };
+        let mut pool = Pool::new(
+            self.dir.clone(),
+            permits,
+            self.bytes_per_permit,
+            self.priority,
+        );
+        pool.scope = Some(scope);
+        pool.domain_capacity = cpus.min(pool.capacity);
+        pool.set_memory_capacity(memory.unwrap_or(0));
+        pool.events = self.events;
+        pool.pressure = false;
+        pool
+    }
+
+    fn scope_dir(&self) -> &Path {
+        self.scope.as_deref().unwrap_or(&self.dir)
     }
 
     pub(crate) fn reserve(&self, cpus: Option<u64>, memory_bytes: Option<u64>) -> Result<Permit> {
@@ -2315,10 +2522,10 @@ impl Pool {
         demand: Option<&Demand>,
         events: &mut Vec<decisions::Event>,
     ) -> Result<Option<Permit>> {
-        let leases = self.dir.join(LEASES_DIR);
+        let leases = self.scope_dir().join(LEASES_DIR);
         std::fs::create_dir_all(&leases)
             .wrap_err_with(|| format!("failed to create {}", leases.display()))?;
-        let registrar_path = self.dir.join(POOL_LOCK);
+        let registrar_path = self.scope_dir().join(POOL_LOCK);
         let mut registrar = fslock::LockFile::open(&registrar_path)?;
         registrar.lock()?;
         let live = scan_leases(&leases)?;
@@ -2340,14 +2547,19 @@ impl Pool {
             });
             return Ok(None);
         }
-        if !live.is_empty()
-            && let Some(pressure) = &pressure
+        if let Some(pressure) = &pressure
             && pressure.valid
             && (pressure.pressured
                 || (pressure.recovered_ms.is_some()
                     && pressure.last_admission_ms.is_some_and(|last| {
                         now.saturating_sub(last) < crate::pressure::INTERVAL_MS
                     })))
+            && holds_short_memory(
+                &self.dir,
+                &live,
+                pressure.short_scopes().as_deref(),
+                self.cgroup_contains,
+            )
         {
             self.gated(state, "pressure", events, || {
                 self.waiting_record(resources, weight, demand, first_arrival_ms, u64::MAX)
@@ -2361,21 +2573,26 @@ impl Pool {
         // ledger cannot see -- unmeasured crates already running, or memory
         // that was never the build's to spend.
         //
-        // Only while somebody else holds a permit, though. With an idle pool
-        // there is no compilation whose finishing would return the memory
-        // this one is short of, so deferring would stall the one thing that
-        // could proceed and wait out the deadline to reach the same answer.
-        if !live.is_empty()
-            && let Some(needed) = predicted
+        // Only while another compilation holds the memory that is short,
+        // though. Without one, no compilation's finishing would return it,
+        // so deferring would stall the one thing that could proceed and wait
+        // out the deadline to reach the same answer.
+        if let Some(needed) = predicted
             && let Some(available) = (self.available_memory)()
-            && available < needed
+            && available.bytes < needed
+            && holds_short_memory(
+                &self.dir,
+                &live,
+                available.short_of(needed).as_deref(),
+                self.cgroup_contains,
+            )
         {
             self.gated(state, "available-memory", events, || {
                 self.waiting_record(resources, weight, demand, first_arrival_ms, u64::MAX)
             });
             return Ok(None);
         }
-        let waiters = self.dir.join(WAITERS_DIR);
+        let waiters = self.scope_dir().join(WAITERS_DIR);
         std::fs::create_dir_all(&waiters)?;
         let waiting = scan_waiters_logged(&waiters, Some(self), events)?;
         let ticket = state.queued.as_ref().map_or(u64::MAX, |entry| entry.ticket);
@@ -2500,9 +2717,16 @@ impl Pool {
             priority: self.priority.as_str().into(),
             build_id: self.build.as_ref().map(|(id, _)| id.clone()),
             domain: Some(self.pressure_domain.into()),
+            cgroups: (!self.memory_cgroups.is_empty()).then(|| self.memory_cgroups.to_vec()),
             bytes_per_permit: self.bytes_per_permit,
+            written: Some(crate::util::Stamp::now()),
         })?;
-        self.lock_record(leases, &lease)
+        let permit = self.lock_record(leases, &lease)?;
+        LAST_GRANT
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(self.dir.clone(), permit.path.clone());
+        Ok(permit)
     }
 
     fn lock_record(&self, leases: &Path, record: &[u8]) -> Result<Permit> {
@@ -2564,6 +2788,11 @@ impl Pool {
     }
 
     fn priority_wait_is_fresh(&self) -> bool {
+        // A run's own slice already paid for its capacity on the machine pool;
+        // yielding again inside it would only stall tests the run reserved for.
+        if self.scope.is_some() {
+            return false;
+        }
         std::fs::metadata(self.dir.join(PRIORITY_WAIT_STAMP))
             .and_then(|metadata| metadata.modified())
             .ok()
@@ -3890,6 +4119,8 @@ fn scan_leases(leases: &Path) -> Result<Vec<Lease>> {
                     priority: SchedulerPriority::Normal.as_str().into(),
                     build_id: None,
                     domain: None,
+                    cgroups: None,
+                    written: None,
                     bytes_per_permit: 0,
                 },
                 |mut lease| {

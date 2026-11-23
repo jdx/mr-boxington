@@ -705,6 +705,8 @@ mod tests {
             priority: waiter.priority.clone(),
             build_id: waiter.build.as_ref().map(|b| b.0.clone()),
             domain: Some(waiter.domain.clone()),
+            cgroups: None,
+            written: None,
             bytes_per_permit: waiter.bytes_per_permit,
         }
     }
@@ -980,7 +982,9 @@ mod tests {
                 1
             );
             match reason {
-                "available-memory" => pool.available_memory = || Some(0),
+                "available-memory" => {
+                    pool.available_memory = || Some(crate::util::Available::host(0))
+                }
                 "pressure" => {
                     pool.pressure = true;
                     pool.pressure_probe = || crate::pressure::Reading {
@@ -1155,7 +1159,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        pool.available_memory = || Some(0);
+        pool.available_memory = || Some(crate::util::Available::host(0));
         assert!(
             pool.try_admit_queued(2, Some(2 * MEMORY_QUANTUM), &mut queued)
                 .unwrap()
@@ -1269,7 +1273,7 @@ mod tests {
             cpu: 1,
             memory_bytes: 2 * MEMORY_QUANTUM,
         };
-        pool.available_memory = || Some(0);
+        pool.available_memory = || Some(crate::util::Available::host(0));
         for _ in 0..3 {
             assert!(
                 pool.try_admit_state(resources, 2, Some(2 * MEMORY_QUANTUM), &mut state, None)
@@ -1328,7 +1332,7 @@ mod tests {
                 .is_none()
         );
         assert!(state.last_gate.is_none());
-        pool.available_memory = || Some(0);
+        pool.available_memory = || Some(crate::util::Available::host(0));
         for _ in 0..3 {
             assert!(
                 pool.try_admit_state(resources, 2, Some(2 * MEMORY_QUANTUM), &mut state, None)
@@ -1417,7 +1421,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&entry._guard.path).unwrap()).unwrap();
         assert!(value.get("pid").is_none());
         assert!(value.get("first_arrival_ms").is_none());
-        pool.available_memory = || Some(0);
+        pool.available_memory = || Some(crate::util::Available::host(0));
         assert!(
             pool.try_admit_inner(
                 resources,

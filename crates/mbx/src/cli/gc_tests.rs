@@ -41,8 +41,8 @@ fn the_sweep_report_is_said_once() {
     assert_eq!(
         take_sweep_report(store),
         vec![
-            "removed 2 target directories".to_string(),
-            "evicted 3 objects".to_string()
+            "an earlier background collection: removed 2 target directories".to_string(),
+            "an earlier background collection: evicted 3 objects".to_string()
         ]
     );
     assert!(
@@ -107,7 +107,11 @@ fn an_automatic_sweep_stands_down_while_another_collector_holds_the_store() {
 fn sweep_reports_accumulate_until_a_build_says_them() {
     let directory = tempfile::tempdir().unwrap();
     let store = directory.path();
-    for report in ["first\n", "second\n"] {
+    for report in [
+        "# finished 2026-11-19 07:12 UTC\nfirst\n# end\n",
+        "older\n",
+        "# finished 2026-11-19 07:40 UTC\nsecond\n# end\n",
+    ] {
         std::fs::create_dir_all(store.join("gc/v1")).unwrap();
         std::fs::OpenOptions::new()
             .create(true)
@@ -117,7 +121,14 @@ fn sweep_reports_accumulate_until_a_build_says_them() {
             .unwrap();
     }
 
-    assert_eq!(take_sweep_report(store), ["first", "second"]);
+    assert_eq!(
+        take_sweep_report(store),
+        [
+            "an earlier background collection (finished 2026-11-19 07:12 UTC): first",
+            "an earlier background collection: older",
+            "an earlier background collection (finished 2026-11-19 07:40 UTC): second",
+        ]
+    );
 }
 
 #[test]
@@ -134,7 +145,11 @@ fn a_build_leaves_the_report_alone_while_a_collector_writes_it() {
     );
 
     collector.unlock().unwrap();
-    assert_eq!(take_sweep_report(store), ["evicted 3 objects"]);
+    // A report written by an older version has no finish time.
+    assert_eq!(
+        take_sweep_report(store),
+        ["an earlier background collection: evicted 3 objects"]
+    );
 }
 
 #[test]
@@ -725,7 +740,7 @@ fn target_report_carries_what_eviction_released_on_disk() {
     assert_eq!(
         target_removals(&initial, false),
         [
-            "removed 1 target directories (2.0 KiB logical, 0 abandoned and 0 live); 4.0 KiB logical remain, 1.0 KiB released on disk"
+            "removed 1 target directories (2.0 KiB logical, 0 whose checkouts are gone and 0 whose checkouts may still exist); 4.0 KiB logical remain, 1.0 KiB released on disk"
         ]
     );
     assert_eq!(
@@ -924,7 +939,7 @@ fn the_released_figure_sits_beside_the_total_when_several_removals_print() {
     assert_eq!(
         target_removals(&outcome, false),
         [
-            "removed 1 target directories (2.0 KiB logical, 0 abandoned and 0 live, 1 kept for running commands or builds that started meanwhile); 4.0 KiB logical remain",
+            "removed 1 target directories (2.0 KiB logical, 0 whose checkouts are gone and 0 whose checkouts may still exist, 1 kept because it may be in use); 4.0 KiB logical remain",
             "removed 3 unused build units from live target directories (1.0 KiB logical)",
             "1.0 KiB of the 3.0 KiB logical removed was released on disk",
         ]

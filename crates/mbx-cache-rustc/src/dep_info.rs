@@ -757,6 +757,7 @@ fn render_argument(argument: &Argument) -> Result<OsString, BypassReason> {
         Argument::InstallName(name) => {
             format!("--codegen=link-arg=-Wl,-install_name,@rpath/{name}")
         }
+        Argument::Rpath(directory) => format!("--codegen=link-arg=-Wl,-rpath,{directory}"),
         Argument::FuseLd(selection) => format!("--codegen=link-arg=-fuse-ld={selection}"),
     };
     Ok(rendered.into())

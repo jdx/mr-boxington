@@ -249,7 +249,22 @@ mbx reads depend on the platform:
 - macOS: available-memory headroom only
 - Windows: neither, so pressure control does not pause admissions there
 
-At least one compilation can run when the pool is idle. After five healthy
+On Linux, available memory is the smaller of the host's `MemAvailable` and
+the headroom of the process's memory cgroups. Headroom counts page cache, the
+`active_file` and `inactive_file` figures in `memory.stat`, as available,
+because the kernel can reclaim it for a compiler. A container whose limit is
+filled by cached files is not short of memory. If reclaiming that cache does
+slow processes down, PSI shows the stalls and pressure control pauses
+admissions.
+
+Pressure control waits only for compilations that use the memory that is
+short. When a container's own limit is low or its own cgroup stalls, that
+means the compilations inside that container, including any in nested
+containers. Compilations in other containers sharing the cache do not keep
+it waiting. When the host's memory is low or the host stalls, every
+compilation in the pool counts. So at least one compilation can run in a
+container that is short of its own memory, and at least one in the pool when
+the host is short. After five healthy
 seconds, mbx admits at most one compilation every half second for five seconds,
 then lifts that limit. Pressure control does not suspend running processes. To
 freeze them, see
@@ -348,7 +363,8 @@ MBX_SCHEDULER_TESTS=1 mbx nextest run        # schedule each nextest test
 
 mbx becomes Cargo's target runner for `cargo test` and `cargo nextest`, and
 calls any runner you have configured. Cargo test binaries wait for permits as
-a suite; nextest waits separately for each test. Listing tests does not take a
+a suite; `nextest run` holds cores for the whole run, and falls back to
+waiting separately for each test when it cannot. Listing tests does not take a
 permit.
 
 For Cargo test, each test binary waits for permits before it starts:
@@ -384,14 +400,27 @@ memory is the largest single process reported by `rusage`; a descendant's
 peak is folded in when it exits, but concurrent child processes are not added
 together.
 
-nextest starts a test's `slow-timeout` clock, including any `terminate-after`
-limit, when it starts mbx's runner. Time spent waiting for a permit therefore
-counts as test time, and nextest offers runners no way to pause the clock. A
-test that waits can be reported as SLOW, and with `terminate-after` it can be
-killed before it starts. After one second of waiting, mbx writes a note to the
-test's stderr, which nextest shows beside the report. If your nextest profile
-sets `terminate-after`, leave room in it for queueing, or lower nextest's
-`--test-threads` so fewer tests queue at once.
+`cargo nextest run` waits for capacity once, before its first test. nextest
+lists every test binary before it runs any test and does not time the listing,
+so mbx holds the run's cores there: the number of tests nextest runs at once
+(`--test-threads`, `-j`, or `NEXTEST_TEST_THREADS`; otherwise one per CPU)
+times the cores a test in the run's first binary has used, never more than the
+pool. The tests then draw from that reservation, not from the machine, so a
+busy host never counts toward `slow-timeout` or `terminate-after`. If the pool
+is busy, mbx says on stderr that the run is waiting. When the reservation is
+smaller than the run's demand, because the pool is smaller than
+`--test-threads` times a test's cores, tests wait for one another's cores and
+that wait does count. Lower `--test-threads` to match. The reservation is
+released when the run ends, so another run can start only after it. Tests are
+still measured, and their history sizes later runs.
+
+A test run any other way, such as a run that nextest starts without listing
+first, still waits for its own permits. nextest starts that test's clock when
+it starts mbx's runner and offers no way to pause it, so the wait counts as
+test time. The test can be reported as SLOW, and with `terminate-after` it can
+be killed before it starts. After one second of waiting, mbx writes a note to
+the test's stderr, which nextest shows beside the report. In that case, leave
+room in `terminate-after`, or lower nextest's `--test-threads`.
 
 Builds a test starts, such as trybuild or compile-fail suites, are charged to
 the test's permits and run without taking permits of their own.

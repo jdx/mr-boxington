@@ -1764,16 +1764,20 @@ fn is_same_binary(candidate: &Path, current: Option<&Path>) -> bool {
     let current_resolved = std::fs::canonicalize(current)
         .ok()
         .unwrap_or_else(|| current.to_path_buf());
-    if resolved == current_resolved {
-        return true;
+    resolved == current_resolved || same_device_and_inode(&resolved, current)
+}
+
+#[cfg(unix)]
+fn same_device_and_inode(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    match (std::fs::metadata(left), std::fs::metadata(right)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        if let (Ok(a), Ok(b)) = (std::fs::metadata(&resolved), std::fs::metadata(current)) {
-            return a.dev() == b.dev() && a.ino() == b.ino();
-        }
-    }
+}
+
+#[cfg(not(unix))]
+fn same_device_and_inode(_left: &Path, _right: &Path) -> bool {
     false
 }
 

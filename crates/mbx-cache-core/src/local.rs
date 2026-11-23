@@ -271,7 +271,7 @@ impl LocalCas {
         fs::create_dir_all(parent)?;
         let staging = tempfile::tempdir_in(parent)?;
         let temporary = staging.path().join("blob");
-        reflink_copy::reflink_or_copy(source, &temporary)?;
+        crate::clone_or_copy(source, &temporary)?;
         let temporary = tempfile::TempPath::try_from_path(temporary)?;
         make_owner_writable(&temporary)?;
         if let Some(before) = before
@@ -344,20 +344,22 @@ impl LocalCas {
 /// and the change time is what a writer cannot set back. Only Unix reports
 /// one, which is why the store trusts this check only there.
 fn same_identity(before: &fs::Metadata, after: &fs::Metadata) -> bool {
-    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        if before.dev() != after.dev()
-            || before.ino() != after.ino()
-            || before.ctime() != after.ctime()
-            || before.ctime_nsec() != after.ctime_nsec()
-        {
-            return false;
-        }
-    }
+    before.len() == after.len()
+        && before.modified().ok() == after.modified().ok()
+        && same_inode_and_change_time(before, after)
+}
+
+#[cfg(unix)]
+fn same_inode_and_change_time(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    before.dev() == after.dev()
+        && before.ino() == after.ino()
+        && before.ctime() == after.ctime()
+        && before.ctime_nsec() == after.ctime_nsec()
+}
+
+#[cfg(not(unix))]
+fn same_inode_and_change_time(_before: &fs::Metadata, _after: &fs::Metadata) -> bool {
     true
 }
 
