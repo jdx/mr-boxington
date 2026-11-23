@@ -619,6 +619,15 @@ pub(super) fn print_gc_store_outcome(outcome: &store::GcOutcome, dry_run: bool) 
 
 /// The lines describing the target directories and unused build units a
 /// sweep freed; none when it freed neither.
+/// "1 whose checkout is gone", "2 whose checkouts are gone".
+fn checkouts(count: u64, one: &str, many: &str) -> String {
+    if count == 1 {
+        format!("1 whose checkout {one}")
+    } else {
+        format!("{count} whose checkouts {many}")
+    }
+}
+
 pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool) -> Vec<String> {
     let verb = if dry_run { "would remove" } else { "removed" };
     let mut lines = Vec::new();
@@ -632,17 +641,26 @@ pub(super) fn target_removals(outcome: &target::CollectionOutcome, dry_run: bool
     }
     if outcome.kept_active_views > 0 {
         kept.push_str(&format!(
-            ", {} kept for running commands or builds that started meanwhile",
-            outcome.kept_active_views
+            ", {} kept because {} may be in use",
+            outcome.kept_active_views,
+            if outcome.kept_active_views == 1 {
+                "it"
+            } else {
+                "they"
+            }
         ));
     }
     if outcome.removed_views > 0 {
         lines.push(format!(
-            "{verb} {} target directories ({} logical, {} abandoned and {} live{kept}); {} logical remain",
+            "{verb} {} target directories ({} logical, {} and {}{kept}); {} logical remain",
             outcome.removed_views,
             ByteSize::b(outcome.removed_bytes).display().iec(),
-            outcome.removed_stale_views,
-            outcome.removed_live_views,
+            checkouts(outcome.removed_stale_views, "is gone", "are gone"),
+            checkouts(
+                outcome.removed_live_views,
+                "may still exist",
+                "may still exist"
+            ),
             ByteSize::b(outcome.remaining_bytes).display().iec(),
         ));
     } else {
@@ -1092,7 +1110,11 @@ pub(super) fn run_automatic(config: &Config, retention: &RetentionSettings) -> R
     }
     // Appended: a report nobody has printed yet is not this sweep's to
     // replace, and the next build says both.
-    let report = sweep.lines.join("\n") + "\n";
+    let report = format!(
+        "{FINISHED_PREFIX}{}\n{}\n{END_MARKER}\n",
+        utc_timestamp(),
+        sweep.lines.join("\n")
+    );
     let path = store.join(SWEEP_REPORT);
     std::fs::OpenOptions::new()
         .create(true)
@@ -1125,11 +1147,33 @@ pub(super) fn take_sweep_report(store: &Path) -> Vec<String> {
     }
     let report = std::fs::read_to_string(&claimed).unwrap_or_default();
     let _ = std::fs::remove_file(&claimed);
+    // Each sweep's report sits between a line with the time it finished and
+    // an end line; reports from older versions have neither.
+    let mut source = "an earlier background collection".to_owned();
     report
         .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(str::to_owned)
+        .filter_map(|line| {
+            if let Some(time) = line.strip_prefix(FINISHED_PREFIX) {
+                source = format!("an earlier background collection (finished {time})");
+                return None;
+            }
+            // An older version may append an undated report after this one.
+            if line == END_MARKER {
+                source = "an earlier background collection".to_owned();
+                return None;
+            }
+            (!line.trim().is_empty()).then(|| format!("{source}: {line}"))
+        })
         .collect()
+}
+
+const FINISHED_PREFIX: &str = "# finished ";
+const END_MARKER: &str = "# end";
+
+fn utc_timestamp() -> String {
+    jiff::Timestamp::now()
+        .strftime("%Y-%m-%d %H:%M UTC")
+        .to_string()
 }
 
 fn claimed_report_path(report: &Path) -> PathBuf {

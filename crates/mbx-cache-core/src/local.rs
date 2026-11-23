@@ -271,7 +271,7 @@ impl LocalCas {
         fs::create_dir_all(parent)?;
         let staging = tempfile::tempdir_in(parent)?;
         let temporary = staging.path().join("blob");
-        reflink_copy::reflink_or_copy(source, &temporary)?;
+        crate::clone_or_copy(source, &temporary)?;
         let temporary = tempfile::TempPath::try_from_path(temporary)?;
         make_owner_writable(&temporary)?;
         if let Some(before) = before
