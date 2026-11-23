@@ -109,8 +109,10 @@ fn run_cargo_shim_inner() -> Result<ExitCode> {
     if mbx_disabled() {
         return run_real_cargo(&real_cargo, &arguments);
     }
-    if enclosing_session(std::env::var_os(crate::session::SOCKET_ENV).as_deref())
-        || cargo_proxy_passthrough(&arguments)
+    if enclosing_session(
+        std::env::var_os(crate::session::SOCKET_ENV).as_deref(),
+        std::env::var_os(crate::session::EXEC_SESSION_ENV).as_deref(),
+    ) || cargo_proxy_passthrough(&arguments)
     {
         if super::launch::cargo_subcommand(&arguments) == Some("clean") {
             drop_dangling_managed_link(&real_cargo, &arguments);
@@ -366,12 +368,16 @@ fn mbx_disabled_value(value: Option<&OsStr>) -> bool {
     })
 }
 
-fn enclosing_session(session_socket: Option<&OsStr>) -> bool {
+fn enclosing_session(session_socket: Option<&OsStr>, exec_session: Option<&OsStr>) -> bool {
     // Cargo subcommands such as watch and nextest can invoke Cargo again. The
     // outer session's compiler wrapper and agent socket are already inherited,
     // so starting another session here would pay the setup cost for every
     // nested invocation and replace the long-lived watch session's context.
-    session_socket.is_some_and(|socket| !socket.is_empty())
+    //
+    // `mbx exec` hands its commands a socket but no rustc wrapper, so a Cargo
+    // run by CMake or maturin there would compile every crate uncached.
+    // It gets a session of its own, as it would run directly.
+    session_socket.is_some_and(|socket| !socket.is_empty()) && exec_session != Some(OsStr::new("1"))
 }
 
 pub(super) fn cargo_proxy_passthrough(arguments: &[OsString]) -> bool {
@@ -935,9 +941,17 @@ mod tests {
 
     #[test]
     fn cargo_shim_reuses_an_enclosing_session() {
-        assert!(enclosing_session(Some(OsStr::new("session-socket"))));
-        assert!(!enclosing_session(Some(OsStr::new(""))));
-        assert!(!enclosing_session(None));
+        let socket = Some(OsStr::new("session-socket"));
+        assert!(enclosing_session(socket, None));
+        assert!(enclosing_session(socket, Some(OsStr::new("0"))));
+        assert!(!enclosing_session(Some(OsStr::new("")), None));
+        assert!(!enclosing_session(None, None));
+    }
+
+    #[test]
+    fn cargo_shim_starts_its_own_session_under_mbx_exec() {
+        let socket = Some(OsStr::new("session-socket"));
+        assert!(!enclosing_session(socket, Some(OsStr::new("1"))));
     }
 
     #[test]

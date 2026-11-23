@@ -342,6 +342,8 @@ async fn session_environment_directs_cargo_at_the_shim() {
 
     assert!(run.is_some());
     assert!(values.contains_key(SOCKET_ENV));
+    // A Cargo this build runs may join it, even under an enclosing `mbx exec`.
+    assert_eq!(values.get(EXEC_SESSION_ENV).unwrap(), "0");
     assert!(values.contains_key(STAGING_ENV));
     assert_eq!(values.get(BUILD_ENV).unwrap().len(), 64);
     // The shim carries an .exe suffix on Windows, so compare stems.

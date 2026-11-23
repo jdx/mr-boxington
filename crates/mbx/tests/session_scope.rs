@@ -989,3 +989,80 @@ rustc-wrapper = ""
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// A Cargo that `mbx exec` runs, as CMake runs `cargo build` for an FFI crate,
+/// inherits the exec session's socket but no rustc wrapper. The Cargo shim
+/// must start its own session there rather than join one that caches nothing.
+#[cfg(unix)]
+#[test]
+fn cargo_shim_under_mbx_exec_caches_its_compilations() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    // A library, because a binary links through exec's `cc` shim and keys its
+    // link differently from a build run directly.
+    project(&root_path, "");
+    std::fs::remove_file(root_path.join("src/main.rs")).unwrap();
+    std::fs::write(
+        root_path.join("src/lib.rs"),
+        "pub fn value() -> u32 { 7 }\n",
+    )
+    .unwrap();
+    let bin = root_path.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let shim = bin.join("cargo");
+    std::fs::write(
+        &shim,
+        "#!/bin/sh\nexport MBX_CARGO_SHIM_MODE=1 MBX_CARGO_SHIM_PATH=\"$0\"\nexec \"$TEST_MBX\" \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cargo = std::path::PathBuf::from(std::env::var_os("CARGO").unwrap());
+    let path = std::env::join_paths(
+        [bin, cargo.parent().unwrap().to_path_buf()]
+            .into_iter()
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+
+    // The exec session must exist for the test to mean anything: without a
+    // C compiler on PATH, exec runs the command with no session at all.
+    let output = mbx(&root_path)
+        .env_remove("CARGO")
+        .env("PATH", &path)
+        .env("TEST_MBX", env!("CARGO_BIN_EXE_mbx"))
+        .env("MBX_GC_AUTO", "0")
+        .env("CARGO_TARGET_DIR", root_path.join("under-exec"))
+        .args([
+            "exec",
+            "sh",
+            "-c",
+            "test \"$MBX_EXEC_SESSION\" = 1 && cargo build --offline",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // A fresh target directory must restore what the nested build published.
+    let report = root_path.join("stats.json");
+    let output = mbx(&root_path)
+        .env("MBX_GC_AUTO", "0")
+        .env("MBX_CARGO_SHIM_MODE", "1")
+        .env("MBX_STATS_REPORT", &report)
+        .env("CARGO_TARGET_DIR", root_path.join("direct"))
+        .args(["build", "--offline"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+    assert!(report["hits"].as_u64().unwrap() > 0, "{report}");
+}
