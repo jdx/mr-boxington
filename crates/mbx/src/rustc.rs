@@ -743,11 +743,6 @@ pub(crate) fn compile(
             required_inputs.iter().map(PathBuf::as_path),
             Some(&source),
         );
-        // The retry's own writes to OUT_DIR are inputs newer than any start
-        // time, so judge inputs only by their snapshots: a start time in the
-        // future keeps one such file from ending the check before a later
-        // source is compared.
-        let retry_started = SystemTime::now() + std::time::Duration::from_secs(86_400);
         let mut retry = compiler_command(rustc, wrapper_argument);
         // None of the portable arguments, incremental state, or cache
         // bookkeeping for the shared tree may be used for the retry. Keep
@@ -792,12 +787,11 @@ pub(crate) fn compile(
         // mixes versions. Reject it as the primary path does; any other
         // validation error is not evidence of a change and is ignored.
         if final_output.status.success()
-            && let Err(error) = validate_compiler_inputs(
+            && let Err(error) = validate_snapshotted_inputs(
                 &invocation,
                 &outputs,
                 &working_dir,
                 &portable,
-                retry_started,
                 &retry_snapshots,
             )
             && discard_modified_compiler_result(&outputs, &retry_snapshots, &error)
@@ -1445,6 +1439,43 @@ fn validate_compiler_inputs(
     compilation_started: SystemTime,
     input_snapshots: &std::io::Result<BTreeMap<PathBuf, FileSnapshot>>,
 ) -> Result<()> {
+    validate_inputs(
+        invocation,
+        outputs,
+        working_dir,
+        portable,
+        Some(compilation_started),
+        input_snapshots,
+    )
+}
+
+/// [`validate_compiler_inputs`] for a compilation that may write inputs of
+/// its own: only inputs with a pre-compile snapshot are judged.
+fn validate_snapshotted_inputs(
+    invocation: &RustcInvocation,
+    outputs: &RustcOutputs,
+    working_dir: &Path,
+    portable: &Portable,
+    input_snapshots: &std::io::Result<BTreeMap<PathBuf, FileSnapshot>>,
+) -> Result<()> {
+    validate_inputs(
+        invocation,
+        outputs,
+        working_dir,
+        portable,
+        None,
+        input_snapshots,
+    )
+}
+
+fn validate_inputs(
+    invocation: &RustcInvocation,
+    outputs: &RustcOutputs,
+    working_dir: &Path,
+    portable: &Portable,
+    compilation_started: Option<SystemTime>,
+    input_snapshots: &std::io::Result<BTreeMap<PathBuf, FileSnapshot>>,
+) -> Result<()> {
     let input_snapshots = input_snapshots
         .as_ref()
         .map_err(|error| eyre::eyre!(error.to_string()))?;
@@ -1455,7 +1486,12 @@ fn validate_compiler_inputs(
         &portable.mappings,
         session::file_digest_cache(),
     )?;
-    discovered.verify_not_modified_since_with_snapshots(compilation_started, input_snapshots)?;
+    match compilation_started {
+        Some(started) => {
+            discovered.verify_not_modified_since_with_snapshots(started, input_snapshots)?;
+        }
+        None => discovered.verify_snapshots_unchanged(input_snapshots)?,
+    }
     discovered.verify()?;
     Ok(())
 }
