@@ -5707,12 +5707,20 @@ pub fn write_to_out_dir(input: TokenStream) -> TokenStream {
             assert_eq!(std::fs::read(output).unwrap(), b"written by rustc");
         }
         let shared = store.path().join("out-dirs");
+        // The macro must never write into a shared tree. A sibling unit of
+        // the package may copy Cargo's OUT_DIR after the retry wrote to it,
+        // which publishes a read-only, content-addressed copy; a file the
+        // macro wrote itself would be writable.
         if shared.is_dir() {
-            assert!(
-                find_files(&shared, |path| file_name_is(path, |name| name
-                    == "macro-output"))
-                .is_empty()
-            );
+            for copy in find_files(&shared, |path| {
+                file_name_is(path, |name| name == "macro-output")
+            }) {
+                assert!(
+                    std::fs::metadata(&copy).unwrap().permissions().readonly(),
+                    "{action}/{mode}: {} was written, not copied",
+                    copy.display()
+                );
+            }
         }
     }
 }

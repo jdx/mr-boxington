@@ -1261,7 +1261,7 @@ fn run_compiler_with(
 
 /// [`run_compiler`] with the forwarding destinations spelled out, so a test can
 /// see what would have reached Cargo.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn run_compiler_forwarding(
     command: &mut Command,
     stdout_sink: impl Write + Send + 'static,
