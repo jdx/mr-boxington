@@ -777,6 +777,22 @@ pub(crate) fn compile(
         if let Some(objects) = objects.take() {
             objects.remove_superseded(&final_output.status);
         }
+        // A source edited while the retry ran would leave an artifact that
+        // mixes versions. Reject it as the primary path does; any other
+        // validation error is not evidence of a change and is ignored.
+        if final_output.status.success()
+            && let Err(error) = validate_compiler_inputs(
+                &invocation,
+                &outputs,
+                &working_dir,
+                &portable,
+                compilation_started,
+                &input_snapshots,
+            )
+            && discard_modified_compiler_result(&outputs, &input_snapshots, &error)
+        {
+            return Ok(ExitCode::FAILURE);
+        }
         if deferred && std::ptr::eq(final_output, &output) {
             replay_unforwarded(final_output)?;
         } else {
