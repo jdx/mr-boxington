@@ -2179,8 +2179,11 @@ mod tests {
         )
         .unwrap();
         let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        filetime::set_file_mtime(&launcher, filetime::FileTime::from_system_time(modified))
-            .unwrap();
+        crate::filetime_compat::set_file_mtime(
+            &launcher,
+            filetime::FileTime::from_system_time(modified),
+        )
+        .unwrap();
 
         retarget_launcher(&launcher, &receiver, 3).unwrap();
 
@@ -2228,8 +2231,11 @@ mod tests {
         std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
         std::fs::write(&executable, b"compiled build script").unwrap();
         let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        filetime::set_file_mtime(&executable, filetime::FileTime::from_system_time(modified))
-            .unwrap();
+        crate::filetime_compat::set_file_mtime(
+            &executable,
+            filetime::FileTime::from_system_time(modified),
+        )
+        .unwrap();
 
         install(&executable, &CacheDigest::blake3(b"action")).unwrap();
 
@@ -2958,11 +2964,12 @@ mod tests {
         let file = directory.path().join("sub/input");
         std::fs::write(&file, "x").unwrap();
         for path in [&file, &directory.path().join("sub"), directory.path()] {
-            filetime::set_file_mtime(path, filetime::FileTime::from_system_time(old)).unwrap();
+            crate::filetime_compat::set_file_mtime(path, filetime::FileTime::from_system_time(old))
+                .unwrap();
         }
         let since = SystemTime::now() - Duration::from_secs(30);
         assert!(!modified_since(directory.path(), &[], since, 0).unwrap());
-        filetime::set_file_mtime(&file, filetime::FileTime::now()).unwrap();
+        crate::filetime_compat::set_file_mtime(&file, filetime::FileTime::now()).unwrap();
         assert!(modified_since(directory.path(), &[], since, 0).unwrap());
         assert!(
             !modified_since(directory.path(), &[directory.path().join("sub")], since, 0).unwrap()

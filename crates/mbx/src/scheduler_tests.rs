@@ -4976,9 +4976,9 @@ fn ledger_cache_notices_atomic_replacement_with_same_time_and_size() {
     replacement
         .write_all(&serde_json::to_vec(&ledger).unwrap())
         .unwrap();
-    filetime::set_file_mtime(
+    crate::filetime_compat::set_file_mtime(
         replacement.path(),
-        filetime::FileTime::from_last_modification_time(&metadata),
+        crate::filetime_compat::modified(&metadata),
     )
     .unwrap();
     replacement.persist(&path).unwrap();
@@ -5000,11 +5000,8 @@ fn ledger_cache_bounds_staleness_when_file_metadata_does_not_change() {
     assert_eq!(cache.read(&path).crates["crate"], 100);
     ledger.crates.insert("crate".into(), 200);
     std::fs::write(&path, serde_json::to_vec(&ledger).unwrap()).unwrap();
-    filetime::set_file_mtime(
-        &path,
-        filetime::FileTime::from_last_modification_time(&metadata),
-    )
-    .unwrap();
+    crate::filetime_compat::set_file_mtime(&path, crate::filetime_compat::modified(&metadata))
+        .unwrap();
     assert!(cache.stamp == LedgerStamp::read(&path));
     assert_eq!(cache.read(&path).crates["crate"], 100);
     cache.loaded_at = Some(Instant::now() - LEDGER_CACHE_MAX_AGE);

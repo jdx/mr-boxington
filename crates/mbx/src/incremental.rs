@@ -1969,8 +1969,11 @@ mod tests {
         let session = unit.join("crate-id/s-session");
         std::fs::create_dir_all(&session).unwrap();
         std::fs::write(session.join("dep-graph.bin"), vec![0; 32]).unwrap();
-        filetime::set_file_mtime(&session, filetime::FileTime::from_unix_time(used as i64, 0))
-            .unwrap();
+        crate::filetime_compat::set_file_mtime(
+            &session,
+            filetime::FileTime::from_unix_time(used as i64, 0),
+        )
+        .unwrap();
         unit
     }
 
@@ -2163,7 +2166,7 @@ mod tests {
         let inactive = unit(&state.directory, "inactive", 1);
         let mut lock = fslock::LockFile::open(&active.join("crate-id/s-session.lock")).unwrap();
         lock.lock().unwrap();
-        filetime::set_file_mtime(
+        crate::filetime_compat::set_file_mtime(
             active.join("crate-id/s-session.lock"),
             filetime::FileTime::from_unix_time(0, 0),
         )
@@ -2198,7 +2201,11 @@ mod tests {
             let lock = directory.join("crate-id/s-session.lock");
             std::fs::write(&lock, b"").unwrap();
             if !fresh_lock {
-                filetime::set_file_mtime(&lock, filetime::FileTime::from_unix_time(0, 0)).unwrap();
+                crate::filetime_compat::set_file_mtime(
+                    &lock,
+                    filetime::FileTime::from_unix_time(0, 0),
+                )
+                .unwrap();
             }
             drop(state.lease);
             for dry_run in [true, false] {
@@ -2211,12 +2218,15 @@ mod tests {
     }
 
     fn mtime(path: &Path) -> i64 {
-        filetime::FileTime::from_last_modification_time(&std::fs::metadata(path).unwrap())
-            .unix_seconds()
+        crate::filetime_compat::modified(&std::fs::metadata(path).unwrap()).unix_seconds()
     }
 
     fn set_mtime(path: &Path, secs: u64) {
-        filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(secs as i64, 0)).unwrap();
+        crate::filetime_compat::set_file_mtime(
+            path,
+            filetime::FileTime::from_unix_time(secs as i64, 0),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2886,7 +2896,7 @@ mod tests {
         std::fs::hard_link(&shared, old.join("crate-id/s-session/alias.bin")).unwrap();
         // Creating the alias refreshed the session directory; keep this
         // donor old so the test exercises eviction rather than startup grace.
-        filetime::set_file_mtime(
+        crate::filetime_compat::set_file_mtime(
             old.join("crate-id/s-session"),
             filetime::FileTime::from_unix_time(0, 0),
         )
@@ -2947,7 +2957,7 @@ mod tests {
         assert!(!old.exists());
         assert!(linked.exists());
 
-        filetime::set_file_mtime(
+        crate::filetime_compat::set_file_mtime(
             recent.join("crate-id/s-session"),
             filetime::FileTime::from_unix_time(0, 0),
         )
@@ -3313,7 +3323,7 @@ mod tests {
             std::fs::write(session.join("dep-graph.bin"), key).unwrap();
             let lock = session_lock_name(session.file_name().unwrap()).unwrap();
             std::fs::write(session.with_file_name(lock), b"").unwrap();
-            filetime::set_file_mtime(
+            crate::filetime_compat::set_file_mtime(
                 &session,
                 filetime::FileTime::from_unix_time(updated_secs as i64, 0),
             )

@@ -160,7 +160,7 @@ fn aged_old_layout_units(view: &Path) -> PathBuf {
         binary.parent().unwrap(),
         binary.as_path(),
     ] {
-        filetime::set_file_times(path, old, old).unwrap();
+        crate::filetime_compat::set_file_times(path, old, old).unwrap();
     }
     binary
 }
@@ -1370,7 +1370,7 @@ fn unrecorded_view(root: &Path, config: &Config, name: &str, days_ago: u64) -> (
         all.push(path);
     }
     for path in all {
-        filetime::set_file_mtime(&path, then).unwrap();
+        crate::filetime_compat::set_file_mtime(&path, then).unwrap();
     }
     (workspace, view)
 }
@@ -1597,7 +1597,7 @@ fn an_old_view_without_a_record_holding_a_cargo_lock_file_is_collected() {
         std::time::SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60),
     );
     for path in [lock.parent().unwrap(), lock.as_path(), view.as_path()] {
-        filetime::set_file_mtime(path, then).unwrap();
+        crate::filetime_compat::set_file_mtime(path, then).unwrap();
     }
 
     let outcome = collect_aged(&config.target.root, false);
@@ -1634,7 +1634,7 @@ fn a_write_past_the_sweeps_clock_keeps_a_view_without_a_record() {
             std::fs::write(&late, b"built").unwrap();
             let after =
                 FileTime::from_system_time(std::time::SystemTime::now() + Duration::from_secs(50));
-            filetime::set_file_mtime(&late, after).unwrap();
+            crate::filetime_compat::set_file_mtime(&late, after).unwrap();
         },
         || {},
     )

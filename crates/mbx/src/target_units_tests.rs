@@ -23,9 +23,9 @@ fn unit(directory: &Path, files: &[&str], age: Duration) {
             if entry.file_type().unwrap().is_dir() {
                 pending.push(entry.path());
             }
-            filetime::set_file_times(entry.path(), time, time).unwrap();
+            crate::filetime_compat::set_file_times(entry.path(), time, time).unwrap();
         }
-        filetime::set_file_times(&next, time, time).unwrap();
+        crate::filetime_compat::set_file_times(&next, time, time).unwrap();
     }
 }
 
@@ -90,7 +90,7 @@ fn a_read_of_the_fingerprint_keeps_an_old_unit() {
     let used = profile.join("build/widget/0123456789abcdef");
     unit(&used, NEW_UNIT, 40 * DAY);
     // A fresh build reads the hash and writes nothing.
-    filetime::set_file_atime(
+    crate::filetime_compat::set_file_atime(
         used.join("fingerprint/lib-widget"),
         FileTime::from_system_time(now() - DAY),
     )

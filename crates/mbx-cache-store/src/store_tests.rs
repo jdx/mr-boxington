@@ -12,7 +12,7 @@ fn age(store: &Path, digest: &CacheDigest, age: Duration) {
     let path = LocalCas::new(store).path_for(digest).unwrap();
     let when = SystemTime::now() - age;
     let time = filetime::FileTime::from_system_time(when);
-    filetime::set_file_times(path, time, time).unwrap();
+    crate::filetime_compat::set_file_times(path, time, time).unwrap();
 }
 
 /// Publish an action result whose output tree holds `outputs`.
@@ -1088,7 +1088,7 @@ fn gc_prunes_abandoned_import_staging() {
     let stale = filetime::FileTime::from_system_time(
         SystemTime::now() - IMPORT_STAGING_RETENTION - Duration::from_secs(60),
     );
-    filetime::set_file_times(&killed, stale, stale).unwrap();
+    crate::filetime_compat::set_file_times(&killed, stale, stale).unwrap();
 
     gc(directory.path(), u64::MAX).unwrap();
 
@@ -1197,7 +1197,7 @@ fn gc_reclaims_a_staging_claim_whose_tree_is_gone() {
     let stale = filetime::FileTime::from_system_time(
         SystemTime::now() - IMPORT_STAGING_RETENTION - Duration::from_secs(60),
     );
-    filetime::set_file_times(&orphan, stale, stale).unwrap();
+    crate::filetime_compat::set_file_times(&orphan, stale, stale).unwrap();
 
     gc(directory.path(), u64::MAX).unwrap();
 
@@ -1217,7 +1217,7 @@ fn gc_leaves_a_locked_import_staging_tree_alone() {
     let stale = filetime::FileTime::from_system_time(
         SystemTime::now() - IMPORT_STAGING_RETENTION - Duration::from_secs(60),
     );
-    filetime::set_file_times(&held, stale, stale).unwrap();
+    crate::filetime_compat::set_file_times(&held, stale, stale).unwrap();
     let _lock = lock_import_staging(&held).unwrap();
 
     gc(directory.path(), u64::MAX).unwrap();
@@ -2025,8 +2025,8 @@ fn write_manifest_aged(store: &Path, identity: &str, bytes: usize, age: Duration
     std::fs::write(&path, vec![b'x'; bytes]).unwrap();
     std::fs::write(&lock, b"").unwrap();
     let at = filetime::FileTime::from_system_time(SystemTime::now() - age);
-    filetime::set_file_mtime(&path, at).unwrap();
-    filetime::set_file_mtime(&lock, at).unwrap();
+    crate::filetime_compat::set_file_mtime(&path, at).unwrap();
+    crate::filetime_compat::set_file_mtime(&lock, at).unwrap();
     path
 }
 
@@ -2045,7 +2045,7 @@ fn drops_manifests_and_locks_no_checkout_claims() {
     // Left behind by a manifest that is already gone.
     let orphan_lock = task_manifest_lock_path(&store, &"3".repeat(64));
     std::fs::write(&orphan_lock, b"").unwrap();
-    filetime::set_file_mtime(
+    crate::filetime_compat::set_file_mtime(
         &orphan_lock,
         filetime::FileTime::from_system_time(SystemTime::now() - old),
     )
@@ -2124,7 +2124,7 @@ fn ignores_what_it_did_not_write_beside_the_task_manifests() {
     std::fs::create_dir_all(&root).unwrap();
     let stray = root.join("notes.json");
     std::fs::write(&stray, b"mine").unwrap();
-    filetime::set_file_mtime(
+    crate::filetime_compat::set_file_mtime(
         &stray,
         filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(10 * 86_400)),
     )
@@ -2337,7 +2337,7 @@ fn write_session(store: &Path, id: &str, age: Duration) {
     .unwrap();
     let when = SystemTime::now() - age;
     let time = filetime::FileTime::from_system_time(when);
-    filetime::set_file_times(&paths.events, time, time).unwrap();
+    crate::filetime_compat::set_file_times(&paths.events, time, time).unwrap();
 }
 
 fn session_count(store: &Path) -> usize {
@@ -2399,7 +2399,7 @@ fn collection_leaves_a_stream_a_build_is_still_writing() {
     let paths = crate::events::session_paths(&store, &live);
     let when = SystemTime::now() - (SESSION_RETENTION + Duration::from_secs(60));
     let time = filetime::FileTime::from_system_time(when);
-    filetime::set_file_times(&paths.events, time, time).unwrap();
+    crate::filetime_compat::set_file_times(&paths.events, time, time).unwrap();
 
     let outcome = gc(&store, u64::MAX).unwrap();
 
@@ -3018,7 +3018,7 @@ fn store_rustc_result(store: &Path, version: &str, output: &[u8]) -> (CacheDiges
 fn age_result(store: &Path, action: &CacheDigest, age: Duration) {
     let path = LocalActionCache::new(store).path_for(action).unwrap();
     let time = filetime::FileTime::from_system_time(SystemTime::now() - age);
-    filetime::set_file_times(path, time, time).unwrap();
+    crate::filetime_compat::set_file_times(path, time, time).unwrap();
 }
 
 const DAY: Duration = Duration::from_secs(86_400);
@@ -3205,8 +3205,7 @@ fn sweeps_do_not_refresh_the_use_time_of_an_idle_version() {
     let (_, _) = store_rustc_result(dir.path(), "rustc 1.90.0", b"current");
     age_result(dir.path(), &idle, 30 * DAY);
     let path = LocalActionCache::new(dir.path()).path_for(&idle).unwrap();
-    let atime =
-        |path: &Path| filetime::FileTime::from_last_access_time(&std::fs::metadata(path).unwrap());
+    let atime = |path: &Path| crate::filetime_compat::accessed(&std::fs::metadata(path).unwrap());
     let before = atime(&path);
 
     // Neither pass is allowed to count as a use, even where reads update atime.
@@ -3568,7 +3567,7 @@ fn configured_session_limits_and_live_lock_apply_to_real_and_dry_gc() {
     let live = crate::events::session_paths(&store, writer.id());
     let old = SystemTime::now() - Duration::from_secs(4 * 86_400);
     let time = filetime::FileTime::from_system_time(old);
-    filetime::set_file_times(&live.events, time, time).unwrap();
+    crate::filetime_compat::set_file_times(&live.events, time, time).unwrap();
 
     let age_only = SessionRetention {
         max_age: Some(Duration::from_secs(86_400)),
