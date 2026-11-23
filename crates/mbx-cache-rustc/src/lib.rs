@@ -1676,6 +1676,44 @@ impl<'a> Parser<'a> {
                     BypassReason::UnknownFlag(format!("-Z{option}"))
                 });
             }
+            // These change what rustc encodes into the rmeta: the MIR of
+            // every item, or the optimized MIR. Keep the exact spelling in
+            // the key; reject values rustc would not accept.
+            if option == "always-encode-mir" {
+                self.parsed.push(Argument::Plain(format!("-Z{option}")));
+                return Ok(());
+            }
+            if let Some(level) = option.strip_prefix("mir-opt-level=") {
+                if matches!(level, "0" | "1" | "2" | "3" | "4") {
+                    self.parsed.push(Argument::Plain(format!("-Z{option}")));
+                    return Ok(());
+                }
+                return Err(if level.is_empty() {
+                    BypassReason::MissingValue("-Zmir-opt-level".into())
+                } else {
+                    BypassReason::UnknownFlag(format!("-Z{option}"))
+                });
+            }
+            if option == "mir-opt-level" {
+                return Err(BypassReason::MissingValue("-Zmir-opt-level".into()));
+            }
+            if option == "inline-mir" {
+                return Err(BypassReason::MissingValue("-Zinline-mir".into()));
+            }
+            if let Some(value) = option.strip_prefix("inline-mir=") {
+                if matches!(
+                    value,
+                    "y" | "yes" | "on" | "true" | "n" | "no" | "off" | "false"
+                ) {
+                    self.parsed.push(Argument::Plain(format!("-Z{option}")));
+                    return Ok(());
+                }
+                return Err(if value.is_empty() {
+                    BypassReason::MissingValue("-Zinline-mir".into())
+                } else {
+                    BypassReason::UnknownFlag(format!("-Z{option}"))
+                });
+            }
             if option.starts_with("threads=") {
                 self.parsed.push(Argument::Plain(format!("-Z{option}")));
                 return Ok(());
