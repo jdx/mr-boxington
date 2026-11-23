@@ -5528,6 +5528,15 @@ fn a_proc_macro_can_write_to_out_dir_with_sharing_enabled() {
         // restore an artifact that would skip its write into Cargo's tree.
         ("check", "io", None, true),
         ("check", "tauri", None, true),
+        ("check", "panic", None, true),
+        ("check", "panic_follow_on", None, true),
+        ("check", "io_follow_on", None, true),
+        (
+            "check",
+            "unrelated_panic",
+            Some("Permission denied would not explain this unrelated panic"),
+            false,
+        ),
         ("build", "io", None, true),
         ("test", "tauri", None, true),
         ("clippy", "tauri", None, true),
@@ -5615,6 +5624,13 @@ pub fn write_to_out_dir(input: TokenStream) -> TokenStream {
     let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     let result = std::fs::write(out.join("macro-output"), b"written by rustc");
     let error = match (mode.as_str(), result) {
+        ("panic", Err(error)) => panic!("OUT_DIR write failed: {error}"),
+        ("panic_follow_on", write) => {
+            write.unwrap();
+            return "pub struct Generated;".parse().unwrap();
+        }
+        ("io_follow_on", Ok(())) => return "pub struct Generated;".parse().unwrap(),
+        ("unrelated_panic", _) => panic!("Permission denied would not explain this unrelated panic"),
         ("unrelated", _) => "primary unrelated failure".to_owned(),
         ("tauri", Err(_)) => "OUT_DIR env var is not set, do you have a build script?".to_owned(),
         ("retry_fails", Err(error)) => format!("primary shared OUT_DIR failure: {error}"),
@@ -5628,9 +5644,16 @@ pub fn write_to_out_dir(input: TokenStream) -> TokenStream {
         )
         .unwrap();
         std::fs::write(path.join("build.rs"), "fn main() {}\n").unwrap();
+        let consumes_generated = match mode {
+            "panic_follow_on" => "pub fn uses_generated(_: Generated) {}\n",
+            "io_follow_on" => "pub use Generated as Wrapped;\n",
+            _ => "",
+        };
         std::fs::write(
             path.join("src/lib.rs"),
-            format!("pub const OUT: &str = env!(\"OUT_DIR\");\nui::write_to_out_dir!({mode});\n"),
+            format!(
+                "pub const OUT: &str = env!(\"OUT_DIR\");\nui::write_to_out_dir!({mode});\n{consumes_generated}"
+            ),
         )
         .unwrap();
         generate_lockfile(path);

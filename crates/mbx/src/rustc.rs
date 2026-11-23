@@ -1091,7 +1091,6 @@ fn shared_out_dir_write_failed(output: &Output) -> bool {
     if output.status.code() != Some(1) {
         return false;
     }
-    let mut write_error = false;
     for line in output.stderr.split(|byte| *byte == b'\n') {
         let Ok(diagnostic) = serde_json::from_slice::<serde_json::Value>(line) else {
             continue;
@@ -1100,7 +1099,7 @@ fn shared_out_dir_write_failed(output: &Output) -> bool {
             continue;
         }
         let message = diagnostic["message"].as_str().unwrap_or_default();
-        if message.starts_with("aborting due to ") {
+        if !diagnostic["code"].is_null() {
             continue;
         }
         let from_macro = diagnostic["spans"]
@@ -1113,17 +1112,45 @@ fn shared_out_dir_write_failed(output: &Output) -> bool {
         ]
         .iter()
         .any(|error| message.contains(error));
-        if diagnostic["code"].is_null()
-            && (message == "OUT_DIR env var is not set, do you have a build script?"
-                || (from_macro && mentions_write_denial))
+        if message == "OUT_DIR env var is not set, do you have a build script?"
+            || (from_macro && mentions_write_denial)
+            || (message == "proc macro panicked"
+                && diagnostic["children"].as_array().is_some_and(|children| {
+                    children.iter().any(|child| {
+                        child["level"] == "help"
+                            && child["message"]
+                                .as_str()
+                                .and_then(|message| message.strip_prefix("message: "))
+                                .is_some_and(panic_reports_write_denial)
+                    })
+                }))
         {
-            write_error = true;
-        } else {
-            // A writable directory cannot fix a second, unrelated error.
-            return false;
+            // Other errors may be consequences of the macro not expanding.
+            // If the single retry still fails, Cargo sees the original output.
+            return true;
         }
     }
-    write_error
+    false
+}
+
+/// A panic may format a filesystem error with Display or with Debug (as
+/// Result::unwrap/expect do). Match the complete OS error at the end of the
+/// payload, not a permission-related phrase in an otherwise arbitrary panic.
+fn panic_reports_write_denial(payload: &str) -> bool {
+    [
+        "Permission denied (os error 13)",
+        "Read-only file system (os error 30)",
+        "Access is denied. (os error 5)",
+        r#"Os { code: 13, kind: PermissionDenied, message: "Permission denied" }"#,
+        r#"Os { code: 30, kind: ReadOnlyFilesystem, message: "Read-only file system" }"#,
+        r#"Os { code: 5, kind: PermissionDenied, message: "Access is denied." }"#,
+    ]
+    .iter()
+    .any(|error| {
+        payload
+            .strip_suffix(error)
+            .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with(": "))
+    })
 }
 
 /// Run the compiler and capture both of its streams, forwarding each line to
