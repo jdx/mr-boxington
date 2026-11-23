@@ -2289,7 +2289,9 @@ impl Pool {
         );
         pool.scope = Some(scope);
         pool.domain_capacity = cpus.min(pool.capacity);
-        pool.set_memory_capacity(memory.unwrap_or(0));
+        pool.memory_capacity = memory.unwrap_or(0);
+        pool.domain_memory_capacity =
+            local_memory_ceiling(pool.memory_capacity, crate::util::memory_total_bytes());
         pool.events = self.events;
         pool.pressure = false;
         pool
