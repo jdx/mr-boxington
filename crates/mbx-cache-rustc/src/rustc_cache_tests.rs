@@ -791,6 +791,58 @@ fn share_generics_explicit_boolean_values_are_keyed() {
     }
 }
 
+#[test]
+fn mir_encoding_flags_are_keyed() {
+    let source = [("/work/project/src.rs", "source")];
+    let digest = |extra: &[&str]| {
+        let mut argv = vec!["--crate-type=lib", "--emit=metadata"];
+        argv.extend_from_slice(extra);
+        argv.push("src.rs");
+        RustcInvocation::parse(&args(&argv))
+            .unwrap_or_else(|error| panic!("{extra:?}: {error}"))
+            .action(context(&source))
+            .unwrap()
+            .digest
+    };
+    let base = digest(&[]);
+    let encode = digest(&["-Zalways-encode-mir"]);
+    assert_ne!(base, encode, "always-encode-mir must change the key");
+    assert_eq!(encode, digest(&["-Z", "always-encode-mir"]));
+
+    let level0 = digest(&["-Zmir-opt-level=0"]);
+    let level1 = digest(&["-Zmir-opt-level=1"]);
+    assert_ne!(base, level1);
+    assert_ne!(level0, level1, "levels must have different keys");
+    assert_eq!(level1, digest(&["-Z", "mir-opt-level=1"]));
+
+    let inline_no = digest(&["-Zinline-mir=no"]);
+    let inline_yes = digest(&["-Zinline-mir=yes"]);
+    assert_ne!(base, inline_no);
+    assert_ne!(inline_no, inline_yes, "values must have different keys");
+    assert_eq!(inline_no, digest(&["-Z", "inline-mir=no"]));
+
+    for flag in [
+        "-Zalways-encode-mir=maybe",
+        "-Zmir-opt-level",
+        "-Zmir-opt-level=",
+        "-Zmir-opt-level=9",
+        "-Zinline-mir",
+        "-Zinline-mir=",
+        "-Zinline-mir=maybe",
+    ] {
+        assert!(
+            RustcInvocation::parse(&args(&[
+                "--crate-type=lib",
+                "--emit=metadata",
+                flag,
+                "src.rs",
+            ]))
+            .is_err(),
+            "{flag} must bypass"
+        );
+    }
+}
+
 /// The archive is keyed by content like an `--extern` artifact, along both
 /// discovery paths: a rebuilt archive with the same name can never be
 /// restored against, and a prediction replays exactly the key dep-info
