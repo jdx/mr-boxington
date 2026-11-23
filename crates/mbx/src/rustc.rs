@@ -737,6 +737,13 @@ pub(crate) fn compile(
         let _ = replay_unforwarded(&output);
     }
     if let Some(original) = retry_out_dir {
+        // The first attempt's snapshot would blame the retry for an edit made
+        // while that attempt ran, which the retry already compiled.
+        let retry_snapshots = crate::util::snapshot_compiler_inputs(
+            required_inputs.iter().map(PathBuf::as_path),
+            Some(&source),
+        );
+        let retry_started = SystemTime::now();
         let mut retry = compiler_command(rustc, wrapper_argument);
         // None of the portable arguments, incremental state, or cache
         // bookkeeping for the shared tree may be used for the retry. Keep
@@ -786,10 +793,10 @@ pub(crate) fn compile(
                 &outputs,
                 &working_dir,
                 &portable,
-                compilation_started,
-                &input_snapshots,
+                retry_started,
+                &retry_snapshots,
             )
-            && discard_modified_compiler_result(&outputs, &input_snapshots, &error)
+            && discard_modified_compiler_result(&outputs, &retry_snapshots, &error)
         {
             return Ok(ExitCode::FAILURE);
         }
