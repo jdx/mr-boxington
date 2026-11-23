@@ -1112,9 +1112,13 @@ fn shared_out_dir_write_failed(output: &Output) -> bool {
         ]
         .iter()
         .any(|error| message.contains(error));
+        let macro_panicked = matches!(
+            message,
+            "proc macro panicked" | "proc-macro derive panicked" | "custom attribute panicked"
+        );
         if message == "OUT_DIR env var is not set, do you have a build script?"
             || (from_macro && mentions_write_denial)
-            || (message == "proc macro panicked"
+            || (macro_panicked
                 && diagnostic["children"].as_array().is_some_and(|children| {
                     children.iter().any(|child| {
                         child["level"] == "help"

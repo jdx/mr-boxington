@@ -5530,6 +5530,8 @@ fn a_proc_macro_can_write_to_out_dir_with_sharing_enabled() {
         ("check", "tauri", None, true),
         ("check", "panic", None, true),
         ("check", "panic_follow_on", None, true),
+        ("check", "derive", None, true),
+        ("check", "attribute", None, true),
         ("check", "io_follow_on", None, true),
         (
             "check",
@@ -5599,7 +5601,7 @@ writer = { path = "../writer" }
         .unwrap();
         std::fs::write(
             path.join("ui/src/lib.rs"),
-            "pub use writer::write_to_out_dir;\n",
+            "pub use writer::{WriteToOutDir, write_to_out_dir, write_to_out_dir_attr};\n",
         )
         .unwrap();
         std::fs::write(
@@ -5618,11 +5620,27 @@ proc-macro = true
             path.join("writer/src/lib.rs"),
             r#"use proc_macro::TokenStream;
 
+fn write_output() -> std::io::Result<()> {
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(out.join("macro-output"), b"written by rustc")
+}
+
+#[proc_macro_derive(WriteToOutDir)]
+pub fn write_derive(_: TokenStream) -> TokenStream {
+    write_output().unwrap();
+    "pub struct Generated;".parse().unwrap()
+}
+
+#[proc_macro_attribute]
+pub fn write_to_out_dir_attr(_: TokenStream, item: TokenStream) -> TokenStream {
+    write_output().unwrap();
+    item
+}
+
 #[proc_macro]
 pub fn write_to_out_dir(input: TokenStream) -> TokenStream {
     let mode = input.to_string();
-    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
-    let result = std::fs::write(out.join("macro-output"), b"written by rustc");
+    let result = write_output();
     let error = match (mode.as_str(), result) {
         ("panic", Err(error)) => panic!("OUT_DIR write failed: {error}"),
         ("panic_follow_on", write) => {
@@ -5644,16 +5662,16 @@ pub fn write_to_out_dir(input: TokenStream) -> TokenStream {
         )
         .unwrap();
         std::fs::write(path.join("build.rs"), "fn main() {}\n").unwrap();
-        let consumes_generated = match mode {
-            "panic_follow_on" => "pub fn uses_generated(_: Generated) {}\n",
-            "io_follow_on" => "pub use Generated as Wrapped;\n",
-            _ => "",
+        let macro_use = match mode {
+            "derive" => "#[derive(ui::WriteToOutDir)] pub struct DeriveInput;\npub fn uses_generated(_: Generated) {}\n".to_owned(),
+            "attribute" => "#[ui::write_to_out_dir_attr] pub struct Generated;\npub fn uses_generated(_: Generated) {}\n".to_owned(),
+            "panic_follow_on" => format!("ui::write_to_out_dir!({mode});\npub fn uses_generated(_: Generated) {{}}\n"),
+            "io_follow_on" => format!("ui::write_to_out_dir!({mode});\npub use Generated as Wrapped;\n"),
+            _ => format!("ui::write_to_out_dir!({mode});\n"),
         };
         std::fs::write(
             path.join("src/lib.rs"),
-            format!(
-                "pub const OUT: &str = env!(\"OUT_DIR\");\nui::write_to_out_dir!({mode});\n{consumes_generated}"
-            ),
+            format!("pub const OUT: &str = env!(\"OUT_DIR\");\n{macro_use}"),
         )
         .unwrap();
         generate_lockfile(path);
