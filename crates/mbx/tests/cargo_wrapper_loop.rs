@@ -168,6 +168,9 @@ fn explicit_wrapper_loops_report_the_loop() {
         (false, "", false, false),
         (true, "", false, false),
         (false, "cargo ", true, false),
+        // macOS filesystems reject invalid UTF-8 names before mbx can run.
+        // The Cargo-chain unit test still covers lossless serialization there.
+        #[cfg(not(target_os = "macos"))]
         (true, "cargo ", false, true),
     ] {
         let root = tempfile::tempdir().unwrap();
