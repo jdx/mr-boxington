@@ -89,6 +89,10 @@ pub const CXX_SHIM_STEM: &str = "mbx-cxx";
 const LEGACY_CC_SHIM_STEM: &str = "mbx-cc";
 pub(crate) const PATH_SHIMS_ENV: &str = "MBX_CC_SHIM_COMPILERS";
 pub(crate) const SOCKET_ENV: &str = "MBX_SOCKET";
+/// Set to `1` by `mbx exec` and to `0` by a Cargo session. A Cargo started
+/// under `mbx exec` inherits that session's socket but no rustc wrapper, so the
+/// Cargo shim must start a session of its own rather than reuse it.
+pub(crate) const EXEC_SESSION_ENV: &str = "MBX_EXEC_SESSION";
 pub(crate) const REAL_CC_ENV: &str = "MBX_REAL_CC";
 pub(crate) const REAL_CXX_ENV: &str = "MBX_REAL_CXX";
 pub(crate) const STAGING_ENV: &str = "MBX_STAGING_DIR";
@@ -518,6 +522,11 @@ impl CacheSession {
             Err(error) => warn!("incremental state was not recorded: {error:#}"),
         }
         environment.insert(SOCKET_ENV.into(), self.socket.clone());
+        // A Cargo this build runs, as watch and nextest do, inherits the
+        // wrapper set below and may reuse this session. Cleared rather than
+        // removed, because a value removed here is still inherited from an
+        // enclosing `mbx exec`.
+        environment.insert(EXEC_SESSION_ENV.into(), "0".into());
         environment.insert(
             STAGING_ENV.into(),
             self.staging.to_string_lossy().into_owned(),
@@ -753,6 +762,9 @@ impl CacheSession {
             project_root.to_string_lossy().into_owned(),
         );
         environment.insert(SOCKET_ENV.into(), self.socket.clone());
+        // No rustc wrapper is set here, so a Cargo shim under this command
+        // must not take the socket as a Cargo session it can join.
+        environment.insert(EXEC_SESSION_ENV.into(), "1".into());
         environment.insert(
             STAGING_ENV.into(),
             self.staging.to_string_lossy().into_owned(),

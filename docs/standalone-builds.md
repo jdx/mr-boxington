@@ -99,6 +99,20 @@ mbx exec make -j8
 The recorded shim stays valid across later commands. Outside `mbx exec` it
 runs the real compiler without using the cache.
 
+## Cargo builds inside `mbx exec`
+
+A build tool under `mbx exec` may run Cargo itself, as a CMake target that
+builds a Rust library does. When that `cargo` is mbx's
+[Cargo shim](/setup), it caches the Rust compilations the same way a build
+run directly does. `mbx exec` does not wrap a plain `cargo` that is not the
+shim, so its Rust compilations stay uncached.
+
+```sh
+# CMake runs `cargo build` for its FFI target; both the C and Rust compiles
+# use the cache
+mbx exec cmake --build build
+```
+
 ## What gets cached
 
 mbx caches ordinary gcc-, clang-, and MSVC-style compiler calls that compile
