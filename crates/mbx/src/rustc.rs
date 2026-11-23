@@ -743,7 +743,11 @@ pub(crate) fn compile(
             required_inputs.iter().map(PathBuf::as_path),
             Some(&source),
         );
-        let retry_started = SystemTime::now();
+        // The retry's own writes to OUT_DIR are inputs newer than any start
+        // time, so judge inputs only by their snapshots: a start time in the
+        // future keeps one such file from ending the check before a later
+        // source is compared.
+        let retry_started = SystemTime::now() + std::time::Duration::from_secs(86_400);
         let mut retry = compiler_command(rustc, wrapper_argument);
         // None of the portable arguments, incremental state, or cache
         // bookkeeping for the shared tree may be used for the retry. Keep
