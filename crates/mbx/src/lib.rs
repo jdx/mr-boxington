@@ -62,6 +62,8 @@ mod cargo_layout;
 mod cc;
 mod digest_ledger;
 mod disk_usage;
+#[cfg(test)]
+mod filetime_compat;
 mod incremental;
 mod linker;
 mod managed_linker;

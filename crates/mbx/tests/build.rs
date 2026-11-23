@@ -7,6 +7,9 @@
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[path = "../src/filetime_compat.rs"]
+mod filetime_compat;
 #[cfg(unix)]
 use std::process::{Child, Output, Stdio};
 
@@ -2792,7 +2795,7 @@ fn gc_evicts_cold_sessions_from_a_live_checkout_and_the_next_edit_builds() {
             if entry.file_type().unwrap().is_dir() {
                 pending.push(entry.path());
             }
-            filetime::set_file_mtime(entry.path(), filetime::FileTime::from_unix_time(1, 0))
+            filetime_compat::set_file_mtime(entry.path(), filetime::FileTime::from_unix_time(1, 0))
                 .unwrap();
         }
     }
@@ -3833,7 +3836,7 @@ fn build_script_shim_does_not_redirty_its_compilation() {
     let newer = filetime::FileTime::from_system_time(
         build_script_mtime + std::time::Duration::from_secs(4),
     );
-    filetime::set_file_mtime(&helper, newer).unwrap();
+    filetime_compat::set_file_mtime(&helper, newer).unwrap();
     // Cargo 1.102 stopped reading a dependency's age from its rlib and reads
     // the unit's fingerprint timestamp instead. Bump that too so the
     // dependency is newer under either rule.
@@ -3849,7 +3852,7 @@ fn build_script_shim_does_not_redirty_its_compilation() {
                 })
             })
     }) {
-        filetime::set_file_mtime(&stamp, newer).unwrap();
+        filetime_compat::set_file_mtime(&stamp, newer).unwrap();
     }
     assert!(
         helper.metadata().unwrap().modified().unwrap() > build_script_mtime,
@@ -7160,7 +7163,7 @@ mod target_views {
         std::fs::write(&probe, b"access time probe").unwrap();
         let past = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 60 * 60);
         let time = filetime::FileTime::from_system_time(past);
-        filetime::set_file_times(&probe, time, time).unwrap();
+        filetime_compat::set_file_times(&probe, time, time).unwrap();
         std::fs::read(&probe).unwrap();
         let accessed = std::fs::metadata(&probe).unwrap().accessed().unwrap();
         std::fs::remove_file(&probe).unwrap();
@@ -7179,7 +7182,7 @@ mod target_views {
                 if entry.file_type().unwrap().is_dir() {
                     pending.push(entry.path());
                 }
-                filetime::set_file_times(entry.path(), past, past).unwrap();
+                filetime_compat::set_file_times(entry.path(), past, past).unwrap();
             }
         }
     }

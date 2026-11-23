@@ -11,6 +11,8 @@
 //! rather than cache content.
 
 mod events;
+#[cfg(test)]
+mod filetime_compat;
 
 use eyre::{Context, Result};
 use mbx_cache_core::{
