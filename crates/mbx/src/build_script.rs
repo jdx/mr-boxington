@@ -2055,7 +2055,9 @@ fn restore_symlink(_: &str, _: &Path) -> Result<()> {
     bail!("cached OUT_DIR symlinks are unsupported on this platform")
 }
 
+// filetime deprecates these for std::fs::set_times, which needs Rust 1.99; the MSRV is 1.91.
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use std::time::{Duration, SystemTime};

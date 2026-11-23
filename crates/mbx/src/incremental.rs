@@ -1710,7 +1710,9 @@ pub(crate) fn tree_bytes(root: &Path) -> u64 {
     inodes.bytes
 }
 
+// filetime deprecates these for std::fs::set_times, which needs Rust 1.99; the MSRV is 1.91.
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 

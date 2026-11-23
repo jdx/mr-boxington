@@ -43,44 +43,46 @@ url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9
 url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/467472280"
 
 [[tools.aube]]
-version = "2.10.0"
+version = "2.10.1"
 backend = "packslip:github.com/aubepkg/aube"
 specifiers = ["latest"]
+unsupported_platforms = ["macos-x64"]
 
 [tools.aube."platforms.linux-arm64"]
-checksum = "sha256:cce81d91e7468fc784c15b580320c5f94b4867f41e7e097c4ba23b0587937b7e"
-url = "https://github.com/aubepkg/aube/releases/download/v2.10.0/aube-v2.10.0-aarch64-unknown-linux-gnu.tar.gz"
+checksum = "sha256:c64f55a43ee7ca4a19fbbf3be0eed161c24c9858bdcdaea024b69eafbc71ad15"
+url = "https://github.com/aubepkg/aube/releases/download/v2.10.1/aube-v2.10.1-aarch64-unknown-linux-gnu.tar.gz"
 signer = "sigstore-oidc:https://github.com/aubepkg/aube/.github/workflows/release.yml"
 
 [tools.aube."platforms.linux-arm64-musl"]
-checksum = "sha256:7541658766b989fbb6560c34275b473d7fb96a5d97d21d639e5df7089c1573a5"
-url = "https://github.com/aubepkg/aube/releases/download/v2.10.0/aube-v2.10.0-aarch64-unknown-linux-musl.tar.gz"
+checksum = "sha256:c437e0c446652a32ac367b81c469f0b5aa0a3bee734c7948c18d11f568365db0"
+url = "https://github.com/aubepkg/aube/releases/download/v2.10.1/aube-v2.10.1-aarch64-unknown-linux-musl.tar.gz"
 signer = "sigstore-oidc:https://github.com/aubepkg/aube/.github/workflows/release.yml"
 
 [tools.aube."platforms.linux-x64"]
-checksum = "sha256:50d76d216495a9fe28f6cc9817d02f6c080c9c483c9f8c6b29a901bd073488ff"
-url = "https://github.com/aubepkg/aube/releases/download/v2.10.0/aube-v2.10.0-x86_64-unknown-linux-gnu.tar.gz"
+checksum = "sha256:2e7206a50cf3dc97b8381ce168a2639f2cf80e17b681a5c47a68ab763fac0b68"
+url = "https://github.com/aubepkg/aube/releases/download/v2.10.1/aube-v2.10.1-x86_64-unknown-linux-gnu.tar.gz"
 signer = "sigstore-oidc:https://github.com/aubepkg/aube/.github/workflows/release.yml"
 
 [tools.aube."platforms.linux-x64-musl"]
-checksum = "sha256:51c88c48f784aa82ca6f9e2ced73aa9c51e5482a5be0e1670b88cc59769fe2eb"
-url = "https://github.com/aubepkg/aube/releases/download/v2.10.0/aube-v2.10.0-x86_64-unknown-linux-musl.tar.gz"
+checksum = "sha256:00a0bc98003aa1d3b091f08036bb218e26149aed8d02064cf41984f53a4187db"
+url = "https://github.com/aubepkg/aube/releases/download/v2.10.1/aube-v2.10.1-x86_64-unknown-linux-musl.tar.gz"
 signer = "sigstore-oidc:https://github.com/aubepkg/aube/.github/workflows/release.yml"
 
 [tools.aube."platforms.macos-arm64"]
-checksum = "sha256:8b403713af1ee52da4a3d9cdbb9f0e3dbdd1247465b49841c4fefd8e2f1bc83f"
-url = "https://github.com/aubepkg/aube/releases/download/v2.10.0/aube-v2.10.0-aarch64-apple-darwin.tar.gz"
+checksum = "sha256:28019c741c28bd90314aa679312d4dc887c2e5a6cb59d018e7624ed9f457f5c8"
+url = "https://github.com/aubepkg/aube/releases/download/v2.10.1/aube-v2.10.1-aarch64-apple-darwin.tar.gz"
 signer = "sigstore-oidc:https://github.com/aubepkg/aube/.github/workflows/release.yml"
 
 [tools.aube."platforms.windows-x64"]
-checksum = "sha256:ff01fc4175d30dc2be40f6145d00decef126a939de0b89522b1178e8cec97c51"
-url = "https://github.com/aubepkg/aube/releases/download/v2.10.0/aube-v2.10.0-x86_64-pc-windows-msvc.zip"
+checksum = "sha256:5b903b6db4ba81cf288e2248426368f31de579e1986e1e0c31f22c3a4c9cd416"
+url = "https://github.com/aubepkg/aube/releases/download/v2.10.1/aube-v2.10.1-x86_64-pc-windows-msvc.zip"
 signer = "sigstore-oidc:https://github.com/aubepkg/aube/.github/workflows/release.yml"
 
 [[tools.communique]]
 version = "1.8.0"
 backend = "packslip:github.com/jdx/communique"
 specifiers = ["latest"]
+unsupported_platforms = ["macos-x64"]
 
 [tools.communique."platforms.linux-arm64"]
 checksum = "sha256:365f67f2bb21f31966d265ad42516fb14e423411e36fadab8f99002046a6310e"
@@ -116,6 +118,7 @@ signer = "sigstore-oidc:https://github.com/jdx/communique/.github/workflows/rele
 version = "2.13.0"
 backend = "packslip:github.com/jdx/hk"
 specifiers = ["latest"]
+unsupported_platforms = ["macos-x64"]
 
 [tools.hk."platforms.linux-arm64"]
 checksum = "sha256:490196a4e638991c671f42941d72ade4d00b14750145f34fc64377b49fc070bb"
@@ -198,6 +201,7 @@ provenance = "github-attestations"
 version = "0.0.4"
 backend = "packslip:github.com/jdx/jouet"
 specifiers = ["0.0.4"]
+unsupported_platforms = ["macos-x64"]
 
 [tools.jouet."platforms.linux-arm64"]
 checksum = "sha256:429a1371699db2bc9aa33c96c6065e3ad6c1874b130904de8aeb63df1061a67b"
@@ -274,6 +278,7 @@ url_api = "https://api.github.com/repos/lycheeverse/lychee/releases/assets/40995
 version = "1.30.0"
 backend = "packslip:github.com/jdx/mr-boxington"
 specifiers = ["latest"]
+unsupported_platforms = ["macos-x64"]
 
 [tools.mr-boxington."platforms.linux-arm64"]
 checksum = "sha256:6317bb6780404e78c3b670d95e128c85871809dfc541882b2efaa34120f45e71"
@@ -382,6 +387,7 @@ provenance = "github-attestations"
 version = "0.0.15"
 backend = "github:jdx/tak"
 specifiers = ["latest"]
+unsupported_platforms = ["macos-x64"]
 
 [tools.tak."platforms.linux-arm64"]
 checksum = "sha256:fe7b14ea8ee0b7d97c23b2258dea7a90f888e010c391eff1006339f4b4ac4305"

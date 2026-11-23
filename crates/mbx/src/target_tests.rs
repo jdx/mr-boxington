@@ -1,3 +1,6 @@
+// filetime deprecates these for std::fs::set_times, which needs Rust 1.99; the MSRV is 1.91.
+#![allow(deprecated)]
+
 use super::*;
 use crate::config::TargetSettings;
 

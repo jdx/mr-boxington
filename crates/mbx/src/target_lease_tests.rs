@@ -7,6 +7,9 @@
 //! would, so most of these tests stand in for the wrapped command in-process.
 //! Each test still runs in a process of its own: see [`in_own_process`].
 
+// filetime deprecates these for std::fs::set_times, which needs Rust 1.99; the MSRV is 1.91.
+#![allow(deprecated)]
+
 use super::*;
 use crate::config::TargetSettings;
 use filetime::FileTime;
