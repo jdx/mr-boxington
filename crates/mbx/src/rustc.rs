@@ -695,8 +695,13 @@ pub(crate) fn compile(
     }
     // Keep speculative notifications and diagnostics away from Cargo until
     // we know whether it needs a retry. A proc macro may need a writable
-    // OUT_DIR, but the shared snapshot must stay read-only.
-    let forwarded = retry_out_dir.is_none() && session::forward_compiler_notifications_requested();
+    // OUT_DIR, but the shared snapshot must stay read-only. Artifact
+    // notifications still go out live so dependents can start against the
+    // .rmeta: rustc prints one only after expansion, which is where a macro's
+    // write fails, so a unit that may need a retry never announces metadata
+    // it is about to replace.
+    let forwarded = session::forward_compiler_notifications_requested();
+    let deferred = forwarded && retry_out_dir.is_some();
     // An earlier hit may have linked these very paths to the store's objects,
     // which are read-only so that nothing rewrites them in place. rustc would
     // refuse them rather than overwrite them.
@@ -716,12 +721,22 @@ pub(crate) fn compile(
     let eligible =
         wrapper_argument.is_none() && !invocation.crate_name().starts_with("build_script_");
     let output = crate::phase_timing::measure("compiler", || {
-        run_compiler(&mut command, forwarded, eligible, &portable.mappings)
+        run_compiler_with(
+            &mut command,
+            forwarded,
+            deferred,
+            eligible,
+            &portable.mappings,
+        )
     })
     .wrap_err("failed to execute rustc")?;
-    if let Some(original) = retry_out_dir
-        && shared_out_dir_write_failed(&output)
-    {
+    let retry_out_dir = retry_out_dir.filter(|_| shared_out_dir_write_failed(&output));
+    if deferred && retry_out_dir.is_none() {
+        // No retry: release the diagnostics held back, so that from here on
+        // the output counts as forwarded like any other.
+        let _ = replay_unforwarded(&output);
+    }
+    if let Some(original) = retry_out_dir {
         let mut retry = compiler_command(rustc, wrapper_argument);
         // None of the portable arguments, incremental state, or cache
         // bookkeeping for the shared tree may be used for the retry. Keep
@@ -762,7 +777,18 @@ pub(crate) fn compile(
         if let Some(objects) = objects.take() {
             objects.remove_superseded(&final_output.status);
         }
-        replay_output(final_output)?;
+        if deferred && std::ptr::eq(final_output, &output) {
+            replay_unforwarded(final_output)?;
+        } else {
+            replay_output(final_output)?;
+        }
+        // The retry compiled in place, so its outputs are the unit's real
+        // ones: keep the dep-info Cargo may empty before the next compile and
+        // check the disk like any other compilation.
+        if learned_enabled && final_output.status.success() {
+            save_dep_info(&compilation, &outputs);
+        }
+        session::check_low_disk_after_compile();
         return Ok(exit_code(final_output.status));
     }
     // Released before the outputs are read back and published: hashing and
@@ -1179,6 +1205,19 @@ fn run_compiler(
     eligible: bool,
     mappings: &[PathMapping],
 ) -> std::io::Result<Output> {
+    run_compiler_with(command, forward, false, eligible, mappings)
+}
+
+/// [`run_compiler`] that, when `defer` is set, forwards only artifact
+/// notifications live and holds every other line for the caller to replay with
+/// [`replay_unforwarded`] once it knows no retry follows.
+fn run_compiler_with(
+    command: &mut Command,
+    forward: bool,
+    defer: bool,
+    eligible: bool,
+    mappings: &[PathMapping],
+) -> std::io::Result<Output> {
     if !forward {
         let mut output = crate::supervision::output(command, eligible)?;
         if !mappings.is_empty() {
@@ -1189,23 +1228,36 @@ fn run_compiler(
         return Ok(output);
     }
     let action = crate::supervision::prepare(command, eligible);
-    run_compiler_forwarding(
+    run_compiler_deferring(
         command,
         std::io::stdout(),
         std::io::stderr(),
         action,
         mappings,
+        defer,
     )
 }
 
 /// [`run_compiler`] with the forwarding destinations spelled out, so a test can
 /// see what would have reached Cargo.
+#[cfg(test)]
 fn run_compiler_forwarding(
+    command: &mut Command,
+    stdout_sink: impl Write + Send + 'static,
+    stderr_sink: impl Write,
+    action: Option<crate::supervision::Action>,
+    mappings: &[PathMapping],
+) -> std::io::Result<Output> {
+    run_compiler_deferring(command, stdout_sink, stderr_sink, action, mappings, false)
+}
+
+fn run_compiler_deferring(
     command: &mut Command,
     stdout_sink: impl Write + Send + 'static,
     stderr_sink: impl Write,
     mut action: Option<crate::supervision::Action>,
     mappings: &[PathMapping],
+    defer: bool,
 ) -> std::io::Result<Output> {
     let mut child = command
         .stdin(Stdio::null())
@@ -1221,9 +1273,10 @@ fn run_compiler_forwarding(
     // read here; standard output is drained alongside so that neither pipe
     // can fill up and stall the compiler.
     let stdout_mappings = mappings.to_vec();
-    let stdout =
-        std::thread::spawn(move || forward_stream_mapped(stdout, stdout_sink, &stdout_mappings));
-    let stderr = forward_stream_mapped(stderr, stderr_sink, mappings);
+    let stdout = std::thread::spawn(move || {
+        forward_stream_deferring(stdout, stdout_sink, &stdout_mappings, defer)
+    });
+    let stderr = forward_stream_deferring(stderr, stderr_sink, mappings, defer);
     let status = child.wait()?;
     let stdout = stdout
         .join()
@@ -1278,10 +1331,22 @@ impl<'a> OutputPaths<'a> {
 
 /// [`forward_stream`] that rewrites placeholders in each line into real paths
 /// first, so what is forwarded and what is captured agree.
+#[cfg(test)]
 fn forward_stream_mapped(
+    source: impl Read,
+    sink: impl Write,
+    mappings: &[PathMapping],
+) -> std::io::Result<Vec<u8>> {
+    forward_stream_deferring(source, sink, mappings, false)
+}
+
+/// [`forward_stream_mapped`] that, when `defer` is set, forwards only artifact
+/// notifications and leaves every other line captured but unforwarded.
+fn forward_stream_deferring(
     source: impl Read,
     mut sink: impl Write,
     mappings: &[PathMapping],
+    defer: bool,
 ) -> std::io::Result<Vec<u8>> {
     let mut reader = BufReader::new(source);
     let mut captured = Vec::new();
@@ -1295,7 +1360,7 @@ fn forward_stream_mapped(
             break;
         }
         captured.extend_from_slice(&paths.denormalize(&line));
-        if forwarding {
+        if forwarding && (!defer || is_artifact_notification(&captured[start..])) {
             forwarding = sink
                 .write_all(&crate::out_dir::for_display(&captured[start..]))
                 .and_then(|()| sink.flush())
@@ -4550,6 +4615,27 @@ fn add_mapping(
 
 fn replay_output(output: &Output) -> Result<()> {
     replay_bytes(&output.stdout, &output.stderr)
+}
+
+/// A line of the JSON message stream that tells Cargo a crate's metadata or
+/// code is ready.
+fn is_artifact_notification(line: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(line)
+        .is_ok_and(|message| !message["artifact"].is_null() && !message["emit"].is_null())
+}
+
+/// Replay what [`run_compiler_with`] held back: all of standard output and the
+/// lines of standard error that are not artifact notifications, which already
+/// reached Cargo.
+fn replay_unforwarded(output: &Output) -> Result<()> {
+    let stderr: Vec<u8> = output
+        .stderr
+        .split_inclusive(|byte| *byte == b'\n')
+        .filter(|line| !is_artifact_notification(line))
+        .flatten()
+        .copied()
+        .collect();
+    replay_bytes(&output.stdout, &stderr)
 }
 
 fn publish_result<'a>(
