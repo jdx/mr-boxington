@@ -93,12 +93,13 @@ jobs:
           # docs/cli commit to it in a later step. A nonempty body does not mean
           # that step has finished, and a merge before it lands ships docs for
           # the previous version, so wait while any release-plz run is active.
-          # Only runs created in the last six hours count: GitHub can leave a
-          # run stuck in `queued` that no API call will cancel or delete, and
-          # one such orphan would otherwise block every release forever.
+          # Only runs updated in the last six hours count (a re-run bumps the
+          # update time). GitHub can leave a run stuck in `queued` that no API
+          # call will cancel or delete, and one such orphan would otherwise
+          # block every release forever.
           cutoff=$(date -u -d '6 hours ago' +%Y-%m-%dT%H:%M:%SZ)
           for status in queued in_progress; do
-            ACTIVE=$(gh run list -R jdx/mr-boxington --workflow release-plz.yml --status "$status" --json databaseId,createdAt --jq "[.[] | select(.createdAt > \"$cutoff\")] | length")
+            ACTIVE=$(gh run list -R jdx/mr-boxington --workflow release-plz.yml --status "$status" --json databaseId,updatedAt --jq "[.[] | select(.updatedAt > \"$cutoff\")] | length")
             if [ "$ACTIVE" != "0" ]; then
               echo "Skipping merge: a release-plz run is $status and may still be updating PR #$PR_NUMBER; will retry on the next scheduled run"
               exit 0
