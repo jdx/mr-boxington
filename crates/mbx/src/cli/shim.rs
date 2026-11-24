@@ -280,6 +280,17 @@ pub(super) struct CargoProbe {
     note: PathBuf,
 }
 
+#[derive(Debug)]
+struct ProbeLoop(String);
+
+impl std::fmt::Display for ProbeLoop {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ProbeLoop {}
+
 impl CargoProbe {
     pub(super) fn new() -> Result<Self> {
         let previous = std::env::var_os(CARGO_SHIM_PROBES_ENV);
@@ -295,9 +306,8 @@ impl CargoProbe {
 
     pub(super) fn finish<T>(self, result: Result<T>) -> Result<T> {
         match result {
-            Err(error) => {
-                Err(read_loop_note_at(&self.note).map_or(error, |note| eyre::eyre!("{note}")))
-            }
+            Err(error) => Err(read_loop_note_at(&self.note)
+                .map_or(error, |note| eyre::Report::new(ProbeLoop(note)))),
             result => result,
         }
     }
@@ -609,7 +619,10 @@ pub(super) fn probe_failure_reason(
     retry: Option<eyre::Report>,
 ) -> eyre::Report {
     match retry {
-        Some(retry) => eyre::eyre!("{original:#}\nExpanded alias metadata also failed: {retry:#}"),
+        Some(retry) if original.is::<ProbeLoop>() => {
+            eyre::eyre!("{original:#}\nExpanded alias metadata also failed: {retry:#}")
+        }
+        Some(retry) => retry,
         None => original,
     }
 }
