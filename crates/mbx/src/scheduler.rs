@@ -2237,8 +2237,8 @@ impl Pool {
     /// run that starts `threads` tests at once from `binary`. Each test is
     /// sized by the busiest recorded test of the binary, or one core and two
     /// memory shares when nothing is recorded, as an unmeasured test is
-    /// charged. Never more than the pool holds, since a larger reservation
-    /// would wait forever.
+    /// charged. Cap both axes at this process's local budget, so a container
+    /// cannot reserve host resources that its tests cannot use.
     pub(crate) fn nextest_run_reservation(&self, binary: &str, threads: u64) -> (u64, Option<u64>) {
         let path = test_history_path(&self.dir.join(TEST_HISTORY_DIR), binary);
         let history = lookup_test_history(&path, binary, "");
@@ -2248,7 +2248,11 @@ impl Pool {
             .and_then(|measurement| measurement.cores)
             .unwrap_or(1)
             .max(1);
-        let cpus = threads.saturating_mul(cores).min(self.capacity).max(1);
+        let cpus = threads
+            .saturating_mul(cores)
+            .min(self.capacity)
+            .min(self.domain_capacity)
+            .max(1);
         let memory = (self.bytes_per_permit > 0).then(|| {
             let shares = recorded
                 .and_then(|measurement| measurement.peak)
@@ -2257,7 +2261,8 @@ impl Pool {
                 self.memory_capacity
             } else {
                 self.capacity.saturating_mul(self.bytes_per_permit)
-            };
+            }
+            .min(self.domain_memory_capacity);
             threads
                 .saturating_mul(shares)
                 .saturating_mul(self.bytes_per_permit)
@@ -2275,6 +2280,8 @@ impl Pool {
         cpus: u64,
         memory: Option<u64>,
     ) -> Pool {
+        let cpus = cpus.min(self.domain_capacity).max(1);
+        let memory = memory.map(|bytes| bytes.min(self.domain_memory_capacity));
         let permits = match memory {
             Some(memory) if self.bytes_per_permit > 0 => {
                 cpus.max(memory.div_ceil(self.bytes_per_permit))
@@ -2290,8 +2297,7 @@ impl Pool {
         pool.scope = Some(scope);
         pool.domain_capacity = cpus.min(pool.capacity);
         pool.memory_capacity = memory.unwrap_or(0);
-        pool.domain_memory_capacity =
-            local_memory_ceiling(pool.memory_capacity, crate::util::memory_total_bytes());
+        pool.domain_memory_capacity = pool.memory_capacity;
         pool.events = self.events;
         pool.pressure = false;
         pool

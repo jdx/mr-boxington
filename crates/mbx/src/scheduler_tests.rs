@@ -5699,3 +5699,42 @@ fn a_reserved_slice_ignores_a_waiting_normal_build() {
     let slice = low.within_reservation(directory.path().join("run"), 4, None);
     assert_eq!(slice.reserved(), 0, "a run's slice does not yield again");
 }
+
+#[test]
+fn nextest_reserves_only_what_its_container_can_use() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = host_pool_with_container_budget(dir.path(), "a");
+    let memory = pool.domain_memory_capacity;
+    for threads in [4, 64] {
+        assert_eq!(
+            pool.nextest_run_reservation("cold", threads),
+            (4, Some(memory))
+        );
+    }
+    pool.record_test_history("measured", "case", Some(2 * GIB), Some(2))
+        .unwrap();
+    assert_eq!(
+        pool.nextest_run_reservation("measured", 4),
+        (4, Some(memory))
+    );
+
+    let mut cpu_only = pool_at(dir.path(), 32, 0);
+    cpu_only.domain_capacity = 4;
+    assert_eq!(cpu_only.nextest_run_reservation("cold", 64), (4, None));
+}
+
+#[test]
+fn a_reserved_slice_keeps_its_containers_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = host_pool_with_container_budget(dir.path(), "a");
+    let slice = pool.within_reservation(dir.path().join("run"), 32, Some(64 * GIB));
+    assert_eq!(slice.domain_capacity, 4);
+    assert_eq!(slice.memory_capacity, pool.domain_memory_capacity);
+    assert_eq!(slice.domain_memory_capacity, pool.domain_memory_capacity);
+    assert_eq!(slice.bytes_per_permit, pool.bytes_per_permit);
+    let held = vector_attempt(&slice, 4, pool.domain_memory_capacity).unwrap();
+    assert!(vector_attempt(&slice, 1, 0).is_none());
+    assert!(vector_attempt(&slice, 0, 1).is_none());
+    drop(held);
+    assert!(vector_attempt(&slice, 1, 1).is_some());
+}
