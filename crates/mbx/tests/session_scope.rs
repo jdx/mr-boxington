@@ -568,15 +568,18 @@ fn main() {
     }
     let args: Vec<_> = std::env::args().collect();
     if args.get(1).map(String::as_str) != Some("daemon") {
+        let log = std::fs::File::create(std::path::Path::new(&args[4]).with_extension("stderr")).unwrap();
         Command::new(std::env::current_exe().unwrap()).arg("daemon").args(&args[1..])
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn().unwrap();
         return;
     }
-    for _ in 0..200 {
+    std::fs::write(&args[5], "waiting for outer invocation").unwrap();
+    for _ in 0..1200 {
         if std::path::Path::new(&args[4]).exists() { break; }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     assert!(std::path::Path::new(&args[4]).exists());
+    std::fs::write(&args[5], "running independent build").unwrap();
     let output = Command::new(&args[2]).args(["check", "--offline"])
         .current_dir(&args[3]).output().unwrap();
     if !output.status.success() { std::fs::write(&args[5], format!("{output:?}")).unwrap(); }
@@ -622,14 +625,19 @@ fn main() {
     );
     std::fs::write(&gate, "go").unwrap();
     let mut contents = String::new();
-    for _ in 0..200 {
+    for _ in 0..1200 {
         contents = std::fs::read_to_string(&result).unwrap_or_default();
         if contents == "nested independent build captured" {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    assert_eq!(contents, "nested independent build captured");
+    assert_eq!(
+        contents,
+        "nested independent build captured",
+        "daemon stderr: {}",
+        std::fs::read_to_string(result.with_extension("stderr")).unwrap_or_default()
+    );
 }
 
 #[test]
