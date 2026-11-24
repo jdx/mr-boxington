@@ -31,6 +31,12 @@ static CALLER: std::sync::OnceLock<Environment> = std::sync::OnceLock::new();
 pub fn remember_caller() {
     CALLER.get_or_init(|| {
         let mut environment = restored_environment().unwrap_or_else(|_| current_environment());
+        // Guard state belongs to Cargo execution, not applications launched
+        // after building. Plain launches and live CLI recovery explicitly
+        // preserve the active guard independently of this caller snapshot.
+        for name in super::shim::CARGO_GUARD_ENV {
+            environment.remove(OsStr::new(name));
+        }
         environment.remove(OsStr::new("MBX_CARGO_SHIM_MODE"));
         environment.remove(OsStr::new("MBX_CARGO_SHIM_PATH"));
         environment
