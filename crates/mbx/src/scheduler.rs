@@ -1991,14 +1991,17 @@ impl Pool {
     }
 
     fn effective_budget(&self) -> Resources {
-        self.priority_budget(Resources {
-            cpu: self.capacity,
-            memory_bytes: self.memory_capacity,
-        })
+        self.priority_budget(
+            Resources {
+                cpu: self.capacity,
+                memory_bytes: self.memory_capacity,
+            },
+            self.priority_wait_is_fresh(),
+        )
     }
 
-    fn priority_budget(&self, budget: Resources) -> Resources {
-        if self.priority != SchedulerPriority::Low || !self.priority_wait_is_fresh() {
+    fn priority_budget(&self, budget: Resources, waiting: bool) -> Resources {
+        if self.priority != SchedulerPriority::Low || !waiting {
             return budget;
         }
         let remaining = |capacity: u64| {
@@ -2676,6 +2679,24 @@ impl Pool {
         let waiting = scan_waiters_logged(&waiters, Some(self), events)?;
         let ticket = state.queued.as_ref().map_or(u64::MAX, |entry| entry.ticket);
         let mut request = self.waiting_record(resources, weight, demand, first_arrival_ms, ticket);
+        // A waiter in another container cannot use this container's spare
+        // CPUs or memory. Reserve local headroom only for a normal waiter
+        // sharing its domain; the machine-wide stamp still governs the host.
+        let domain = self.priority_budget(
+            Resources {
+                cpu: self.domain_capacity,
+                memory_bytes: self.domain_memory_capacity,
+            },
+            self.scope.is_none()
+                && waiting.iter().any(|entry| {
+                    entry.priority == "normal" && entry.domain == self.pressure_domain
+                }),
+        );
+        if domain.cpu < self.domain_capacity {
+            request.domain_capacity = self.legacy_domain_capacity.min(domain.cpu);
+        }
+        request.domain_cpu_cap = Some(domain.cpu);
+        request.domain_memory_cap = Some(domain.memory_bytes);
         request.global_capacity = Some(capacity);
         request.cpu_cap = Some(budget.cpu);
         request.mem_cap = Some(budget.memory_bytes);
@@ -2738,10 +2759,6 @@ impl Pool {
         first_arrival_ms: u64,
         ticket: u64,
     ) -> Waiting {
-        let domain = self.priority_budget(Resources {
-            cpu: self.domain_capacity,
-            memory_bytes: self.domain_memory_capacity,
-        });
         Waiting {
             first_arrival_ms: self.events.then_some(first_arrival_ms),
             pid: self.events.then(std::process::id),
@@ -2755,16 +2772,12 @@ impl Pool {
             weight,
             priority: self.priority.as_str().into(),
             domain: self.pressure_domain.into(),
-            domain_capacity: if domain.cpu < self.domain_capacity {
-                self.legacy_domain_capacity.min(domain.cpu)
-            } else {
-                self.legacy_domain_capacity
-            },
-            domain_cpu_cap: Some(domain.cpu),
+            domain_capacity: self.legacy_domain_capacity,
+            domain_cpu_cap: Some(self.domain_capacity),
             global_capacity: Some(self.capacity),
             cpu_cap: Some(self.capacity),
             mem_cap: Some(self.memory_capacity),
-            domain_memory_cap: Some(domain.memory_bytes),
+            domain_memory_cap: Some(self.domain_memory_capacity),
             cpu: Some(resources.cpu),
             memory_bytes: Some(resources.memory_bytes),
             bytes_per_permit: self.bytes_per_permit,

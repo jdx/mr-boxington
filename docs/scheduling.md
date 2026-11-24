@@ -321,6 +321,12 @@ Use `scheduler.priority = "low"` (`MBX_SCHEDULER_PRIORITY=low`) for an editor's
 background check or CI on a shared machine. While normal-priority work is
 waiting, low-priority builds leave a quarter of each budget available for it,
 without withholding the whole CPU or memory budget.
+The shared pool leaves headroom for any normal-priority waiter. A container
+also leaves local CPU and memory headroom for normal-priority waiters in that
+same container; work queued elsewhere does not reduce its local ceiling.
+An already-reserved nextest slice does not yield a second time. Nextest run
+reservations and their slices stay within the container's own CPU and memory
+ceilings, including when test history predicts greater resource use.
 
 ## Reserve capacity for external work
 
