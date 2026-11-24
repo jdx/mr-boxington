@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.21.0...mbx-cache-rustc-v0.22.0) - 2026-11-24
+
+### Added
+
+- *(cache)* cache builds that use -Zalways-encode-mir, -Zmir-opt-level, and -Zinline-mir ([#1007](https://github.com/jdx/mr-boxington/pull/1007))
+
+### Fixed
+
+- *(rustc)* keep OUT_DIR writable for procedural macro retries ([#1002](https://github.com/jdx/mr-boxington/pull/1002))
+- *(rustc)* cache macOS links that pass an absolute -Wl,-rpath ([#987](https://github.com/jdx/mr-boxington/pull/987))
+- cache crates that use an untyped build-script search path ([#964](https://github.com/jdx/mr-boxington/pull/964))
+- *(rustc)* restore compilations across profiles that compile identically ([#953](https://github.com/jdx/mr-boxington/pull/953))
+
 ## [0.21.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-rustc-v0.20.8...mbx-cache-rustc-v0.21.0) - 2026-11-09
 
 ### Fixed

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.2.3...mbx-cache-store-v0.2.4) - 2026-11-24
+
+### Fixed
+
+- *(cache)* let the umask decide cache file modes so a group can share one cache ([#952](https://github.com/jdx/mr-boxington/pull/952))
+
+### Other
+
+- *(deps)* lock file maintenance ([#1004](https://github.com/jdx/mr-boxington/pull/1004))
+- set file times through std instead of deprecated filetime calls ([#1005](https://github.com/jdx/mr-boxington/pull/1005))
+
 ## [0.2.3](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.2.2...mbx-cache-store-v0.2.3) - 2026-11-09
 
 ### Added

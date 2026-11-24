@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.31.0](https://github.com/jdx/mr-boxington/compare/v1.30.0...v1.31.0) - 2026-11-24
+
+### Added
+
+- *(reserve)* tell the reserved command how many cores it holds ([#972](https://github.com/jdx/mr-boxington/pull/972))
+- *(remote)* stop uploading once a cache server keeps failing ([#959](https://github.com/jdx/mr-boxington/pull/959))
+
+### Fixed
+
+- *(rustc)* keep OUT_DIR writable for procedural macro retries ([#1002](https://github.com/jdx/mr-boxington/pull/1002))
+- *(exec)* cache Rust compiles of a cargo started under mbx exec ([#1006](https://github.com/jdx/mr-boxington/pull/1006))
+- *(scheduler)* stop nextest's wait for a permit from counting toward slow-timeout ([#996](https://github.com/jdx/mr-boxington/pull/996))
+- *(target)* stop seeding from creating untagged nested target directories ([#995](https://github.com/jdx/mr-boxington/pull/995))
+- *(cache)* store cache files in containers that refuse reflinks with EPERM ([#988](https://github.com/jdx/mr-boxington/pull/988))
+- *(out-dir)* recover from damaged shared build-script output ([#980](https://github.com/jdx/mr-boxington/pull/980))
+- *(gc)* say when a reported collection ran elsewhere, and what its counts mean ([#985](https://github.com/jdx/mr-boxington/pull/985))
+- *(scheduler)* stop holding back compilations in containers full of page cache ([#916](https://github.com/jdx/mr-boxington/pull/916))
+- *(target)* count the end of a build as its target directory's last use ([#947](https://github.com/jdx/mr-boxington/pull/947))
+- *(reserve)* keep the lease until the command exits after ^C or a group signal ([#974](https://github.com/jdx/mr-boxington/pull/974))
+- *(rustc)* compile coverage builds in each checkout ([#975](https://github.com/jdx/mr-boxington/pull/975))
+- *(test)* keep the build-script redirty test passing on Cargo 1.102 nightly ([#973](https://github.com/jdx/mr-boxington/pull/973))
+- *(rustc)* keep mbx incremental off for opt-level 1 builds that run local ThinLTO ([#942](https://github.com/jdx/mr-boxington/pull/942))
+- cache the crates mbx fix compiles ([#963](https://github.com/jdx/mr-boxington/pull/963))
+- *(incremental)* restore cached content when returning to it after edits ([#956](https://github.com/jdx/mr-boxington/pull/956))
+- *(cache)* let the umask decide cache file modes so a group can share one cache ([#952](https://github.com/jdx/mr-boxington/pull/952))
+- *(rustc)* restore compilations across profiles that compile identically ([#953](https://github.com/jdx/mr-boxington/pull/953))
+- *(rustc)* stop seeding incremental state from other checkouts ([#943](https://github.com/jdx/mr-boxington/pull/943))
+- *(cache)* rerun build scripts with missing watched inputs ([#926](https://github.com/jdx/mr-boxington/pull/926))
+- *(cc)* share C++ objects across target dirs when duplicated header names are never looked up ([#940](https://github.com/jdx/mr-boxington/pull/940))
+- *(cc)* share cache entries across include-directory orderings ([#937](https://github.com/jdx/mr-boxington/pull/937))
+- *(doctor)* detect the mise cargo wrapper from project directories ([#934](https://github.com/jdx/mr-boxington/pull/934))
+- *(scheduler)* stop cargo llvm-cov from deadlocking on scheduler slots ([#931](https://github.com/jdx/mr-boxington/pull/931))
+- *(target)* collect and report managed targets that lost their record ([#929](https://github.com/jdx/mr-boxington/pull/929))
+- *(cache)* deduplicate only non-workspace Rust dependencies ([#927](https://github.com/jdx/mr-boxington/pull/927))
+
+### Other
+
+- *(deps)* lock file maintenance ([#1004](https://github.com/jdx/mr-boxington/pull/1004))
+- set file times through std instead of deprecated filetime calls ([#1005](https://github.com/jdx/mr-boxington/pull/1005))
+- pass Windows clippy on Rust 1.100 in doctor and session ([#982](https://github.com/jdx/mr-boxington/pull/982))
+
 ## [1.30.0](https://github.com/jdx/mr-boxington/compare/v1.29.2...v1.30.0) - 2026-11-09
 
 ### Added
