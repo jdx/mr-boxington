@@ -5926,3 +5926,34 @@ fn an_idle_container_keeps_headroom_for_a_younger_normal_waiter() {
         );
     }
 }
+
+#[test]
+fn new_priority_domains_prune_old_hints_without_removing_fresh_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut active = pool_at(dir.path(), 32, 0);
+    active.pressure_domain = "active";
+    active.mark_priority_wait();
+    let directory = dir.path().join(PRIORITY_DOMAINS_DIR);
+    let gone = directory.join("gone.json");
+    let unrelated = directory.join("keep.txt");
+    for path in [&gone, &unrelated] {
+        std::fs::write(path, b"").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new().set_modified(
+                    std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60),
+                ),
+            )
+            .unwrap();
+    }
+    let mut new = pool_at(dir.path(), 32, 0);
+    new.pressure_domain = "new";
+    new.mark_priority_wait();
+    assert!(!gone.exists());
+    assert!(active.domain_priority_wait_is_fresh());
+    assert!(new.domain_priority_wait_is_fresh());
+    assert!(unrelated.exists());
+}

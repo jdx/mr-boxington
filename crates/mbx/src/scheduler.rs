@@ -73,6 +73,7 @@ const INFLIGHT_DIR: &str = "inflight";
 const POOL_LOCK: &str = "pool.lock";
 /// Stamp a waiting normal-priority build touches so low-priority builds yield.
 const PRIORITY_WAIT_STAMP: &str = "priority-wait";
+const PRIORITY_DOMAINS_DIR: &str = "priority-domains";
 /// Ledger of peak compiler RSS by crate name.
 const LEDGER_FILE: &str = "memory.json";
 /// Lock serializing ledger updates.
@@ -2907,16 +2908,24 @@ impl Pool {
     fn domain_priority_stamp(&self) -> PathBuf {
         use sha2::Digest as _;
         let digest = sha2::Sha256::digest(self.pressure_domain.as_bytes());
-        self.dir.join(format!(
-            "{PRIORITY_WAIT_STAMP}-{}",
-            hex::encode(&digest[..16])
-        ))
+        self.dir
+            .join(PRIORITY_DOMAINS_DIR)
+            .join(format!("{}.json", hex::encode(&digest[..16])))
     }
 
     fn mark_priority_wait(&self) {
         let _ = std::fs::write(self.dir.join(PRIORITY_WAIT_STAMP), b"");
         if self.scope.is_none() {
-            let _ = std::fs::write(self.domain_priority_stamp(), b"");
+            let directory = self.dir.join(PRIORITY_DOMAINS_DIR);
+            if std::fs::create_dir_all(&directory).is_ok() {
+                let path = self.domain_priority_stamp();
+                if !path.exists() {
+                    // Reuse the pressure-domain retention policy: new
+                    // containers remove hints left unwritten for a day.
+                    crate::pressure::prune(&directory, std::time::SystemTime::now());
+                }
+                let _ = std::fs::write(path, b"");
+            }
         }
     }
 
