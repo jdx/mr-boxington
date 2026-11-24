@@ -5912,11 +5912,17 @@ fn an_idle_container_keeps_headroom_for_a_younger_normal_waiter() {
                 .is_none(),
             "the idle-scope escape must not consume local priority headroom"
         );
+        assert!(
+            low_queue.is_none(),
+            "an ineligible request must not block the queue"
+        );
+        let smaller = vector_attempt(&low, 1, unit)
+            .expect("smaller background work can use unreserved capacity");
         let foreground = normal
             .try_admit_named(normal_request, 1, None, &mut normal_queue, None)
             .unwrap()
             .unwrap();
-        drop(foreground);
+        drop((foreground, smaller));
         std::fs::remove_file(normal.domain_priority_stamp()).unwrap();
         assert!(
             low.try_admit_named(request, 4, None, &mut low_queue, None)

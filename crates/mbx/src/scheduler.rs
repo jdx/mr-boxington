@@ -1997,7 +1997,7 @@ impl Pool {
                 cpu: self.capacity,
                 memory_bytes: self.memory_capacity,
             },
-            self.priority_wait_is_fresh(),
+            self.priority == SchedulerPriority::Low && self.priority_wait_is_fresh(),
         )
     }
 
@@ -2683,7 +2683,8 @@ impl Pool {
         // A waiter in another container cannot use this container's spare
         // CPUs or memory. Reserve local headroom only for a normal waiter
         // sharing its domain; the machine-wide stamp still governs the host.
-        let local_waiting = self.scope.is_none()
+        let local_waiting = self.priority == SchedulerPriority::Low
+            && self.scope.is_none()
             && (self.domain_priority_wait_is_fresh()
                 || waiting.iter().any(|entry| {
                     entry.priority == "normal" && entry.domain == self.pressure_domain
@@ -2713,11 +2714,15 @@ impl Pool {
             && ((domain.cpu < self.domain_capacity && resources.cpu > domain.cpu)
                 || (domain.memory_bytes < self.domain_memory_capacity
                     && resources.memory_bytes > domain.memory_bytes));
-        let decision = if exceeds_local_headroom {
-            AdmissionDecision::Waiting
-        } else {
-            admission_decision_traced(capacity, &live, waiting.iter(), &request, trace.as_ref())
-        };
+        if exceeds_local_headroom {
+            // Like a memory-gated demand, this cannot run yet. Keeping it as
+            // a queue head would prevent smaller background work from using
+            // the unreserved part of the container's budget.
+            self.gated(state, "priority-headroom", events, || request.clone());
+            return Ok(None);
+        }
+        let decision =
+            admission_decision_traced(capacity, &live, waiting.iter(), &request, trace.as_ref());
         if decision == AdmissionDecision::Waiting {
             if let Some(entry) = &state.queued {
                 let serialized_record = serde_json::to_vec(&request)?;
