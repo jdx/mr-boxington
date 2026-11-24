@@ -1991,17 +1991,26 @@ impl Pool {
     }
 
     fn effective_budget(&self) -> Resources {
-        let yielding = self.priority == SchedulerPriority::Low && self.priority_wait_is_fresh();
-        let memory_headroom = if yielding && self.memory_capacity > 0 {
-            (self.memory_capacity / 4)
-                .max(1)
-                .min(self.memory_capacity - 1)
-        } else {
-            0
+        self.priority_budget(Resources {
+            cpu: self.capacity,
+            memory_bytes: self.memory_capacity,
+        })
+    }
+
+    fn priority_budget(&self, budget: Resources) -> Resources {
+        if self.priority != SchedulerPriority::Low || !self.priority_wait_is_fresh() {
+            return budget;
+        }
+        let remaining = |capacity: u64| {
+            if capacity == 0 {
+                0
+            } else {
+                capacity - (capacity / 4).max(1).min(capacity - 1)
+            }
         };
         Resources {
-            cpu: self.capacity - self.reserved(),
-            memory_bytes: self.memory_capacity - memory_headroom,
+            cpu: remaining(budget.cpu),
+            memory_bytes: remaining(budget.memory_bytes),
         }
     }
 
@@ -2729,6 +2738,10 @@ impl Pool {
         first_arrival_ms: u64,
         ticket: u64,
     ) -> Waiting {
+        let domain = self.priority_budget(Resources {
+            cpu: self.domain_capacity,
+            memory_bytes: self.domain_memory_capacity,
+        });
         Waiting {
             first_arrival_ms: self.events.then_some(first_arrival_ms),
             pid: self.events.then(std::process::id),
@@ -2742,12 +2755,16 @@ impl Pool {
             weight,
             priority: self.priority.as_str().into(),
             domain: self.pressure_domain.into(),
-            domain_capacity: self.legacy_domain_capacity,
-            domain_cpu_cap: Some(self.domain_capacity),
+            domain_capacity: if domain.cpu < self.domain_capacity {
+                self.legacy_domain_capacity.min(domain.cpu)
+            } else {
+                self.legacy_domain_capacity
+            },
+            domain_cpu_cap: Some(domain.cpu),
             global_capacity: Some(self.capacity),
             cpu_cap: Some(self.capacity),
             mem_cap: Some(self.memory_capacity),
-            domain_memory_cap: Some(self.domain_memory_capacity),
+            domain_memory_cap: Some(domain.memory_bytes),
             cpu: Some(resources.cpu),
             memory_bytes: Some(resources.memory_bytes),
             bytes_per_permit: self.bytes_per_permit,
@@ -2840,8 +2857,7 @@ impl Pool {
             .wrap_err("failed to name a lease that was not already taken")
     }
 
-    /// CPU headroom for waiting normal-priority work. `effective_budget`
-    /// withholds memory headroom too.
+    /// CPU headroom for waiting normal-priority work.
     ///
     /// Never the whole pool. A reserve equal to the capacity -- which a
     /// single-permit machine would otherwise get -- stops a low-priority
@@ -2849,12 +2865,9 @@ impl Pool {
     /// oversized-demand escape as the only way it ever runs, and that one
     /// hands over the entire machine at once. Yielding a quarter must not
     /// become yielding everything and then taking everything.
+    #[cfg(test)]
     fn reserved(&self) -> u64 {
-        if self.priority == SchedulerPriority::Low && self.priority_wait_is_fresh() {
-            (self.capacity / 4).max(1).min(self.capacity - 1)
-        } else {
-            0
-        }
+        self.capacity - self.effective_budget().cpu
     }
 
     fn priority_wait_is_fresh(&self) -> bool {

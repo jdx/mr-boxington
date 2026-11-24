@@ -3681,6 +3681,14 @@ fn low_priority_preserves_headroom_on_both_axes() {
             memory_bytes: 6 * GIB
         }
     );
+    assert_eq!(
+        pool.waiting_record(Resources::default(), 1, None, 0, 0)
+            .domain_budget(),
+        Resources {
+            cpu: 6,
+            memory_bytes: 6 * GIB
+        },
+    );
     pool.capacity = 1;
     assert_eq!(
         pool.effective_budget(),
@@ -4059,24 +4067,35 @@ fn assert_legacy_record_fields(
             .clone()
             .unwrap_or_else(|| ledger_key(&d.name, d.links))
     });
-    let global = pool.capacity
-        - if pool.priority == SchedulerPriority::Low {
-            (pool.capacity / 4).max(1).min(pool.capacity - 1)
+    let priority_limit = |capacity: u64| {
+        if pool.priority == SchedulerPriority::Low && capacity > 0 {
+            capacity - (capacity / 4).max(1).min(capacity - 1)
         } else {
-            0
-        };
+            capacity
+        }
+    };
+    let global = priority_limit(pool.capacity);
+    let domain_cpu = priority_limit(pool.domain_capacity);
+    let legacy_domain = if pool.priority == SchedulerPriority::Low {
+        pool.legacy_domain_capacity.min(domain_cpu)
+    } else {
+        pool.legacy_domain_capacity
+    };
     assert_eq!(
         serde_json::to_value(legacy_waiting).unwrap(),
         serde_json::json!({
             "name": name, "mode_key": mode, "ticket": 1, "weight": weight,
             "priority": pool.priority.as_str(), "domain": pool.pressure_domain,
-            "domain_capacity": pool.legacy_domain_capacity, "global_capacity": global,
+            "domain_capacity": legacy_domain, "global_capacity": global,
             "bytes_per_permit": pool.bytes_per_permit, "build": pool.build,
         })
     );
-    assert_eq!(waiting.domain_cpu_cap, Some(pool.domain_capacity));
-    assert_eq!(waiting.domain_memory_cap, Some(pool.domain_memory_capacity));
-    assert_eq!(waiting.domain_budget().cpu, pool.domain_capacity);
+    assert_eq!(waiting.domain_cpu_cap, Some(domain_cpu));
+    assert_eq!(
+        waiting.domain_memory_cap,
+        Some(priority_limit(pool.domain_memory_capacity))
+    );
+    assert_eq!(waiting.domain_budget().cpu, domain_cpu);
     drop((held, queued));
     let permit = pool
         .try_admit_named(resources, weight, None, &mut None, demand)
@@ -5737,4 +5756,26 @@ fn a_reserved_slice_keeps_its_containers_limits() {
     assert!(vector_attempt(&slice, 0, 1).is_none());
     drop(held);
     assert!(vector_attempt(&slice, 1, 1).is_some());
+}
+
+#[test]
+fn low_priority_work_leaves_headroom_inside_a_container() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut normal = pool_at(dir.path(), 32, 0);
+    normal.domain_capacity = 4;
+    normal.build = Some(("normal".into(), 2));
+    let first = normal.try_admit(1, None).unwrap().unwrap();
+    assert!(normal.try_admit(2, None).unwrap().is_none());
+    std::fs::write(dir.path().join(PRIORITY_WAIT_STAMP), b"").unwrap();
+    let mut low = pool_at(dir.path(), 32, 0);
+    low.domain_capacity = 4;
+    low.priority = SchedulerPriority::Low;
+    let background = low.try_admit(2, None).unwrap().unwrap();
+    assert!(
+        low.try_admit(1, None).unwrap().is_none(),
+        "leave room for the queued normal build"
+    );
+    drop(first);
+    assert!(normal.try_admit(2, None).unwrap().is_some());
+    drop(background);
 }
