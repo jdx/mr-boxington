@@ -5818,3 +5818,111 @@ fn local_memory_headroom_is_reserved_only_for_local_waiters() {
         drop((background, first));
     }
 }
+
+#[test]
+fn memory_gated_normal_work_reserves_only_its_own_containers_headroom() {
+    for same_container in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut normal = pool_at(dir.path(), 32, GIB);
+        normal.domain_capacity = 4;
+        normal.domain_memory_capacity = 8 * GIB;
+        let held = normal.try_admit(1, None).unwrap().unwrap();
+        normal.available_memory = || Some(crate::util::Available::host(GIB));
+        let mut state = AdmissionState::new(0);
+        assert!(
+            normal
+                .try_admit_state(
+                    Resources {
+                        cpu: 2,
+                        memory_bytes: 3 * GIB
+                    },
+                    3,
+                    Some(3 * GIB),
+                    &mut state,
+                    None,
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            scan_waiters(&dir.path().join(WAITERS_DIR))
+                .unwrap()
+                .is_empty()
+        );
+        normal.mark_priority_wait();
+        let mut low = pool_at(dir.path(), 32, GIB);
+        low.domain_capacity = 4;
+        low.domain_memory_capacity = 8 * GIB;
+        low.priority = SchedulerPriority::Low;
+        if !same_container {
+            low.pressure_domain = "other-container";
+        }
+        let background = vector_attempt(
+            &low,
+            if same_container { 2 } else { 4 },
+            if same_container { 5 * GIB } else { 8 * GIB },
+        )
+        .unwrap();
+        assert!(vector_attempt(&low, 1, 1).is_none());
+        drop((background, held));
+    }
+}
+
+#[test]
+fn an_idle_container_keeps_headroom_for_a_younger_normal_waiter() {
+    for memory in [0, 8 * GIB] {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = if memory == 0 { 0 } else { GIB };
+        let mut elsewhere = pool_at(dir.path(), 32, unit);
+        elsewhere.pressure_domain = "other-container";
+        let machine_full = vector_attempt(&elsewhere, 32, 0).unwrap();
+        let mut low = pool_at(dir.path(), 32, unit);
+        low.priority = SchedulerPriority::Low;
+        low.domain_capacity = 4;
+        low.domain_memory_capacity = memory;
+        let request = Resources {
+            cpu: if memory == 0 { 4 } else { 1 },
+            memory_bytes: memory,
+        };
+        let mut low_queue = None;
+        assert!(
+            low.try_admit_named(request, 4, None, &mut low_queue, None)
+                .unwrap()
+                .is_none()
+        );
+        let mut normal = pool_at(dir.path(), 32, unit);
+        normal.domain_capacity = 4;
+        normal.domain_memory_capacity = memory;
+        let normal_request = Resources {
+            cpu: 1,
+            memory_bytes: unit,
+        };
+        let mut normal_queue = None;
+        assert!(
+            normal
+                .try_admit_named(normal_request, 1, None, &mut normal_queue, None)
+                .unwrap()
+                .is_none()
+        );
+        normal.mark_priority_wait();
+        drop(machine_full);
+        assert!(
+            low.try_admit_named(request, 4, None, &mut low_queue, None)
+                .unwrap()
+                .is_none(),
+            "the idle-scope escape must not consume local priority headroom"
+        );
+        let foreground = normal
+            .try_admit_named(normal_request, 1, None, &mut normal_queue, None)
+            .unwrap()
+            .unwrap();
+        drop(foreground);
+        std::fs::remove_file(normal.domain_priority_stamp()).unwrap();
+        assert!(
+            low.try_admit_named(request, 4, None, &mut low_queue, None)
+                .unwrap()
+                .is_some(),
+            "background work resumes once the local priority wait ends"
+        );
+    }
+}

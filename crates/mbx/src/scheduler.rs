@@ -2194,7 +2194,7 @@ impl Pool {
             if self.priority == SchedulerPriority::Normal
                 && stamped.is_none_or(|last| last.elapsed() >= PRIORITY_STAMP_INTERVAL)
             {
-                let _ = std::fs::write(self.dir.join(PRIORITY_WAIT_STAMP), b"");
+                self.mark_priority_wait();
                 stamped = Some(Instant::now());
             }
             // A pool that is genuinely full is a pool doing its job, so this
@@ -2345,7 +2345,7 @@ impl Pool {
             if self.priority == SchedulerPriority::Normal
                 && stamped.is_none_or(|last| last.elapsed() >= PRIORITY_STAMP_INTERVAL)
             {
-                let _ = std::fs::write(self.dir.join(PRIORITY_WAIT_STAMP), b"");
+                self.mark_priority_wait();
                 stamped = Some(Instant::now());
             }
             std::thread::sleep(jittered(delay));
@@ -2682,15 +2682,17 @@ impl Pool {
         // A waiter in another container cannot use this container's spare
         // CPUs or memory. Reserve local headroom only for a normal waiter
         // sharing its domain; the machine-wide stamp still governs the host.
+        let local_waiting = self.scope.is_none()
+            && (self.domain_priority_wait_is_fresh()
+                || waiting.iter().any(|entry| {
+                    entry.priority == "normal" && entry.domain == self.pressure_domain
+                }));
         let domain = self.priority_budget(
             Resources {
                 cpu: self.domain_capacity,
                 memory_bytes: self.domain_memory_capacity,
             },
-            self.scope.is_none()
-                && waiting.iter().any(|entry| {
-                    entry.priority == "normal" && entry.domain == self.pressure_domain
-                }),
+            local_waiting,
         );
         if domain.cpu < self.domain_capacity {
             request.domain_capacity = self.legacy_domain_capacity.min(domain.cpu);
@@ -2703,8 +2705,18 @@ impl Pool {
         let trace = self
             .events
             .then(|| std::cell::RefCell::new(decisions::Trace::default()));
-        let decision =
-            admission_decision_traced(capacity, &live, waiting.iter(), &request, trace.as_ref());
+        // The usual idle-scope escape admits oversized work. While local
+        // normal work waits, that escape must not consume its reserved room.
+        let exceeds_local_headroom = self.priority == SchedulerPriority::Low
+            && local_waiting
+            && ((domain.cpu < self.domain_capacity && resources.cpu > domain.cpu)
+                || (domain.memory_bytes < self.domain_memory_capacity
+                    && resources.memory_bytes > domain.memory_bytes));
+        let decision = if exceeds_local_headroom {
+            AdmissionDecision::Waiting
+        } else {
+            admission_decision_traced(capacity, &live, waiting.iter(), &request, trace.as_ref())
+        };
         if decision == AdmissionDecision::Waiting {
             if let Some(entry) = &state.queued {
                 let serialized_record = serde_json::to_vec(&request)?;
@@ -2889,7 +2901,31 @@ impl Pool {
         if self.scope.is_some() {
             return false;
         }
-        std::fs::metadata(self.dir.join(PRIORITY_WAIT_STAMP))
+        Self::priority_stamp_is_fresh(&self.dir.join(PRIORITY_WAIT_STAMP))
+    }
+
+    fn domain_priority_stamp(&self) -> PathBuf {
+        use sha2::Digest as _;
+        let digest = sha2::Sha256::digest(self.pressure_domain.as_bytes());
+        self.dir.join(format!(
+            "{PRIORITY_WAIT_STAMP}-{}",
+            hex::encode(&digest[..16])
+        ))
+    }
+
+    fn mark_priority_wait(&self) {
+        let _ = std::fs::write(self.dir.join(PRIORITY_WAIT_STAMP), b"");
+        if self.scope.is_none() {
+            let _ = std::fs::write(self.domain_priority_stamp(), b"");
+        }
+    }
+
+    fn domain_priority_wait_is_fresh(&self) -> bool {
+        self.scope.is_none() && Self::priority_stamp_is_fresh(&self.domain_priority_stamp())
+    }
+
+    fn priority_stamp_is_fresh(path: &Path) -> bool {
+        std::fs::metadata(path)
             .and_then(|metadata| metadata.modified())
             .ok()
             .and_then(|modified| modified.elapsed().ok())
