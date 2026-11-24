@@ -160,6 +160,42 @@ fn wrapper_loop_through_a_plain_launch_still_stops() {
 /// Legacy launchers can invoke mbx explicitly rather than enter Cargo shim
 /// mode. Bound the fixture itself so a regression cannot exhaust the host.
 #[test]
+fn a_live_managed_run_cannot_reset_the_cargo_guard() {
+    for shim in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let calls = root.path().join("calls");
+        let cutoff = root.path().join("cutoff");
+        let wrapper = fixture(
+            root.path(),
+            r##"#!/bin/sh
+case " $* " in *" metadata "*) exec "$MBX_TEST_REAL_CARGO" "$@";; esac
+count=$(cat "$MBX_TEST_CALLS" 2>/dev/null || echo 0)
+count=$((count + 1))
+echo "$count" > "$MBX_TEST_CALLS"
+if [ "$count" -gt 32 ]; then touch "$MBX_TEST_CUTOFF"; exit 99; fi
+MBX_CARGO_SHIM_MODE=1 exec "$MBX_TEST_BIN" "$@"
+"##,
+        );
+        let mut command = mbx(root.path(), &wrapper);
+        if !shim {
+            command.env_remove("MBX_CARGO_SHIM_MODE");
+        }
+        command
+            .env("MBX_TEST_BIN", env!("CARGO_BIN_EXE_mbx"))
+            .env("MBX_TEST_REAL_CARGO", std::env::var_os("CARGO").unwrap())
+            .env("MBX_TEST_CALLS", &calls)
+            .env("MBX_TEST_CUTOFF", &cutoff)
+            .env("MBX_GC_AUTO", "0")
+            .env("MBX_TARGET_ROOT", root.path().join("targets"))
+            .args(["run", "--offline"]);
+        let (success, output) = output_within(command, root.path(), Duration::from_secs(30));
+        assert!(!success, "{output}");
+        assert!(!cutoff.exists(), "a live launch reset the guard: {output}");
+        assert!(output.contains("re-entered its Cargo shim"), "{output}");
+    }
+}
+
+#[test]
 fn explicit_wrapper_loops_report_the_loop() {
     for (configured, prefix, change_dir, non_utf8) in [
         (false, "cargo ", false, false),

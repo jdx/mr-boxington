@@ -51,11 +51,7 @@ pub(super) fn plain_launch(
         command.env_clear().envs(caller);
         // The caller's snapshot predates this shim entry. Dropping the loop
         // guard's counters would restart them in every re-entry.
-        for name in super::shim::CARGO_GUARD_ENV {
-            if let Some(value) = std::env::var_os(name) {
-                command.env(name, value);
-            }
-        }
+        preserve_cargo_guard(&mut command);
     }
     // A `+toolchain` argument asks rustup for another toolchain, and the
     // caller's RUSTC or RUSTUP_TOOLCHAIN already settles which compiler runs;
@@ -103,11 +99,26 @@ pub fn recover_cli() -> Result<Option<ExitCode>> {
         .args(std::env::args_os().skip(1))
         .env_clear()
         .envs(restored_environment()?);
+    if live {
+        // This is still a re-entry into the live Cargo launch. Restore its
+        // build environment, but keep the active guard; only an application
+        // or stale-session recovery starts from the caller's guard state.
+        preserve_cargo_guard(&mut command);
+    }
     if super::is_cargo_shim() {
         command.env("MBX_CARGO_SHIM_MODE", "1");
     }
     let status = command.status()?;
     Ok(Some(super::cargo::exit_code(status)))
+}
+
+fn preserve_cargo_guard(command: &mut Command) {
+    for name in super::shim::CARGO_GUARD_ENV {
+        match std::env::var_os(name) {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
 }
 
 /// Bind the handoff to the selected executable: when it is real Cargo, an
