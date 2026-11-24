@@ -159,7 +159,7 @@ pub fn run_cargo_shim() -> Result<ExitCode> {
             FailedProbe::Roots(roots) => *roots,
             FailedProbe::Passthrough => return run_real_cargo(&real_cargo, &arguments),
             FailedProbe::Reject(retry_reason) => {
-                let reason = retry_reason.unwrap_or(reason);
+                let reason = probe_failure_reason(reason, retry_reason);
                 eyre::bail!(
                     "could not verify Cargo build storage: metadata probing failed; run cargo metadata --no-deps --format-version 1 with the same manifest and configuration options to diagnose it: {reason}"
                 )
@@ -602,6 +602,16 @@ pub(super) enum FailedProbe {
     Passthrough,
     /// Refuse it, carrying the expanded probe's failure if it was retried.
     Reject(Option<eyre::Report>),
+}
+
+pub(super) fn probe_failure_reason(
+    original: eyre::Report,
+    retry: Option<eyre::Report>,
+) -> eyre::Report {
+    match retry {
+        Some(retry) => eyre::eyre!("{original:#}\nExpanded alias metadata also failed: {retry:#}"),
+        None => original,
+    }
 }
 
 /// Decide what a failed roots probe leaves the caller able to do.

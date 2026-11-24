@@ -518,6 +518,53 @@ exit 2
 }
 
 #[test]
+fn alias_recovery_reports_both_a_loop_and_its_own_manifest_error() {
+    let root = tempfile::tempdir().unwrap();
+    let bad = root.path().join("bad");
+    std::fs::create_dir_all(root.path().join(".cargo")).unwrap();
+    std::fs::create_dir(&bad).unwrap();
+    let bad_manifest = bad.join("Cargo.toml");
+    std::fs::write(&bad_manifest, "[package\n").unwrap();
+    std::fs::write(
+        root.path().join(".cargo/config.toml"),
+        format!(
+            "[alias]\nbad = [\"build\", \"--manifest-path\", {}]\n",
+            serde_json::to_string(&bad_manifest).unwrap()
+        ),
+    )
+    .unwrap();
+    let wrapper = fixture(
+        root.path(),
+        r##"#!/bin/sh
+for arg do
+    if [ "$arg" = "$MBX_TEST_BAD_MANIFEST" ]; then exec "$MBX_TEST_REAL_CARGO" "$@"; fi
+done
+exec "$MBX_TEST_BIN" "$@"
+"##,
+    );
+    for shim in [false, true] {
+        let mut command = mbx(root.path(), &wrapper);
+        if !shim {
+            command.env_remove("MBX_CARGO_SHIM_MODE");
+        }
+        command
+            .env("MBX_TEST_BIN", env!("CARGO_BIN_EXE_mbx"))
+            .env("MBX_TEST_REAL_CARGO", std::env::var_os("CARGO").unwrap())
+            .env("MBX_TEST_BAD_MANIFEST", &bad_manifest)
+            .arg("bad");
+        let (success, output) = output_within(command, root.path(), Duration::from_secs(30));
+        assert!(!success, "{output}");
+        assert!(output.contains("re-entered its Cargo shim"), "{output}");
+        assert!(
+            output.contains("Expanded alias metadata also failed"),
+            "{output}"
+        );
+        assert!(output.contains("Cargo.toml"), "{output}");
+        assert!(output.contains("expected"), "{output}");
+    }
+}
+
+#[test]
 fn translated_wrapper_failure_keeps_the_loop_diagnosis() {
     let root = tempfile::tempdir().unwrap();
     let mbx_path = env!("CARGO_BIN_EXE_mbx");
