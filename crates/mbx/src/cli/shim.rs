@@ -18,6 +18,12 @@ const MAX_CARGO_SHIM_DEPTH: usize = 12;
 const MAX_CARGO_LOOP_RETRIES: usize = 128;
 pub(super) const CARGO_SHIM_NOTE_ENV: &str = "MBX_CARGO_SHIM_NOTE";
 const CARGO_SHIM_PROBES_ENV: &str = "MBX_CARGO_SHIM_PROBES";
+pub(super) const CARGO_GUARD_ENV: [&str; 4] = [
+    CARGO_SHIM_DEPTH_ENV,
+    CARGO_SHIM_CHAIN_ENV,
+    CARGO_SHIM_NOTE_ENV,
+    CARGO_SHIM_PROBES_ENV,
+];
 static PATH_BEFORE_SHIM_EXCLUSION: OnceLock<OsString> = OnceLock::new();
 
 /// The outermost Cargo selection owns the invocation's retry counter and

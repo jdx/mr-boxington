@@ -509,6 +509,9 @@ fn main() {
     assert!(std::path::Path::new(&args[4]).exists());
     assert!(std::env::var_os("MBX_SOCKET").is_none());
     assert!(std::env::var_os("RUSTC_WRAPPER").is_none());
+    for key in ["MBX_CARGO_SHIM_DEPTH", "MBX_CARGO_SHIM_CHAIN", "MBX_CARGO_SHIM_NOTE", "MBX_CARGO_SHIM_PROBES"] {
+        assert!(std::env::var_os(key).is_none(), "build guard leaked into application: {key}");
+    }
     let output = Command::new(&args[2]).args(["check", "--offline"])
         .current_dir(&args[3]).env("MBX_LOG", "debug").output().unwrap();
     assert!(output.status.success(), "{:?}", output);

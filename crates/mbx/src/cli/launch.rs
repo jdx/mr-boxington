@@ -51,11 +51,7 @@ pub(super) fn plain_launch(
         command.env_clear().envs(caller);
         // The caller's snapshot predates this shim entry. Dropping the loop
         // guard's counters would restart them in every re-entry.
-        for name in [
-            super::shim::CARGO_SHIM_DEPTH_ENV,
-            super::shim::CARGO_SHIM_CHAIN_ENV,
-            super::shim::CARGO_SHIM_NOTE_ENV,
-        ] {
+        for name in super::shim::CARGO_GUARD_ENV {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
             }
@@ -539,11 +535,12 @@ pub(super) fn record_overlay(environment: &mut BTreeMap<String, String>) -> Resu
             restore.insert(name.clone(), caller.get(&name).cloned());
         }
     }
-    for name in environment
-        .keys()
-        .map(OsString::from)
-        .chain(["PATH", "CARGO"].into_iter().map(OsString::from))
-    {
+    for name in environment.keys().map(OsString::from).chain(
+        ["PATH", "CARGO"]
+            .into_iter()
+            .chain(super::shim::CARGO_GUARD_ENV)
+            .map(OsString::from),
+    ) {
         restore.insert(name.clone(), caller.get(&name).cloned());
     }
     restore.insert(RESTORE.into(), None);
