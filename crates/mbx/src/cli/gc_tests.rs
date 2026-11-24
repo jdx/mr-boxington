@@ -517,7 +517,7 @@ fn a_combined_budget_shares_unoccupied_store_capacity() {
         };
         collect();
         assert!(
-            views.iter().all(|view| view.exists()),
+            views.iter().all(|view| has_outputs(view)),
             "an empty store leaves all 128 target bytes within budget"
         );
 
@@ -530,7 +530,7 @@ fn a_combined_budget_shares_unoccupied_store_capacity() {
         assert_eq!(occupied_store_budget(&config, &retention, 32), 32);
         gc::run(&config, config.gc.max_bytes, true, false, None, &retention).unwrap();
         assert!(
-            views.iter().all(|view| view.exists()),
+            views.iter().all(|view| has_outputs(view)),
             "dry runs preserve targets"
         );
         collect();
@@ -538,7 +538,10 @@ fn a_combined_budget_shares_unoccupied_store_capacity() {
             !has_outputs(&views[0]),
             "the older target makes room for the occupied store"
         );
-        assert!(views[1].exists(), "the newest target still fits the budget");
+        assert!(
+            has_outputs(&views[1]),
+            "the newest target still fits the budget"
+        );
         let tight = RetentionSettings {
             max_total_bytes: Some(32),
             ..retention
