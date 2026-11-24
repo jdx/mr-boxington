@@ -1605,15 +1605,16 @@ pub(super) fn cargo_roots_reported(
         return remote_install_roots(arguments, &working_dir, target_dir_env)
             .ok_or_else(|| eyre::eyre!("could not resolve remote install storage"));
     }
-    let (resolved, workspace_members) = mbx_cache_cargo::try_resolve_reported_with_members(
-        cargo,
-        arguments,
-        &working_dir,
-        target_dir_env.map(std::ffi::OsStr::to_os_string),
+    let probe = super::shim::CargoProbe::new()?;
+    let (resolved, workspace_members) = probe.finish(
+        mbx_cache_cargo::try_resolve_reported_with_members(
+            cargo,
+            arguments,
+            &working_dir,
+            target_dir_env.map(std::ffi::OsStr::to_os_string),
+        )
+        .map_err(Into::into),
     )?;
-    // A wrapper can recover from a failed recursive branch by executing real
-    // Cargo directly. Its successful metadata supersedes that branch's note.
-    super::shim::clear_loop_note();
     Ok(Roots {
         workspace_members,
         workspace_root: resolved.workspace_root,

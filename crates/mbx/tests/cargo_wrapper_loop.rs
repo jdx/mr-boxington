@@ -54,16 +54,13 @@ fn fixture(root: &Path, wrapper_body: &str) -> std::path::PathBuf {
     wrapper
 }
 
-fn track_loop_note(wrapper: &Path, root: &Path) {
+fn track_loop_note(wrapper: &Path) {
     let script = std::fs::read_to_string(wrapper).unwrap();
     std::fs::write(
         wrapper,
         script.replacen(
             "#!/bin/sh\n",
-            &format!(
-                "#!/bin/sh\numask 022\nprintf '%s' \"$MBX_CARGO_SHIM_NOTE\" > '{}'\nif [ -e \"$MBX_CARGO_SHIM_NOTE\" ]; then ls -l \"$MBX_CARGO_SHIM_NOTE\" > '{}'; fi\n",
-                root.join("note-path").display(), root.join("note-mode").display()
-            ),
+            "#!/bin/sh\numask 022\nprintf '%s' \"$MBX_CARGO_SHIM_NOTE\" > \"$MBX_TEST_NOTE_PATH\"\nif [ -e \"$MBX_CARGO_SHIM_NOTE\" ]; then ls -l \"$MBX_CARGO_SHIM_NOTE\" > \"$MBX_TEST_NOTE_MODE\"; fi\n",
             1,
         ),
     )
@@ -97,6 +94,8 @@ fn mbx(root: &Path, wrapper: &Path) -> Command {
                 .filter_map(|name| Some((name, std::env::var_os(name)?))),
         )
         .env("MBX_CACHE_DIR", root.join("cache"))
+        .env("MBX_TEST_NOTE_PATH", root.join("note-path"))
+        .env("MBX_TEST_NOTE_MODE", root.join("note-mode"))
         .env("MBX_CARGO_SHIM_MODE", "1")
         .env("CARGO", wrapper);
     command
@@ -201,7 +200,7 @@ fn explicit_wrapper_loops_report_the_loop() {
             std::fs::rename(wrapper.parent().unwrap(), &directory).unwrap();
             wrapper = directory.join("cargo");
         }
-        track_loop_note(&wrapper, root.path());
+        track_loop_note(&wrapper);
         let mut command = mbx(root.path(), &wrapper);
         command.env_remove("MBX_CARGO_SHIM_MODE");
         if !configured {
@@ -259,7 +258,7 @@ fn wrapper_can_recover_a_recursive_branch_with_real_cargo() {
             Path::new(&real).display()
         ),
     );
-    track_loop_note(&wrapper, root.path());
+    track_loop_note(&wrapper);
     let mut command = mbx(root.path(), &wrapper);
     command.env_remove("MBX_CARGO_SHIM_MODE");
     command.args(["metadata", "--no-deps", "--format-version", "1"]);
@@ -427,8 +426,8 @@ fn direct_cargo_fallback_can_run_external_commands_without_a_manifest() {
     );
     assert!(output.contains("managed-alias"), "{output}");
 
-    // Successful metadata must discard the abandoned failure before the
-    // actual command starts another mbx invocation through the same wrapper.
+    // Successful metadata must not carry an abandoned failure into the
+    // actual command, which starts another invocation through the wrapper.
     let mut command = mbx(root.path(), &wrapper);
     command.env_remove("MBX_CARGO_SHIM_MODE").arg("helper");
     let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
@@ -437,6 +436,85 @@ fn direct_cargo_fallback_can_run_external_commands_without_a_manifest() {
         "successful metadata left a stale loop note: {output}"
     );
     assert!(output.contains("workspace_root"), "{output}");
+}
+
+#[test]
+fn tracked_note_paths_can_contain_apostrophes() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("O'Neil");
+    let wrapper = fixture(&root, "#!/bin/sh\nexec \"$MBX_TEST_BIN\" cargo \"$@\"\n");
+    track_loop_note(&wrapper);
+    let mut command = mbx(&root, &wrapper);
+    command
+        .env_remove("MBX_CARGO_SHIM_MODE")
+        .env("MBX_TEST_BIN", env!("CARGO_BIN_EXE_mbx"))
+        .args(["cargo", "fmt", "--all", "--", "--check"]);
+    let (success, output) = output_within(command, &root, Duration::from_secs(30));
+    assert!(!success, "{output}");
+    assert!(output.contains("re-entered its Cargo shim"), "{output}");
+    assert_loop_note_removed(&root);
+    assert!(read(&root.join("note-mode")).starts_with("-rw-------"));
+}
+
+#[test]
+fn explain_last_ignores_an_exhausted_cargo_retry_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let wrapper = fixture(root.path(), "#!/bin/sh\necho cargo-must-not-run\nexit 99\n");
+    let note = root.path().join("guard");
+    std::fs::write(
+        root.path().join("guard.retries"),
+        ((1_u64 << 63) | 128).to_le_bytes(),
+    )
+    .unwrap();
+    let mut command = mbx(root.path(), &wrapper);
+    command
+        .env_remove("MBX_CARGO_SHIM_MODE")
+        .env("MBX_CARGO_SHIM_DEPTH", "12")
+        .env("MBX_CARGO_SHIM_NOTE", &note)
+        .args(["explain", "--last"]);
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(15));
+    assert!(!success, "an empty cache has no build to explain: {output}");
+    assert!(output.contains("no recorded build was found"), "{output}");
+    assert!(!output.contains("re-entered its Cargo shim"), "{output}");
+    assert!(!output.contains("cargo-must-not-run"), "{output}");
+}
+
+#[test]
+fn sibling_probes_keep_their_own_errors_and_cannot_clear_a_loop_diagnosis() {
+    let root = tempfile::tempdir().unwrap();
+    let bad = root.path().join("bad");
+    std::fs::create_dir(&bad).unwrap();
+    std::fs::write(bad.join("Cargo.toml"), "[package\n").unwrap();
+    let wrapper = fixture(
+        root.path(),
+        r##"#!/bin/sh
+if [ -n "$MBX_TEST_RECURSIVE_BRANCH" ]; then exec "$MBX_TEST_BIN" "$@"; fi
+MBX_TEST_RECURSIVE_BRANCH=1 "$MBX_TEST_BIN" "$@" >/dev/null 2>&1
+CARGO="$MBX_TEST_REAL_CARGO" "$MBX_TEST_BIN" check --manifest-path "$MBX_TEST_BAD_MANIFEST" > "$MBX_TEST_BAD_OUTPUT" 2>&1
+CARGO="$MBX_TEST_REAL_CARGO" "$MBX_TEST_BIN" metadata --no-deps --format-version 1 --manifest-path "$MBX_TEST_GOOD_MANIFEST" >/dev/null 2>&1 || exit 96
+exit 2
+"##,
+    );
+    let bad_output = root.path().join("manifest-error");
+    let mut command = mbx(root.path(), &wrapper);
+    command
+        .env_remove("MBX_CARGO_SHIM_MODE")
+        .env("MBX_TEST_BIN", env!("CARGO_BIN_EXE_mbx"))
+        .env("MBX_TEST_REAL_CARGO", std::env::var_os("CARGO").unwrap())
+        .env("MBX_TEST_BAD_MANIFEST", bad.join("Cargo.toml"))
+        .env("MBX_TEST_GOOD_MANIFEST", root.path().join("Cargo.toml"))
+        .env("MBX_TEST_BAD_OUTPUT", &bad_output)
+        .arg("build");
+    let (success, output) = output_within(command, root.path(), Duration::from_secs(30));
+    assert!(!success, "{output}");
+    assert!(output.contains("re-entered its Cargo shim"), "{output}");
+    let manifest_error = read(&bad_output);
+    assert!(manifest_error.contains("Cargo.toml"), "{manifest_error}");
+    assert!(manifest_error.contains("expected"), "{manifest_error}");
+    assert!(
+        !manifest_error.contains("re-entered its Cargo shim"),
+        "{manifest_error}"
+    );
 }
 
 #[test]
@@ -611,7 +689,7 @@ fn changing_path_cannot_restart_sibling_probe_trees() {
             root.path().join("bin").display()
         ),
     );
-    track_loop_note(&wrapper, root.path());
+    track_loop_note(&wrapper);
     let mut command = mbx(root.path(), &wrapper);
     command
         .env_remove("MBX_CARGO_SHIM_MODE")
@@ -688,22 +766,39 @@ fn successful_independent_probes_cannot_reset_a_failed_trees_budget() {
     let entries = root.path().join("entries");
     let cutoff = root.path().join("cutoff");
     let observed = root.path().join("retries-observed");
+    let independent = root.path().join("independent-cargo");
+    let succeeded = root.path().join("metadata-succeeded");
+    std::fs::write(
+        &independent,
+        r##"#!/bin/sh
+"$MBX_TEST_REAL_CARGO" "$@"
+status=$?
+case " $* " in *" metadata "*)
+    if [ "$status" -eq 0 ]; then : > "$MBX_TEST_PROBE_SUCCEEDED"; fi;;
+esac
+exit "$status"
+"##,
+    )
+    .unwrap();
+    std::fs::set_permissions(&independent, std::fs::Permissions::from_mode(0o755)).unwrap();
     let wrapper = fixture(
         root.path(),
         &format!(
-            "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || echo 0)\ncount=$((count + 1))\necho $count > '{}'\n[ $count -le 512 ] || {{ touch '{}'; exit 99; }}\nif [ -f \"$MBX_CARGO_SHIM_NOTE.retries\" ]; then cp \"$MBX_CARGO_SHIM_NOTE.retries\" '{}'; fi\nCARGO='{}' '{mbx_path}' check --mbx-test-invalid-flag >/dev/null 2>&1 || :\nPATH='{}':\"$PATH\" exec '{mbx_path}' nextest run\n",
+            "#!/bin/sh\ncount=$(cat '{}' 2>/dev/null || echo 0)\ncount=$((count + 1))\necho $count > '{}'\n[ $count -le 512 ] || {{ touch '{}'; exit 99; }}\nif [ -f \"$MBX_CARGO_SHIM_NOTE.retries\" ]; then cp \"$MBX_CARGO_SHIM_NOTE.retries\" '{}'; fi\nCARGO=\"$MBX_TEST_INDEPENDENT_CARGO\" '{mbx_path}' check --mbx-test-invalid-flag >/dev/null 2>&1 || :\nPATH='{}':\"$PATH\" exec '{mbx_path}' nextest run\n",
             entries.display(),
             entries.display(),
             cutoff.display(),
             observed.display(),
-            Path::new(&real).display(),
             root.path().join("bin").display()
         ),
     );
-    track_loop_note(&wrapper, root.path());
+    track_loop_note(&wrapper);
     let mut command = mbx(root.path(), &wrapper);
     command
         .env_remove("MBX_CARGO_SHIM_MODE")
+        .env("MBX_TEST_REAL_CARGO", real)
+        .env("MBX_TEST_INDEPENDENT_CARGO", independent)
+        .env("MBX_TEST_PROBE_SUCCEEDED", &succeeded)
         .env("MBX_GC_AUTO", "0")
         .env("MBX_TARGET_ROOT", root.path().join("targets"))
         .args(["nextest", "run"]);
@@ -719,5 +814,9 @@ fn successful_independent_probes_cannot_reset_a_failed_trees_budget() {
     );
     let bytes: [u8; 8] = std::fs::read(&observed).unwrap().try_into().unwrap();
     assert_eq!(u64::from_le_bytes(bytes) & !(1 << 63), 128);
+    assert!(
+        succeeded.exists(),
+        "no independent metadata probe succeeded: {output}"
+    );
     assert_loop_note_removed(root.path());
 }

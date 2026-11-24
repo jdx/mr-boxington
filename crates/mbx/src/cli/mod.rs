@@ -320,7 +320,11 @@ pub fn run() -> Result<ExitCode> {
             unreachable!("settings were handled before configuration loading")
         }
         Commands::Explain(args) => {
-            let _selection = shim::prepare_explicit_cargo()?;
+            let _selection = if args.is_last() {
+                None
+            } else {
+                Some(shim::prepare_explicit_cargo()?)
+            };
             explain::run(&config, &settings, args, toolchain)
         }
         Commands::Analyze(args) => analyze::run(&config, args),

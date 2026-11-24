@@ -17,10 +17,11 @@ pub(super) const CARGO_SHIM_CHAIN_ENV: &str = "MBX_CARGO_SHIM_CHAIN";
 const MAX_CARGO_SHIM_DEPTH: usize = 12;
 const MAX_CARGO_LOOP_RETRIES: usize = 128;
 pub(super) const CARGO_SHIM_NOTE_ENV: &str = "MBX_CARGO_SHIM_NOTE";
+const CARGO_SHIM_PROBES_ENV: &str = "MBX_CARGO_SHIM_PROBES";
 static PATH_BEFORE_SHIM_EXCLUSION: OnceLock<OsString> = OnceLock::new();
 
-/// Only the outermost Cargo selection owns the diagnostic note. Keep it until
-/// that command finishes so failed probes cannot restart a known wrapper loop.
+/// The outermost Cargo selection owns the invocation's retry counter and
+/// fallback diagnosis, independently of individual metadata probes.
 pub(super) struct CargoSelection {
     note: Option<PathBuf>,
 }
@@ -211,6 +212,10 @@ fn record_cargo_selection(
     let note = owns_note.then(|| {
         let path = loop_note_path();
         unsafe { std::env::set_var(CARGO_SHIM_NOTE_ENV, &path) };
+        // Only the owner creates the counter. Direct Cargo queries can run
+        // even if this fails, but a nested entry must open the existing state
+        // successfully before it can spawn another child.
+        let _ = initialize_loop_retries(&path);
         path
     });
     Ok(CargoSelection { note })
@@ -235,18 +240,24 @@ fn loop_note_path() -> PathBuf {
         ))
 }
 
-fn read_loop_note() -> Option<String> {
-    let path = std::env::var_os(CARGO_SHIM_NOTE_ENV)?;
+fn read_loop_note_at(path: &Path) -> Option<String> {
     std::fs::read_to_string(path)
         .ok()
         .filter(|note| note.contains("re-entered its Cargo shim"))
 }
 
 fn leave_loop_note(message: &str) {
-    let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV) else {
-        return;
-    };
-    if let Some(parent) = Path::new(&path).parent() {
+    let mut paths = cargo_chain(std::env::var_os(CARGO_SHIM_PROBES_ENV).as_deref());
+    if let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV) {
+        paths.push(PathBuf::from(path));
+    }
+    for path in paths {
+        write_loop_note(&path, message);
+    }
+}
+
+fn write_loop_note(path: &Path, message: &str) {
+    if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let mut options = std::fs::OpenOptions::new();
@@ -256,23 +267,51 @@ fn leave_loop_note(message: &str) {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    if let Ok(mut file) = options.open(&path) {
+    if let Ok(mut file) = options.open(path) {
         let _ = std::io::Write::write_all(&mut file, message.as_bytes());
     }
 }
 
-pub(super) fn reject_known_cargo_loop() -> Result<()> {
-    if let Some(note) = read_loop_note() {
-        eyre::bail!("{note}");
-    }
-    Ok(())
+/// Each roots probe owns its diagnosis. Children report to every active
+/// ancestor probe, while a successful or unrelated sibling only drops its own
+/// note. The invocation-wide retry counter is independent of these notes.
+pub(super) struct CargoProbe {
+    previous: Option<OsString>,
+    note: PathBuf,
 }
 
-pub(super) fn clear_loop_note() {
-    if let Some(path) = std::env::var_os(CARGO_SHIM_NOTE_ENV) {
-        // A recovered probe supersedes its diagnosis, but cannot reset the
-        // invocation tree's retry budget. Only the outer owner removes that.
-        let _ = std::fs::remove_file(path);
+impl CargoProbe {
+    pub(super) fn new() -> Result<Self> {
+        let previous = std::env::var_os(CARGO_SHIM_PROBES_ENV);
+        let mut probes = cargo_chain(previous.as_deref());
+        let note = loop_note_path();
+        probes.push(note.clone());
+        let encoded =
+            serde_json::to_string(&probes.iter().map(|p| p.as_os_str()).collect::<Vec<_>>())?;
+        // CLI probing is single-threaded, before a cache session starts.
+        unsafe { std::env::set_var(CARGO_SHIM_PROBES_ENV, encoded) };
+        Ok(Self { previous, note })
+    }
+
+    pub(super) fn finish<T>(self, result: Result<T>) -> Result<T> {
+        match result {
+            Err(error) => {
+                Err(read_loop_note_at(&self.note).map_or(error, |note| eyre::eyre!("{note}")))
+            }
+            result => result,
+        }
+    }
+}
+
+impl Drop for CargoProbe {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous {
+                Some(previous) => std::env::set_var(CARGO_SHIM_PROBES_ENV, previous),
+                None => std::env::remove_var(CARGO_SHIM_PROBES_ENV),
+            }
+        }
+        let _ = std::fs::remove_file(&self.note);
     }
 }
 
@@ -290,22 +329,40 @@ fn remove_loop_note(note: &Path) {
 /// Nested entries verify shared state is writable. Once a loop is detected,
 /// the counter bounds siblings even when a wrapper changes PATH every time.
 fn charge_loop_retry(activate: bool) -> Result<()> {
-    use std::io::{Read, Seek, Write};
     let Some(note) = std::env::var_os(CARGO_SHIM_NOTE_ENV) else {
         return Ok(());
     };
+    charge_loop_retry_at(Path::new(&note), activate)
+}
+
+fn initialize_loop_retries(note: &Path) -> Result<()> {
+    use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(retry_counter_path(note))?
+        .write_all(&0_u64.to_le_bytes())?;
+    Ok(())
+}
+
+fn charge_loop_retry_at(note: &Path, activate: bool) -> Result<()> {
+    use std::io::{Read, Seek, Write};
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
-    let mut file = options.open(retry_counter_path(Path::new(&note)))?;
+    let mut file = options.open(retry_counter_path(note))?;
     file.lock()?;
     let mut bytes = [0; 8];
     let state = match file.metadata()?.len() {
-        0 => 0,
         8 => {
             file.read_exact(&mut bytes)?;
             u64::from_le_bytes(bytes)
@@ -315,7 +372,7 @@ fn charge_loop_retry(activate: bool) -> Result<()> {
     let active = activate || state & (1 << 63) != 0;
     let count = (state & !(1 << 63)) as usize;
     if count >= MAX_CARGO_LOOP_RETRIES {
-        let diagnosis = read_loop_note().unwrap_or_default();
+        let diagnosis = read_loop_note_at(note).unwrap_or_default();
         eyre::bail!(
             "mbx re-entered its Cargo shim too many times: stopped after {count} retries in a failed invocation tree. {diagnosis}"
         );
@@ -581,7 +638,6 @@ pub(super) fn failed_probe(
         note_uncached_passthrough(invocation.as_ref());
         return Ok(FailedProbe::Passthrough);
     }
-    reject_known_cargo_loop()?;
     Ok(FailedProbe::Reject(retry_reason))
 }
 
@@ -902,6 +958,23 @@ mod tests {
     #[test]
     fn independent_selections_with_the_same_pid_have_distinct_loop_notes() {
         assert_ne!(loop_note_path(), loop_note_path());
+    }
+
+    #[test]
+    fn a_missing_or_truncated_counter_cannot_restart_a_failed_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("note");
+        initialize_loop_retries(&note).unwrap();
+        for _ in 0..MAX_CARGO_LOOP_RETRIES {
+            charge_loop_retry_at(&note, true).unwrap();
+        }
+        assert!(charge_loop_retry_at(&note, true).is_err());
+        let counter = retry_counter_path(&note);
+        std::fs::remove_file(&counter).unwrap();
+        assert!(charge_loop_retry_at(&note, false).is_err());
+        assert!(!counter.exists(), "a missing counter must not be recreated");
+        std::fs::write(&counter, b"").unwrap();
+        assert!(charge_loop_retry_at(&note, false).is_err());
     }
 
     #[cfg(unix)]
