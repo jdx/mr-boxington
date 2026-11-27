@@ -460,6 +460,18 @@ fn extract_executable(archive: &Path, destination: &Path, suffix: &str) -> Resul
     bail!("release archive did not contain an executable ending in `{suffix}`")
 }
 
+/// The name to give the rust-lld shim. LLD picks its driver from the name it
+/// was run as, so a WebAssembly link fed to the ELF driver fails.
+fn lld_flavor(target: &str) -> &'static str {
+    if target.contains("apple") {
+        "ld64.lld"
+    } else if target.starts_with("wasm") {
+        "wasm-ld"
+    } else {
+        "ld.lld"
+    }
+}
+
 fn rust_lld(target: Option<&str>, cache_dir: &Path, cargo_arguments: &[String]) -> Result<PathBuf> {
     if cfg!(windows) {
         bail!("managed rust-lld selection on Windows is not supported yet");
@@ -485,12 +497,7 @@ fn rust_lld(target: Option<&str>, cache_dir: &Path, cargo_arguments: &[String]) 
             path.display()
         );
     }
-    let link_target = target.unwrap_or(&host);
-    let flavor = if link_target.contains("apple") {
-        "ld64.lld"
-    } else {
-        "ld.lld"
-    };
+    let flavor = lld_flavor(target.unwrap_or(&host));
     let sysroot_key = hex::encode(Sha256::digest(sysroot.trim().as_bytes()));
     let shim_dir = cache_dir
         .join("tools/rust-lld")
@@ -1069,6 +1076,14 @@ mod tests {
                 executable
             )])
         );
+    }
+
+    #[test]
+    fn rust_lld_shim_names_the_driver_for_the_target() {
+        assert_eq!(lld_flavor("aarch64-apple-darwin"), "ld64.lld");
+        assert_eq!(lld_flavor("wasm32-unknown-unknown"), "wasm-ld");
+        assert_eq!(lld_flavor("wasm32-wasip1"), "wasm-ld");
+        assert_eq!(lld_flavor("x86_64-unknown-linux-gnu"), "ld.lld");
     }
 
     #[cfg(unix)]
