@@ -404,7 +404,7 @@ fn cargo_with_settings_bypass_log_and_roots(
     }
     // An alias can supply `--target`, which overrides `CARGO_BUILD_TARGET`.
     let build_targets = if crate::managed_linker::cargo_targets(&expanded).is_empty() {
-        configured_build_targets()
+        configured_build_targets(&invocation_dir(&working_dir, &expanded), &expanded)
     } else {
         Vec::new()
     };
@@ -1281,8 +1281,16 @@ pub(super) fn compiler_for_cargo(
 
 /// The targets Cargo builds when it is given no `--target`:
 /// `CARGO_BUILD_TARGET`, or `build.target` in its configuration files.
-fn configured_build_targets() -> Vec<String> {
-    let configured = super::launch::load_cargo_config()
+fn configured_build_targets(cwd: &Path, arguments: &[String]) -> Vec<String> {
+    configured_build_targets_with(cwd, arguments, &BTreeMap::new())
+}
+
+pub(super) fn configured_build_targets_with(
+    cwd: &Path,
+    arguments: &[String],
+    environment: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let configured = super::launch::load_invocation_config(cwd, arguments, environment)
         .and_then(|config| Ok(config.build_target_for_cli(Vec::<String>::new())?));
     match configured {
         Ok(targets) => targets,
