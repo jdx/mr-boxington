@@ -195,15 +195,13 @@ async fn check(config: &Config, toolchain: Option<&str>) -> Vec<Check> {
 
 /// Probe the transport every orchestrated build needs in this environment.
 ///
-/// This uses a fresh temporary directory just like a real session. Sandboxes
-/// can permit both creating the directory and opening an AF_UNIX socket while
-/// still rejecting `bind`, so no filesystem-only check can answer this.
+/// This creates its directory exactly as a real session does, so the socket
+/// path it binds has the same length. Sandboxes can permit both creating the
+/// directory and opening an AF_UNIX socket while still rejecting `bind`, so no
+/// filesystem-only check can answer this.
 #[cfg(unix)]
 fn session_check() -> Check {
-    let directory = match tempfile::Builder::new()
-        .prefix("mbx-session-probe-")
-        .tempdir()
-    {
+    let directory = match crate::session::create_session_dir() {
         Ok(directory) => directory,
         Err(error) => {
             return Check::warn(
@@ -214,7 +212,7 @@ fn session_check() -> Check {
             );
         }
     };
-    let socket = directory.path().join("cache-agent.sock");
+    let socket = directory.path().join(crate::session::SOCKET_FILE);
     let socket_probe = std::os::unix::net::UnixListener::bind(&socket).map(drop);
     session_check_from(socket_probe, || {
         crate::session::create_fifo(&directory.path().join("cache-agent.fifo"))
@@ -229,6 +227,16 @@ fn session_check_from(
 ) -> Check {
     match socket_probe {
         Ok(()) => Check::pass("session", "Unix-domain listeners are available"),
+        // Builds fall back to FIFOs only for these errors; any other bind
+        // failure stops the session from starting.
+        Err(socket_error) if !crate::session::socket_bind_unavailable(&socket_error) => {
+            Check::warn(
+                "session",
+                format!(
+                    "Unix-domain listener failed ({socket_error}); builds will fail to start a cache session"
+                ),
+            )
+        }
         Err(socket_error) => match fifo_probe() {
             Ok(()) => Check::warn(
                 "session",
@@ -919,6 +927,7 @@ mod tests {
             Severity::Warn => assert!(
                 check.detail.contains("FIFO transport")
                     || check.detail.contains("without mbx caching")
+                    || check.detail.contains("fail to start")
             ),
             Severity::Fail => panic!("session transport probes are advisory"),
         }
@@ -933,6 +942,29 @@ mod tests {
         );
         assert_eq!(check.severity, Severity::Warn);
         assert!(check.detail.contains("builds will use FIFO transport"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_overlong_socket_path_reports_the_fifo_fallback() {
+        let socket_error = std::os::unix::net::UnixListener::bind(
+            std::path::Path::new("/tmp").join("x".repeat(200)),
+        )
+        .map(drop);
+        let check = session_check_from(socket_error, || Ok(()));
+        assert_eq!(check.severity, Severity::Warn);
+        assert!(check.detail.contains("builds will use FIFO transport"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bind_error_without_a_fallback_reports_that_builds_fail() {
+        let check = session_check_from(
+            Err(std::io::Error::from(std::io::ErrorKind::AddrInUse)),
+            || panic!("builds do not try FIFOs after this error"),
+        );
+        assert_eq!(check.severity, Severity::Warn);
+        assert!(check.detail.contains("builds will fail to start"));
     }
 
     #[cfg(unix)]
