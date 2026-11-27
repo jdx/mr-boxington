@@ -518,15 +518,25 @@ pub(crate) fn cargo_profile(arguments: &[String]) -> String {
     let mut profile = None;
     let mut debug = false;
     while let Some(argument) = arguments.next() {
+        // cargo-nextest's `--profile` names its own test profile; it passes
+        // Cargo's build profile as `--cargo-profile` instead.
+        let nextest = subcommand == Some("nextest");
+        let (profile_flag, profile_prefix) = if nextest {
+            ("--cargo-profile", "--cargo-profile=")
+        } else {
+            ("--profile", "--profile=")
+        };
         if argument == "--release" {
             profile = Some("release".to_owned());
         } else if argument == "--debug" {
             debug = true;
-        } else if argument == "--profile" {
+        } else if argument == profile_flag {
             profile = arguments.next().cloned();
-        } else if let Some(value) = argument.strip_prefix("--profile=") {
+        } else if let Some(value) = argument.strip_prefix(profile_prefix) {
             profile = Some(value.to_owned());
-        } else if matches!(argument.as_str(), "--config" | "--color" | "-Z") {
+        } else if matches!(argument.as_str(), "--config" | "--color" | "-Z")
+            || (nextest && matches!(argument.as_str(), "--profile" | "-P"))
+        {
             let _ = arguments.next();
         } else if !argument.starts_with('-') && !argument.starts_with('+') && subcommand.is_none() {
             subcommand = Some(argument.as_str());
@@ -665,6 +675,34 @@ mod tests {
         assert_eq!(
             cargo_profile(&["run".into(), "--".into(), "--debug".into()]),
             "dev"
+        );
+        // nextest's `--profile` is its own; `--cargo-profile` is Cargo's.
+        assert_eq!(
+            cargo_profile(&[
+                "nextest".into(),
+                "run".into(),
+                "--profile".into(),
+                "ci".into()
+            ]),
+            "dev"
+        );
+        assert_eq!(
+            cargo_profile(&["nextest".into(), "run".into(), "-P".into(), "ci".into()]),
+            "dev"
+        );
+        assert_eq!(
+            cargo_profile(&[
+                "nextest".into(),
+                "run".into(),
+                "--profile=ci".into(),
+                "--cargo-profile".into(),
+                "fast".into()
+            ]),
+            "fast"
+        );
+        assert_eq!(
+            cargo_profile(&["nextest".into(), "run".into(), "--release".into()]),
+            "release"
         );
     }
 
