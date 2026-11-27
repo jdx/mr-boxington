@@ -367,8 +367,11 @@ fn a_short_disk_collects_live_targets_past_their_budget() {
 
     let report = prune_targets(&config, &always_short(), config.gc.max_bytes);
 
-    assert!(!views[0].exists(), "the older checkout's target went");
-    assert!(!views[1].exists(), "the newest inactive target also goes");
+    assert!(!has_outputs(&views[0]), "the older checkout's target went");
+    assert!(
+        !has_outputs(&views[1]),
+        "the newest inactive target also goes"
+    );
     assert_eq!(report.freed_bytes, 128);
     assert!(
         report.removals[0].contains("under the"),
@@ -395,7 +398,7 @@ fn json_report_includes_low_disk_target_removals() {
     let retention = always_short();
     let low_disk = collect_low_disk(&config, &retention);
     assert!(
-        !views[0].exists(),
+        !has_outputs(&views[0]),
         "low-disk collection removed the older target"
     );
 
@@ -514,7 +517,7 @@ fn a_combined_budget_shares_unoccupied_store_capacity() {
         };
         collect();
         assert!(
-            views.iter().all(|view| view.exists()),
+            views.iter().all(|view| has_outputs(view)),
             "an empty store leaves all 128 target bytes within budget"
         );
 
@@ -527,22 +530,25 @@ fn a_combined_budget_shares_unoccupied_store_capacity() {
         assert_eq!(occupied_store_budget(&config, &retention, 32), 32);
         gc::run(&config, config.gc.max_bytes, true, false, None, &retention).unwrap();
         assert!(
-            views.iter().all(|view| view.exists()),
+            views.iter().all(|view| has_outputs(view)),
             "dry runs preserve targets"
         );
         collect();
         assert!(
-            !views[0].exists(),
+            !has_outputs(&views[0]),
             "the older target makes room for the occupied store"
         );
-        assert!(views[1].exists(), "the newest target still fits the budget");
+        assert!(
+            has_outputs(&views[1]),
+            "the newest target still fits the budget"
+        );
         let tight = RetentionSettings {
             max_total_bytes: Some(32),
             ..retention
         };
         let sweep = sweep_store(&config, &tight);
         assert!(
-            !views[1].exists(),
+            !has_outputs(&views[1]),
             "a tighter budget also evicts the newest inactive target"
         );
         assert!(
@@ -818,7 +824,7 @@ fn a_target_round_that_frees_nothing_logical_still_progresses() {
         u64::MAX,
         &mut collection
     ));
-    assert!(!view.exists());
+    assert!(!has_outputs(&view));
     let targets = collection.targets.as_ref().unwrap();
     assert_eq!(
         targets.freed_bytes(),
@@ -871,7 +877,7 @@ fn the_low_disk_target_line_says_what_was_released_on_disk() {
 
     let collection = collect_low_disk(&config, &always_short());
 
-    assert!(!view.exists());
+    assert!(!has_outputs(&view));
     let line = collection
         .lines
         .iter()
@@ -1168,9 +1174,9 @@ fn a_short_disk_retries_targets_after_sparse_files_release_little_space() {
 
     let collection = collect_low_disk(&config, &retention);
 
-    assert!(!views[0].exists(), "the first logical eviction ran");
+    assert!(!has_outputs(&views[0]), "the first logical eviction ran");
     assert!(
-        !views[1].exists(),
+        !has_outputs(&views[1]),
         "the disk is still short after the first eviction, so collection must retry"
     );
     assert_eq!(collection.targets.unwrap().removed_views, 2);
@@ -1213,7 +1219,7 @@ fn a_program_keeps_its_target_from_the_budget_but_not_from_a_short_disk() {
     );
 
     let report = prune_targets(&config, &always_short(), config.gc.max_bytes);
-    assert!(!view.exists(), "{:?}", report.removals);
+    assert!(!has_outputs(&view), "{:?}", report.removals);
 
     let view = low_disk_view(
         &config,
@@ -1231,7 +1237,7 @@ fn a_program_keeps_its_target_from_the_budget_but_not_from_a_short_disk() {
         u64::MAX,
         &mut collection
     ));
-    assert!(!view.exists());
+    assert!(!has_outputs(&view));
 }
 
 #[test]
@@ -1254,4 +1260,12 @@ fn configured_session_count_reaches_gc_and_dry_run() {
     gc::run(&config, u64::MAX, false, false, None, &retention).unwrap();
     assert!(!sessions.join("100-1-aaaa.jsonl").exists());
     assert!(sessions.join("200-1-bbbb.jsonl").exists());
+}
+
+// Collection may leave an empty placeholder; old outputs must be gone.
+fn has_outputs(path: &std::path::Path) -> bool {
+    if path.is_file() {
+        return true;
+    }
+    std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some())
 }

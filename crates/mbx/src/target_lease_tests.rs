@@ -241,8 +241,8 @@ fn a_view_a_wrapped_command_is_still_using_is_kept() {
     let outcome = collect_expired(&config.target.root);
 
     assert_eq!(outcome.removed_live_views, 1);
-    assert!(!view.exists());
-    assert!(!is_recorded(&config.target.root, &workspace));
+    assert!(!has_outputs(&view));
+    assert!(is_recorded(&config.target.root, &workspace));
 }
 
 /// A command can start after collection has chosen what to remove. The lease
@@ -265,6 +265,8 @@ fn a_lease_taken_after_the_selection_is_kept() {
         RunningPrograms::Spare,
         false,
         now_secs(),
+        |_| {},
+        |_| {},
         || {
             // The command arrives between the selection and the removal.
             lease = Some(ViewLease::acquire(&config.target.root, &workspace).unwrap());
@@ -283,7 +285,7 @@ fn a_lease_taken_after_the_selection_is_kept() {
     let outcome = collect_expired(&config.target.root);
 
     assert_eq!(outcome.removed_views, 1);
-    assert!(!view.exists());
+    assert!(!has_outputs(&view));
 }
 
 /// A command that arrives while collection holds the view exclusively must
@@ -310,6 +312,8 @@ fn a_command_arriving_during_the_removal_waits_and_finds_the_view_gone() {
         RunningPrograms::Spare,
         false,
         now_secs(),
+        |_| {},
+        |_| {},
         || {},
         |directory: &Path| {
             let (refused, was_refused) = mpsc::channel();
@@ -324,7 +328,7 @@ fn a_command_arriving_during_the_removal_waits_and_finds_the_view_gone() {
                     .unwrap();
                 // Blocks until collection releases its exclusive hold.
                 file.lock_shared().unwrap();
-                directory.exists()
+                has_outputs(&directory)
             }));
             // Let collection go on only once the command has been turned
             // away, so the removal really does overlap its arrival.
@@ -343,7 +347,7 @@ fn a_command_arriving_during_the_removal_waits_and_finds_the_view_gone() {
         "the view was moved aside before collection released it"
     );
     assert_eq!(outcome.removed_views, 1);
-    assert!(!view.exists());
+    assert!(!has_outputs(&view));
 }
 
 /// Two commands can use one view at once, such as `cargo test` and
@@ -378,7 +382,7 @@ fn stacked_leases_keep_a_view_until_the_last_is_released() {
     drop(second);
     let outcome = collect_expired(&config.target.root);
     assert_eq!(outcome.removed_views, 1);
-    assert!(!view.exists());
+    assert!(!has_outputs(&view));
 }
 
 /// A command that is killed never gets to release its lease itself. The
@@ -464,7 +468,7 @@ fn a_lease_dies_with_its_process() {
         outcome.removed_views, 1,
         "the killed child's lease went with it"
     );
-    assert!(!view.exists());
+    assert!(!has_outputs(&view));
 }
 
 /// A command that fails by panicking unwinds through its lease, and the view
@@ -492,7 +496,7 @@ fn a_panicking_thread_releases_its_lease() {
     let outcome = collect_expired(&config.target.root);
 
     assert_eq!(outcome.removed_live_views, 1);
-    assert!(!view.exists());
+    assert!(!has_outputs(&view));
 }
 
 /// An explicit clean of one checkout must not delete outputs a command in that
@@ -533,7 +537,7 @@ fn remove_workspace_keeps_a_view_in_use() {
         remove_workspace(&config.target.root, &workspace).unwrap(),
         RemoveOutcome::Removed(bytes) if bytes > 0
     ));
-    assert!(!view.exists());
+    assert!(!has_outputs(&view));
     assert!(!record.exists());
     assert!(std::fs::symlink_metadata(&link).is_err());
     assert_eq!(
@@ -563,7 +567,7 @@ fn unrelated_views_are_collected_while_another_is_in_use() {
     assert_eq!(outcome.kept_active_views, 1);
     assert_eq!(outcome.removed_views, 1);
     assert!(busy.join("artifact").exists());
-    assert!(!idle.exists());
+    assert!(!has_outputs(&idle));
 }
 
 /// A preview must say what a real run would do. A view a command is using
@@ -641,6 +645,8 @@ fn a_command_waiting_on_the_removal_keeps_the_record_it_writes() {
         RunningPrograms::Spare,
         false,
         now_secs(),
+        |_| {},
+        |_| {},
         || {},
         |_| {
             // The command arrives while collection holds the view: it waits
@@ -759,6 +765,11 @@ fn a_deletion_that_fails_after_the_rename_keeps_its_bytes_in_the_total() {
     std::fs::create_dir(&sealed).unwrap();
     std::fs::write(sealed.join("inside"), b"x").unwrap();
     std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // The fixture represents old outputs, including the directories just
+    // created above; recent Cargo directory writes now count as use.
+    for path in [view.join("debug"), view.join("debug/deps")] {
+        filetime::set_file_mtime(path, FileTime::from_unix_time(1, 0)).unwrap();
+    }
     let unseal = |root: &Path| {
         for entry in std::fs::read_dir(views_root(root)).unwrap().flatten() {
             let sealed = entry.path().join("debug/deps/sealed");
@@ -783,11 +794,11 @@ fn a_deletion_that_fails_after_the_rename_keeps_its_bytes_in_the_total() {
     let Some(aside) = aside else {
         // Running as root: the deletion went through, so there is nothing to
         // account for here.
-        assert!(!view.exists());
+        assert!(!has_outputs(&view));
         return;
     };
 
-    assert!(!view.exists(), "the view is gone from its path");
+    assert!(!has_outputs(&view), "the view is gone from its path");
     assert!(aside.exists(), "what could not be deleted is still aside");
     assert_eq!(outcome.removed_views, 1);
     // Deletion may have freed some files before it failed; whichever way it
@@ -1291,7 +1302,7 @@ fn a_program_running_from_a_view_keeps_it_from_a_budget() {
     assert_eq!(preview.kept_active_views, 1, "{preview:?}");
     assert_eq!(outcome.kept_active_views, 1, "{outcome:?}");
     assert_eq!(outcome.removed_views, 1, "an unrelated view still goes");
-    assert!(!idle.exists());
+    assert!(!has_outputs(&idle));
     assert!(view.join("debug/sleep").exists());
     assert!(is_recorded(&config.target.root, &workspace));
 
@@ -1300,7 +1311,7 @@ fn a_program_running_from_a_view_keeps_it_from_a_budget() {
 
     assert_eq!(outcome.kept_active_views, 0, "{outcome:?}");
     assert_eq!(outcome.removed_live_views, 1);
-    assert!(!view.exists());
+    assert!(!has_outputs(&view));
 }
 
 /// A disk short of `gc.min_free_size` outranks a program run by hand, as it
@@ -1324,7 +1335,7 @@ fn a_short_disk_collects_a_view_a_program_runs_from() {
 
     assert_eq!(outcome.kept_active_views, 0, "{outcome:?}");
     assert_eq!(outcome.removed_live_views, 1);
-    assert!(!view.exists());
+    assert!(!has_outputs(&view));
     assert!(program.0.try_wait().unwrap().is_none(), "still running");
 }
 
@@ -1353,7 +1364,7 @@ fn a_view_with_a_file_a_program_has_open_is_kept() {
     let outcome = collect_to_nothing(&config.target.root, RunningPrograms::Spare);
 
     assert_eq!(outcome.removed_live_views, 1, "{outcome:?}");
-    assert!(!view.exists());
+    assert!(!has_outputs(&view));
 }
 
 /// A view that lost its record, whose contents last changed `days_ago` days
@@ -1445,7 +1456,7 @@ fn an_old_view_without_a_record_is_collected_by_an_age_limit() {
     assert_eq!(outcome.removed_views, 1);
     assert_eq!(outcome.removed_untracked_views, 1);
     assert_eq!(outcome.removed_live_views, 0);
-    assert!(!view.exists());
+    assert!(!has_outputs(&view));
     assert_eq!(stats(&config.target.root).unwrap().untracked, 0);
 }
 
@@ -1464,7 +1475,7 @@ fn a_view_without_a_record_is_collected_by_a_budget() {
     let outcome = collect(&config.target.root, Some(0), None, false).unwrap();
 
     assert_eq!(outcome.removed_untracked_views, 1);
-    assert!(!view.exists());
+    assert!(!has_outputs(&view));
 }
 
 #[test]
@@ -1509,7 +1520,7 @@ fn a_view_without_a_record_under_a_lease_is_kept() {
     drop(held);
     let outcome = collect_aged(&config.target.root, false);
     assert_eq!(outcome.removed_untracked_views, 1);
-    assert!(!view.exists());
+    assert!(!has_outputs(&view));
 }
 
 /// A build placing the checkout while collection holds the reservation can
@@ -1534,6 +1545,8 @@ fn a_record_written_during_the_removal_keeps_the_directory() {
         RunningPrograms::Spare,
         false,
         now_secs(),
+        |_| {},
+        |_| {},
         || {},
         |_| record_view(&config.target.root, &workspace).unwrap(),
         || {},
@@ -1569,6 +1582,8 @@ fn a_view_without_a_record_written_after_selection_is_kept() {
         RunningPrograms::Spare,
         false,
         now_secs(),
+        |_| {},
+        |_| {},
         || {},
         |directory: &Path| std::fs::write(directory.join("late"), b"built").unwrap(),
         || {},
@@ -1606,7 +1621,7 @@ fn an_old_view_without_a_record_holding_a_cargo_lock_file_is_collected() {
     let outcome = collect_aged(&config.target.root, false);
 
     assert_eq!(outcome.removed_untracked_views, 1, "{outcome:?}");
-    assert!(!view.exists());
+    assert!(!has_outputs(&view));
 }
 
 /// The sweep's clock is read before the walk, so a write that lands after it
@@ -1631,6 +1646,8 @@ fn a_write_past_the_sweeps_clock_keeps_a_view_without_a_record() {
         RunningPrograms::Spare,
         false,
         now_secs().saturating_sub(100),
+        |_| {},
+        |_| {},
         || {},
         |directory: &Path| {
             let late = directory.join("late");
@@ -1645,4 +1662,12 @@ fn a_write_past_the_sweeps_clock_keeps_a_view_without_a_record() {
 
     assert_eq!(outcome.removed_views, 0);
     assert!(view.join("late").exists());
+}
+
+// Collection may leave an empty placeholder; old outputs must be gone.
+fn has_outputs(path: &std::path::Path) -> bool {
+    if path.is_file() {
+        return true;
+    }
+    std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some())
 }

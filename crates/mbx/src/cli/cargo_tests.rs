@@ -532,7 +532,7 @@ fn rust_analyzer_target_is_a_child_of_the_managed_view() {
     );
     assert!(managed.starts_with(&config.target.root));
     assert_eq!(placement.touch_path, workspace.join("target"));
-    assert_eq!(crate::target::stats(&config.target.root).unwrap().views, 1);
+    assert_eq!(crate::target::stats(&config.target.root).unwrap().views, 0);
 }
 
 #[test]

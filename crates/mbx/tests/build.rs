@@ -7001,6 +7001,70 @@ mod target_views {
         );
     }
 
+    #[test]
+    fn gc_counts_plain_cargo_writes_into_a_placeholder() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        write_project(project.path());
+        build_with(
+            project.path(),
+            store.path(),
+            &reports.path().join("check.json"),
+            &[("MBX_TARGET_VIEWS", "1")],
+        );
+        let view = managed(project.path());
+        let record = view.with_extension("json");
+        let mut fields: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        fields["updated_secs"] = 1.into();
+        std::fs::write(&record, serde_json::to_vec(&fields).unwrap()).unwrap();
+        age_tree(&view);
+        let output = mbx_command()
+            .arg("gc")
+            .env("MBX_CACHE_DIR", store.path())
+            .env("MBX_TARGET_MAX_AGE", "60s")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(std::fs::read_dir(&view).unwrap().next().is_none());
+        assert!(project.path().join("target").is_dir());
+        // Plain Cargo rebuilds through the unchanged link into the placeholder.
+        let output = isolated_cargo_command(
+            isolated_command(cargo()),
+            project.path(),
+            store.path(),
+            &reports.path().join("plain.json"),
+            &["check", "--offline"],
+            &[],
+        )
+        .output()
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "plain cargo: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        assert_eq!(after["updated_secs"], 1);
+        let output = mbx_command()
+            .arg("gc")
+            .env("MBX_CACHE_DIR", store.path())
+            .env("MBX_TARGET_MAX_AGE", "60s")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "gc: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(view.is_dir());
+        assert_eq!(managed(project.path()), view);
+        assert!(view.join("debug/.cargo-lock").is_file());
+        assert!(tree_bytes(&view.join("debug")) > 0);
+    }
+
     /// What a fixture program prints once it is running, and then waits for
     /// its standard input to close before it exits.
     ///
@@ -7059,6 +7123,8 @@ mod target_views {
             for entry in std::fs::read_dir(&directory).unwrap().flatten() {
                 let path = entry.path();
                 if path.is_dir() {
+                    filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(1, 0))
+                        .unwrap();
                     if depth < 3 {
                         pending.push((path, depth + 1));
                     }
@@ -7175,8 +7241,8 @@ mod target_views {
         backdate_runs(&view);
         let (gc_stdout, gc_stderr) = gc_expired_targets(store);
         assert!(
-            !view.exists(),
-            "gc should remove the expired target directory once the command has exited:\ngc stdout: {gc_stdout}\ngc stderr: {gc_stderr}"
+            std::fs::read_dir(&view).unwrap().next().is_none(),
+            "gc should leave an empty placeholder once the command has exited:\ngc stdout: {gc_stdout}\ngc stderr: {gc_stderr}"
         );
         assert!(
             gc_stdout.contains("removed 1 target directories"),
