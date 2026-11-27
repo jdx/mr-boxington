@@ -402,8 +402,9 @@ fn cargo_with_settings_bypass_log_and_roots(
     if let Some(build_dir) = nested_build_dir {
         require_local_build_dir(build_dir)?;
     }
+    // An alias can supply `--target`, which overrides `CARGO_BUILD_TARGET`.
     let managed_linker =
-        crate::managed_linker::resolve(&config.linker, &config.cache_dir, &config.http, arguments)?;
+        crate::managed_linker::resolve(&config.linker, &config.cache_dir, &config.http, &expanded)?;
     if let Some(bytes) = removed_target_bytes {
         crate::session::note(&format!(
             "mbx[gc]: removed the existing target/ directory ({} logical)",
