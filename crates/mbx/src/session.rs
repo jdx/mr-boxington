@@ -42,10 +42,10 @@ use client::{request_agent_at, request_standalone_agent};
 pub(crate) use diagnostics::{
     note, report_shim_debug, report_shim_error, report_shim_warning, reserve_stderr_for_compiler,
 };
-#[cfg(unix)]
-pub(crate) use server::create_fifo;
 pub(crate) use server::listener_unavailable;
 use server::spawn_server;
+#[cfg(unix)]
+pub(crate) use server::{SOCKET_FILE, create_fifo, socket_bind_unavailable};
 pub(crate) use shims::CC_CRATE_ENV;
 #[cfg(all(test, windows))]
 use shims::link_path_shim;
@@ -162,6 +162,14 @@ fn session_gc_environment(config: &Config, min_free: Option<MinFree>) -> Vec<(St
         (GC_TARGET_ROOT_ENV.into(), absolute(&config.target.root)),
         (GC_EXECUTABLE_ENV.into(), executable),
     ]
+}
+
+/// Create the private temporary directory a build session runs in.
+///
+/// Builds and `mbx doctor` both create their directory here, so the doctor's
+/// transport probe binds a socket path exactly as long as a build's would.
+pub(crate) fn create_session_dir() -> std::io::Result<tempfile::TempDir> {
+    tempfile::Builder::new().prefix("mbx-session-").tempdir()
 }
 
 /// Resolve the session-only low-disk setting without consulting configuration.

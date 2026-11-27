@@ -79,11 +79,31 @@ impl std::error::Error for ListenerBindError {
 #[cfg(unix)]
 impl ListenerBindError {
     fn unavailable(&self) -> bool {
-        matches!(
-            self.source.kind(),
-            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
-        )
+        socket_bind_unavailable(&self.source)
     }
+}
+
+/// File name of the session's Unix-domain listener inside the session
+/// directory.
+#[cfg(unix)]
+pub(crate) const SOCKET_FILE: &str = "cache-agent.sock";
+
+/// Whether a failed `bind` of the session socket means this environment
+/// cannot host the listener, so the session should fall back to FIFOs.
+///
+/// Sandboxes reject the bind outright. A socket path longer than `sun_path`
+/// (about 107 bytes), which a long `TMPDIR` produces, is rejected before the
+/// bind with `InvalidInput`, or `InvalidFilename` where the kernel reports
+/// `ENAMETOOLONG`. FIFOs are ordinary filesystem paths without that limit.
+#[cfg(unix)]
+pub(crate) fn socket_bind_unavailable(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::Unsupported
+            | std::io::ErrorKind::InvalidInput
+            | std::io::ErrorKind::InvalidFilename
+    )
 }
 
 /// Whether session startup failed because this environment cannot bind the
@@ -112,7 +132,7 @@ pub(super) async fn spawn_server(
 ) -> Result<(String, JoinHandle<Result<()>>)> {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let socket = session_dir.join("cache-agent.sock");
+    let socket = session_dir.join(SOCKET_FILE);
     let listener = match tokio::net::UnixListener::bind(&socket) {
         Ok(listener) => listener,
         Err(source) => {
@@ -438,6 +458,43 @@ mod tests {
             });
             assert!(listener_unavailable(&error));
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_session_directory_too_long_for_a_socket_uses_fifos() {
+        let root = tempfile::tempdir().unwrap();
+        let session = root.path().join("x".repeat(120));
+        std::fs::create_dir(&session).unwrap();
+        assert!(
+            std::os::unix::net::UnixListener::bind(session.join(SOCKET_FILE))
+                .is_err_and(|error| socket_bind_unavailable(&error))
+        );
+        let agent = CacheAgent::new(root.path().join("store"), super::super::VERSION);
+        let task = Arc::new(super::super::SessionTask {
+            identity: std::sync::OnceLock::new(),
+            initialized: tokio::sync::OnceCell::new(),
+            connected: std::sync::atomic::AtomicBool::new(false),
+        });
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (endpoint, server) = spawn_server(&session, agent, task, shutdown_rx)
+            .await
+            .unwrap();
+        assert!(endpoint.starts_with(FIFO_ENDPOINT_PREFIX), "{endpoint}");
+        let responses = std::thread::spawn(move || {
+            super::super::client::request_agent_at(
+                &endpoint.into(),
+                &[AgentRequest::RecordUnconsulted],
+            )
+        })
+        .join()
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            responses.as_slice(),
+            [AgentResponse::UnconsultedRecorded]
+        ));
+        shutdown_tx.send(()).unwrap();
+        server.await.unwrap().unwrap();
     }
 
     #[test]
