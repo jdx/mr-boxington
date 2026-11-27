@@ -14,9 +14,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const LINKER_ENV: &str = "MBX_LINKER";
-/// Cargo's environment spelling of `build.target`. Tools such as wasm-pack
-/// choose the target this way rather than with `--target`.
-const BUILD_TARGET_ENV: &str = "CARGO_BUILD_TARGET";
 
 /// The linkers selected for one Cargo invocation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -30,11 +27,16 @@ pub(crate) struct Selection {
 }
 
 /// Resolve and, where necessary, install the linker selected for this build.
+///
+/// `build_targets` are the targets Cargo builds when it is given no
+/// `--target`: `CARGO_BUILD_TARGET` or `build.target` in its configuration.
+/// Tools such as wasm-pack choose their target that way.
 pub(crate) fn resolve(
     settings: &LinkerSettings,
     cache_dir: &Path,
     http: &HttpSettings,
     cargo_arguments: &[String],
+    build_targets: Vec<String>,
 ) -> Result<Option<Selection>> {
     resolve_with_environment(
         settings,
@@ -42,7 +44,7 @@ pub(crate) fn resolve(
         http,
         cargo_arguments,
         std::env::var(LINKER_ENV).ok(),
-        std::env::var(BUILD_TARGET_ENV).ok(),
+        build_targets,
     )
 }
 
@@ -52,7 +54,7 @@ fn resolve_with_environment(
     http: &HttpSettings,
     cargo_arguments: &[String],
     environment: Option<String>,
-    build_target: Option<String>,
+    build_targets: Vec<String>,
 ) -> Result<Option<Selection>> {
     let profile = cargo_profile(cargo_arguments);
     let environment = environment.filter(|value| !value.trim().is_empty());
@@ -87,35 +89,37 @@ fn resolve_with_environment(
         environment.clone(),
         target.as_deref(),
     )? {
-        // Cargo can still pass `--target` to rustc when the target comes from
-        // `build.target` in a config file, which mbx does not read. The shim
-        // keeps the host linker away from such compilations, so route the
-        // host triple's explicit spelling here as well.
+        // The shim keeps the host linker away from compilations that name a
+        // target. Route the host triple's explicit spelling here as well, for
+        // a target mbx could not see, such as one set with `--config`.
         if let Some(host) = target.or_else(|| host_target(cargo_arguments)) {
             selection.targets.insert(host, executable.clone());
         }
         selection.host = Some(executable);
     }
-    // `--target` overrides `CARGO_BUILD_TARGET`, as it does in Cargo. Without
+    // `--target` overrides configured targets, as it does in Cargo. Without
     // it, Cargo still builds build scripts and proc macros for the host, so
-    // they keep the host's linker while the target follows its own policy.
+    // they keep the host's linker while each target follows its own policy.
     // Cargo trims the name, so the policy key must be trimmed as well.
-    if let Some(build_target) = build_target
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
-        let rustc_target = normalize_cargo_target(&build_target, cargo_arguments)?;
-        selection.targets.remove(&rustc_target);
-        selection.targets.extend(resolve_targets(
-            settings,
-            cache_dir,
-            http,
-            cargo_arguments,
-            &profile,
-            &environment,
-            vec![build_target],
-        )?);
+    let build_targets = build_targets
+        .into_iter()
+        .map(|target| target.trim().to_owned())
+        .filter(|target| !target.is_empty())
+        .collect::<Vec<_>>();
+    for target in &build_targets {
+        selection
+            .targets
+            .remove(&normalize_cargo_target(target, cargo_arguments)?);
     }
+    selection.targets.extend(resolve_targets(
+        settings,
+        cache_dir,
+        http,
+        cargo_arguments,
+        &profile,
+        &environment,
+        build_targets,
+    )?);
     Ok((selection != Selection::default()).then_some(selection))
 }
 
@@ -763,7 +767,7 @@ mod tests {
                 &HttpSettings::default(),
                 &arguments,
                 None,
-                None,
+                vec![],
             )
             .unwrap()
             .is_none()
@@ -803,7 +807,7 @@ mod tests {
             &HttpSettings::default(),
             &arguments,
             None,
-            None,
+            vec![],
         )
         .unwrap()
         else {
@@ -835,7 +839,7 @@ mod tests {
             &HttpSettings::default(),
             &wasm_pack,
             None,
-            Some(" wasm32-unknown-unknown ".into()),
+            vec![" wasm32-unknown-unknown ".into()],
         )
         .unwrap()
         .unwrap();
@@ -866,7 +870,7 @@ mod tests {
             &HttpSettings::default(),
             &explicit,
             None,
-            Some("wasm32-unknown-unknown".into()),
+            vec!["wasm32-unknown-unknown".into()],
         )
         .unwrap()
         else {
@@ -892,7 +896,7 @@ mod tests {
             &HttpSettings::default(),
             &["build".into()],
             None,
-            None,
+            vec![],
         )
         .unwrap()
         .unwrap();
@@ -922,7 +926,7 @@ mod tests {
             &HttpSettings::default(),
             &["build".into()],
             None,
-            Some(host.clone()),
+            vec![host.clone()],
         )
         .unwrap()
         .unwrap();
@@ -931,6 +935,39 @@ mod tests {
             Selection {
                 host: Some(executable.clone()),
                 targets: BTreeMap::from([(host, executable)]),
+            }
+        );
+    }
+
+    /// A cross target from `build.target` gets its own policy, which here is
+    /// the default managed linker, as an explicit `--target` would.
+    #[test]
+    fn configured_cross_target_keeps_the_managed_linker() {
+        let cache = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let host = host_target(&[]).unwrap();
+        let settings = LinkerSettings {
+            default: format!("path:{}", executable.display()),
+            ..Default::default()
+        };
+        let selection = resolve_with_environment(
+            &settings,
+            cache.path(),
+            &HttpSettings::default(),
+            &["build".into()],
+            None,
+            vec!["aarch64-unknown-linux-gnu".into()],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            selection,
+            Selection {
+                host: Some(executable.clone()),
+                targets: BTreeMap::from([
+                    (host, executable.clone()),
+                    ("aarch64-unknown-linux-gnu".into(), executable),
+                ]),
             }
         );
     }
@@ -978,7 +1015,7 @@ mod tests {
             &HttpSettings::default(),
             &["build".into(), "--target=host-tuple".into()],
             None,
-            None,
+            vec![],
         )
         .unwrap()
         else {
@@ -1015,7 +1052,7 @@ mod tests {
             &HttpSettings::default(),
             &["build".into(), "--target".into(), relative],
             None,
-            None,
+            vec![],
         )
         .unwrap()
         else {
