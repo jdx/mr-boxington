@@ -99,7 +99,11 @@ fn resolve_with_environment(
     // `--target` overrides `CARGO_BUILD_TARGET`, as it does in Cargo. Without
     // it, Cargo still builds build scripts and proc macros for the host, so
     // they keep the host's linker while the target follows its own policy.
-    if let Some(build_target) = build_target.filter(|value| !value.trim().is_empty()) {
+    // Cargo trims the name, so the policy key must be trimmed as well.
+    if let Some(build_target) = build_target
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
         let rustc_target = normalize_cargo_target(&build_target, cargo_arguments)?;
         selection.targets.remove(&rustc_target);
         selection.targets.extend(resolve_targets(
@@ -793,7 +797,7 @@ mod tests {
             &HttpSettings::default(),
             &wasm_pack,
             None,
-            Some("wasm32-unknown-unknown".into()),
+            Some(" wasm32-unknown-unknown ".into()),
         )
         .unwrap()
         .unwrap();
