@@ -565,21 +565,11 @@ fn cargo_with_settings_bypass_log_and_roots(
         environment.insert(session::MANAGED_LINKER_ENV.into(), String::new());
         environment.insert(session::MANAGED_TARGET_LINKERS_ENV.into(), String::new());
         if let Some(selection) = &managed_linker {
-            match selection {
-                crate::managed_linker::Selection::Host { executable, host } => {
-                    environment.insert(session::MANAGED_LINKER_ENV.into(), executable.to_string_lossy().into_owned());
-                    // A target set by `build.target` reaches rustc as `--target`
-                    // even when it is the host; route that spelling here too.
-                    if let Some(host) = host {
-                        environment.insert(
-                            session::MANAGED_TARGET_LINKERS_ENV.into(),
-                            serde_json::to_string(&BTreeMap::from([(host, executable)]))?,
-                        );
-                    }
-                }
-                crate::managed_linker::Selection::Targets(executables) => {
-                    environment.insert(session::MANAGED_TARGET_LINKERS_ENV.into(), serde_json::to_string(executables)?);
-                }
+            if let Some(executable) = &selection.host {
+                environment.insert(session::MANAGED_LINKER_ENV.into(), executable.to_string_lossy().into_owned());
+            }
+            if !selection.targets.is_empty() {
+                environment.insert(session::MANAGED_TARGET_LINKERS_ENV.into(), serde_json::to_string(&selection.targets)?);
             }
         }
         // Stated explicitly for the same reason as the session's own keys: an
