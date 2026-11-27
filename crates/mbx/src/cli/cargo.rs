@@ -141,13 +141,13 @@ fn cargo_with_settings_bypass_log_and_roots(
                     &cargo,
                     &os_arguments,
                     target_dir_env.as_deref(),
-                ) {
+                )? {
                     super::shim::FailedProbe::Roots(roots) => *roots,
                     super::shim::FailedProbe::Passthrough => {
                         return run_cargo(&cargo, arguments, BTreeMap::new());
                     }
                     super::shim::FailedProbe::Reject(retry_reason) => {
-                        let reason = retry_reason.unwrap_or(reason);
+                        let reason = super::shim::probe_failure_reason(reason, retry_reason);
                         eyre::bail!(
                             "could not verify Cargo build storage: metadata probing failed; run cargo metadata --no-deps --format-version 1 with the same manifest and configuration options to diagnose it: {reason}"
                         )
@@ -1605,11 +1605,15 @@ pub(super) fn cargo_roots_reported(
         return remote_install_roots(arguments, &working_dir, target_dir_env)
             .ok_or_else(|| eyre::eyre!("could not resolve remote install storage"));
     }
-    let (resolved, workspace_members) = mbx_cache_cargo::try_resolve_reported_with_members(
-        cargo,
-        arguments,
-        &working_dir,
-        target_dir_env.map(std::ffi::OsStr::to_os_string),
+    let probe = super::shim::CargoProbe::new()?;
+    let (resolved, workspace_members) = probe.finish(
+        mbx_cache_cargo::try_resolve_reported_with_members(
+            cargo,
+            arguments,
+            &working_dir,
+            target_dir_env.map(std::ffi::OsStr::to_os_string),
+        )
+        .map_err(Into::into),
     )?;
     Ok(Roots {
         workspace_members,

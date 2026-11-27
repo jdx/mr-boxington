@@ -509,6 +509,9 @@ fn main() {
     assert!(std::path::Path::new(&args[4]).exists());
     assert!(std::env::var_os("MBX_SOCKET").is_none());
     assert!(std::env::var_os("RUSTC_WRAPPER").is_none());
+    for key in ["MBX_CARGO_SHIM_DEPTH", "MBX_CARGO_SHIM_CHAIN", "MBX_CARGO_SHIM_NOTE", "MBX_CARGO_SHIM_PROBES"] {
+        assert!(std::env::var_os(key).is_none(), "build guard leaked into application: {key}");
+    }
     let output = Command::new(&args[2]).args(["check", "--offline"])
         .current_dir(&args[3]).env("MBX_LOG", "debug").output().unwrap();
     assert!(output.status.success(), "{:?}", output);
@@ -544,6 +547,97 @@ fn main() {
     }
     assert_eq!(contents, "independent build captured");
     assert!(!String::from_utf8_lossy(&output.stderr).contains("Checking scope-fixture"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_nested_application_daemon_does_not_inherit_the_outer_cargo_guard() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let nested = root.path().join("nested");
+    let other = root.path().join("other");
+    project(root.path(), "fn main() {}\n");
+    project(&other, "fn main() {}\n");
+    project(
+        &nested,
+        r#"
+use std::process::{Command, Stdio};
+fn main() {
+    for key in ["MBX_CARGO_SHIM_DEPTH", "MBX_CARGO_SHIM_CHAIN", "MBX_CARGO_SHIM_NOTE", "MBX_CARGO_SHIM_PROBES"] {
+        assert!(std::env::var_os(key).is_none(), "nested application inherited {key}");
+    }
+    let args: Vec<_> = std::env::args().collect();
+    if args.get(1).map(String::as_str) != Some("daemon") {
+        let log = std::fs::File::create(std::path::Path::new(&args[4]).with_extension("stderr")).unwrap();
+        Command::new(std::env::current_exe().unwrap()).arg("daemon").args(&args[1..])
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn().unwrap();
+        return;
+    }
+    std::fs::write(&args[5], "waiting for outer invocation").unwrap();
+    for _ in 0..1200 {
+        if std::path::Path::new(&args[4]).exists() { break; }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(std::path::Path::new(&args[4]).exists());
+    std::fs::write(&args[5], "running independent build").unwrap();
+    let output = Command::new(&args[2]).args(["check", "--offline"])
+        .current_dir(&args[3]).output().unwrap();
+    if !output.status.success() { std::fs::write(&args[5], format!("{output:?}")).unwrap(); }
+    assert!(output.status.success(), "{output:?}");
+    std::fs::write(&args[5], "nested independent build captured").unwrap();
+}
+"#,
+    );
+    std::fs::write(root.path().join("build.rs"), r#"
+fn main() {
+    let status = std::process::Command::new(std::env::var_os("TEST_SHIM").unwrap())
+        .args(["run", "--offline", "--manifest-path"]).arg(std::env::var_os("NESTED_MANIFEST").unwrap())
+        .arg("--").arg(std::env::var_os("TEST_MBX").unwrap())
+        .arg(std::env::var_os("OTHER_PROJECT").unwrap())
+        .arg(std::env::var_os("DAEMON_GATE").unwrap()).arg(std::env::var_os("DAEMON_RESULT").unwrap())
+        .status().unwrap();
+    assert!(status.success());
+}
+"#).unwrap();
+    let shim = root.path().join("cargo-wrapper");
+    std::fs::write(
+        &shim,
+        "#!/bin/sh\nMBX_CARGO_SHIM_MODE=1 exec \"$TEST_MBX\" \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let gate = root.path().join("outer-exited");
+    let result = root.path().join("result");
+    let output = mbx(root.path())
+        .env("TEST_SHIM", &shim)
+        .env("TEST_MBX", env!("CARGO_BIN_EXE_mbx"))
+        .env("NESTED_MANIFEST", nested.join("Cargo.toml"))
+        .env("OTHER_PROJECT", &other)
+        .env("DAEMON_GATE", &gate)
+        .env("DAEMON_RESULT", &result)
+        .args(["check", "--offline"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::write(&gate, "go").unwrap();
+    let mut contents = String::new();
+    for _ in 0..1200 {
+        contents = std::fs::read_to_string(&result).unwrap_or_default();
+        if contents == "nested independent build captured" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(
+        contents,
+        "nested independent build captured",
+        "daemon stderr: {}",
+        std::fs::read_to_string(result.with_extension("stderr")).unwrap_or_default()
+    );
 }
 
 #[test]

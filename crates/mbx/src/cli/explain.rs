@@ -25,7 +25,6 @@ pub(super) struct ExplainArgs {
 }
 
 impl ExplainArgs {
-    #[cfg(test)]
     pub(super) fn is_last(&self) -> bool {
         self.last
     }
