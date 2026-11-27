@@ -2055,6 +2055,31 @@ fn managed_target_linkers_follow_rustc_target_and_leave_host_alone() {
     }
 }
 
+/// wasm-pack builds through `CARGO_BUILD_TARGET`, so a host linker such as
+/// mold must not reach the WebAssembly compilation (#1011).
+#[test]
+fn host_linker_stays_off_compilations_that_name_a_target() {
+    let link = |extra: &[&str]| {
+        let mut arguments = ["--crate-name", "dlr_wasm", "--crate-type", "cdylib"]
+            .iter()
+            .chain(extra)
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        let before = arguments.len();
+        let host = r#"{"x86_64-unknown-linux-gnu":"/tools/mold"}"#;
+        apply_managed_linkers(&mut arguments, Some(host), Some(OsStr::new("/tools/mold")));
+        arguments[before..]
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    };
+    let mold = ["-Clinker=clang", "-Clink-arg=-fuse-ld=/tools/mold"];
+    assert_eq!(link(&[]), mold);
+    assert_eq!(link(&["--target", "x86_64-unknown-linux-gnu"]), mold);
+    assert!(link(&["--target", "wasm32-unknown-unknown"]).is_empty());
+    assert!(link(&["--target=aarch64-unknown-linux-gnu"]).is_empty());
+}
+
 #[test]
 fn json_target_linkers_match_equivalent_paths() {
     let directory = tempfile::tempdir().unwrap();

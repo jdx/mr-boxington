@@ -14,11 +14,20 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const LINKER_ENV: &str = "MBX_LINKER";
+/// Cargo's environment spelling of `build.target`. Tools such as wasm-pack
+/// choose the target this way rather than with `--target`.
+const BUILD_TARGET_ENV: &str = "CARGO_BUILD_TARGET";
 
 /// A linker selected for one Cargo invocation.
 #[derive(Debug, Clone)]
 pub(crate) enum Selection {
-    Single(PathBuf),
+    /// One linker for compilations that name no `--target`, which Cargo
+    /// builds for the host. `host` is that triple when it is known, so a
+    /// compilation that names it explicitly can use the same linker.
+    Host {
+        executable: PathBuf,
+        host: Option<String>,
+    },
     Targets(BTreeMap<String, PathBuf>),
 }
 
@@ -35,6 +44,7 @@ pub(crate) fn resolve(
         http,
         cargo_arguments,
         std::env::var(LINKER_ENV).ok(),
+        std::env::var(BUILD_TARGET_ENV).ok(),
     )
 }
 
@@ -44,10 +54,17 @@ fn resolve_with_environment(
     http: &HttpSettings,
     cargo_arguments: &[String],
     environment: Option<String>,
+    build_target: Option<String>,
 ) -> Result<Option<Selection>> {
     let profile = cargo_profile(cargo_arguments);
     let environment = environment.filter(|value| !value.trim().is_empty());
-    let targets = cargo_targets(cargo_arguments);
+    let mut targets = cargo_targets(cargo_arguments);
+    // `--target` overrides `CARGO_BUILD_TARGET`, as it does in Cargo.
+    if targets.is_empty()
+        && let Some(build_target) = build_target.filter(|value| !value.trim().is_empty())
+    {
+        targets.push(build_target);
+    }
     if !targets.is_empty() {
         let mut selections = BTreeMap::new();
         for target in targets {
@@ -78,7 +95,7 @@ fn resolve_with_environment(
     } else {
         None
     };
-    Ok(resolve_target(
+    let Some(executable) = resolve_target(
         settings,
         cache_dir,
         http,
@@ -87,7 +104,14 @@ fn resolve_with_environment(
         environment,
         target.as_deref(),
     )?
-    .map(Selection::Single))
+    else {
+        return Ok(None);
+    };
+    // Cargo can still pass `--target` to rustc when the target comes from
+    // `build.target` in a config file, which mbx does not read. The shim
+    // keeps this linker away from such compilations unless they name the host.
+    let host = target.or_else(|| host_target(cargo_arguments));
+    Ok(Some(Selection::Host { executable, host }))
 }
 
 /// Resolve one profile/target selector to an executable; system needs no override.
@@ -661,6 +685,7 @@ mod tests {
                 &HttpSettings::default(),
                 &arguments,
                 None,
+                None,
             )
             .unwrap()
             .is_none()
@@ -697,6 +722,7 @@ mod tests {
             &HttpSettings::default(),
             &arguments,
             None,
+            None,
         )
         .unwrap() else {
             panic!("expected target-specific selection");
@@ -705,6 +731,85 @@ mod tests {
             selections,
             BTreeMap::from([("aarch64-apple-darwin".into(), executable)])
         );
+    }
+
+    /// wasm-pack names its target only through `CARGO_BUILD_TARGET`, so the
+    /// policy for that target must apply rather than the host's (#1011).
+    #[test]
+    fn cargo_build_target_environment_selects_target_policy() {
+        let cache = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let settings = LinkerSettings {
+            default: format!("path:{}", executable.display()),
+            profiles: BTreeMap::from([(
+                "release".into(),
+                BTreeMap::from([("wasm32-unknown-unknown".into(), "system".into())]),
+            )]),
+        };
+        let wasm_pack = ["build", "--lib", "--release"].map(str::to_owned);
+        assert!(
+            resolve_with_environment(
+                &settings,
+                cache.path(),
+                &HttpSettings::default(),
+                &wasm_pack,
+                None,
+                Some("wasm32-unknown-unknown".into()),
+            )
+            .unwrap()
+            .is_none()
+        );
+
+        // An explicit `--target` still wins over the environment.
+        let explicit = [
+            "build",
+            "--release",
+            "--target",
+            "aarch64-unknown-linux-gnu",
+        ]
+        .map(str::to_owned);
+        let Some(Selection::Targets(selections)) = resolve_with_environment(
+            &settings,
+            cache.path(),
+            &HttpSettings::default(),
+            &explicit,
+            None,
+            Some("wasm32-unknown-unknown".into()),
+        )
+        .unwrap() else {
+            panic!("expected target-specific selection");
+        };
+        assert_eq!(
+            selections,
+            BTreeMap::from([("aarch64-unknown-linux-gnu".into(), executable)])
+        );
+    }
+
+    #[test]
+    fn host_selection_reports_the_host_triple() {
+        let cache = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let settings = LinkerSettings {
+            default: format!("path:{}", executable.display()),
+            ..Default::default()
+        };
+        let Some(Selection::Host {
+            executable: selected,
+            host,
+        }) = resolve_with_environment(
+            &settings,
+            cache.path(),
+            &HttpSettings::default(),
+            &["build".into()],
+            None,
+            None,
+        )
+        .unwrap()
+        else {
+            panic!("expected a host selection");
+        };
+        assert_eq!(selected, executable);
+        assert_eq!(host, host_target(&[]));
     }
 
     #[test]
@@ -747,6 +852,7 @@ mod tests {
             &HttpSettings::default(),
             &["build".into(), "--target=host-tuple".into()],
             None,
+            None,
         )
         .unwrap() else {
             panic!("expected target-specific selection");
@@ -778,6 +884,7 @@ mod tests {
             directory.path(),
             &HttpSettings::default(),
             &["build".into(), "--target".into(), relative],
+            None,
             None,
         )
         .unwrap() else {
