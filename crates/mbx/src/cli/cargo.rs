@@ -402,8 +402,19 @@ fn cargo_with_settings_bypass_log_and_roots(
     if let Some(build_dir) = nested_build_dir {
         require_local_build_dir(build_dir)?;
     }
-    let managed_linker =
-        crate::managed_linker::resolve(&config.linker, &config.cache_dir, &config.http, arguments)?;
+    // An alias can supply `--target`, which overrides `CARGO_BUILD_TARGET`.
+    let build_targets = if crate::managed_linker::cargo_targets(&expanded).is_empty() {
+        configured_build_targets(&invocation_dir(&working_dir, &expanded), &expanded)
+    } else {
+        Vec::new()
+    };
+    let managed_linker = crate::managed_linker::resolve(
+        &config.linker,
+        &config.cache_dir,
+        &config.http,
+        &expanded,
+        build_targets,
+    )?;
     if let Some(bytes) = removed_target_bytes {
         crate::session::note(&format!(
             "mbx[gc]: removed the existing target/ directory ({} logical)",
@@ -565,13 +576,11 @@ fn cargo_with_settings_bypass_log_and_roots(
         environment.insert(session::MANAGED_LINKER_ENV.into(), String::new());
         environment.insert(session::MANAGED_TARGET_LINKERS_ENV.into(), String::new());
         if let Some(selection) = &managed_linker {
-            match selection {
-                crate::managed_linker::Selection::Single(executable) => {
-                    environment.insert(session::MANAGED_LINKER_ENV.into(), executable.to_string_lossy().into_owned());
-                }
-                crate::managed_linker::Selection::Targets(executables) => {
-                    environment.insert(session::MANAGED_TARGET_LINKERS_ENV.into(), serde_json::to_string(executables)?);
-                }
+            if let Some(executable) = &selection.host {
+                environment.insert(session::MANAGED_LINKER_ENV.into(), executable.to_string_lossy().into_owned());
+            }
+            if !selection.targets.is_empty() {
+                environment.insert(session::MANAGED_TARGET_LINKERS_ENV.into(), serde_json::to_string(&selection.targets)?);
             }
         }
         // Stated explicitly for the same reason as the session's own keys: an
@@ -1268,6 +1277,31 @@ pub(super) fn compiler_for_cargo(
         return None;
     }
     toolchain_rustc(cargo)
+}
+
+/// The targets Cargo builds when it is given no `--target`:
+/// `CARGO_BUILD_TARGET`, or `build.target` in its configuration files.
+fn configured_build_targets(cwd: &Path, arguments: &[String]) -> Vec<String> {
+    configured_build_targets_with(cwd, arguments, &BTreeMap::new())
+}
+
+pub(super) fn configured_build_targets_with(
+    cwd: &Path,
+    arguments: &[String],
+    environment: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let configured = super::launch::load_invocation_config(cwd, arguments, environment)
+        .and_then(|config| Ok(config.build_target_for_cli(Vec::<String>::new())?));
+    match configured {
+        Ok(targets) => targets,
+        Err(error) => {
+            log::debug!("could not read Cargo's build.target: {error:#}");
+            std::env::var("CARGO_BUILD_TARGET")
+                .ok()
+                .into_iter()
+                .collect()
+        }
+    }
 }
 
 /// [`compiler_for_cargo`] for this invocation, which also leaves the choice to

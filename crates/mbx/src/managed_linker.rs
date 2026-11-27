@@ -15,19 +15,28 @@ use std::process::Command;
 
 const LINKER_ENV: &str = "MBX_LINKER";
 
-/// A linker selected for one Cargo invocation.
-#[derive(Debug, Clone)]
-pub(crate) enum Selection {
-    Single(PathBuf),
-    Targets(BTreeMap<String, PathBuf>),
+/// The linkers selected for one Cargo invocation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Selection {
+    /// For compilations that name no `--target`, which Cargo builds for the
+    /// host: build scripts, proc macros, and a build with no target at all.
+    pub(crate) host: Option<PathBuf>,
+    /// For compilations that name a target, keyed by the `--target` rustc
+    /// receives.
+    pub(crate) targets: BTreeMap<String, PathBuf>,
 }
 
 /// Resolve and, where necessary, install the linker selected for this build.
+///
+/// `build_targets` are the targets Cargo builds when it is given no
+/// `--target`: `CARGO_BUILD_TARGET` or `build.target` in its configuration.
+/// Tools such as wasm-pack choose their target that way.
 pub(crate) fn resolve(
     settings: &LinkerSettings,
     cache_dir: &Path,
     http: &HttpSettings,
     cargo_arguments: &[String],
+    build_targets: Vec<String>,
 ) -> Result<Option<Selection>> {
     resolve_with_environment(
         settings,
@@ -35,6 +44,7 @@ pub(crate) fn resolve(
         http,
         cargo_arguments,
         std::env::var(LINKER_ENV).ok(),
+        build_targets,
     )
 }
 
@@ -44,50 +54,108 @@ fn resolve_with_environment(
     http: &HttpSettings,
     cargo_arguments: &[String],
     environment: Option<String>,
+    build_targets: Vec<String>,
 ) -> Result<Option<Selection>> {
     let profile = cargo_profile(cargo_arguments);
     let environment = environment.filter(|value| !value.trim().is_empty());
     let targets = cargo_targets(cargo_arguments);
     if !targets.is_empty() {
-        let mut selections = BTreeMap::new();
-        for target in targets {
-            let rustc_target = normalize_cargo_target(&target, cargo_arguments)?;
-            // Keep path-keyed policy compatible with the Cargo argument. Only
-            // the host directive needs its concrete triple for policy lookup.
-            let policy_target = if target == "host-tuple" {
-                &rustc_target
-            } else {
-                &target
-            };
-            if let Some(executable) = resolve_target(
-                settings,
-                cache_dir,
-                http,
-                cargo_arguments,
-                &profile,
-                environment.clone(),
-                Some(policy_target),
-            )? {
-                selections.insert(rustc_target, executable);
-            }
-        }
-        return Ok((!selections.is_empty()).then_some(Selection::Targets(selections)));
+        let targets = resolve_targets(
+            settings,
+            cache_dir,
+            http,
+            cargo_arguments,
+            &profile,
+            &environment,
+            targets,
+        )?;
+        return Ok((!targets.is_empty()).then_some(Selection {
+            host: None,
+            targets,
+        }));
     }
     let target = if environment.is_none() && settings.selections(&profile).is_some() {
         host_target(cargo_arguments)
     } else {
         None
     };
-    Ok(resolve_target(
+    let mut selection = Selection::default();
+    if let Some(executable) = resolve_target(
         settings,
         cache_dir,
         http,
         cargo_arguments,
         &profile,
-        environment,
+        environment.clone(),
         target.as_deref(),
-    )?
-    .map(Selection::Single))
+    )? {
+        // The shim keeps the host linker away from compilations that name a
+        // target. Route the host triple's explicit spelling here as well, for
+        // a target mbx could not see, such as one set with `--config`.
+        if let Some(host) = target.or_else(|| host_target(cargo_arguments)) {
+            selection.targets.insert(host, executable.clone());
+        }
+        selection.host = Some(executable);
+    }
+    // `--target` overrides configured targets, as it does in Cargo. Without
+    // it, Cargo still builds build scripts and proc macros for the host, so
+    // they keep the host's linker while each target follows its own policy.
+    // Cargo trims the name, so the policy key must be trimmed as well.
+    let build_targets = build_targets
+        .into_iter()
+        .map(|target| target.trim().to_owned())
+        .filter(|target| !target.is_empty())
+        .collect::<Vec<_>>();
+    for target in &build_targets {
+        selection
+            .targets
+            .remove(&normalize_cargo_target(target, cargo_arguments)?);
+    }
+    selection.targets.extend(resolve_targets(
+        settings,
+        cache_dir,
+        http,
+        cargo_arguments,
+        &profile,
+        &environment,
+        build_targets,
+    )?);
+    Ok((selection != Selection::default()).then_some(selection))
+}
+
+/// Resolve each Cargo target's policy, keyed by the `--target` rustc receives.
+fn resolve_targets(
+    settings: &LinkerSettings,
+    cache_dir: &Path,
+    http: &HttpSettings,
+    cargo_arguments: &[String],
+    profile: &str,
+    environment: &Option<String>,
+    targets: Vec<String>,
+) -> Result<BTreeMap<String, PathBuf>> {
+    let mut selections = BTreeMap::new();
+    for target in targets {
+        let rustc_target = normalize_cargo_target(&target, cargo_arguments)?;
+        // Keep path-keyed policy compatible with the Cargo argument. Only
+        // the host directive needs its concrete triple for policy lookup.
+        let policy_target = if target == "host-tuple" {
+            &rustc_target
+        } else {
+            &target
+        };
+        if let Some(executable) = resolve_target(
+            settings,
+            cache_dir,
+            http,
+            cargo_arguments,
+            profile,
+            environment.clone(),
+            Some(policy_target),
+        )? {
+            selections.insert(rustc_target, executable);
+        }
+    }
+    Ok(selections)
 }
 
 /// Resolve one profile/target selector to an executable; system needs no override.
@@ -392,6 +460,18 @@ fn extract_executable(archive: &Path, destination: &Path, suffix: &str) -> Resul
     bail!("release archive did not contain an executable ending in `{suffix}`")
 }
 
+/// The name to give the rust-lld shim. LLD picks its driver from the name it
+/// was run as, so a WebAssembly link fed to the ELF driver fails.
+fn lld_flavor(target: &str) -> &'static str {
+    if target.contains("apple") {
+        "ld64.lld"
+    } else if target.starts_with("wasm") {
+        "wasm-ld"
+    } else {
+        "ld.lld"
+    }
+}
+
 fn rust_lld(target: Option<&str>, cache_dir: &Path, cargo_arguments: &[String]) -> Result<PathBuf> {
     if cfg!(windows) {
         bail!("managed rust-lld selection on Windows is not supported yet");
@@ -417,12 +497,7 @@ fn rust_lld(target: Option<&str>, cache_dir: &Path, cargo_arguments: &[String]) 
             path.display()
         );
     }
-    let link_target = target.unwrap_or(&host);
-    let flavor = if link_target.contains("apple") {
-        "ld64.lld"
-    } else {
-        "ld.lld"
-    };
+    let flavor = lld_flavor(target.unwrap_or(&host));
     let sysroot_key = hex::encode(Sha256::digest(sysroot.trim().as_bytes()));
     let shim_dir = cache_dir
         .join("tools/rust-lld")
@@ -454,15 +529,25 @@ pub(crate) fn cargo_profile(arguments: &[String]) -> String {
     let mut profile = None;
     let mut debug = false;
     while let Some(argument) = arguments.next() {
+        // cargo-nextest's `--profile` names its own test profile; it passes
+        // Cargo's build profile as `--cargo-profile` instead.
+        let nextest = subcommand == Some("nextest");
+        let (profile_flag, profile_prefix) = if nextest {
+            ("--cargo-profile", "--cargo-profile=")
+        } else {
+            ("--profile", "--profile=")
+        };
         if argument == "--release" {
             profile = Some("release".to_owned());
         } else if argument == "--debug" {
             debug = true;
-        } else if argument == "--profile" {
+        } else if argument == profile_flag {
             profile = arguments.next().cloned();
-        } else if let Some(value) = argument.strip_prefix("--profile=") {
+        } else if let Some(value) = argument.strip_prefix(profile_prefix) {
             profile = Some(value.to_owned());
-        } else if matches!(argument.as_str(), "--config" | "--color" | "-Z") {
+        } else if matches!(argument.as_str(), "--config" | "--color" | "-Z")
+            || (nextest && matches!(argument.as_str(), "--profile" | "-P"))
+        {
             let _ = arguments.next();
         } else if !argument.starts_with('-') && !argument.starts_with('+') && subcommand.is_none() {
             subcommand = Some(argument.as_str());
@@ -602,6 +687,34 @@ mod tests {
             cargo_profile(&["run".into(), "--".into(), "--debug".into()]),
             "dev"
         );
+        // nextest's `--profile` is its own; `--cargo-profile` is Cargo's.
+        assert_eq!(
+            cargo_profile(&[
+                "nextest".into(),
+                "run".into(),
+                "--profile".into(),
+                "ci".into()
+            ]),
+            "dev"
+        );
+        assert_eq!(
+            cargo_profile(&["nextest".into(), "run".into(), "-P".into(), "ci".into()]),
+            "dev"
+        );
+        assert_eq!(
+            cargo_profile(&[
+                "nextest".into(),
+                "run".into(),
+                "--profile=ci".into(),
+                "--cargo-profile".into(),
+                "fast".into()
+            ]),
+            "fast"
+        );
+        assert_eq!(
+            cargo_profile(&["nextest".into(), "run".into(), "--release".into()]),
+            "release"
+        );
     }
 
     #[test]
@@ -661,6 +774,7 @@ mod tests {
                 &HttpSettings::default(),
                 &arguments,
                 None,
+                vec![],
             )
             .unwrap()
             .is_none()
@@ -691,19 +805,177 @@ mod tests {
             "--target=x86_64-apple-darwin",
         ]
         .map(str::to_owned);
-        let Some(Selection::Targets(selections)) = resolve_with_environment(
+        let Some(Selection {
+            targets: selections,
+            ..
+        }) = resolve_with_environment(
             &settings,
             cache.path(),
             &HttpSettings::default(),
             &arguments,
             None,
+            vec![],
         )
-        .unwrap() else {
+        .unwrap()
+        else {
             panic!("expected target-specific selection");
         };
         assert_eq!(
             selections,
             BTreeMap::from([("aarch64-apple-darwin".into(), executable)])
+        );
+    }
+
+    /// wasm-pack names its target only through `CARGO_BUILD_TARGET`, so the
+    /// policy for that target must apply rather than the host's (#1011).
+    #[test]
+    fn cargo_build_target_environment_selects_target_policy() {
+        let cache = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let settings = LinkerSettings {
+            default: format!("path:{}", executable.display()),
+            profiles: BTreeMap::from([(
+                "release".into(),
+                BTreeMap::from([("wasm32-unknown-unknown".into(), "system".into())]),
+            )]),
+        };
+        let wasm_pack = ["build", "--lib", "--release"].map(str::to_owned);
+        let selection = resolve_with_environment(
+            &settings,
+            cache.path(),
+            &HttpSettings::default(),
+            &wasm_pack,
+            None,
+            vec![" wasm32-unknown-unknown ".into()],
+        )
+        .unwrap()
+        .unwrap();
+        // Build scripts and proc macros still link for the host with its
+        // linker, but nothing routes the WebAssembly target to it.
+        assert_eq!(
+            selection,
+            Selection {
+                host: Some(executable.clone()),
+                targets: BTreeMap::from([(host_target(&[]).unwrap(), executable.clone())]),
+            }
+        );
+
+        // An explicit `--target` still wins over the environment.
+        let explicit = [
+            "build",
+            "--release",
+            "--target",
+            "aarch64-unknown-linux-gnu",
+        ]
+        .map(str::to_owned);
+        let Some(Selection {
+            targets: selections,
+            ..
+        }) = resolve_with_environment(
+            &settings,
+            cache.path(),
+            &HttpSettings::default(),
+            &explicit,
+            None,
+            vec!["wasm32-unknown-unknown".into()],
+        )
+        .unwrap()
+        else {
+            panic!("expected target-specific selection");
+        };
+        assert_eq!(
+            selections,
+            BTreeMap::from([("aarch64-unknown-linux-gnu".into(), executable)])
+        );
+    }
+
+    #[test]
+    fn host_selection_reports_the_host_triple() {
+        let cache = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let settings = LinkerSettings {
+            default: format!("path:{}", executable.display()),
+            ..Default::default()
+        };
+        let selection = resolve_with_environment(
+            &settings,
+            cache.path(),
+            &HttpSettings::default(),
+            &["build".into()],
+            None,
+            vec![],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            selection,
+            Selection {
+                host: Some(executable.clone()),
+                targets: BTreeMap::from([(host_target(&[]).unwrap(), executable)]),
+            }
+        );
+    }
+
+    /// `CARGO_BUILD_TARGET` naming the host keeps the host's linker for both
+    /// the target units and the build scripts.
+    #[test]
+    fn cargo_build_target_naming_the_host_keeps_build_scripts_linker() {
+        let cache = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let host = host_target(&[]).unwrap();
+        let settings = LinkerSettings {
+            default: format!("path:{}", executable.display()),
+            ..Default::default()
+        };
+        let selection = resolve_with_environment(
+            &settings,
+            cache.path(),
+            &HttpSettings::default(),
+            &["build".into()],
+            None,
+            vec![host.clone()],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            selection,
+            Selection {
+                host: Some(executable.clone()),
+                targets: BTreeMap::from([(host, executable)]),
+            }
+        );
+    }
+
+    /// A cross target from `build.target` gets its own policy, which here is
+    /// the default managed linker, as an explicit `--target` would.
+    #[test]
+    fn configured_cross_target_keeps_the_managed_linker() {
+        let cache = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let host = host_target(&[]).unwrap();
+        let settings = LinkerSettings {
+            default: format!("path:{}", executable.display()),
+            ..Default::default()
+        };
+        let selection = resolve_with_environment(
+            &settings,
+            cache.path(),
+            &HttpSettings::default(),
+            &["build".into()],
+            None,
+            vec!["aarch64-unknown-linux-gnu".into()],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            selection,
+            Selection {
+                host: Some(executable.clone()),
+                targets: BTreeMap::from([
+                    (host, executable.clone()),
+                    ("aarch64-unknown-linux-gnu".into(), executable),
+                ]),
+            }
         );
     }
 
@@ -741,14 +1013,19 @@ mod tests {
             )]),
             ..Default::default()
         };
-        let Some(Selection::Targets(selections)) = resolve_with_environment(
+        let Some(Selection {
+            targets: selections,
+            ..
+        }) = resolve_with_environment(
             &settings,
             cache.path(),
             &HttpSettings::default(),
             &["build".into(), "--target=host-tuple".into()],
             None,
+            vec![],
         )
-        .unwrap() else {
+        .unwrap()
+        else {
             panic!("expected target-specific selection");
         };
         assert_eq!(selections, BTreeMap::from([(host, executable)]));
@@ -773,14 +1050,19 @@ mod tests {
             )]),
             ..Default::default()
         };
-        let Some(Selection::Targets(selections)) = resolve_with_environment(
+        let Some(Selection {
+            targets: selections,
+            ..
+        }) = resolve_with_environment(
             &settings,
             directory.path(),
             &HttpSettings::default(),
             &["build".into(), "--target".into(), relative],
             None,
+            vec![],
         )
-        .unwrap() else {
+        .unwrap()
+        else {
             panic!("expected target-specific selection");
         };
         assert_eq!(
@@ -794,6 +1076,14 @@ mod tests {
                 executable
             )])
         );
+    }
+
+    #[test]
+    fn rust_lld_shim_names_the_driver_for_the_target() {
+        assert_eq!(lld_flavor("aarch64-apple-darwin"), "ld64.lld");
+        assert_eq!(lld_flavor("wasm32-unknown-unknown"), "wasm-ld");
+        assert_eq!(lld_flavor("wasm32-wasip1"), "wasm-ld");
+        assert_eq!(lld_flavor("x86_64-unknown-linux-gnu"), "ld.lld");
     }
 
     #[cfg(unix)]

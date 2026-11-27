@@ -1262,3 +1262,51 @@ fn cargo_fix_gets_the_shim_as_its_workspace_wrapper_too() {
     run(&["fix"], &mut environment);
     assert!(!environment.contains_key("RUSTC_WORKSPACE_WRAPPER"));
 }
+
+#[test]
+fn configured_build_targets_follow_cargo_install_configuration() {
+    // `CARGO_BUILD_TARGET` outranks `build.target`, so check in a child
+    // that does not inherit one.
+    const CHILD: &str = "MBX_TEST_CONFIGURED_BUILD_TARGET_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cli::cargo_tests::configured_build_targets_follow_cargo_install_configuration",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env_remove("CARGO_BUILD_TARGET")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        return;
+    }
+    let checkout = tempfile::tempdir().unwrap();
+    let cargo_home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(checkout.path().join(".cargo")).unwrap();
+    std::fs::write(
+        checkout.path().join(".cargo/config.toml"),
+        "[build]\ntarget = \"wasm32-unknown-unknown\"\n",
+    )
+    .unwrap();
+    let environment = std::collections::BTreeMap::from([(
+        "CARGO_HOME".to_owned(),
+        cargo_home.path().display().to_string(),
+    )]);
+    let targets = |arguments: &[&str]| {
+        let arguments = arguments
+            .iter()
+            .map(|&argument| argument.to_owned())
+            .collect::<Vec<_>>();
+        cargo::configured_build_targets_with(checkout.path(), &arguments, &environment)
+    };
+
+    assert_eq!(targets(&["build"]), ["wasm32-unknown-unknown"]);
+    assert_eq!(
+        targets(&["install", "--path", "."]),
+        ["wasm32-unknown-unknown"]
+    );
+    // A registry install reads only `CARGO_HOME`, not the caller's checkout.
+    assert!(targets(&["install", "ripgrep"]).is_empty());
+}

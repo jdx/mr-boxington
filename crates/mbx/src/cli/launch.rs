@@ -200,6 +200,24 @@ pub(super) fn load_cargo_config() -> Result<cargo_config2::Config> {
     Ok(without_empty_wrappers(cargo_config2::Config::load()?))
 }
 
+/// Load the configuration Cargo reads for this invocation: from the directory
+/// it runs in, or from where `cargo install` starts discovery.
+pub(super) fn load_invocation_config(
+    cwd: &Path,
+    arguments: &[String],
+    environment: &BTreeMap<String, String>,
+) -> Result<cargo_config2::Config> {
+    let environment = effective_environment(environment);
+    let cargo_home = cargo_home(cwd, &environment);
+    let root = config_root(cwd, arguments, cargo_home.as_deref());
+    let options = cargo_config2::ResolveOptions::default()
+        .env(environment)
+        .cargo_home(cargo_home);
+    Ok(without_empty_wrappers(
+        cargo_config2::Config::load_with_options(&root, options)?,
+    ))
+}
+
 #[derive(Default)]
 pub(super) struct ConfiguredWrappers {
     pub rustc: Option<String>,

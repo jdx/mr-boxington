@@ -1851,15 +1851,11 @@ pub fn run_rustc_shim() -> ExitCode {
     } else {
         rustc
     };
-    if let Ok(selections) = std::env::var(MANAGED_TARGET_LINKERS_ENV)
-        && let Ok(selections) = serde_json::from_str::<BTreeMap<String, PathBuf>>(&selections)
-        && let Some(linker) = target_linker(&arguments, &selections)
-    {
-        use_managed_linker(&mut arguments, linker.as_os_str());
-    }
-    if let Some(linker) = std::env::var_os(MANAGED_LINKER_ENV).filter(|path| !path.is_empty()) {
-        use_managed_linker(&mut arguments, &linker);
-    }
+    apply_managed_linkers(
+        &mut arguments,
+        std::env::var(MANAGED_TARGET_LINKERS_ENV).ok().as_deref(),
+        std::env::var_os(MANAGED_LINKER_ENV).as_deref(),
+    );
     let is_workspace_wrapper =
         workspace_wrapper_matches(&rustc) || is_nested_rustc_workspace_wrapper(&rustc, &arguments);
     let (wrapper_argument, compiler_arguments) = workspace_wrapper_arguments(&rustc, &arguments);
@@ -1910,32 +1906,62 @@ pub fn run_rustc_shim() -> ExitCode {
 }
 
 /// Explicit Cargo targets must not affect host build scripts or proc macros.
+/// Add the linker `mbx cargo` selected to one rustc invocation.
+///
+/// `target_linkers` routes by the `--target` rustc names. `host_linker` was
+/// resolved for the host, so it applies only to compilations that name no
+/// target: one Cargo builds for `build.target` or `CARGO_BUILD_TARGET`, such
+/// as wasm-pack's WebAssembly build, must not inherit it.
+fn apply_managed_linkers(
+    arguments: &mut Vec<OsString>,
+    target_linkers: Option<&str>,
+    host_linker: Option<&OsStr>,
+) {
+    if let Some(selections) = target_linkers
+        && let Ok(selections) = serde_json::from_str::<BTreeMap<String, PathBuf>>(selections)
+        && let Some(linker) = target_linker(arguments, &selections)
+    {
+        use_managed_linker(arguments, linker.as_os_str());
+        return;
+    }
+    if let Some(linker) = host_linker.filter(|path| !path.is_empty())
+        && rustc_target(arguments).is_none()
+    {
+        use_managed_linker(arguments, linker);
+    }
+}
+
+/// The target a rustc invocation names, if any.
+fn rustc_target(arguments: &[OsString]) -> Option<&str> {
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        if argument == "--target" {
+            return arguments.next().and_then(|value| value.to_str());
+        }
+        if let Some(target) = argument
+            .to_str()
+            .and_then(|value| value.strip_prefix("--target="))
+        {
+            return Some(target);
+        }
+    }
+    None
+}
+
 fn target_linker<'a>(
     arguments: &[OsString],
     selections: &'a BTreeMap<String, PathBuf>,
 ) -> Option<&'a PathBuf> {
-    let mut arguments = arguments.iter();
-    while let Some(argument) = arguments.next() {
-        let target = if argument == "--target" {
-            arguments.next().and_then(|value| value.to_str())
-        } else {
-            argument
-                .to_str()
-                .and_then(|value| value.strip_prefix("--target="))
-        };
-        if let Some(target) = target {
-            return selections.get(target).or_else(|| {
-                // Cargo versions can pass JSON paths without Windows' verbatim
-                // prefix. Canonicalize both spellings to the stored routing key.
-                if !target.ends_with(".json") {
-                    return None;
-                }
-                let canonical = std::fs::canonicalize(target).ok()?;
-                selections.get(canonical.to_str()?)
-            });
+    let target = rustc_target(arguments)?;
+    selections.get(target).or_else(|| {
+        // Cargo versions can pass JSON paths without Windows' verbatim
+        // prefix. Canonicalize both spellings to the stored routing key.
+        if !target.ends_with(".json") {
+            return None;
         }
-    }
-    None
+        let canonical = std::fs::canonicalize(target).ok()?;
+        selections.get(canonical.to_str()?)
+    })
 }
 
 /// Route native links through the selected executable while leaving metadata
