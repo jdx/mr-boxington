@@ -73,6 +73,7 @@ const INFLIGHT_DIR: &str = "inflight";
 const POOL_LOCK: &str = "pool.lock";
 /// Stamp a waiting normal-priority build touches so low-priority builds yield.
 const PRIORITY_WAIT_STAMP: &str = "priority-wait";
+const PRIORITY_DOMAINS_DIR: &str = "priority-domains";
 /// Ledger of peak compiler RSS by crate name.
 const LEDGER_FILE: &str = "memory.json";
 /// Lock serializing ledger updates.
@@ -106,6 +107,8 @@ pub(crate) const SCHED_SLOTS_ENV: &str = "MBX_SCHED_SLOTS";
 const SCHED_CPUS_ENV: &str = "MBX_SCHED_CPUS";
 /// Exact memory budget, independent of legacy permit rounding.
 const SCHED_MEMORY_BYTES_ENV: &str = "MBX_SCHED_MEMORY_BYTES";
+/// `1` when the memory budget is the machine default rather than configured.
+const SCHED_MEMORY_DEFAULT_ENV: &str = "MBX_SCHED_MEMORY_DEFAULT";
 /// Legacy memory share; zero disables memory predictions.
 pub(crate) const SCHED_SLOT_BYTES_ENV: &str = "MBX_SCHED_SLOT_BYTES";
 /// Permit priority of this build's compilations.
@@ -1687,8 +1690,12 @@ pub(crate) fn reservation_pool(config: &Config, priority: SchedulerPriority) -> 
             bytes_per_permit(scheduler.memory_bytes, permits),
             priority,
         );
-        pool.domain_capacity = scheduler.cpus.min(default_capacity()).max(1);
-        pool.set_memory_capacity(scheduler.memory_bytes.unwrap_or(0));
+        pool.set_local_budget(
+            scheduler.memory_bytes.unwrap_or(0),
+            scheduler.memory_is_default,
+            local_cpus(scheduler.reserve_cpus),
+            crate::util::memory_total_bytes(),
+        );
         pool.events = config.events;
         pool.pressure = scheduler.pressure;
         // A reserved command runs where it is started; supervision moves
@@ -1711,14 +1718,16 @@ fn resolve_pool() -> Option<Pool> {
                     .and_then(|value| value.parse().ok())
                     .unwrap_or_default(),
             );
-            pool.domain_capacity = env_number(SCHED_CPUS_ENV)
-                .unwrap_or(capacity)
-                .min(default_capacity())
-                .max(1);
             pool.events = env_number(SCHED_EVENTS_ENV) != Some(0);
-            pool.set_memory_capacity(
+            // The session exports the CPU count before and after the reserve.
+            let reserve =
+                env_number(SCHED_CPUS_ENV).map_or(0, |cpus| cpus.saturating_sub(capacity));
+            pool.set_local_budget(
                 env_number(SCHED_MEMORY_BYTES_ENV)
                     .unwrap_or_else(|| capacity.saturating_mul(pool.bytes_per_permit)),
+                env_number(SCHED_MEMORY_DEFAULT_ENV) == Some(1),
+                local_cpus(reserve),
+                crate::util::memory_total_bytes(),
             );
             pool.pressure = env_number(SCHED_PRESSURE_ENV) == Some(1);
             pool.export_permit_marker = true;
@@ -1751,6 +1760,14 @@ fn default_capacity() -> u64 {
     std::thread::available_parallelism().map_or(1, |cpus| cpus.get() as u64)
 }
 
+/// The CPUs this process's own builds may use: its CPU limit, less the
+/// reserve. The reserve also comes off the shared pool, so a bare host or a
+/// single container keeps the budget it had before the pool was sized from
+/// the machine.
+fn local_cpus(reserve: u64) -> u64 {
+    default_capacity().saturating_sub(reserve).max(1)
+}
+
 /// The environment a session hands its shims so they schedule consistently.
 ///
 /// An explicit empty directory means "off", stated rather than omitted for the
@@ -1766,7 +1783,8 @@ pub(crate) fn session_environment_with_jobs(
         return vec![(SCHED_DIR_ENV.into(), String::new())];
     }
     let permits = scheduler.permits();
-    let build_permits = cargo_jobs.map_or(permits, |jobs| permits.min(jobs.max(1)));
+    let local_permits = permits.min(local_cpus(scheduler.reserve_cpus));
+    let build_permits = cargo_jobs.map_or(local_permits, |jobs| local_permits.min(jobs.max(1)));
     vec![
         (
             SCHED_DIR_ENV.into(),
@@ -1784,12 +1802,24 @@ pub(crate) fn session_environment_with_jobs(
             scheduler.memory_bytes.unwrap_or(0).to_string(),
         ),
         (
+            SCHED_MEMORY_DEFAULT_ENV.into(),
+            u8::from(scheduler.memory_is_default).to_string(),
+        ),
+        (
             SCHED_PRESSURE_ENV.into(),
             u8::from(scheduler.pressure).to_string(),
         ),
         (
             SCHED_SLOT_BYTES_ENV.into(),
-            bytes_per_permit(scheduler.memory_bytes, permits).to_string(),
+            bytes_per_permit(
+                Some(domain_memory_ceiling(
+                    scheduler.memory_bytes.unwrap_or(0),
+                    scheduler.memory_is_default,
+                    crate::util::memory_total_bytes(),
+                )),
+                local_permits,
+            )
+            .to_string(),
         ),
         (
             SCHED_PRIORITY_ENV.into(),
@@ -1920,6 +1950,17 @@ fn legacy_local_ceiling(
     capacity.min(cpus).min(memory).max(1)
 }
 
+/// The memory ceiling for builds in this process's domain. The machine default
+/// describes the whole host, so it always leaves a cgroup 15% of its limit,
+/// as the default did when it was measured inside the container.
+fn domain_memory_ceiling(budget: u64, is_default: bool, local: Option<u64>) -> u64 {
+    if is_default {
+        local.map_or(budget, |bytes| budget.min(bytes / 100 * 85))
+    } else {
+        local_memory_ceiling(budget, local)
+    }
+}
+
 /// Pure local ceilings, independently applied to each physical axis.
 fn local_ceiling(cpu: u64, memory: u64, local_cpus: u64, local_memory: Option<u64>) -> Resources {
     Resources {
@@ -1929,24 +1970,51 @@ fn local_ceiling(cpu: u64, memory: u64, local_cpus: u64, local_memory: Option<u6
 }
 
 impl Pool {
-    fn set_memory_capacity(&mut self, memory: u64) {
+    // `memory` and `self.capacity` are the shared pool's budgets. The domain
+    // gets the process's own CPUs (already less the reserve) and memory limit.
+    fn set_local_budget(
+        &mut self,
+        memory: u64,
+        memory_is_default: bool,
+        local_cpus: u64,
+        local_memory: Option<u64>,
+    ) {
         self.memory_capacity = memory;
-        self.domain_memory_capacity =
-            local_memory_ceiling(memory, crate::util::memory_total_bytes());
+        let domain = Resources {
+            cpu: local_ceiling(self.capacity, memory, local_cpus, local_memory).cpu,
+            memory_bytes: domain_memory_ceiling(memory, memory_is_default, local_memory),
+        };
+        self.domain_capacity = domain.cpu;
+        self.domain_memory_capacity = domain.memory_bytes;
+        self.bytes_per_permit = bytes_per_permit(Some(domain.memory_bytes), domain.cpu);
+        self.legacy_domain_capacity =
+            legacy_local_ceiling(domain.cpu, self.bytes_per_permit, local_cpus, local_memory);
     }
 
     fn effective_budget(&self) -> Resources {
-        let yielding = self.priority == SchedulerPriority::Low && self.priority_wait_is_fresh();
-        let memory_headroom = if yielding && self.memory_capacity > 0 {
-            (self.memory_capacity / 4)
-                .max(1)
-                .min(self.memory_capacity - 1)
-        } else {
-            0
+        self.priority_budget(
+            Resources {
+                cpu: self.capacity,
+                memory_bytes: self.memory_capacity,
+            },
+            self.priority == SchedulerPriority::Low && self.priority_wait_is_fresh(),
+        )
+    }
+
+    fn priority_budget(&self, budget: Resources, waiting: bool) -> Resources {
+        if self.priority != SchedulerPriority::Low || !waiting {
+            return budget;
+        }
+        let remaining = |capacity: u64| {
+            if capacity == 0 {
+                0
+            } else {
+                capacity - (capacity / 4).max(1).min(capacity - 1)
+            }
         };
         Resources {
-            cpu: self.capacity - self.reserved(),
-            memory_bytes: self.memory_capacity - memory_headroom,
+            cpu: remaining(budget.cpu),
+            memory_bytes: remaining(budget.memory_bytes),
         }
     }
 
@@ -2046,8 +2114,12 @@ impl Pool {
                 bytes_per_permit(scheduler.memory_bytes, permits),
                 scheduler.priority,
             );
-            pool.domain_capacity = scheduler.cpus.min(default_capacity()).max(1);
-            pool.set_memory_capacity(scheduler.memory_bytes.unwrap_or(0));
+            pool.set_local_budget(
+                scheduler.memory_bytes.unwrap_or(0),
+                scheduler.memory_is_default,
+                local_cpus(scheduler.reserve_cpus),
+                crate::util::memory_total_bytes(),
+            );
             pool.events = config.events;
             pool.pressure = scheduler.pressure;
             pool
@@ -2123,7 +2195,7 @@ impl Pool {
             if self.priority == SchedulerPriority::Normal
                 && stamped.is_none_or(|last| last.elapsed() >= PRIORITY_STAMP_INTERVAL)
             {
-                let _ = std::fs::write(self.dir.join(PRIORITY_WAIT_STAMP), b"");
+                self.mark_priority_wait();
                 stamped = Some(Instant::now());
             }
             // A pool that is genuinely full is a pool doing its job, so this
@@ -2178,8 +2250,8 @@ impl Pool {
     /// run that starts `threads` tests at once from `binary`. Each test is
     /// sized by the busiest recorded test of the binary, or one core and two
     /// memory shares when nothing is recorded, as an unmeasured test is
-    /// charged. Never more than the pool holds, since a larger reservation
-    /// would wait forever.
+    /// charged. Cap both axes at this process's local budget, so a container
+    /// cannot reserve host resources that its tests cannot use.
     pub(crate) fn nextest_run_reservation(&self, binary: &str, threads: u64) -> (u64, Option<u64>) {
         let path = test_history_path(&self.dir.join(TEST_HISTORY_DIR), binary);
         let history = lookup_test_history(&path, binary, "");
@@ -2189,7 +2261,11 @@ impl Pool {
             .and_then(|measurement| measurement.cores)
             .unwrap_or(1)
             .max(1);
-        let cpus = threads.saturating_mul(cores).min(self.capacity).max(1);
+        let cpus = threads
+            .saturating_mul(cores)
+            .min(self.capacity)
+            .min(self.domain_capacity)
+            .max(1);
         let memory = (self.bytes_per_permit > 0).then(|| {
             let shares = recorded
                 .and_then(|measurement| measurement.peak)
@@ -2198,7 +2274,8 @@ impl Pool {
                 self.memory_capacity
             } else {
                 self.capacity.saturating_mul(self.bytes_per_permit)
-            };
+            }
+            .min(self.domain_memory_capacity);
             threads
                 .saturating_mul(shares)
                 .saturating_mul(self.bytes_per_permit)
@@ -2216,6 +2293,8 @@ impl Pool {
         cpus: u64,
         memory: Option<u64>,
     ) -> Pool {
+        let cpus = cpus.min(self.domain_capacity).max(1);
+        let memory = memory.map(|bytes| bytes.min(self.domain_memory_capacity));
         let permits = match memory {
             Some(memory) if self.bytes_per_permit > 0 => {
                 cpus.max(memory.div_ceil(self.bytes_per_permit))
@@ -2230,7 +2309,8 @@ impl Pool {
         );
         pool.scope = Some(scope);
         pool.domain_capacity = cpus.min(pool.capacity);
-        pool.set_memory_capacity(memory.unwrap_or(0));
+        pool.memory_capacity = memory.unwrap_or(0);
+        pool.domain_memory_capacity = pool.memory_capacity;
         pool.events = self.events;
         pool.pressure = false;
         pool
@@ -2266,7 +2346,7 @@ impl Pool {
             if self.priority == SchedulerPriority::Normal
                 && stamped.is_none_or(|last| last.elapsed() >= PRIORITY_STAMP_INTERVAL)
             {
-                let _ = std::fs::write(self.dir.join(PRIORITY_WAIT_STAMP), b"");
+                self.mark_priority_wait();
                 stamped = Some(Instant::now());
             }
             std::thread::sleep(jittered(delay));
@@ -2326,7 +2406,7 @@ impl Pool {
                         cpu: cores,
                         memory_bytes: 0,
                     },
-                    weight: cores.min(self.capacity),
+                    weight: cores.min(self.domain_capacity),
                     predicted: None,
                     source: "unmeasured",
                 };
@@ -2337,7 +2417,7 @@ impl Pool {
             let weight = predicted
                 .div_ceil(self.bytes_per_permit)
                 .max(cores)
-                .clamp(1, self.capacity);
+                .clamp(1, self.domain_capacity);
             return Plan {
                 resources: Resources {
                     cpu: cores,
@@ -2365,7 +2445,7 @@ impl Pool {
             .flatten();
         let threads = learned
             .or(demand.threads)
-            .unwrap_or_else(|| self.capacity.div_ceil(2))
+            .unwrap_or_else(|| self.domain_capacity.div_ceil(2))
             .max(1);
         let link_floor = demand.links.then_some(LINK_WEIGHT);
         if self.bytes_per_permit == 0 {
@@ -2374,7 +2454,10 @@ impl Pool {
                     cpu: link_floor.unwrap_or(1).max(threads),
                     memory_bytes: 0,
                 },
-                weight: link_floor.unwrap_or(1).max(threads).min(self.capacity),
+                weight: link_floor
+                    .unwrap_or(1)
+                    .max(threads)
+                    .min(self.domain_capacity),
                 predicted: None,
                 source: "unmeasured",
             };
@@ -2428,7 +2511,7 @@ impl Pool {
         let weight = predicted
             .map_or(1, |bytes| bytes.div_ceil(self.bytes_per_permit))
             .max(threads)
-            .clamp(1, self.capacity);
+            .clamp(1, self.domain_capacity);
         let memory_bytes =
             if predicted.is_none() || matches!(source, "unmeasured" | "default" | "link-floor") {
                 predicted
@@ -2597,12 +2680,47 @@ impl Pool {
         let waiting = scan_waiters_logged(&waiters, Some(self), events)?;
         let ticket = state.queued.as_ref().map_or(u64::MAX, |entry| entry.ticket);
         let mut request = self.waiting_record(resources, weight, demand, first_arrival_ms, ticket);
+        // A waiter in another container cannot use this container's spare
+        // CPUs or memory. Reserve local headroom only for a normal waiter
+        // sharing its domain; the machine-wide stamp still governs the host.
+        let local_waiting = self.priority == SchedulerPriority::Low
+            && self.scope.is_none()
+            && (self.domain_priority_wait_is_fresh()
+                || waiting.iter().any(|entry| {
+                    entry.priority == "normal" && entry.domain == self.pressure_domain
+                }));
+        let domain = self.priority_budget(
+            Resources {
+                cpu: self.domain_capacity,
+                memory_bytes: self.domain_memory_capacity,
+            },
+            local_waiting,
+        );
+        if domain.cpu < self.domain_capacity {
+            request.domain_capacity = self.legacy_domain_capacity.min(domain.cpu);
+        }
+        request.domain_cpu_cap = Some(domain.cpu);
+        request.domain_memory_cap = Some(domain.memory_bytes);
         request.global_capacity = Some(capacity);
         request.cpu_cap = Some(budget.cpu);
         request.mem_cap = Some(budget.memory_bytes);
         let trace = self
             .events
             .then(|| std::cell::RefCell::new(decisions::Trace::default()));
+        // The usual idle-scope escape admits oversized work. While local
+        // normal work waits, that escape must not consume its reserved room.
+        let exceeds_local_headroom = self.priority == SchedulerPriority::Low
+            && local_waiting
+            && ((domain.cpu < self.domain_capacity && resources.cpu > domain.cpu)
+                || (domain.memory_bytes < self.domain_memory_capacity
+                    && resources.memory_bytes > domain.memory_bytes));
+        if exceeds_local_headroom {
+            // Like a memory-gated demand, this cannot run yet. Keeping it as
+            // a queue head would prevent smaller background work from using
+            // the unreserved part of the container's budget.
+            self.gated(state, "priority-headroom", events, || request.clone());
+            return Ok(None);
+        }
         let decision =
             admission_decision_traced(capacity, &live, waiting.iter(), &request, trace.as_ref());
         if decision == AdmissionDecision::Waiting {
@@ -2770,8 +2888,7 @@ impl Pool {
             .wrap_err("failed to name a lease that was not already taken")
     }
 
-    /// CPU headroom for waiting normal-priority work. `effective_budget`
-    /// withholds memory headroom too.
+    /// CPU headroom for waiting normal-priority work.
     ///
     /// Never the whole pool. A reserve equal to the capacity -- which a
     /// single-permit machine would otherwise get -- stops a low-priority
@@ -2779,12 +2896,9 @@ impl Pool {
     /// oversized-demand escape as the only way it ever runs, and that one
     /// hands over the entire machine at once. Yielding a quarter must not
     /// become yielding everything and then taking everything.
+    #[cfg(test)]
     fn reserved(&self) -> u64 {
-        if self.priority == SchedulerPriority::Low && self.priority_wait_is_fresh() {
-            (self.capacity / 4).max(1).min(self.capacity - 1)
-        } else {
-            0
-        }
+        self.capacity - self.effective_budget().cpu
     }
 
     fn priority_wait_is_fresh(&self) -> bool {
@@ -2793,7 +2907,39 @@ impl Pool {
         if self.scope.is_some() {
             return false;
         }
-        std::fs::metadata(self.dir.join(PRIORITY_WAIT_STAMP))
+        Self::priority_stamp_is_fresh(&self.dir.join(PRIORITY_WAIT_STAMP))
+    }
+
+    fn domain_priority_stamp(&self) -> PathBuf {
+        use sha2::Digest as _;
+        let digest = sha2::Sha256::digest(self.pressure_domain.as_bytes());
+        self.dir
+            .join(PRIORITY_DOMAINS_DIR)
+            .join(format!("{}.json", hex::encode(&digest[..16])))
+    }
+
+    fn mark_priority_wait(&self) {
+        let _ = std::fs::write(self.dir.join(PRIORITY_WAIT_STAMP), b"");
+        if self.scope.is_none() {
+            let directory = self.dir.join(PRIORITY_DOMAINS_DIR);
+            if std::fs::create_dir_all(&directory).is_ok() {
+                let path = self.domain_priority_stamp();
+                if !path.exists() {
+                    // Reuse the pressure-domain retention policy: new
+                    // containers remove hints left unwritten for a day.
+                    crate::pressure::prune(&directory, std::time::SystemTime::now());
+                }
+                let _ = std::fs::write(path, b"");
+            }
+        }
+    }
+
+    fn domain_priority_wait_is_fresh(&self) -> bool {
+        self.scope.is_none() && Self::priority_stamp_is_fresh(&self.domain_priority_stamp())
+    }
+
+    fn priority_stamp_is_fresh(path: &Path) -> bool {
+        std::fs::metadata(path)
             .and_then(|metadata| metadata.modified())
             .ok()
             .and_then(|modified| modified.elapsed().ok())

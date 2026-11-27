@@ -775,11 +775,14 @@ fn nextest_test_threads_do_not_limit_build_permits_through_an_alias() {
     )
     .unwrap();
     let slots = root.path().join("slots");
+    let local_slots = std::thread::available_parallelism()
+        .map_or(1, |cpus| cpus.get())
+        .min(8);
     for (typed, expected) in [
-        (&["nextest", "run", "-j", "1"][..], "8"),
-        (&["nt", "-j", "1"], "8"),
-        (&["nt", "--test-threads=1"], "8"),
-        (&["nt", "--build-jobs", "2"], "2"),
+        (&["nextest", "run", "-j", "1"][..], local_slots),
+        (&["nt", "-j", "1"], local_slots),
+        (&["nt", "--test-threads=1"], local_slots),
+        (&["nt", "--build-jobs", "2"], local_slots.min(2)),
     ] {
         let _ = std::fs::remove_file(&slots);
         let output = mbx(root.path())
@@ -797,7 +800,7 @@ fn nextest_test_threads_do_not_limit_build_permits_through_an_alias() {
         );
         assert_eq!(
             std::fs::read_to_string(&slots).unwrap(),
-            expected,
+            expected.to_string(),
             "{typed:?}"
         );
     }
@@ -913,10 +916,19 @@ pub fn documented() {}
         "[target.'cfg(unix)']\nrunner = ['./caller-runner', 'runner arg']\n",
     )
     .unwrap();
+    let local_slots = std::thread::available_parallelism()
+        .map_or(1, |cpus| cpus.get())
+        .min(8);
+    let unmeasured = local_slots.div_ceil(2).to_string();
+    let explicit = local_slots.min(3).to_string();
     for (tests, harness, expected) in [
-        (Some("1"), &["--test-threads=3"][..], Some("3")),
-        // Half of the 8 permits until this binary has been measured,
-        (Some("1"), &[][..], Some("4")),
+        (
+            Some("1"),
+            &["--test-threads=3"][..],
+            Some(explicit.as_str()),
+        ),
+        // Half of the locally usable permits until this binary has been measured,
+        (Some("1"), &[][..], Some(unmeasured.as_str())),
         (None, &[][..], None),
         // then the one core the idle suite was measured using.
         (Some("1"), &[][..], Some("1")),
@@ -978,9 +990,13 @@ fn quick() {
     )
     .unwrap();
     std::fs::write(root.path().join("src/lib.rs"), "").unwrap();
-    // Unmeasured, the suite asks for half of the 8 permits; one run that
-    // ends well under a second records it as a single core.
-    for expected in ["4", "1"] {
+    // Unmeasured, the suite asks for half of the locally usable permits;
+    // one run that ends well under a second records it as a single core.
+    let local_slots = std::thread::available_parallelism()
+        .map_or(1, |cpus| cpus.get())
+        .min(8);
+    let unmeasured = local_slots.div_ceil(2).to_string();
+    for expected in [unmeasured.as_str(), "1"] {
         let output = mbx(root.path())
             .env("MBX_SCHEDULER_CPUS", "8")
             .env("MBX_SCHEDULER_MEMORY", "none")

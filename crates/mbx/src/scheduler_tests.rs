@@ -972,11 +972,15 @@ fn session_environment_states_off_explicitly() {
         value(SCHED_DIR_ENV),
         Path::new("/cache").join("scheduler").to_str().unwrap()
     );
+    // One share is the local memory ceiling over the local CPUs, both after
+    // the reserve; the pool itself keeps the configured size.
+    let local = 6.min(local_cpus(2));
     assert_eq!(value(SCHED_SLOTS_ENV), "6");
-    assert_eq!(value(SCHED_SLOT_BYTES_ENV), "1333");
+    assert_eq!(value(SCHED_SLOT_BYTES_ENV), (8000 / local).to_string());
+    assert_eq!(value(SCHED_MEMORY_DEFAULT_ENV), "0");
     assert_eq!(value(SCHED_PRIORITY_ENV), "normal");
     assert!(!value(SCHED_BUILD_ID_ENV).is_empty());
-    assert_eq!(value(SCHED_BUILD_SLOTS_ENV), "6");
+    assert_eq!(value(SCHED_BUILD_SLOTS_ENV), local.to_string());
 
     let environment = session_environment_with_jobs(&config, Some(3));
     let value = |name: &str| {
@@ -987,8 +991,8 @@ fn session_environment_states_off_explicitly() {
             .unwrap()
     };
     assert_eq!(value(SCHED_SLOTS_ENV), "6", "the machine pool stays global");
-    assert_eq!(value(SCHED_SLOT_BYTES_ENV), "1333");
-    assert_eq!(value(SCHED_BUILD_SLOTS_ENV), "3");
+    assert_eq!(value(SCHED_SLOT_BYTES_ENV), (8000 / local).to_string());
+    assert_eq!(value(SCHED_BUILD_SLOTS_ENV), 3.min(local).to_string());
 }
 
 #[test]
@@ -3804,13 +3808,14 @@ fn exact_memory_budget_and_legacy_transport_defaults_are_conservative() {
     config.scheduler.reserve_cpus = 2;
     config.scheduler.memory_bytes = Some(12001);
     let pool = Pool::from_config(&config).unwrap();
+    let share = 12001 / 6.min(local_cpus(2));
     assert_eq!(pool.capacity, 6);
-    assert_eq!(pool.bytes_per_permit, 2000);
+    assert_eq!(pool.bytes_per_permit, share);
     assert_eq!(pool.memory_capacity, 12001);
     assert_eq!(scheduler_report(&config).memory_capacity, 12001);
     let env = session_environment_with_jobs(&config, None);
     assert!(env.contains(&(SCHED_MEMORY_BYTES_ENV.into(), "12001".into())));
-    assert!(env.contains(&(SCHED_SLOT_BYTES_ENV.into(), "2000".into())));
+    assert!(env.contains(&(SCHED_SLOT_BYTES_ENV.into(), share.to_string())));
     assert!(env.contains(&(SCHED_SLOTS_ENV.into(), "6".into())));
     assert_eq!(
         Pool::new(dir.path().into(), 6, 2000, SchedulerPriority::Normal).memory_capacity,
@@ -4163,7 +4168,12 @@ fn legacy_lease_and_waiter_schema_is_preserved_across_estimator_demands_and_limi
                 suite,
                 Demand::nextest("bin", "case"),
             ] {
+                // Request sizing retains the legacy calculation at the local
+                // CPU ceiling, rather than the shared host capacity.
+                let host_capacity = pool.capacity;
+                pool.capacity = pool.domain_capacity;
                 let expected = legacy::prediction(&pool, &demand);
+                pool.capacity = host_capacity;
                 let plan = pool.demand_vector(&demand);
                 if demand.compile_mode.is_none() && !demand.links {
                     assert_eq!((plan.weight, plan.predicted), (expected.0, expected.1));
@@ -5502,6 +5512,184 @@ fn a_compiler_beneath_a_permit_holder_does_not_ask_for_a_second_permit() {
 }
 
 #[test]
+fn eight_machine_cpus_allow_two_four_cpu_domains() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut a = pool_at(directory.path(), 8, 0);
+    a.pressure_domain = "container-a";
+    a.domain_capacity = local_ceiling(8, 0, 4, None).cpu;
+    let mut b = pool_at(directory.path(), 8, 0);
+    b.pressure_domain = "container-b";
+    b.domain_capacity = local_ceiling(8, 0, 4, None).cpu;
+    let mut c = pool_at(directory.path(), 8, 0);
+    c.pressure_domain = "container-c";
+    c.domain_capacity = local_ceiling(8, 0, 4, None).cpu;
+    let first = a.try_admit(4, None).unwrap().unwrap();
+    assert!(a.try_admit(1, None).unwrap().is_none());
+    let second = b.try_admit(4, None).unwrap().unwrap();
+    assert!(c.try_admit(1, None).unwrap().is_none());
+    drop(first);
+    assert!(c.try_admit(4, None).unwrap().is_some());
+    drop(second);
+}
+
+fn host_pool_with_container_budget(dir: &Path, domain: &'static str) -> Pool {
+    let memory = 256 * GIB / 100 * 85;
+    let mut pool = pool_at(dir, 32, memory / 32);
+    pool.pressure_domain = domain;
+    pool.set_local_budget(memory, true, 4, Some(8 * GIB));
+    pool
+}
+
+#[test]
+fn local_estimates_allow_four_cold_compiles_per_container() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = host_pool_with_container_budget(dir.path(), "a");
+    let b = host_pool_with_container_budget(dir.path(), "b");
+    assert_eq!(a.bytes_per_permit, (8 * GIB / 100 * 85) / 4);
+    let demand = Demand::new("cold", false);
+    let mut held = Vec::new();
+    for pool in [&a, &b] {
+        let plan = pool.demand_vector(&demand);
+        for _ in 0..4 {
+            held.push(
+                pool.try_admit_named(plan.resources, plan.weight, None, &mut None, Some(&demand))
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        assert!(
+            pool.try_admit_named(plan.resources, plan.weight, None, &mut None, Some(&demand))
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn an_unsized_container_test_uses_local_threads_and_is_admitted() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = host_pool_with_container_budget(dir.path(), "a");
+    let demand = Demand::test("cold-suite", None);
+    let plan = pool.demand_vector(&demand);
+    assert_eq!(plan.resources.cpu, 2);
+    assert!(
+        pool.try_admit_named(plan.resources, plan.weight, None, &mut None, Some(&demand))
+            .unwrap()
+            .is_some()
+    );
+    // A declared thread count is charged in full, so other builds sharing the
+    // pool see what it really uses; it runs once its container is idle.
+    let demand = Demand::test("wide", Some(64));
+    let wide = pool.demand_vector(&demand);
+    assert_eq!(wide.resources.cpu, 64);
+    assert!(
+        wide.weight <= 4,
+        "the legacy weight stays within the container"
+    );
+    let other = host_pool_with_container_budget(dir.path(), "b");
+    let held = other
+        .try_admit_named(plan.resources, plan.weight, None, &mut None, None)
+        .unwrap()
+        .unwrap();
+    assert!(
+        pool.try_admit_named(wide.resources, wide.weight, None, &mut None, Some(&demand))
+            .unwrap()
+            .is_none(),
+        "it waits while another build holds part of the host"
+    );
+    drop(held);
+    assert!(
+        pool.try_admit_named(wide.resources, wide.weight, None, &mut None, Some(&demand))
+            .unwrap()
+            .is_some()
+    );
+    assert!(pool.demand_vector(&Demand::new("link", true)).resources.cpu <= 4);
+}
+
+#[test]
+fn bare_host_request_estimates_preserve_the_original_units() {
+    let dir = tempfile::tempdir().unwrap();
+    let memory = 256 * GIB / 100 * 85;
+    for reserve in [0, 2] {
+        let capacity = 32 - reserve;
+        let mut pool = pool_at(dir.path(), capacity, memory / capacity);
+        // Callers pass the local CPUs already less the reserve.
+        pool.set_local_budget(memory, true, 32 - reserve, Some(256 * GIB));
+        assert_eq!(pool.bytes_per_permit, memory / capacity);
+        assert_eq!(
+            pool.demand_vector(&Demand::test("cold-suite", None))
+                .resources
+                .cpu,
+            capacity.div_ceil(2)
+        );
+    }
+}
+
+#[test]
+fn a_default_memory_budget_leaves_a_large_cgroup_its_headroom() {
+    // 100 GiB host, so the default shared budget is 85 GiB.
+    let host = 100 * GIB / 100 * 85;
+    let container = 90 * GIB;
+    assert_eq!(
+        domain_memory_ceiling(host, true, Some(container)),
+        container / 100 * 85,
+        "a default leaves the container 15% of its limit"
+    );
+    assert_eq!(
+        domain_memory_ceiling(host, false, Some(container)),
+        host,
+        "a configured budget that fits the limit applies as configured"
+    );
+    assert_eq!(domain_memory_ceiling(host, true, Some(100 * GIB)), host);
+    assert_eq!(domain_memory_ceiling(host, true, None), host);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut pool = pool_at(dir.path(), 32, host / 32);
+    pool.set_local_budget(host, true, 32, Some(container));
+    assert_eq!(pool.domain_memory_capacity, container / 100 * 85);
+    assert_eq!(
+        pool.memory_capacity, host,
+        "the shared pool keeps the host budget"
+    );
+}
+
+#[test]
+fn a_reserve_in_a_container_keeps_the_budget_it_had() {
+    // A 4-CPU, 8 GiB container on a 32-CPU host with two CPUs reserved. Before
+    // the pool was sized from the machine, its builds had 4 - 2 CPUs and one
+    // share of 85% of 8 GiB over those two.
+    let dir = tempfile::tempdir().unwrap();
+    let memory = 256 * GIB / 100 * 85;
+    let mut pool = pool_at(dir.path(), 30, memory / 30);
+    pool.set_local_budget(memory, true, 4 - 2, Some(8 * GIB));
+    assert_eq!(pool.domain_capacity, 2);
+    assert_eq!(pool.bytes_per_permit, (8 * GIB / 100 * 85) / 2);
+    assert_eq!(local_cpus(0), default_capacity());
+    assert_eq!(local_cpus(default_capacity() + 5), 1);
+}
+
+#[test]
+fn a_reserve_comes_off_the_processs_own_cpus_as_well_as_the_pool() {
+    // A configured host budget larger than this process's CPUs, with a
+    // reserve that leaves the process one CPU of its own.
+    let local = default_capacity();
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::for_test(dir.path());
+    config.scheduler.enabled = true;
+    config.scheduler.cpus = local + 10;
+    config.scheduler.reserve_cpus = local - 1;
+    let memory = crate::util::memory_total_bytes().unwrap_or(GIB).min(GIB) / 2;
+    config.scheduler.memory_bytes = Some(memory);
+    let pool = Pool::from_config(&config).unwrap();
+    assert_eq!(pool.capacity, 11);
+    assert_eq!(pool.domain_capacity, 1);
+    assert_eq!(pool.bytes_per_permit, memory);
+    let env = session_environment_with_jobs(&config, None);
+    assert!(env.contains(&(SCHED_BUILD_SLOTS_ENV.into(), "1".into())));
+    assert!(env.contains(&(SCHED_SLOT_BYTES_ENV.into(), memory.to_string())));
+}
+
+#[test]
 fn a_reserved_slice_ignores_a_waiting_normal_build() {
     let directory = tempfile::tempdir().unwrap();
     let low = low_pool_at(directory.path(), 8);
@@ -5510,4 +5698,268 @@ fn a_reserved_slice_ignores_a_waiting_normal_build() {
 
     let slice = low.within_reservation(directory.path().join("run"), 4, None);
     assert_eq!(slice.reserved(), 0, "a run's slice does not yield again");
+}
+
+#[test]
+fn nextest_reserves_only_what_its_container_can_use() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = host_pool_with_container_budget(dir.path(), "a");
+    let memory = pool.domain_memory_capacity;
+    for threads in [4, 64] {
+        assert_eq!(
+            pool.nextest_run_reservation("cold", threads),
+            (4, Some(memory))
+        );
+    }
+    pool.record_test_history("measured", "case", Some(2 * GIB), Some(2))
+        .unwrap();
+    assert_eq!(
+        pool.nextest_run_reservation("measured", 4),
+        (4, Some(memory))
+    );
+
+    let mut cpu_only = pool_at(dir.path(), 32, 0);
+    cpu_only.domain_capacity = 4;
+    assert_eq!(cpu_only.nextest_run_reservation("cold", 64), (4, None));
+}
+
+#[test]
+fn a_reserved_slice_keeps_its_containers_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = host_pool_with_container_budget(dir.path(), "a");
+    let slice = pool.within_reservation(dir.path().join("run"), 32, Some(64 * GIB));
+    assert_eq!(slice.domain_capacity, 4);
+    assert_eq!(slice.memory_capacity, pool.domain_memory_capacity);
+    assert_eq!(slice.domain_memory_capacity, pool.domain_memory_capacity);
+    assert_eq!(slice.bytes_per_permit, pool.bytes_per_permit);
+    let held = vector_attempt(&slice, 4, pool.domain_memory_capacity).unwrap();
+    assert!(vector_attempt(&slice, 1, 0).is_none());
+    assert!(vector_attempt(&slice, 0, 1).is_none());
+    drop(held);
+    assert!(vector_attempt(&slice, 1, 1).is_some());
+}
+
+#[test]
+fn low_priority_work_leaves_headroom_inside_a_container() {
+    for same_container in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut normal = pool_at(dir.path(), 32, 0);
+        normal.domain_capacity = 4;
+        normal.build = Some(("normal".into(), 2));
+        let first = normal.try_admit(1, None).unwrap().unwrap();
+        let mut queued = None;
+        let request = Resources {
+            cpu: 2,
+            memory_bytes: 0,
+        };
+        assert!(
+            normal
+                .try_admit_named(request, 2, None, &mut queued, None)
+                .unwrap()
+                .is_none()
+        );
+        std::fs::write(dir.path().join(PRIORITY_WAIT_STAMP), b"").unwrap();
+        let mut low = pool_at(dir.path(), 32, 0);
+        low.domain_capacity = 4;
+        low.priority = SchedulerPriority::Low;
+        if !same_container {
+            low.pressure_domain = "other-container";
+        }
+        // Reserve a CPU only where the normal waiter could actually use it.
+        let background = low
+            .try_admit(if same_container { 2 } else { 4 }, None)
+            .unwrap()
+            .unwrap();
+        assert!(low.try_admit(1, None).unwrap().is_none());
+        drop(first);
+        assert!(
+            normal
+                .try_admit_named(request, 2, None, &mut queued, None)
+                .unwrap()
+                .is_some()
+        );
+        drop(background);
+    }
+}
+
+#[test]
+fn local_memory_headroom_is_reserved_only_for_local_waiters() {
+    for same_container in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut normal = pool_at(dir.path(), 32, GIB);
+        normal.domain_capacity = 4;
+        normal.domain_memory_capacity = 8 * GIB;
+        normal.build = Some(("normal".into(), 2));
+        let first = normal.try_admit(1, None).unwrap().unwrap();
+        let mut queued = None;
+        let request = Resources {
+            cpu: 2,
+            memory_bytes: 0,
+        };
+        assert!(
+            normal
+                .try_admit_named(request, 2, None, &mut queued, None)
+                .unwrap()
+                .is_none()
+        );
+        std::fs::write(dir.path().join(PRIORITY_WAIT_STAMP), b"").unwrap();
+        let mut low = pool_at(dir.path(), 32, GIB);
+        low.domain_capacity = 4;
+        low.domain_memory_capacity = 8 * GIB;
+        low.priority = SchedulerPriority::Low;
+        if !same_container {
+            low.pressure_domain = "other-container";
+        }
+        // The normal build already holds one GiB; leave two more free only
+        // when its queued work shares this container.
+        let memory = if same_container { 5 * GIB } else { 8 * GIB };
+        let background = vector_attempt(&low, 1, memory).unwrap();
+        assert!(vector_attempt(&low, 1, 1).is_none());
+        drop((background, first));
+    }
+}
+
+#[test]
+fn memory_gated_normal_work_reserves_only_its_own_containers_headroom() {
+    for same_container in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut normal = pool_at(dir.path(), 32, GIB);
+        normal.domain_capacity = 4;
+        normal.domain_memory_capacity = 8 * GIB;
+        let held = normal.try_admit(1, None).unwrap().unwrap();
+        normal.available_memory = || Some(crate::util::Available::host(GIB));
+        let mut state = AdmissionState::new(0);
+        assert!(
+            normal
+                .try_admit_state(
+                    Resources {
+                        cpu: 2,
+                        memory_bytes: 3 * GIB
+                    },
+                    3,
+                    Some(3 * GIB),
+                    &mut state,
+                    None,
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            scan_waiters(&dir.path().join(WAITERS_DIR))
+                .unwrap()
+                .is_empty()
+        );
+        normal.mark_priority_wait();
+        let mut low = pool_at(dir.path(), 32, GIB);
+        low.domain_capacity = 4;
+        low.domain_memory_capacity = 8 * GIB;
+        low.priority = SchedulerPriority::Low;
+        if !same_container {
+            low.pressure_domain = "other-container";
+        }
+        let background = vector_attempt(
+            &low,
+            if same_container { 2 } else { 4 },
+            if same_container { 5 * GIB } else { 8 * GIB },
+        )
+        .unwrap();
+        assert!(vector_attempt(&low, 1, 1).is_none());
+        drop((background, held));
+    }
+}
+
+#[test]
+fn an_idle_container_keeps_headroom_for_a_younger_normal_waiter() {
+    for memory in [0, 8 * GIB] {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = if memory == 0 { 0 } else { GIB };
+        let mut elsewhere = pool_at(dir.path(), 32, unit);
+        elsewhere.pressure_domain = "other-container";
+        let machine_full = vector_attempt(&elsewhere, 32, 0).unwrap();
+        let mut low = pool_at(dir.path(), 32, unit);
+        low.priority = SchedulerPriority::Low;
+        low.domain_capacity = 4;
+        low.domain_memory_capacity = memory;
+        let request = Resources {
+            cpu: if memory == 0 { 4 } else { 1 },
+            memory_bytes: memory,
+        };
+        let mut low_queue = None;
+        assert!(
+            low.try_admit_named(request, 4, None, &mut low_queue, None)
+                .unwrap()
+                .is_none()
+        );
+        let mut normal = pool_at(dir.path(), 32, unit);
+        normal.domain_capacity = 4;
+        normal.domain_memory_capacity = memory;
+        let normal_request = Resources {
+            cpu: 1,
+            memory_bytes: unit,
+        };
+        let mut normal_queue = None;
+        assert!(
+            normal
+                .try_admit_named(normal_request, 1, None, &mut normal_queue, None)
+                .unwrap()
+                .is_none()
+        );
+        normal.mark_priority_wait();
+        drop(machine_full);
+        assert!(
+            low.try_admit_named(request, 4, None, &mut low_queue, None)
+                .unwrap()
+                .is_none(),
+            "the idle-scope escape must not consume local priority headroom"
+        );
+        assert!(
+            low_queue.is_none(),
+            "an ineligible request must not block the queue"
+        );
+        let smaller = vector_attempt(&low, 1, unit)
+            .expect("smaller background work can use unreserved capacity");
+        let foreground = normal
+            .try_admit_named(normal_request, 1, None, &mut normal_queue, None)
+            .unwrap()
+            .unwrap();
+        drop((foreground, smaller));
+        std::fs::remove_file(normal.domain_priority_stamp()).unwrap();
+        assert!(
+            low.try_admit_named(request, 4, None, &mut low_queue, None)
+                .unwrap()
+                .is_some(),
+            "background work resumes once the local priority wait ends"
+        );
+    }
+}
+
+#[test]
+fn new_priority_domains_prune_old_hints_without_removing_fresh_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut active = pool_at(dir.path(), 32, 0);
+    active.pressure_domain = "active";
+    active.mark_priority_wait();
+    let directory = dir.path().join(PRIORITY_DOMAINS_DIR);
+    let gone = directory.join("gone.json");
+    let unrelated = directory.join("keep.txt");
+    for path in [&gone, &unrelated] {
+        std::fs::write(path, b"").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new().set_modified(
+                    std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60),
+                ),
+            )
+            .unwrap();
+    }
+    let mut new = pool_at(dir.path(), 32, 0);
+    new.pressure_domain = "new";
+    new.mark_priority_wait();
+    assert!(!gone.exists());
+    assert!(active.domain_priority_wait_is_fresh());
+    assert!(new.domain_priority_wait_is_fresh());
+    assert!(unrelated.exists());
 }
