@@ -1265,6 +1265,23 @@ fn cargo_fix_gets_the_shim_as_its_workspace_wrapper_too() {
 
 #[test]
 fn configured_build_targets_follow_cargo_install_configuration() {
+    // `CARGO_BUILD_TARGET` outranks `build.target`, so check in a child
+    // that does not inherit one.
+    const CHILD: &str = "MBX_TEST_CONFIGURED_BUILD_TARGET_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cli::cargo_tests::configured_build_targets_follow_cargo_install_configuration",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env_remove("CARGO_BUILD_TARGET")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        return;
+    }
     let checkout = tempfile::tempdir().unwrap();
     let cargo_home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(checkout.path().join(".cargo")).unwrap();
