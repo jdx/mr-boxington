@@ -14,7 +14,7 @@ change. mbx reads configuration from three places; the first value found wins:
    or the working directory outside a checkout.
 3. `mbx/config.toml` in the platform configuration directory:
    - Linux: `~/.config/mbx/config.toml`, honoring `$XDG_CONFIG_HOME`
-   - macOS: `~/Library/Application Support/mbx/config.toml`
+   - macOS: `$XDG_CONFIG_HOME/mbx/config.toml` when `XDG_CONFIG_HOME` is an absolute path, otherwise `~/Library/Application Support/mbx/config.toml`
    - Windows: `%APPDATA%\mbx\config.toml`
 
 Anything still unset takes its default. mbx rejects unknown TOML keys, so a

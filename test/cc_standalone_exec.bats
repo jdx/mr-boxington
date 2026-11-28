@@ -633,9 +633,6 @@ SCRIPT
   local report="$BATS_TEST_TMPDIR/policy.json" bypass="$BATS_TEST_TMPDIR/policy.tsv"
   # Cover config-file policy through exec, without an inherited env override.
   local config_dir="$XDG_CONFIG_HOME/mbx"
-  if [[ "$(uname -s)" == Darwin ]]; then
-    config_dir="$HOME/Library/Application Support/mbx"
-  fi
   mkdir -p "$config_dir"
   echo 'cc_store_path_specific = false' >"$config_dir/config.toml"
   local attempt

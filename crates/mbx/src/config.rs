@@ -6,6 +6,7 @@
 use crate::util::parse_duration;
 use bytesize::ByteSize;
 use eyre::{Context, Result, bail};
+pub(crate) use mbx_cache_cargo::config_file_path;
 use mbx_cache_core::{RemoteCacheMode, S3ConditionalWrites};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -2033,11 +2034,6 @@ fn repair_hint(origin: &usage_config::Origin, key: &str, unknown: bool) -> Optio
     }
 }
 
-/// The global configuration file, which `mbx settings` edits.
-pub(crate) fn config_file_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join("mbx").join("config.toml"))
-}
-
 /// Every setting mbx declares.
 pub(crate) fn settings_registry() -> usage_config::Registry {
     RawConfig::SETTINGS_REGISTRY
@@ -2104,6 +2100,7 @@ mod tests {
         EmptyEnvironment,
         NonUnicodeEnvironment,
         NoEnvironmentWithFile,
+        XdgConfigFile,
         ValidEnvironment,
         Default,
     }
@@ -2115,6 +2112,7 @@ mod tests {
                 Self::EmptyEnvironment => "empty-environment",
                 Self::NonUnicodeEnvironment => "non-unicode-environment",
                 Self::NoEnvironmentWithFile => "no-environment-with-file",
+                Self::XdgConfigFile => "xdg-config-file",
                 Self::ValidEnvironment => "valid-environment",
                 Self::Default => "default",
             }
@@ -2197,10 +2195,12 @@ mod tests {
         use std::os::unix::ffi::OsStringExt as _;
 
         let home = tempfile::tempdir().unwrap();
-        let config_home = if cfg!(target_os = "macos") {
-            home.path().join("Library/Application Support")
+        let use_xdg_config =
+            !cfg!(target_os = "macos") || matches!(case, CacheRootCase::XdgConfigFile);
+        let config_home = if use_xdg_config {
+            home.path().join("xdg config")
         } else {
-            home.path().join(".config")
+            home.path().join("Library/Application Support")
         };
         let platform_cache_home = if cfg!(target_os = "macos") {
             home.path().join("Library/Caches")
@@ -2222,7 +2222,7 @@ mod tests {
                 Some(file_cache.clone()),
                 Some(file_cache.clone()),
             ),
-            CacheRootCase::NoEnvironmentWithFile => {
+            CacheRootCase::NoEnvironmentWithFile | CacheRootCase::XdgConfigFile => {
                 (None, Some(file_cache.clone()), Some(file_cache.clone()))
             }
             CacheRootCase::ValidEnvironment => (
@@ -2261,14 +2261,14 @@ mod tests {
                 "--test-threads=1",
             ])
             .env(CACHE_ROOT_TEST_CASE, case.label())
-            .env("HOME", home.path());
+            .env("HOME", home.path())
+            .env_remove("XDG_CONFIG_HOME");
 
-        if cfg!(target_os = "macos") {
-            // macOS dirs follow HOME rather than the XDG overrides.
-        } else {
-            command
-                .env("XDG_CONFIG_HOME", &config_home)
-                .env("XDG_CACHE_HOME", &platform_cache_home);
+        if use_xdg_config {
+            command.env("XDG_CONFIG_HOME", &config_home);
+        }
+        if !cfg!(target_os = "macos") {
+            command.env("XDG_CACHE_HOME", &platform_cache_home);
         }
         if let Some(environment) = environment {
             command.env("MBX_CACHE_DIR", environment);
@@ -2428,6 +2428,15 @@ mod tests {
         assert_cache_root_resolvers_match(
             "cache_root_uses_file_config_when_environment_is_absent",
             CacheRootCase::NoEnvironmentWithFile,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_root_uses_xdg_config_when_cache_environment_is_absent() {
+        assert_cache_root_resolvers_match(
+            "cache_root_uses_xdg_config_when_cache_environment_is_absent",
+            CacheRootCase::XdgConfigFile,
         );
     }
 
