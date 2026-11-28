@@ -102,3 +102,8 @@ For a hypothetical fix, prefer `fix(cache): reuse build artifacts across worktre
 over `fix: address review feedback`. Its description should show the build commands in two worktrees and explain which compilation work is reused.
 These rules supplement the repository's existing commit, release, and disclosure
 requirements.
+
+<!-- entire-agent:begin -->
+Read .entire/agent-guide.md for this repository's workflow, source inspection, and verification guidance.
+@.entire/agent-guide.md
+<!-- entire-agent:end -->
