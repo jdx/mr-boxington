@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.24](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.3.23...mbx-cache-cargo-v0.3.24) - 2026-11-28
+
+### Fixed
+
+- *(config)* honor XDG_CONFIG_HOME on macOS ([#1027](https://github.com/jdx/mr-boxington/pull/1027))
+
 ## [0.3.23](https://github.com/jdx/mr-boxington/compare/mbx-cache-cargo-v0.3.22...mbx-cache-cargo-v0.3.23) - 2026-11-24
 
 ### Fixed

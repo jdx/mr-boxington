@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.31.1](https://github.com/jdx/mr-boxington/compare/v1.31.0...v1.31.1) - 2026-11-28
+
+### Fixed
+
+- *(cache)* cache Rust builds that use Nix store paths ([#1028](https://github.com/jdx/mr-boxington/pull/1028))
+- *(config)* honor XDG_CONFIG_HOME on macOS ([#1027](https://github.com/jdx/mr-boxington/pull/1027))
+- *(cli)* stop cargo run passing --message-format to the program ([#1024](https://github.com/jdx/mr-boxington/pull/1024))
+- *(linker)* use workspace policy for wasm-pack builds that set CARGO_BUILD_TARGET ([#1022](https://github.com/jdx/mr-boxington/pull/1022))
+- *(session)* fall back to FIFO transport when TMPDIR is too long for a socket ([#1023](https://github.com/jdx/mr-boxington/pull/1023))
+- *(deps)* update rust crate jiff to v1 ([#1018](https://github.com/jdx/mr-boxington/pull/1018))
+- *(scheduler)* size a shared pool from the machine, not each container ([#965](https://github.com/jdx/mr-boxington/pull/965))
+- *(cargo)* stop recursive explicit mbx wrappers ([#977](https://github.com/jdx/mr-boxington/pull/977))
+- *(gc)* count writes inside a target directory as use, and leave an empty directory when collecting one ([#981](https://github.com/jdx/mr-boxington/pull/981))
+
 ## [1.31.0](https://github.com/jdx/mr-boxington/compare/v1.30.0...v1.31.0) - 2026-11-24
 
 ### Added

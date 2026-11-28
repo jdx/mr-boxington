@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.22.0...mbx-cache-core-v0.23.0) - 2026-11-28
+
+### Fixed
+
+- *(cache)* [**breaking**] keep concurrent task manifest updates on S3 buckets without conditional writes ([#1031](https://github.com/jdx/mr-boxington/pull/1031))
+
 ## [0.22.0](https://github.com/jdx/mr-boxington/compare/mbx-cache-core-v0.21.0...mbx-cache-core-v0.22.0) - 2026-11-24
 
 ### Added
