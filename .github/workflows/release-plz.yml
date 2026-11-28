@@ -202,7 +202,10 @@ jobs:
             echo "::warning title=Communiqué skipped::ANTHROPIC_API_KEY is not configured; keeping the release-plz notes"
             exit 0
           fi
-          communique generate "$TAG" --github-release
+          communique generate "$TAG" --github-release --review-report "$RUNNER_TEMP/communique-coverage.md"
+          if [[ -f "$RUNNER_TEMP/communique-coverage.md" ]]; then
+            cat "$RUNNER_TEMP/communique-coverage.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   publish-release:
     name: Publish release

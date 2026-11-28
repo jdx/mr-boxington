@@ -13,6 +13,8 @@ system_extra = """
 Write for developers using mbx locally or in CI. Explain user-visible consequences rather than
 repeating commit subjects, distinguish CLI behavior from library-only changes, and call out
 breaking changes plainly. Do not claim that mbx replaces Cargo or caches linking.
+
+Credit only people other than @jdx. @jdx maintains mr boxington and writes most changes, so a bullet for a change he wrote ends with its PR link and no username: never add "(@jdx)", "by @jdx", or thanks to @jdx. When someone else wrote a change, or is named in its description as a co-author or as the person who reported the problem, credit them by username.
 """
 
 [defaults]
