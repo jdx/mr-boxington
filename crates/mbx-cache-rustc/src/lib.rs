@@ -42,6 +42,8 @@ use thiserror::Error;
 
 mod dep_info;
 
+const NIX_STORE_ROOT: &str = "/nix/store";
+
 pub use dep_info::{DepInfoCommand, DiscoveredInputs, RustcDepInfo};
 
 /// Schema version embedded in canonical rustc action descriptors.
@@ -854,7 +856,7 @@ impl RustcInvocation {
         // There are few of those; the thousands of objects are not named.
         let mut inputs = BTreeSet::new();
         for input in &discovered.inputs {
-            let normalized = builder.normalize_path(&input.path)?;
+            let normalized = builder.normalize_file_path(&input.path)?;
             if !under_any_directory(&normalized, &native_directories)
                 || !discovered.is_native_only(&input.path)
             {
@@ -964,6 +966,16 @@ pub fn normalize_mapped_path(
     mappings: &[PathMapping],
 ) -> Result<String, BypassReason> {
     normalize_shared_path(path, working_dir, &shared_path_mappings(mappings)).map_err(Into::into)
+}
+
+/// Key an input path using the configured mappings or its literal Nix store path.
+pub fn normalize_input_path(
+    path: &Path,
+    working_dir: &Path,
+    mappings: &[PathMapping],
+) -> Result<String, BypassReason> {
+    normalize_mapped_path(path, working_dir, mappings)
+        .or_else(|reason| key_nix_store_path(path, working_dir, reason))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1184,6 +1196,16 @@ impl RustcInputPrediction {
         path_mappings: &[PathMapping],
         digests: &dyn FileDigestCache,
     ) -> Result<DiscoveredInputs, BypassReason> {
+        self.discover_with_store(working_dir, path_mappings, digests, NIX_STORE_ROOT)
+    }
+
+    fn discover_with_store(
+        &self,
+        working_dir: &Path,
+        path_mappings: &[PathMapping],
+        digests: &dyn FileDigestCache,
+        store_root: &str,
+    ) -> Result<DiscoveredInputs, BypassReason> {
         if !matches!(self.version, 2..=4) {
             return Err(BypassReason::UnsupportedPrediction);
         }
@@ -1199,7 +1221,7 @@ impl RustcInputPrediction {
             if self.version >= 3
                 && let Some(path) = path.strip_prefix(NATIVE_DIRECTORY_PREDICTION_PREFIX)
             {
-                let directory = denormalize_path(path, path_mappings)?;
+                let directory = denormalize_path(path, path_mappings, store_root)?;
                 dep_info::collect_native_directory(
                     &directory,
                     &admitted_roots,
@@ -1208,7 +1230,7 @@ impl RustcInputPrediction {
                     &mut counted,
                 )?;
             } else {
-                let path = denormalize_path(path, path_mappings)?;
+                let path = denormalize_path(path, path_mappings, store_root)?;
                 named.insert(path.clone());
                 paths.insert(path);
             }
@@ -2513,6 +2535,7 @@ fn parse_emits(value: &str) -> Vec<Emit> {
 
 struct ActionBuilder<'a> {
     invocation: &'a RustcInvocation,
+    store_root: &'a str,
     context: ActionContext,
     mappings: Vec<SharedPathMapping>,
     /// The directories resolved while building this one action. Its inputs
@@ -2529,6 +2552,7 @@ impl<'a> ActionBuilder<'a> {
         Self {
             linker: None,
             invocation,
+            store_root: NIX_STORE_ROOT,
             mappings,
             aliases: PathAliases::default(),
             context,
@@ -2607,7 +2631,7 @@ impl<'a> ActionBuilder<'a> {
             .invocation
             .required_inputs
             .iter()
-            .map(|path| self.normalize_path(path))
+            .map(|path| self.normalize_file_path(path))
             .collect::<Result<BTreeSet<_>, _>>()?
             .into_iter()
             .collect();
@@ -2657,13 +2681,19 @@ impl<'a> ActionBuilder<'a> {
     fn normalize_argument(&self, argument: &Argument) -> Result<String, BypassReason> {
         match argument {
             Argument::Plain(value) => Ok(value.clone()),
+            Argument::Path { flag, path } if flag == "--sysroot" => {
+                Ok(format!("{flag}={}", self.normalize_sysroot_path(path)?))
+            }
             Argument::Path { flag, path } => Ok(format!("{flag}={}", self.normalize_path(path)?)),
             Argument::SearchPath { kind, path } => {
                 let text = self.normalize_path(path)?;
                 Ok(format!("-L{kind}={text}"))
             }
             Argument::Extern { name, path } => match path {
-                Some(path) => Ok(format!("--extern={name}={}", self.normalize_path(path)?)),
+                Some(path) => Ok(format!(
+                    "--extern={name}={}",
+                    self.normalize_file_path(path)?
+                )),
                 None => Ok(format!("--extern={name}")),
             },
             Argument::Emit(emits) => Ok(format!(
@@ -2748,7 +2778,27 @@ impl<'a> ActionBuilder<'a> {
                 }
             }
         }
+        self.normalize_file_path(path)
+    }
+
+    fn normalize_sysroot_path(&self, path: &Path) -> Result<String, BypassReason> {
+        let absolute = self.context.working_dir.join(path);
+        if !absolute.starts_with(self.store_root) {
+            return self.normalize_path(path);
+        }
+        // Dep-info omits implicit libraries from the sysroot. Its literal
+        // path can identify them only when the directory stays in the store.
+        if let Some(value) = absolute.to_str()
+            && resolve_nix_store_path(value, self.store_root).is_some_and(|path| path.is_dir())
+        {
+            return Ok(value.to_owned());
+        }
+        Err(BypassReason::UnmappedAbsolutePath(absolute))
+    }
+
+    fn normalize_file_path(&self, path: &Path) -> Result<String, BypassReason> {
         self.normalize_path(path)
+            .or_else(|reason| key_nix_store_path(path, &self.context.working_dir, reason))
     }
 
     fn normalize_path(&self, path: &Path) -> Result<String, BypassReason> {
@@ -2773,7 +2823,11 @@ fn under_any_directory(path: &str, directories: &BTreeSet<String>) -> bool {
     })
 }
 
-fn denormalize_path(value: &str, mappings: &[PathMapping]) -> Result<PathBuf, BypassReason> {
+fn denormalize_path(
+    value: &str,
+    mappings: &[PathMapping],
+    store_root: &str,
+) -> Result<PathBuf, BypassReason> {
     for mapping in mappings {
         let prefix = format!("${{{}}}", mapping.placeholder);
         let suffix = if value == prefix {
@@ -2797,7 +2851,46 @@ fn denormalize_path(value: &str, mappings: &[PathMapping]) -> Result<PathBuf, By
         path.extend(suffix.split('/').filter(|component| !component.is_empty()));
         return Ok(path);
     }
+    // Predictions can come from a shared cache. Check the symlink target as
+    // well as the spelling before allowing the caller to read the file.
+    if resolve_nix_store_path(value, store_root).is_some() {
+        return Ok(PathBuf::from(value));
+    }
     Err(BypassReason::InvalidPredictedInput(value.into()))
+}
+
+fn resolve_nix_store_path(value: &str, store_root: &str) -> Option<PathBuf> {
+    let resolved = nix_store_path(value, store_root)?.canonicalize().ok()?;
+    nix_store_path(resolved.to_str()?, store_root)?;
+    Some(resolved)
+}
+
+fn nix_store_path<'a>(value: &'a str, store_root: &str) -> Option<&'a Path> {
+    let path = Path::new(value);
+    if !path.is_absolute() {
+        return None;
+    }
+    let suffix = value.strip_prefix(store_root)?.strip_prefix('/')?;
+    (!suffix.split('/').any(|component| {
+        component.is_empty() || matches!(component, "." | "..") || component.contains('\0')
+    }))
+    .then_some(path)
+}
+
+fn key_nix_store_path(
+    path: &Path,
+    working_dir: &Path,
+    reason: BypassReason,
+) -> Result<String, BypassReason> {
+    if matches!(reason, BypassReason::UnmappedAbsolutePath(_)) {
+        let absolute = working_dir.join(path);
+        if let Some(value) = absolute.to_str()
+            && nix_store_path(value, NIX_STORE_ROOT).is_some()
+        {
+            return Ok(value.to_owned());
+        }
+    }
+    Err(reason)
 }
 
 fn normalize_components(path: &Path) -> PathBuf {

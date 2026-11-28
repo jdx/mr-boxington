@@ -16,7 +16,7 @@ use mbx_cache_core::{
 use mbx_cache_rustc::{
     ActionContext, ActionInput, BypassReason, CompilerIdentity, DiscoveredInputs, LinkerIdentity,
     ParseOptions, PathMapping, RustcAction, RustcDepInfo, RustcInputPrediction, RustcInvocation,
-    RustcOutputs, normalize_mapped_path,
+    RustcOutputs, normalize_input_path, normalize_mapped_path,
 };
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -3072,7 +3072,7 @@ fn compilation_action_diagnostic(
     compilation: &Compilation<'_>,
     action: &RustcAction,
 ) -> Result<ActionDiagnostic> {
-    let source = normalize_mapped_path(
+    let source = normalize_input_path(
         compilation.invocation.source(),
         compilation.working_dir,
         &PathMapping::ordered(&compilation.portable.mappings),

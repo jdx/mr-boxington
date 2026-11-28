@@ -1645,7 +1645,12 @@ fn rejects_noncanonical_compact_prediction_prefixes() {
 fn predicted_mapping_root_round_trips() {
     let workspace = workspace();
     assert_eq!(
-        denormalize_path("${workspace}", &[PathMapping::new(&workspace, "workspace")]).unwrap(),
+        denormalize_path(
+            "${workspace}",
+            &[PathMapping::new(&workspace, "workspace")],
+            NIX_STORE_ROOT
+        )
+        .unwrap(),
         workspace
     );
 }
@@ -2061,6 +2066,173 @@ fn action_rejects_unmapped_absolute_paths() {
         .action(context(&[("src/lib.rs", "source")]))
         .unwrap_err();
     assert_eq!(error, BypassReason::UnmappedAbsolutePath(unmapped));
+}
+
+#[cfg(unix)]
+#[test]
+fn nix_sysroots_are_keyed_by_their_full_store_paths() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().canonicalize().unwrap();
+    let store = root.join("store");
+    let sysroot = store.join("00000000000000000000000000000000-rust-wasm");
+    std::fs::create_dir_all(&sysroot).unwrap();
+
+    let inside = store.join("11111111111111111111111111111111-rust-wasm");
+    symlink(&sysroot, &inside).unwrap();
+    let outside = root.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let escape = store.join("22222222222222222222222222222222-rust-wasm");
+    symlink(&outside, &escape).unwrap();
+
+    let key = |sysroot: &Path| {
+        let sysroot = sysroot.to_str().unwrap();
+        let invocation = RustcInvocation::parse(&args(&[
+            "--crate-type=lib",
+            "--emit=link",
+            "--sysroot",
+            sysroot,
+            "src/lib.rs",
+        ]))
+        .unwrap();
+        let mut context = context(&[("src/lib.rs", "source")]);
+        context
+            .path_mappings
+            .push(PathMapping::new(&outside, "outside"));
+        let mut builder = ActionBuilder::new(&invocation, context);
+        builder.store_root = store.to_str().unwrap();
+        let invocation_descriptor = builder.invocation_descriptor()?;
+        assert!(
+            invocation_descriptor
+                .arguments
+                .contains(&format!("--sysroot={sysroot}"))
+        );
+        Ok(builder.build()?.digest)
+    };
+
+    assert_ne!(key(&sysroot).unwrap(), key(&inside).unwrap());
+    for invalid in [escape, store.join("missing")] {
+        assert_eq!(
+            key(&invalid),
+            Err(BypassReason::UnmappedAbsolutePath(invalid))
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn nix_standard_library_sources_are_keyed_by_path_and_content() {
+    let key = |source, contents| {
+        let invocation = RustcInvocation::parse(&args(&[
+            "--crate-name=core",
+            "--crate-type=lib",
+            "--emit=dep-info,metadata,link",
+            "-Zforce-unstable-if-unmarked",
+            source,
+        ]))
+        .unwrap();
+        let context = context(&[(source, contents)]);
+        let invocation_digest = invocation.invocation_digest(&context).unwrap();
+        let action = invocation.action(context).unwrap();
+        let descriptor: serde_json::Value = serde_json::from_slice(&action.bytes).unwrap();
+        assert_eq!(descriptor["inputs"][0]["path"], source);
+        (invocation_digest, action.digest)
+    };
+    let source = "/nix/store/00000000000000000000000000000000-rust-src/library/core/src/lib.rs";
+    let other = "/nix/store/11111111111111111111111111111111-rust-src/library/core/src/lib.rs";
+    let first = key(source, "source");
+    let second = key(other, "source");
+    assert_ne!(first.0, second.0);
+    assert_ne!(first.1, second.1);
+    assert_ne!(first.1, key(source, "changed").1);
+}
+
+#[cfg(unix)]
+#[test]
+fn nix_store_key_paths_require_a_literal_path_beneath_the_store() {
+    for invalid in [
+        "/nix/store",
+        "/nix/store/",
+        "/nix/store-backup/package/lib.rs",
+        "/nix/store/../lib.rs",
+        "/nix/store/package/../lib.rs",
+        "/nix/store/package/./lib.rs",
+        "/nix/store/package//lib.rs",
+    ] {
+        assert!(matches!(
+            normalize_input_path(Path::new(invalid), &workspace(), &[]),
+            Err(BypassReason::UnmappedAbsolutePath(_))
+        ));
+        assert_eq!(
+            denormalize_path(invalid, &[], NIX_STORE_ROOT),
+            Err(BypassReason::InvalidPredictedInput(invalid.into()))
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn nix_store_prediction_rediscovers_files_and_checks_symlink_targets() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = tempfile::tempdir().unwrap();
+    let working_dir = fixture.path().canonicalize().unwrap();
+    let store = working_dir.join("store");
+    let package = store.join("00000000000000000000000000000000-rust-src");
+    std::fs::create_dir_all(&package).unwrap();
+    let source = package.join("lib.rs");
+    std::fs::write(&source, "first source").unwrap();
+
+    let internal = package.join("internal.rs");
+    symlink(&source, &internal).unwrap();
+    // A sibling that shares the store root's string prefix is outside it.
+    let outside = working_dir.join("store-other");
+    std::fs::write(&outside, "outside").unwrap();
+    let external = package.join("external.rs");
+    symlink(outside, &external).unwrap();
+
+    let predict = |paths: &[&Path]| {
+        let prediction = RustcInputPrediction {
+            version: 4,
+            inputs: paths
+                .iter()
+                .map(|path| path.to_str().unwrap().into())
+                .collect(),
+            environment: Vec::new(),
+            compiler_duration_ns: 0,
+            crate_name: "core".into(),
+        };
+        let serialized = serde_json::to_vec(&prediction).unwrap();
+        let restored: RustcInputPrediction = serde_json::from_slice(&serialized).unwrap();
+        restored.discover_with_store(
+            &working_dir,
+            &[],
+            &mbx_cache_core::NoFileDigestCache,
+            store.to_str().unwrap(),
+        )
+    };
+
+    let inputs = predict(&[&source, &internal]).unwrap().inputs;
+    assert_eq!(inputs.len(), 2);
+    for (input, path) in inputs.iter().zip([&internal, &source]) {
+        assert_eq!(&input.path, path);
+        assert_eq!(input.digest, digest("first source"));
+    }
+    std::fs::write(&source, "changed source").unwrap();
+    let inputs = predict(&[&source, &internal]).unwrap().inputs;
+    assert!(
+        inputs
+            .iter()
+            .all(|input| input.digest == digest("changed source"))
+    );
+
+    assert_eq!(
+        predict(&[&external]),
+        Err(BypassReason::InvalidPredictedInput(
+            external.to_str().unwrap().into()
+        ))
+    );
 }
 
 #[test]
