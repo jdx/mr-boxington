@@ -607,6 +607,22 @@ fn crlf_checkout(lock: &[u8]) -> Vec<u8> {
     converted
 }
 
+/// Locate the global mbx configuration file.
+///
+/// On macOS, an absolute `XDG_CONFIG_HOME` overrides Application Support.
+pub fn config_file_path() -> Option<PathBuf> {
+    let xdg_config_home = if cfg!(target_os = "macos") {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_absolute())
+    } else {
+        None
+    };
+    xdg_config_home
+        .or_else(dirs::config_dir)
+        .map(|dir| dir.join("mbx").join("config.toml"))
+}
+
 /// Resolve the shared mbx cache root from the environment, machine config, or platform default.
 ///
 /// Match `Config`'s environment layer: a Unicode value overrides the file, while a non-Unicode
@@ -616,7 +632,7 @@ pub fn cache_root() -> Option<PathBuf> {
     if let Some(root) = std::env::var_os("MBX_CACHE_DIR").filter(|value| value.to_str().is_some()) {
         return (!root.is_empty()).then(|| PathBuf::from(root));
     }
-    if let Some(config) = dirs::config_dir().map(|root| root.join("mbx/config.toml"))
+    if let Some(config) = config_file_path()
         && let Ok(contents) = std::fs::read_to_string(config)
         && let Ok(document) = toml::from_str::<toml::Value>(&contents)
         && let Some(root) = document.get("cache_dir").and_then(toml::Value::as_str)
