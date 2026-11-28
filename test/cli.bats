@@ -41,8 +41,8 @@ setup() {
   assert_line --index 0 "--wait"
   local config_path
   config_path="$(sed -n '2p' "$editor_log")"
+  assert_equal "$config_path" "$config_root/mbx/config.toml"
   assert_file_empty "$config_path"
-  [[ "$config_path" == *" "* ]]
 }
 
 @test "edit opens invalid existing config unchanged and empty VISUAL falls back to EDITOR" {
@@ -182,16 +182,39 @@ PY
   assert_output --partial "0 B"
 }
 
-# Where the platform configuration directory puts mbx's global file.
+# The test environment sets XDG_CONFIG_HOME.
 global_config_file() {
-  if [[ "$(uname -s)" == Darwin ]]; then
-    echo "$HOME/Library/Application Support/mbx/config.toml"
-  else
-    echo "$XDG_CONFIG_HOME/mbx/config.toml"
-  fi
+  echo "$XDG_CONFIG_HOME/mbx/config.toml"
+}
+
+@test "macOS settings use Application Support when XDG_CONFIG_HOME is unset or invalid" {
+  [[ "$(uname -s)" == Darwin ]] || skip "macOS only"
+  local platform_config="$HOME/Library/Application Support/mbx/config.toml"
+  unset MBX_SAVINGS
+
+  run env -u XDG_CONFIG_HOME "$MBX_BIN" settings set savings off
+  assert_success
+  assert_file_exists "$platform_config"
+
+  run env -u XDG_CONFIG_HOME "$MBX_BIN" settings get savings
+  assert_success
+  assert_output "off"
+
+  run env XDG_CONFIG_HOME= "$MBX_BIN" settings get savings
+  assert_success
+  assert_output "off"
+
+  run env XDG_CONFIG_HOME=relative "$MBX_BIN" settings get savings
+  assert_success
+  assert_output "off"
+
+  run "$MBX_BIN" settings get savings
+  assert_success
+  assert_output "quips"
 }
 
 @test "settings set writes the global configuration file and unset removes it" {
+  unset MBX_GC_MAX_SIZE
   config="$(global_config_file)"
 
   run "$MBX_BIN" settings set gc.max_size 20GiB

@@ -2035,6 +2035,13 @@ fn repair_hint(origin: &usage_config::Origin, key: &str, unknown: bool) -> Optio
 
 /// The global configuration file, which `mbx settings` edits.
 pub(crate) fn config_file_path() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+    {
+        return Some(dir.join("mbx").join("config.toml"));
+    }
     dirs::config_dir().map(|dir| dir.join("mbx").join("config.toml"))
 }
 
@@ -2264,7 +2271,7 @@ mod tests {
             .env("HOME", home.path());
 
         if cfg!(target_os = "macos") {
-            // macOS dirs follow HOME rather than the XDG overrides.
+            command.env_remove("XDG_CONFIG_HOME");
         } else {
             command
                 .env("XDG_CONFIG_HOME", &config_home)
