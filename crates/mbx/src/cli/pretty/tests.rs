@@ -108,6 +108,7 @@ fn coloured_test_results_count_as_they_arrive() {
 /// toolchain selectors and placement configuration do not hide the Cargo verb.
 #[test]
 fn argument_injection_preserves_command_and_program_arguments() {
+    const FORMAT: &str = "--message-format=json,json-diagnostic-rendered-ansi";
     let args = vec![
         "run".into(),
         "--bin=server".into(),
@@ -118,12 +119,33 @@ fn argument_injection_preserves_command_and_program_arguments() {
         cargo_arguments(&args),
         [
             "run",
-            "--bin=server",
             "--message-format=json,json-diagnostic-rendered-ansi",
+            "--bin=server",
             "--",
             "--message-format=custom"
         ]
     );
+    // `cargo run` passes everything from the first positional argument on to
+    // the program, with or without a `--`, so the flag must precede it.
+    for (args, expected) in [
+        (vec!["run", "tui"], vec!["run", FORMAT, "tui"]),
+        (
+            vec!["run", "--release", "tui", "--flag"],
+            vec!["run", FORMAT, "--release", "tui", "--flag"],
+        ),
+        (
+            vec!["run", "tui", "--", "--flag"],
+            vec!["run", FORMAT, "tui", "--", "--flag"],
+        ),
+        (
+            vec!["+stable", "r", "tui"],
+            vec!["+stable", "r", FORMAT, "tui"],
+        ),
+    ] {
+        let args: Vec<String> = args.into_iter().map(Into::into).collect();
+        assert!(eligible(&args), "{args:?}");
+        assert_eq!(cargo_arguments(&args), expected, "{args:?}");
+    }
     assert!(eligible(&args));
     let prefixed = vec!["+stable".into(), "test".into(), "--".into(), "works".into()];
     assert!(eligible(&prefixed));

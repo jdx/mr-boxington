@@ -73,12 +73,13 @@ fn eligible(arguments: &[String]) -> bool {
         })
 }
 
+/// Ask Cargo for JSON output. The flag goes right after the subcommand:
+/// `cargo run` hands everything from its first positional argument on to the
+/// program, so anything appended later would reach the program instead.
 fn cargo_arguments(arguments: &[String]) -> Vec<String> {
     let mut result = arguments.to_vec();
-    let index = result
-        .iter()
-        .position(|arg| arg == "--")
-        .unwrap_or(result.len());
+    let index =
+        super::launch::cargo_subcommand_at(&result).map_or(result.len(), |(index, _)| index + 1);
     result.insert(
         index,
         "--message-format=json,json-diagnostic-rendered-ansi".into(),
