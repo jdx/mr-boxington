@@ -736,7 +736,13 @@ impl S3RemoteCache {
         let url = self.object_url(ObjectKind::ActionManifest, key)?;
         let manifest = &manifest;
         retry_async("PUT", &url, self.retries, || async {
-            let body = manifest().await?;
+            // Only a failed PUT is retried here. The refresh does its own
+            // retrying, so an error from it has already used up that budget
+            // and goes straight back to the caller.
+            let body = match manifest().await {
+                Ok(body) => body,
+                Err(error) => return Ok(Err(error)),
+            };
             let response = self
                 .signed(reqwest::Method::PUT, &url, &PayloadHash::of(&body))
                 .await?
@@ -745,11 +751,11 @@ impl S3RemoteCache {
                 .send()
                 .await?;
             if response.status().is_success() {
-                return Ok(());
+                return Ok(Ok(()));
             }
             Err(FailedRequest::read(response).await.report("update", &url))
         })
-        .await?;
+        .await??;
         if self.may_drop_conditionals() {
             self.note_conditionals_unsupported();
         }

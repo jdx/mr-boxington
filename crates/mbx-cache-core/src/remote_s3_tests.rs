@@ -1403,3 +1403,31 @@ async fn renewal_resumes_once_the_backoff_ends() {
     signing_key(&store).await;
     eventually(async || signing_key(&store).await == "ASIARENEWED").await;
 }
+
+#[tokio::test]
+async fn a_failed_manifest_refresh_is_not_retried_again() {
+    let mut server = mockito::Server::new_async().await;
+    let key = CacheDigest::blake3(b"a task");
+    let never = server
+        .mock("PUT", manifest_path(&key).as_str())
+        .expect(0)
+        .create_async()
+        .await;
+    let store = test_store_with(&server, Duration::from_secs(1), 3);
+    let attempts = std::sync::atomic::AtomicUsize::new(0);
+
+    // The refresh retries its own read. A failure that survives that must not
+    // start the read over once per remaining PUT retry.
+    let error = store
+        .put_action_manifest_unconditionally(&key, || async {
+            attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(eyre::Report::new(TransientRequest("refresh timed out")))
+        })
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("refresh timed out"));
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 1);
+    never.assert_async().await;
+    assert!(store.conditionals_enabled());
+}
