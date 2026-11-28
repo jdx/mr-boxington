@@ -1100,6 +1100,124 @@ fn gc_prunes_abandoned_import_staging() {
 }
 
 #[test]
+fn gc_prunes_abandoned_remote_downloads_and_previews_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    let root = store.join(REMOTE_STAGING_DIR);
+    let blob = root.join(".tmp-blob");
+    let pack = root.join(".tmp-pack");
+    let empty_pack = root.join(".tmp-empty");
+    std::fs::create_dir_all(&pack).unwrap();
+    std::fs::create_dir(&empty_pack).unwrap();
+    std::fs::write(&blob, b"blob").unwrap();
+    std::fs::write(pack.join("0"), b"first").unwrap();
+    std::fs::write(pack.join("1"), b"second").unwrap();
+    let stale = filetime::FileTime::from_system_time(
+        SystemTime::now() - REMOTE_STAGING_RETENTION - Duration::from_secs(60),
+    );
+    for path in [&blob, &pack, &pack.join("0"), &pack.join("1"), &empty_pack] {
+        crate::filetime_compat::set_file_times(path, stale, stale).unwrap();
+    }
+
+    let preview = gc_dry_run(store, u64::MAX).unwrap();
+    assert_eq!(
+        preview,
+        GcOutcome {
+            removed_bytes: 15,
+            ..GcOutcome::default()
+        }
+    );
+    assert!(blob.is_file() && pack.join("0").is_file() && pack.join("1").is_file());
+    assert!(empty_pack.is_dir());
+
+    assert_eq!(gc(store, u64::MAX).unwrap(), preview);
+    assert_eq!(std::fs::read_dir(root).unwrap().count(), 0);
+    assert_eq!(gc(store, u64::MAX).unwrap().removed_bytes, 0);
+}
+
+#[test]
+fn gc_preserves_fresh_and_unrecognized_remote_downloads() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    let root = store.join(REMOTE_STAGING_DIR);
+    let stale = filetime::FileTime::from_system_time(
+        SystemTime::now() - REMOTE_STAGING_RETENTION - Duration::from_secs(60),
+    );
+    let future =
+        filetime::FileTime::from_system_time(SystemTime::now() + Duration::from_secs(3600));
+    let fresh_pack = root.join(".tmp-fresh-pack");
+    let fresh_member = root.join(".tmp-fresh-member");
+    let unknown_member = root.join(".tmp-unknown-member");
+    let nested = root.join(".tmp-nested");
+    std::fs::create_dir_all(nested.join("0")).unwrap();
+    for pack in [&fresh_pack, &fresh_member, &unknown_member] {
+        std::fs::create_dir(pack).unwrap();
+        std::fs::write(pack.join("0"), b"member").unwrap();
+    }
+    std::fs::write(unknown_member.join("unrecognized"), b"data").unwrap();
+    for name in [".tmp-fresh", ".tmp-future", "unrecognized"] {
+        std::fs::write(root.join(name), b"data").unwrap();
+    }
+    for path in [
+        fresh_pack.join("0"),
+        fresh_member,
+        unknown_member.clone(),
+        unknown_member.join("0"),
+        unknown_member.join("unrecognized"),
+        nested.clone(),
+        nested.join("0"),
+        root.join("unrecognized"),
+    ] {
+        crate::filetime_compat::set_file_times(path, stale, stale).unwrap();
+    }
+    crate::filetime_compat::set_file_times(root.join(".tmp-future"), future, future).unwrap();
+
+    assert_eq!(gc(store, u64::MAX).unwrap().removed_bytes, 0);
+    for name in [
+        ".tmp-fresh",
+        ".tmp-future",
+        "unrecognized",
+        ".tmp-fresh-pack/0",
+        ".tmp-fresh-member/0",
+        ".tmp-unknown-member/0",
+        ".tmp-unknown-member/unrecognized",
+        ".tmp-nested/0",
+    ] {
+        assert!(root.join(name).exists(), "{name} must survive GC");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn gc_skips_symlinks_in_remote_staging() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path();
+    let outside = tempfile::tempdir().unwrap();
+    let blob = outside.path().join(".tmp-blob");
+    let root = store.join(REMOTE_STAGING_DIR);
+    std::fs::write(&blob, b"outside").unwrap();
+    let stale = filetime::FileTime::from_system_time(
+        SystemTime::now() - REMOTE_STAGING_RETENTION - Duration::from_secs(60),
+    );
+    crate::filetime_compat::set_file_times(&blob, stale, stale).unwrap();
+    std::os::unix::fs::symlink(outside.path(), &root).unwrap();
+    assert_eq!(gc(store, u64::MAX).unwrap().removed_bytes, 0);
+    assert!(blob.is_file());
+
+    std::fs::remove_file(&root).unwrap();
+    let pack = root.join(".tmp-pack");
+    std::fs::create_dir_all(&pack).unwrap();
+    let link = root.join(".tmp-link");
+    for path in [&link, &pack.join("0")] {
+        std::os::unix::fs::symlink(&blob, path).unwrap();
+        filetime::set_symlink_file_times(path, stale, stale).unwrap();
+    }
+    crate::filetime_compat::set_file_times(&pack, stale, stale).unwrap();
+    assert_eq!(gc(store, u64::MAX).unwrap().removed_bytes, 0);
+    assert!(blob.is_file() && link.is_symlink() && pack.join("0").is_symlink());
+}
+
+#[test]
 fn export_refuses_a_corrupted_object_of_the_right_length() {
     let source = tempfile::tempdir().unwrap();
     let workspace = source.path().join("workspace");
