@@ -2071,34 +2071,53 @@ fn action_rejects_unmapped_absolute_paths() {
 #[cfg(unix)]
 #[test]
 fn nix_sysroots_are_keyed_by_their_full_store_paths() {
-    let key = |store_path| {
+    use std::os::unix::fs::symlink;
+
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().canonicalize().unwrap();
+    let store = root.join("store");
+    let sysroot = store.join("00000000000000000000000000000000-rust-wasm");
+    std::fs::create_dir_all(&sysroot).unwrap();
+
+    let inside = store.join("11111111111111111111111111111111-rust-wasm");
+    symlink(&sysroot, &inside).unwrap();
+    let outside = root.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let escape = store.join("22222222222222222222222222222222-rust-wasm");
+    symlink(&outside, &escape).unwrap();
+
+    let key = |sysroot: &Path| {
+        let sysroot = sysroot.to_str().unwrap();
         let invocation = RustcInvocation::parse(&args(&[
             "--crate-type=lib",
             "--emit=link",
             "--sysroot",
-            store_path,
+            sysroot,
             "src/lib.rs",
         ]))
         .unwrap();
-        let context = context(&[("src/lib.rs", "source")]);
-        let invocation_digest = invocation.invocation_digest(&context).unwrap();
-        let action = invocation.action(context).unwrap();
-        let descriptor: serde_json::Value = serde_json::from_slice(&action.bytes).unwrap();
-        let flag = format!("--sysroot={store_path}");
+        let mut context = context(&[("src/lib.rs", "source")]);
+        context
+            .path_mappings
+            .push(PathMapping::new(&outside, "outside"));
+        let mut builder = ActionBuilder::new(&invocation, context);
+        builder.store_root = store.to_str().unwrap();
+        let invocation_descriptor = builder.invocation_descriptor()?;
         assert!(
-            descriptor["arguments"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|arg| arg == &flag)
+            invocation_descriptor
+                .arguments
+                .contains(&format!("--sysroot={sysroot}"))
         );
-        (invocation_digest, action.digest)
+        Ok(builder.build()?.digest)
     };
 
-    let first = key("/nix/store/00000000000000000000000000000000-rust-wasm");
-    let second = key("/nix/store/11111111111111111111111111111111-rust-wasm");
-    assert_ne!(first.0, second.0);
-    assert_ne!(first.1, second.1);
+    assert_ne!(key(&sysroot).unwrap(), key(&inside).unwrap());
+    for invalid in [escape, store.join("missing")] {
+        assert_eq!(
+            key(&invalid),
+            Err(BypassReason::UnmappedAbsolutePath(invalid))
+        );
+    }
 }
 
 #[cfg(unix)]

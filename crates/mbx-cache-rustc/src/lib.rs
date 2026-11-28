@@ -2535,6 +2535,7 @@ fn parse_emits(value: &str) -> Vec<Emit> {
 
 struct ActionBuilder<'a> {
     invocation: &'a RustcInvocation,
+    store_root: &'a str,
     context: ActionContext,
     mappings: Vec<SharedPathMapping>,
     /// The directories resolved while building this one action. Its inputs
@@ -2551,6 +2552,7 @@ impl<'a> ActionBuilder<'a> {
         Self {
             linker: None,
             invocation,
+            store_root: NIX_STORE_ROOT,
             mappings,
             aliases: PathAliases::default(),
             context,
@@ -2680,7 +2682,7 @@ impl<'a> ActionBuilder<'a> {
         match argument {
             Argument::Plain(value) => Ok(value.clone()),
             Argument::Path { flag, path } if flag == "--sysroot" => {
-                Ok(format!("{flag}={}", self.normalize_file_path(path)?))
+                Ok(format!("{flag}={}", self.normalize_sysroot_path(path)?))
             }
             Argument::Path { flag, path } => Ok(format!("{flag}={}", self.normalize_path(path)?)),
             Argument::SearchPath { kind, path } => {
@@ -2779,6 +2781,21 @@ impl<'a> ActionBuilder<'a> {
         self.normalize_file_path(path)
     }
 
+    fn normalize_sysroot_path(&self, path: &Path) -> Result<String, BypassReason> {
+        let absolute = self.context.working_dir.join(path);
+        if !absolute.starts_with(self.store_root) {
+            return self.normalize_path(path);
+        }
+        // Dep-info omits implicit libraries from the sysroot. Its literal
+        // path can identify them only when the directory stays in the store.
+        if let Some(value) = absolute.to_str()
+            && resolve_nix_store_path(value, self.store_root).is_some_and(|path| path.is_dir())
+        {
+            return Ok(value.to_owned());
+        }
+        Err(BypassReason::UnmappedAbsolutePath(absolute))
+    }
+
     fn normalize_file_path(&self, path: &Path) -> Result<String, BypassReason> {
         self.normalize_path(path)
             .or_else(|reason| key_nix_store_path(path, &self.context.working_dir, reason))
@@ -2836,16 +2853,16 @@ fn denormalize_path(
     }
     // Predictions can come from a shared cache. Check the symlink target as
     // well as the spelling before allowing the caller to read the file.
-    if let Some(path) = nix_store_path(value, store_root)
-        && path.canonicalize().is_ok_and(|resolved| {
-            resolved
-                .to_str()
-                .is_some_and(|resolved| nix_store_path(resolved, store_root).is_some())
-        })
-    {
-        return Ok(path.to_path_buf());
+    if resolve_nix_store_path(value, store_root).is_some() {
+        return Ok(PathBuf::from(value));
     }
     Err(BypassReason::InvalidPredictedInput(value.into()))
+}
+
+fn resolve_nix_store_path(value: &str, store_root: &str) -> Option<PathBuf> {
+    let resolved = nix_store_path(value, store_root)?.canonicalize().ok()?;
+    nix_store_path(resolved.to_str()?, store_root)?;
+    Some(resolved)
 }
 
 fn nix_store_path<'a>(value: &'a str, store_root: &str) -> Option<&'a Path> {
