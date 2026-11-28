@@ -38,11 +38,13 @@ SUBJECTS: dict[str, dict[str, object]] = {
     "aube": {
         "description": "jdx/aube, a 15-crate Rust workspace with C dependencies",
         "url": "https://github.com/jdx/aube.git",
-        # The child changes aube-registry and aube-resolver, so the next-commit
-        # build recompiles those and every workspace crate that depends on
-        # them rather than a single leaf.
-        "parent": "757947e58a893b2dd1bcfa7d108fdd7db249d644",
-        "child": "e9a36ebef471af5acd13e5b5ace31fd94751215f",
+        # The child changes aube-resolver, so the next-commit build recompiles
+        # it and every workspace crate that depends on it rather than a single
+        # leaf. The pair postdates aube#1994; older commits race in the
+        # primer build script when the contention scenario builds them side by
+        # side.
+        "parent": "48b859b13cf05663f622e55426ea3902162bd5b7",
+        "child": "478121b5d9475b9ef710022009d6cebf6bd573a3",
         "args": ["build", "--locked"],
         # Most of the workspace depends on aube-util, so an edit here rebuilds
         # a chain of crates. The binary's own main.rs is a thin shim and would
