@@ -663,24 +663,27 @@ impl S3RemoteCache {
         let body = bytes.to_vec();
         let expected_etag = expected_etag.map(quoted_etag).transpose()?;
         retry_async("PUT", &url, self.retries, || async {
-            let conditional = self.conditionals_enabled();
-            let mut request = self
+            if !self.conditionals_enabled() {
+                // Checked on every attempt: another write on this client may
+                // have found the store lacks conditions while this one waited.
+                // Writing these bytes now would skip the caller's re-read.
+                return Ok(ManifestPutOutcome::ConditionsUnsupported);
+            }
+            let request = self
                 .signed(reqwest::Method::PUT, &url, &PayloadHash::of(&body))
                 .await?
                 .header(CONTENT_LENGTH, body.len())
                 .body(body.clone());
-            if conditional {
-                request = match &expected_etag {
-                    Some(etag) => request.header(IF_MATCH, etag),
-                    None => request.header(IF_NONE_MATCH, "*"),
-                };
-            }
+            let request = match &expected_etag {
+                Some(etag) => request.header(IF_MATCH, etag),
+                None => request.header(IF_NONE_MATCH, "*"),
+            };
             let response = request.send().await?;
             let status = response.status();
             if status.is_success() {
                 return Ok(ManifestPutOutcome::Stored);
             }
-            if conditional && status == StatusCode::PRECONDITION_FAILED {
+            if status == StatusCode::PRECONDITION_FAILED {
                 // Either the manifest moved under us or, for a create, one
                 // already exists. Both mean re-reading and merging.
                 return Ok(ManifestPutOutcome::PreconditionFailed);
@@ -692,7 +695,7 @@ impl S3RemoteCache {
                 return Err(conditional_request_conflict(&url));
             }
             let failure = FailedRequest::read(response).await;
-            if conditional && failure.is_not_implemented() {
+            if failure.is_not_implemented() {
                 if self.may_drop_conditionals() {
                     // Nothing was written. The caller re-reads the manifest
                     // right before writing it without a condition, rather
@@ -715,23 +718,30 @@ impl S3RemoteCache {
 
     /// Store a task action manifest without a precondition.
     ///
-    /// For use once conditions are off or [`ManifestPutOutcome::ConditionsUnsupported`]
-    /// said the store refused one. Success after such a refusal is what shows
-    /// the store, not an intermediary, lacks conditional writes, so it turns
-    /// them off for the rest of the session.
-    pub(crate) async fn put_action_manifest_unconditionally(
+    /// For use once [`ManifestPutOutcome::ConditionsUnsupported`] said the
+    /// store refused one or conditions are off. `manifest` produces the bytes
+    /// for each attempt, so a retry re-reads and merges rather than writing
+    /// what was current before the retry delay. Success after a refusal is what
+    /// shows the store, not an intermediary, lacks conditional writes, so it
+    /// turns them off for the rest of the session.
+    pub(crate) async fn put_action_manifest_unconditionally<F, Fut>(
         &self,
         key: &CacheDigest,
-        bytes: &[u8],
-    ) -> Result<()> {
+        manifest: F,
+    ) -> Result<()>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<u8>>>,
+    {
         let url = self.object_url(ObjectKind::ActionManifest, key)?;
-        let body = bytes.to_vec();
+        let manifest = &manifest;
         retry_async("PUT", &url, self.retries, || async {
+            let body = manifest().await?;
             let response = self
                 .signed(reqwest::Method::PUT, &url, &PayloadHash::of(&body))
                 .await?
                 .header(CONTENT_LENGTH, body.len())
-                .body(body.clone())
+                .body(body)
                 .send()
                 .await?;
             if response.status().is_success() {

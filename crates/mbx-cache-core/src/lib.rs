@@ -254,7 +254,8 @@ pub enum ManifestPutOutcome {
     Stored,
     /// The supplied entity-tag precondition did not match.
     PreconditionFailed,
-    /// The store does not implement the precondition, and nothing was written.
+    /// The store does not implement the precondition, or this session has
+    /// already found that out, and nothing was written.
     ///
     /// Re-read the manifest, merge, and write it with
     /// [`RemoteCacheClient::put_action_manifest_unconditionally`].
@@ -532,17 +533,27 @@ impl RemoteCacheClient {
     /// Store a task action manifest without a precondition.
     ///
     /// Only for a store whose manifest writes are not conditional, or one that
-    /// answered [`ManifestPutOutcome::ConditionsUnsupported`].
-    pub async fn put_action_manifest_unconditionally(
+    /// answered [`ManifestPutOutcome::ConditionsUnsupported`]. `manifest`
+    /// produces the bytes for each attempt, including retries, so it should
+    /// re-read and merge the current manifest each time it is called.
+    pub async fn put_action_manifest_unconditionally<F, Fut>(
         &self,
         key: &CacheDigest,
-        bytes: &[u8],
-    ) -> Result<()> {
+        manifest: F,
+    ) -> Result<()>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<u8>>>,
+    {
         match &self.backend {
             Backend::Http(_) => {
                 bail!("the HTTP remote cache does not take unconditional manifest writes")
             }
-            Backend::S3(store) => store.put_action_manifest_unconditionally(key, bytes).await,
+            Backend::S3(store) => {
+                store
+                    .put_action_manifest_unconditionally(key, manifest)
+                    .await
+            }
         }
     }
 

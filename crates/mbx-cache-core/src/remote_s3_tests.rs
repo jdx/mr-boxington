@@ -455,7 +455,7 @@ async fn a_store_that_does_not_implement_something_else_is_not_retried_forever()
         ManifestPutOutcome::ConditionsUnsupported
     );
     let error = store
-        .put_action_manifest_unconditionally(&key, b"{}")
+        .put_action_manifest_unconditionally(&key, || async { Ok(b"{}".to_vec()) })
         .await
         .unwrap_err();
 
@@ -480,7 +480,7 @@ async fn a_store_without_conditional_writes_is_used_without_them() {
         .mock("PUT", manifest_path(&key).as_str())
         .match_header("if-none-match", mockito::Matcher::Missing)
         .with_status(200)
-        .expect(2)
+        .expect(1)
         .create_async()
         .await;
     let store = test_store(&server);
@@ -493,19 +493,98 @@ async fn a_store_without_conditional_writes_is_used_without_them() {
     );
     assert!(store.manifest_writes_are_conditional());
     store
-        .put_action_manifest_unconditionally(&key, b"{}")
+        .put_action_manifest_unconditionally(&key, || async { Ok(b"{}".to_vec()) })
         .await
         .unwrap();
     assert!(!store.manifest_writes_are_conditional());
     // Having learned it once, the store stops asking for the rest of the
-    // session rather than spending a refused round trip on every write.
+    // session rather than spending a refused round trip on every write, and
+    // hands each later write back to be re-read and sent unconditionally.
     assert_eq!(
         store.put_action_manifest(&key, b"{}", None).await.unwrap(),
-        ManifestPutOutcome::Stored
+        ManifestPutOutcome::ConditionsUnsupported
     );
 
     refused.assert_async().await;
     unconditional.assert_async().await;
+}
+
+#[tokio::test]
+async fn a_manifest_write_queued_behind_the_fallback_is_not_sent_stale() {
+    let mut server = mockito::Server::new_async().await;
+    let key = CacheDigest::blake3(b"a task");
+    server
+        .mock("PUT", manifest_path(&key).as_str())
+        .match_header("if-none-match", "*")
+        .with_status(501)
+        .with_body(s3_error_body("NotImplemented"))
+        .create_async()
+        .await;
+    let unconditional = server
+        .mock("PUT", manifest_path(&key).as_str())
+        .match_header("if-none-match", mockito::Matcher::Missing)
+        .match_header("if-match", mockito::Matcher::Missing)
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let store = test_store(&server);
+    store.put_action_manifest(&key, b"{}", None).await.unwrap();
+    store
+        .put_action_manifest_unconditionally(&key, || async { Ok(b"{}".to_vec()) })
+        .await
+        .unwrap();
+
+    // A write that checked before the fallback and only now gets to send must
+    // go back to its caller to be re-read, not go out with its old bytes.
+    assert_eq!(
+        store
+            .put_action_manifest(&key, b"{}", Some("etag"))
+            .await
+            .unwrap(),
+        ManifestPutOutcome::ConditionsUnsupported
+    );
+    unconditional.assert_async().await;
+}
+
+#[tokio::test]
+async fn an_unconditional_manifest_retry_rebuilds_its_bytes() {
+    let mut server = mockito::Server::new_async().await;
+    let key = CacheDigest::blake3(b"a task");
+    let busy = server
+        .mock("PUT", manifest_path(&key).as_str())
+        .match_body("first")
+        .with_status(503)
+        .with_body(s3_error_body("SlowDown"))
+        .expect(1)
+        .create_async()
+        .await;
+    let stored = server
+        .mock("PUT", manifest_path(&key).as_str())
+        .match_body("second")
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let store = test_store_with(&server, Duration::from_secs(1), 1);
+    let attempts = std::sync::atomic::AtomicUsize::new(0);
+
+    // Another writer can publish during the retry delay, so each attempt asks
+    // for fresh bytes rather than resending the first attempt's.
+    store
+        .put_action_manifest_unconditionally(&key, || async {
+            let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(if attempt == 0 {
+                b"first".to_vec()
+            } else {
+                b"second".to_vec()
+            })
+        })
+        .await
+        .unwrap();
+
+    busy.assert_async().await;
+    stored.assert_async().await;
 }
 
 #[tokio::test]
@@ -531,7 +610,7 @@ async fn conditionals_stay_on_when_dropping_them_does_not_help() {
     );
     assert!(
         store
-            .put_action_manifest_unconditionally(&key, b"{}")
+            .put_action_manifest_unconditionally(&key, || async { Ok(b"{}".to_vec()) })
             .await
             .is_err()
     );
