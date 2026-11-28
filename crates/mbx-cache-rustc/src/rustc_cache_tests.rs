@@ -2063,6 +2063,90 @@ fn action_rejects_unmapped_absolute_paths() {
     assert_eq!(error, BypassReason::UnmappedAbsolutePath(unmapped));
 }
 
+#[cfg(unix)]
+#[test]
+fn nix_sysroots_are_keyed_by_their_full_store_paths() {
+    let key = |store_path| {
+        let invocation = RustcInvocation::parse(&args(&[
+            "--crate-type=lib",
+            "--emit=link",
+            "--sysroot",
+            store_path,
+            "src/lib.rs",
+        ]))
+        .unwrap();
+        let context = context(&[("src/lib.rs", "source")]);
+        let invocation_digest = invocation.invocation_digest(&context).unwrap();
+        let action = invocation.action(context).unwrap();
+        let descriptor: serde_json::Value = serde_json::from_slice(&action.bytes).unwrap();
+        let flag = format!("--sysroot={store_path}");
+        assert!(
+            descriptor["arguments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|arg| arg == &flag)
+        );
+        (invocation_digest, action.digest)
+    };
+
+    let first = key("/nix/store/00000000000000000000000000000000-rust-wasm");
+    let second = key("/nix/store/11111111111111111111111111111111-rust-wasm");
+    assert_ne!(first.0, second.0);
+    assert_ne!(first.1, second.1);
+}
+
+#[cfg(unix)]
+#[test]
+fn nix_standard_library_sources_are_keyed_by_path_and_content() {
+    let key = |source, contents| {
+        let invocation = RustcInvocation::parse(&args(&[
+            "--crate-name=core",
+            "--crate-type=lib",
+            "--emit=dep-info,metadata,link",
+            "-Zforce-unstable-if-unmarked",
+            source,
+        ]))
+        .unwrap();
+        let context = context(&[(source, contents)]);
+        let invocation_digest = invocation.invocation_digest(&context).unwrap();
+        let action = invocation.action(context).unwrap();
+        let descriptor: serde_json::Value = serde_json::from_slice(&action.bytes).unwrap();
+        assert_eq!(descriptor["inputs"][0]["path"], source);
+        (invocation_digest, action.digest)
+    };
+    let source = "/nix/store/00000000000000000000000000000000-rust-src/library/core/src/lib.rs";
+    let other = "/nix/store/11111111111111111111111111111111-rust-src/library/core/src/lib.rs";
+    let first = key(source, "source");
+    let second = key(other, "source");
+    assert_ne!(first.0, second.0);
+    assert_ne!(first.1, second.1);
+    assert_ne!(first.1, key(source, "changed").1);
+}
+
+#[cfg(unix)]
+#[test]
+fn nix_store_key_paths_require_a_literal_path_beneath_the_store() {
+    for invalid in [
+        "/nix/store",
+        "/nix/store/",
+        "/nix/store-backup/package/lib.rs",
+        "/nix/store/../lib.rs",
+        "/nix/store/package/../lib.rs",
+        "/nix/store/package/./lib.rs",
+        "/nix/store/package//lib.rs",
+    ] {
+        assert!(matches!(
+            normalize_input_path(Path::new(invalid), &workspace(), &[]),
+            Err(BypassReason::UnmappedAbsolutePath(_))
+        ));
+        assert_eq!(
+            denormalize_path(invalid, &[]),
+            Err(BypassReason::InvalidPredictedInput(invalid.into()))
+        );
+    }
+}
+
 #[test]
 fn custom_targets_are_required_inputs() {
     let invocation = RustcInvocation::parse(&args(&[
