@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.2.4...mbx-cache-store-v0.2.5) - 2026-11-28
+
+### Fixed
+
+- *(gc)* reclaim abandoned remote downloads ([#1026](https://github.com/jdx/mr-boxington/pull/1026))
+
 ## [0.2.4](https://github.com/jdx/mr-boxington/compare/mbx-cache-store-v0.2.3...mbx-cache-store-v0.2.4) - 2026-11-24
 
 ### Fixed
