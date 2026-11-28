@@ -663,56 +663,103 @@ impl S3RemoteCache {
         let body = bytes.to_vec();
         let expected_etag = expected_etag.map(quoted_etag).transpose()?;
         retry_async("PUT", &url, self.retries, || async {
-            // Set once the store has refused a condition and the same write is
-            // being tried without one, so that success can be attributed.
-            let mut dropped_condition = false;
-            let outcome = loop {
-                let conditional = self.conditionals_enabled() && !dropped_condition;
-                let mut request = self
-                    .signed(reqwest::Method::PUT, &url, &PayloadHash::of(&body))
-                    .await?
-                    .header(CONTENT_LENGTH, body.len())
-                    .body(body.clone());
-                if conditional {
-                    request = match &expected_etag {
-                        Some(etag) => request.header(IF_MATCH, etag),
-                        None => request.header(IF_NONE_MATCH, "*"),
-                    };
-                }
-                let response = request.send().await?;
-                let status = response.status();
-                if status.is_success() {
-                    if dropped_condition {
-                        self.note_conditionals_unsupported();
-                    }
-                    break ManifestPutOutcome::Stored;
-                }
-                if conditional && status == StatusCode::PRECONDITION_FAILED {
-                    // Either the manifest moved under us or, for a create, one
-                    // already exists. Both mean re-reading and merging.
-                    break ManifestPutOutcome::PreconditionFailed;
-                }
-                if status == StatusCode::CONFLICT {
-                    // A concurrent conditional write on the same key. S3 asks
-                    // that this be retried rather than treated as a conflict of
-                    // content.
-                    return Err(conditional_request_conflict(&url));
-                }
-                let failure = FailedRequest::read(response).await;
-                if conditional && failure.is_not_implemented() {
-                    if self.may_drop_conditionals() {
-                        dropped_condition = true;
-                        continue;
-                    }
-                    return Err(failure.report("update", &url).wrap_err(
-                        "conditional writes are required but this store does not implement them",
-                    ));
-                }
-                return Err(failure.report("update", &url));
+            if !self.conditionals_enabled() {
+                // Checked on every attempt: another write on this client may
+                // have found the store lacks conditions while this one waited.
+                // Writing these bytes now would skip the caller's re-read.
+                return Ok(ManifestPutOutcome::ConditionsUnsupported);
+            }
+            let request = self
+                .signed(reqwest::Method::PUT, &url, &PayloadHash::of(&body))
+                .await?
+                .header(CONTENT_LENGTH, body.len())
+                .body(body.clone());
+            let request = match &expected_etag {
+                Some(etag) => request.header(IF_MATCH, etag),
+                None => request.header(IF_NONE_MATCH, "*"),
             };
-            Ok(outcome)
+            let response = request.send().await?;
+            let status = response.status();
+            if status.is_success() {
+                return Ok(ManifestPutOutcome::Stored);
+            }
+            if status == StatusCode::PRECONDITION_FAILED {
+                // Either the manifest moved under us or, for a create, one
+                // already exists. Both mean re-reading and merging.
+                return Ok(ManifestPutOutcome::PreconditionFailed);
+            }
+            if status == StatusCode::CONFLICT {
+                // A concurrent conditional write on the same key. S3 asks
+                // that this be retried rather than treated as a conflict of
+                // content.
+                return Err(conditional_request_conflict(&url));
+            }
+            let failure = FailedRequest::read(response).await;
+            if failure.is_not_implemented() {
+                if self.may_drop_conditionals() {
+                    // Nothing was written. The caller re-reads the manifest
+                    // right before writing it without a condition, rather
+                    // than overwriting whatever it read when its build began.
+                    return Ok(ManifestPutOutcome::ConditionsUnsupported);
+                }
+                return Err(failure.report("update", &url).wrap_err(
+                    "conditional writes are required but this store does not implement them",
+                ));
+            }
+            Err(failure.report("update", &url))
         })
         .await
+    }
+
+    /// Whether a manifest update is guarded by the entity tag it was read with.
+    pub(crate) fn manifest_writes_are_conditional(&self) -> bool {
+        self.conditionals_enabled()
+    }
+
+    /// Store a task action manifest without a precondition.
+    ///
+    /// For use once [`ManifestPutOutcome::ConditionsUnsupported`] said the
+    /// store refused one or conditions are off. `manifest` produces the bytes
+    /// for each attempt, so a retry re-reads and merges rather than writing
+    /// what was current before the retry delay. Success after a refusal is what
+    /// shows the store, not an intermediary, lacks conditional writes, so it
+    /// turns them off for the rest of the session.
+    pub(crate) async fn put_action_manifest_unconditionally<F, Fut>(
+        &self,
+        key: &CacheDigest,
+        manifest: F,
+    ) -> Result<()>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<u8>>>,
+    {
+        let url = self.object_url(ObjectKind::ActionManifest, key)?;
+        let manifest = &manifest;
+        retry_async("PUT", &url, self.retries, || async {
+            // Only a failed PUT is retried here. The refresh does its own
+            // retrying, so an error from it has already used up that budget
+            // and goes straight back to the caller.
+            let body = match manifest().await {
+                Ok(body) => body,
+                Err(error) => return Ok(Err(error)),
+            };
+            let response = self
+                .signed(reqwest::Method::PUT, &url, &PayloadHash::of(&body))
+                .await?
+                .header(CONTENT_LENGTH, body.len())
+                .body(body)
+                .send()
+                .await?;
+            if response.status().is_success() {
+                return Ok(Ok(()));
+            }
+            Err(FailedRequest::read(response).await.report("update", &url))
+        })
+        .await??;
+        if self.may_drop_conditionals() {
+            self.note_conditionals_unsupported();
+        }
+        Ok(())
     }
 
     pub(crate) async fn put_blob(&self, upload: &BlobUpload) -> Result<()> {

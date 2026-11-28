@@ -1847,14 +1847,27 @@ impl CacheAgent {
         };
         let (_, selector) = Self::task_manifest_selector(task)?;
         let _permit = self.remote_transfers.acquire().await?;
-        self.stats
+        Self::fetch_remote_task_manifest(&self.stats, remote, &selector, |bytes| {
+            self.parse_task_manifest(task, bytes, true)
+        })
+        .await
+    }
+
+    /// Read a task manifest without taking a transfer permit; the caller holds one.
+    async fn fetch_remote_task_manifest(
+        stats: &AtomicAgentStats,
+        remote: &RemoteCacheClient,
+        selector: &CacheDigest,
+        parse: impl FnOnce(&[u8]) -> Result<TaskActionManifest>,
+    ) -> Result<Option<(TaskActionManifest, String)>> {
+        stats
             .remote_manifest_lookups
             .fetch_add(1, Ordering::Relaxed);
-        let _timer = AtomicDurationTimer::start(&self.stats.remote_manifest_lookup_duration_ns);
-        let Some(remote_manifest) = remote.get_action_manifest(&selector).await? else {
+        let _timer = AtomicDurationTimer::start(&stats.remote_manifest_lookup_duration_ns);
+        let Some(remote_manifest) = remote.get_action_manifest(selector).await? else {
             return Ok(None);
         };
-        let manifest = self.parse_task_manifest(task, &remote_manifest.bytes, true)?;
+        let manifest = parse(&remote_manifest.bytes)?;
         Ok(Some((manifest, remote_manifest.etag)))
     }
 
@@ -1870,7 +1883,41 @@ impl CacheAgent {
             return Ok(manifest);
         };
         let (_, selector) = Self::task_manifest_selector(task)?;
+        // Without a condition a write replaces whatever is there, so the merge
+        // has to happen against the newest manifest, read immediately before
+        // the write, not the one this build started from. That leaves a race
+        // of one round trip instead of a whole build.
+        let mut conditional = remote.manifest_writes_are_conditional();
         for _ in 0..4 {
+            if !conditional {
+                // Each attempt, retries included, merges into the manifest as
+                // it is at that moment.
+                let current = std::sync::Mutex::new(manifest);
+                let _permit = self.remote_transfers.acquire().await?;
+                remote
+                    .put_action_manifest_unconditionally(&selector, || async {
+                        let newest = Self::fetch_remote_task_manifest(
+                            &self.stats,
+                            remote,
+                            &selector,
+                            |bytes| self.parse_task_manifest(task, bytes, true),
+                        )
+                        .await?;
+                        let mut manifest = current.lock().unwrap();
+                        if let Some((remote_manifest, _)) = newest {
+                            *manifest = merge_task_manifests(
+                                task,
+                                remote_manifest,
+                                manifest.clone(),
+                                required,
+                                fallbacks,
+                            )?;
+                        }
+                        canonical_json(&*manifest)
+                    })
+                    .await?;
+                return Ok(current.into_inner().unwrap());
+            }
             let bytes = canonical_json(&manifest)?;
             let outcome = {
                 let _permit = self.remote_transfers.acquire().await?;
@@ -1890,6 +1937,7 @@ impl CacheAgent {
                         merge_task_manifests(task, remote_manifest, manifest, required, fallbacks)?;
                     expected_etag = Some(etag);
                 }
+                ManifestPutOutcome::ConditionsUnsupported => conditional = false,
             }
         }
         bail!("remote task action manifest changed too frequently")

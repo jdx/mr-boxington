@@ -254,6 +254,12 @@ pub enum ManifestPutOutcome {
     Stored,
     /// The supplied entity-tag precondition did not match.
     PreconditionFailed,
+    /// The store does not implement the precondition, or this session has
+    /// already found that out, and nothing was written.
+    ///
+    /// Re-read the manifest, merge, and write it with
+    /// [`RemoteCacheClient::put_action_manifest_unconditionally`].
+    ConditionsUnsupported,
 }
 
 /// A client for a remote mbx cache.
@@ -509,6 +515,45 @@ impl RemoteCacheClient {
         match &self.backend {
             Backend::Http(client) => client.put_action_manifest(key, bytes, expected_etag).await,
             Backend::S3(store) => store.put_action_manifest(key, bytes, expected_etag).await,
+        }
+    }
+
+    /// Whether a manifest update is guarded by the entity tag it was read with.
+    ///
+    /// When it is not, another writer can replace the manifest between a read
+    /// and the write that follows it, so a caller should read as close to its
+    /// write as it can.
+    pub fn manifest_writes_are_conditional(&self) -> bool {
+        match &self.backend {
+            Backend::Http(_) => true,
+            Backend::S3(store) => store.manifest_writes_are_conditional(),
+        }
+    }
+
+    /// Store a task action manifest without a precondition.
+    ///
+    /// Only for a store whose manifest writes are not conditional, or one that
+    /// answered [`ManifestPutOutcome::ConditionsUnsupported`]. `manifest`
+    /// produces the bytes for each attempt, including retries, so it should
+    /// re-read and merge the current manifest each time it is called.
+    pub async fn put_action_manifest_unconditionally<F, Fut>(
+        &self,
+        key: &CacheDigest,
+        manifest: F,
+    ) -> Result<()>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<u8>>>,
+    {
+        match &self.backend {
+            Backend::Http(_) => {
+                bail!("the HTTP remote cache does not take unconditional manifest writes")
+            }
+            Backend::S3(store) => {
+                store
+                    .put_action_manifest_unconditionally(key, manifest)
+                    .await
+            }
         }
     }
 

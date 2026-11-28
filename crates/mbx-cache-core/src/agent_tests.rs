@@ -2250,6 +2250,134 @@ async fn a_write_only_hit_adds_a_fallback_missing_from_the_remote_manifest() {
     published.assert_async().await;
 }
 
+/// An agent whose remote is an S3 store at this mock server.
+fn s3_remote_agent(
+    server: &mockito::ServerGuard,
+    cache_dir: PathBuf,
+    mode: RemoteCacheMode,
+) -> CacheAgent {
+    let client = RemoteCacheClient::new_s3(crate::S3RemoteCacheConfig {
+        bucket: "cache-bucket".into(),
+        prefix: String::new(),
+        namespace: "test".into(),
+        region: "us-east-1".into(),
+        endpoint: Some(server.url().parse().unwrap()),
+        force_path_style: None,
+        conditional_writes: crate::S3ConditionalWrites::Auto,
+        credentials: crate::S3Credentials {
+            access_key_id: "AKIDEXAMPLE".into(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
+            session_token: None,
+        },
+        connect_timeout: Duration::from_secs(1),
+        read_timeout: Duration::from_secs(1),
+        download_timeout: Duration::from_secs(1),
+        retries: 0,
+    })
+    .unwrap();
+    CacheAgent::new_remote_with_download_limit(
+        &cache_dir,
+        "test-version",
+        AgentRemoteCache {
+            client,
+            mode,
+            staging_dir: cache_dir.join("remote"),
+        },
+        DEFAULT_MAX_REMOTE_DOWNLOAD_BYTES,
+    )
+}
+
+#[tokio::test]
+async fn a_store_without_conditional_writes_keeps_a_concurrent_writers_predictions() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let mut server = mockito::Server::new_async().await;
+    let task = "f".repeat(64);
+    let predictions = seeded_predictions(&["shared", "this build's", "another job's"]);
+    CacheAgent::new(&cache, "test-version")
+        .persist_task_manifest(&TaskActionManifest {
+            version: TASK_ACTION_MANIFEST_VERSION,
+            task: task.clone(),
+            predictions: predictions[..2].to_vec(),
+        })
+        .unwrap();
+    let (_, selector) = CacheAgent::task_manifest_selector(&task).unwrap();
+    let path = format!(
+        "/cache-bucket/test/v1/action-manifests/blake3/{}/{}",
+        selector.hash, selector.size
+    );
+    let manifest_with = |predictions: Vec<ActionPrediction>| {
+        canonical_json(&TaskActionManifest {
+            version: TASK_ACTION_MANIFEST_VERSION,
+            task: task.clone(),
+            predictions,
+        })
+        .unwrap()
+    };
+    // What this job reads before it writes.
+    let first_read = server
+        .mock("GET", path.as_str())
+        .with_status(200)
+        .with_header("etag", "\"first\"")
+        .with_body(manifest_with(vec![predictions[0].clone()]))
+        .expect(1)
+        .create_async()
+        .await;
+    // Another job publishes before this one's write lands.
+    let second_read = server
+        .mock("GET", path.as_str())
+        .with_status(200)
+        .with_header("etag", "\"second\"")
+        .with_body(manifest_with(vec![
+            predictions[2].clone(),
+            predictions[0].clone(),
+        ]))
+        .expect(1)
+        .create_async()
+        .await;
+    let refused = server
+        .mock("PUT", path.as_str())
+        .match_header("if-match", "\"first\"")
+        .with_status(501)
+        .with_body("<Error><Code>NotImplemented</Code></Error>")
+        .expect(1)
+        .create_async()
+        .await;
+    let hex = |prediction: &ActionPrediction| prediction.invocation.hash.clone();
+    let published = server
+        .mock("PUT", path.as_str())
+        .match_header("if-match", mockito::Matcher::Missing)
+        .match_header("if-none-match", mockito::Matcher::Missing)
+        .match_body(mockito::Matcher::AllOf(
+            predictions
+                .iter()
+                .map(|prediction| mockito::Matcher::Regex(hex(prediction)))
+                .collect(),
+        ))
+        .with_status(200)
+        .expect(1)
+        .create_async()
+        .await;
+    let agent = s3_remote_agent(&server, cache, RemoteCacheMode::WriteOnly);
+
+    let run = agent.begin_task_on_prediction(&task).await.unwrap();
+    assert!(matches!(
+        agent
+            .respond(AgentRequest::RecordActionPrediction {
+                task: run.clone(),
+                prediction: predictions[0].clone(),
+            })
+            .await,
+        AgentResponse::ActionPredictionRecorded
+    ));
+    agent.commit_task(&run).await.unwrap();
+
+    first_read.assert_async().await;
+    refused.assert_async().await;
+    second_read.assert_async().await;
+    published.assert_async().await;
+}
+
 #[tokio::test]
 async fn the_newest_manifest_in_the_store_is_the_last_resort() {
     let directory = tempfile::tempdir().unwrap();
