@@ -190,8 +190,9 @@ place, and conditional writes prevent concurrent updates from overwriting one
 another. AWS S3, R2, and current MinIO all implement them. Against a bucket that
 does not, mbx says so once and continues without them. Blobs and action results
 are content-addressed, so writing one twice is harmless. Without conditional
-writes, though, concurrent manifest updates can lose each other's predictions,
-which costs prefetch coverage on later builds.
+writes, mbx re-reads the manifest and merges into it just before each update,
+but two updates that land within one round trip can still lose each other's
+predictions, which costs prefetch coverage on later builds.
 `MBX_REMOTE_S3_CONDITIONAL_WRITES=required` refuses such a bucket instead.
 
 ### Who may publish

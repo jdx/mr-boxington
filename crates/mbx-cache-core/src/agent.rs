@@ -1870,7 +1870,24 @@ impl CacheAgent {
             return Ok(manifest);
         };
         let (_, selector) = Self::task_manifest_selector(task)?;
+        // Without a condition a write replaces whatever is there, so the merge
+        // has to happen against the newest manifest, read immediately before
+        // the write, not the one this build started from. That leaves a race
+        // of one round trip instead of a whole build.
+        let mut conditional = remote.manifest_writes_are_conditional();
         for _ in 0..4 {
+            if !conditional {
+                if let Some((remote_manifest, _)) = self.get_remote_task_manifest(task).await? {
+                    manifest =
+                        merge_task_manifests(task, remote_manifest, manifest, required, fallbacks)?;
+                }
+                let bytes = canonical_json(&manifest)?;
+                let _permit = self.remote_transfers.acquire().await?;
+                remote
+                    .put_action_manifest_unconditionally(&selector, &bytes)
+                    .await?;
+                return Ok(manifest);
+            }
             let bytes = canonical_json(&manifest)?;
             let outcome = {
                 let _permit = self.remote_transfers.acquire().await?;
@@ -1890,6 +1907,7 @@ impl CacheAgent {
                         merge_task_manifests(task, remote_manifest, manifest, required, fallbacks)?;
                     expected_etag = Some(etag);
                 }
+                ManifestPutOutcome::ConditionsUnsupported => conditional = false,
             }
         }
         bail!("remote task action manifest changed too frequently")

@@ -448,14 +448,18 @@ async fn a_store_that_does_not_implement_something_else_is_not_retried_forever()
         .await;
     let mut settings = config(&server);
     settings.retries = 3;
+    let store = S3RemoteCache::new(settings).unwrap();
 
-    let error = S3RemoteCache::new(settings)
-        .unwrap()
-        .put_action_manifest(&key, b"{}", None)
+    assert_eq!(
+        store.put_action_manifest(&key, b"{}", None).await.unwrap(),
+        ManifestPutOutcome::ConditionsUnsupported
+    );
+    let error = store
+        .put_action_manifest_unconditionally(&key, b"{}")
         .await
         .unwrap_err();
 
-    // One conditional attempt, one unconditional retry, and no more.
+    // One conditional attempt, one unconditional write, and no more.
     refusals.assert_async().await;
     assert!(error.to_string().contains("failed to update"));
 }
@@ -481,10 +485,18 @@ async fn a_store_without_conditional_writes_is_used_without_them() {
         .await;
     let store = test_store(&server);
 
+    // Nothing is written on the refusal, so the caller can re-read the
+    // manifest before it overwrites it.
     assert_eq!(
         store.put_action_manifest(&key, b"{}", None).await.unwrap(),
-        ManifestPutOutcome::Stored
+        ManifestPutOutcome::ConditionsUnsupported
     );
+    assert!(store.manifest_writes_are_conditional());
+    store
+        .put_action_manifest_unconditionally(&key, b"{}")
+        .await
+        .unwrap();
+    assert!(!store.manifest_writes_are_conditional());
     // Having learned it once, the store stops asking for the rest of the
     // session rather than spending a refused round trip on every write.
     assert_eq!(
@@ -513,7 +525,16 @@ async fn conditionals_stay_on_when_dropping_them_does_not_help() {
         .await;
     let store = test_store(&server);
 
-    assert!(store.put_action_manifest(&key, b"{}", None).await.is_err());
+    assert_eq!(
+        store.put_action_manifest(&key, b"{}", None).await.unwrap(),
+        ManifestPutOutcome::ConditionsUnsupported
+    );
+    assert!(
+        store
+            .put_action_manifest_unconditionally(&key, b"{}")
+            .await
+            .is_err()
+    );
 
     assert!(store.conditionals_enabled());
 }
