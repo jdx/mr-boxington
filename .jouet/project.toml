@@ -1,4 +1,0 @@
-[checks]
-full = "mise run test"
-lint = "mise run lint"
-before_push = ["mise run ci"]

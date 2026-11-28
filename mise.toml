@@ -155,7 +155,6 @@ aube = { version = "latest", lazy = true, lazy_bins = ["aube"], minimum_release_
 hk = { version = "latest", minimum_release_age = "0s" }
 communique = { version = "latest", minimum_release_age = "0s" }
 jactionlint = "latest"
-jouet = "v0.0.5"
 lychee = "0.24.2"
 node = "24"
 python = "3"
