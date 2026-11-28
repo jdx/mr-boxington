@@ -20,9 +20,6 @@ compiler caching in the Rust ecosystem. It reuses compiler work locally and
 through remote storage, and supports a broader set of compilers and use cases
 than mbx.
 
-See the [comparison with sccache](/compared#sccache) for where mbx makes
-different tradeoffs.
-
 ## kache
 
 [kache](https://github.com/kunobi-ninja/kache) predates mbx and directly
@@ -31,8 +28,7 @@ with C and C++ compiler shims, remote storage, and executable caching.
 
 mbx and kache do not share code. Both aim to make compiled work reusable across
 checkouts; they differ in process lifecycle, storage management, and remote
-policy. The [comparison with kache](/compared#kache) explains where mbx took a
-different direction and where kache may be the better fit.
+policy.
 
 ## cargo-pretty
 

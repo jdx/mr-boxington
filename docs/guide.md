@@ -50,8 +50,6 @@ For automatic Cargo wrapping and rust-analyzer, see [Cargo and editor setup](/se
 ## About mbx
 
 [Benchmarks](/benchmarks) includes measured results and the method behind them.
-[How mbx compares](/compared) explains the tradeoffs with other caches and
-Cargo's incremental compilation.
 
 ## Look something up
 

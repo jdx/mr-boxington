@@ -66,7 +66,7 @@ export default defineConfig({
         text: "Docs",
         link: "/guide",
         activeMatch:
-          "^/(guide|getting-started|installation|setup|cookbook/local-development|scheduling|incremental|linkers|managed-targets|standalone-builds|tui|stats|troubleshooting|analyze|cache-results|how-it-works|limits|compared|faq|song|acknowledgements)",
+          "^/(guide|getting-started|installation|setup|cookbook/local-development|scheduling|incremental|linkers|managed-targets|standalone-builds|tui|stats|troubleshooting|analyze|cache-results|how-it-works|limits|faq|song|acknowledgements)",
       },
       {
         text: "CI & sharing",
@@ -132,7 +132,6 @@ export default defineConfig({
       {
         text: "About mbx",
         items: [
-          { text: "How mbx compares", link: "/compared" },
           { text: "Benchmarks", link: "/benchmarks" },
           { text: "Acknowledgements", link: "/acknowledgements" },
           { text: "The song", link: "/song" },
