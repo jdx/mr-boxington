@@ -11,7 +11,8 @@ compare a representative warm build. For production release jobs, follow
 
 Replace the existing cache action with `jdx/mr-boxington-action`. Both actions
 can transport Cargo's target state, so using both for the same paths duplicates
-the restore and save work. See [CI caches](/compared#tarball-ci-caches).
+the restore and save work. See
+[GitHub Actions cache](/github-action#github-actions-cache).
 
 Before:
 
