@@ -1196,6 +1196,16 @@ impl RustcInputPrediction {
         path_mappings: &[PathMapping],
         digests: &dyn FileDigestCache,
     ) -> Result<DiscoveredInputs, BypassReason> {
+        self.discover_with_store(working_dir, path_mappings, digests, NIX_STORE_ROOT)
+    }
+
+    fn discover_with_store(
+        &self,
+        working_dir: &Path,
+        path_mappings: &[PathMapping],
+        digests: &dyn FileDigestCache,
+        store_root: &str,
+    ) -> Result<DiscoveredInputs, BypassReason> {
         if !matches!(self.version, 2..=4) {
             return Err(BypassReason::UnsupportedPrediction);
         }
@@ -1211,7 +1221,7 @@ impl RustcInputPrediction {
             if self.version >= 3
                 && let Some(path) = path.strip_prefix(NATIVE_DIRECTORY_PREDICTION_PREFIX)
             {
-                let directory = denormalize_path(path, path_mappings)?;
+                let directory = denormalize_path(path, path_mappings, store_root)?;
                 dep_info::collect_native_directory(
                     &directory,
                     &admitted_roots,
@@ -1220,7 +1230,7 @@ impl RustcInputPrediction {
                     &mut counted,
                 )?;
             } else {
-                let path = denormalize_path(path, path_mappings)?;
+                let path = denormalize_path(path, path_mappings, store_root)?;
                 named.insert(path.clone());
                 paths.insert(path);
             }
@@ -2796,7 +2806,11 @@ fn under_any_directory(path: &str, directories: &BTreeSet<String>) -> bool {
     })
 }
 
-fn denormalize_path(value: &str, mappings: &[PathMapping]) -> Result<PathBuf, BypassReason> {
+fn denormalize_path(
+    value: &str,
+    mappings: &[PathMapping],
+    store_root: &str,
+) -> Result<PathBuf, BypassReason> {
     for mapping in mappings {
         let prefix = format!("${{{}}}", mapping.placeholder);
         let suffix = if value == prefix {
@@ -2822,11 +2836,11 @@ fn denormalize_path(value: &str, mappings: &[PathMapping]) -> Result<PathBuf, By
     }
     // Predictions can come from a shared cache. Check the symlink target as
     // well as the spelling before allowing the caller to read the file.
-    if let Some(path) = nix_store_path(value)
+    if let Some(path) = nix_store_path(value, store_root)
         && path.canonicalize().is_ok_and(|resolved| {
             resolved
                 .to_str()
-                .is_some_and(|resolved| nix_store_path(resolved).is_some())
+                .is_some_and(|resolved| nix_store_path(resolved, store_root).is_some())
         })
     {
         return Ok(path.to_path_buf());
@@ -2834,12 +2848,12 @@ fn denormalize_path(value: &str, mappings: &[PathMapping]) -> Result<PathBuf, By
     Err(BypassReason::InvalidPredictedInput(value.into()))
 }
 
-fn nix_store_path(value: &str) -> Option<&Path> {
+fn nix_store_path<'a>(value: &'a str, store_root: &str) -> Option<&'a Path> {
     let path = Path::new(value);
     if !path.is_absolute() {
         return None;
     }
-    let suffix = value.strip_prefix(NIX_STORE_ROOT)?.strip_prefix('/')?;
+    let suffix = value.strip_prefix(store_root)?.strip_prefix('/')?;
     (!suffix.split('/').any(|component| {
         component.is_empty() || matches!(component, "." | "..") || component.contains('\0')
     }))
@@ -2854,7 +2868,7 @@ fn key_nix_store_path(
     if matches!(reason, BypassReason::UnmappedAbsolutePath(_)) {
         let absolute = working_dir.join(path);
         if let Some(value) = absolute.to_str()
-            && nix_store_path(value).is_some()
+            && nix_store_path(value, NIX_STORE_ROOT).is_some()
         {
             return Ok(value.to_owned());
         }

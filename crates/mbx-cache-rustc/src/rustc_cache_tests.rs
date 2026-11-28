@@ -1645,7 +1645,12 @@ fn rejects_noncanonical_compact_prediction_prefixes() {
 fn predicted_mapping_root_round_trips() {
     let workspace = workspace();
     assert_eq!(
-        denormalize_path("${workspace}", &[PathMapping::new(&workspace, "workspace")]).unwrap(),
+        denormalize_path(
+            "${workspace}",
+            &[PathMapping::new(&workspace, "workspace")],
+            NIX_STORE_ROOT
+        )
+        .unwrap(),
         workspace
     );
 }
@@ -2141,10 +2146,74 @@ fn nix_store_key_paths_require_a_literal_path_beneath_the_store() {
             Err(BypassReason::UnmappedAbsolutePath(_))
         ));
         assert_eq!(
-            denormalize_path(invalid, &[]),
+            denormalize_path(invalid, &[], NIX_STORE_ROOT),
             Err(BypassReason::InvalidPredictedInput(invalid.into()))
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn nix_store_prediction_rediscovers_files_and_checks_symlink_targets() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = tempfile::tempdir().unwrap();
+    let working_dir = fixture.path().canonicalize().unwrap();
+    let store = working_dir.join("store");
+    let package = store.join("00000000000000000000000000000000-rust-src");
+    std::fs::create_dir_all(&package).unwrap();
+    let source = package.join("lib.rs");
+    std::fs::write(&source, "first source").unwrap();
+
+    let internal = package.join("internal.rs");
+    symlink(&source, &internal).unwrap();
+    // A sibling that shares the store root's string prefix is outside it.
+    let outside = working_dir.join("store-other");
+    std::fs::write(&outside, "outside").unwrap();
+    let external = package.join("external.rs");
+    symlink(outside, &external).unwrap();
+
+    let predict = |paths: &[&Path]| {
+        let prediction = RustcInputPrediction {
+            version: 4,
+            inputs: paths
+                .iter()
+                .map(|path| path.to_str().unwrap().into())
+                .collect(),
+            environment: Vec::new(),
+            compiler_duration_ns: 0,
+            crate_name: "core".into(),
+        };
+        let serialized = serde_json::to_vec(&prediction).unwrap();
+        let restored: RustcInputPrediction = serde_json::from_slice(&serialized).unwrap();
+        restored.discover_with_store(
+            &working_dir,
+            &[],
+            &mbx_cache_core::NoFileDigestCache,
+            store.to_str().unwrap(),
+        )
+    };
+
+    let inputs = predict(&[&source, &internal]).unwrap().inputs;
+    assert_eq!(inputs.len(), 2);
+    for (input, path) in inputs.iter().zip([&internal, &source]) {
+        assert_eq!(&input.path, path);
+        assert_eq!(input.digest, digest("first source"));
+    }
+    std::fs::write(&source, "changed source").unwrap();
+    let inputs = predict(&[&source, &internal]).unwrap().inputs;
+    assert!(
+        inputs
+            .iter()
+            .all(|input| input.digest == digest("changed source"))
+    );
+
+    assert_eq!(
+        predict(&[&external]),
+        Err(BypassReason::InvalidPredictedInput(
+            external.to_str().unwrap().into()
+        ))
+    );
 }
 
 #[test]
