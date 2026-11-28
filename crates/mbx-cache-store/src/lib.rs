@@ -37,11 +37,13 @@ const CHECKOUT_RECORD_VERSION: u8 = 1;
 const BUILD_RECEIPTS_DIR: &str = "build-receipts/v1";
 const BUILD_RECEIPT_VERSION: u8 = 1;
 const IMPORT_STAGING_DIR: &str = "import-staging";
+const REMOTE_STAGING_DIR: &str = "remote";
 const EXPORT_MANIFEST: &str = "mbx-cache-export-v1.json";
 const EXPORT_VERSION: u8 = 2;
 const LEGACY_EXPORT_VERSION: u8 = 1;
 
 const IMPORT_STAGING_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+const REMOTE_STAGING_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const SESSION_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// How long an unclaimed task manifest or its lock must sit untouched before a
@@ -2267,6 +2269,9 @@ fn gc_with_mode(
     outcome.removed_session_streams += sessions.removed_streams;
     outcome.removed_bytes += sessions.removed_bytes;
     prune_import_staging(store, dry_run);
+    outcome.removed_bytes = outcome
+        .removed_bytes
+        .saturating_add(prune_remote_staging(store, dry_run));
 
     outcome.remaining_bytes = live_bytes;
     Ok(outcome)
@@ -2562,6 +2567,81 @@ fn prune_import_staging(store: &Path, dry_run: bool) {
         drop(lock);
         let _ = std::fs::remove_file(&lock_path);
     }
+}
+
+/// Reclaim temporary remote downloads left by interrupted builds. Downloads
+/// have no cross-process claim, so require a full day without writes to either
+/// the entry or any of its members.
+fn prune_remote_staging(store: &Path, dry_run: bool) -> u64 {
+    let root = store.join(REMOTE_STAGING_DIR);
+    if !std::fs::symlink_metadata(&root).is_ok_and(|metadata| metadata.is_dir()) {
+        return 0;
+    }
+    let Some(cutoff) = SystemTime::now().checked_sub(REMOTE_STAGING_RETENTION) else {
+        return 0;
+    };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let mut removed_bytes = 0_u64;
+    for entry in entries.flatten() {
+        if !entry.file_name().as_encoded_bytes().starts_with(b".tmp") {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.modified().is_ok_and(|modified| modified <= cutoff) {
+            continue;
+        }
+        let path = entry.path();
+        let bytes = if metadata.is_file() {
+            metadata.len()
+        } else if metadata.is_dir() {
+            let Some(bytes) = stale_remote_pack_bytes(&path, cutoff) else {
+                continue;
+            };
+            bytes
+        } else {
+            continue;
+        };
+        if !dry_run {
+            let result = if metadata.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            if let Err(error) = result {
+                log::debug!(
+                    "could not remove abandoned remote staging {}: {error}",
+                    path.display()
+                );
+                continue;
+            }
+        }
+        removed_bytes = removed_bytes.saturating_add(bytes);
+    }
+    removed_bytes
+}
+
+fn stale_remote_pack_bytes(path: &Path, cutoff: SystemTime) -> Option<u64> {
+    let mut bytes = 0_u64;
+    for member in std::fs::read_dir(path).ok()? {
+        let member = member.ok()?;
+        let metadata = member.metadata().ok()?;
+        if !metadata.is_file()
+            || !member
+                .file_name()
+                .as_encoded_bytes()
+                .iter()
+                .all(u8::is_ascii_digit)
+            || metadata.modified().ok()? > cutoff
+        {
+            return None;
+        }
+        bytes = bytes.saturating_add(metadata.len());
+    }
+    Some(bytes)
 }
 
 /// The staging tree a claim describes.
